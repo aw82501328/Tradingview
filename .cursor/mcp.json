@@ -1,0 +1,24 @@
+{
+    "mcpServers": {
+        "tradingview-data": {
+            "command": "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\uv.exe",
+            "args": [
+                "run",
+                "--directory",
+                "E:\\AI_Projects\\TRADINGVIEW\\server-data",
+                "python",
+                "-m",
+                "src.server"
+            ]
+        },
+        "tradingview-cdp": {
+            "command": "node",
+            "args": [
+                "E:\\AI_Projects\\TRADINGVIEW\\server-cdp\\src\\server.js"
+            ],
+            "env": {
+                "TV_MCP_PORT": "9222"
+            }
+        }
+    }
+}

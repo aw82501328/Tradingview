@@ -1,0 +1,13 @@
+{
+    "name": "tradingview-mcp-cdp",
+    "version": "1.0.0",
+    "description": "TradingView 桌面控制 MCP Server — 通过 CDP 协议操控本地 TradingView 图表",
+    "main": "src/server.js",
+    "scripts": {
+        "start": "node src/server.js"
+    },
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.0.0",
+        "chrome-remote-interface": "^0.33.0"
+    }
+}

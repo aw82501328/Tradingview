@@ -1,0 +1,26 @@
+[project]
+name = "tradingview-mcp-data"
+version = "1.0.0"
+description = "TradingView 数据 MCP Server — 历史K线、技术指标、市场筛选器"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "mcp[cli]>=1.0.0",
+    "tvdatafeed-enhanced>=2.2.0",
+    "websocket-client>=1.8.0",
+    "tradingview-ta>=3.3.0",
+    "tradingview-screener>=2.0.0",
+    "pandas>=2.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[project.scripts]
+tradingview-data = "src.server:main"
+
+[tool.setuptools.package-dir]
+"src" = "src"

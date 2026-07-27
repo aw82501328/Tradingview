@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# uv
+.uv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Node.js (server-cdp)
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cache / temp
+*.log
+.cache/
