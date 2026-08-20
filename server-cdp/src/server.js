@@ -73,22 +73,23 @@ async function tvHealthCheck() {
 }
 
 async function tvGetChart() {
-  const r = await evalInPage(`{
-    const chart = TradingViewApi.activeChart();
-    if (!chart) return { error: "no_chart" };
-    const symExt = chart.symbolExt();
-    return {
-      symbol: chart.symbol(),
-      full_name: symExt ? symExt.full_name : null,
-      exchange: symExt ? symExt.exchange : null,
-      description: symExt ? symExt.description : null,
-      type: symExt ? symExt.type : null,
-      resolution: String(chart.resolution()),
-      chartType: chart.chartType(),
-      timezone: chart.getTimezone(),
-      studies: chart.getAllStudies()
-    };
-  }`);
+  const r = await evalInPage(`
+    (() => {
+      const chart = TradingViewApi.activeChart();
+      if (!chart) return { error: "no_chart" };
+      const symExt = chart.symbolExt();
+      return {
+        symbol: chart.symbol(),
+        full_name: symExt ? symExt.full_name : null,
+        exchange: symExt ? symExt.exchange : null,
+        description: symExt ? symExt.description : null,
+        type: symExt ? symExt.type : null,
+        resolution: String(chart.resolution()),
+        chartType: chart.chartType(),
+        timezone: chart.getTimezone(),
+        studies: chart.getAllStudies()
+      };
+    })()`);
   return r;
 }
 
