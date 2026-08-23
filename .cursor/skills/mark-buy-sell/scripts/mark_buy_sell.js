@@ -12,12 +12,30 @@
  *   --dry               只计算不绘图
  *   --debug             打印锚定过程、标记列表等调试信息
  */
+const fs = require("fs");
+const path = require("path");
 const CDP = require("../../../../server-cdp/node_modules/chrome-remote-interface");
+// 缠论算法核心（唯一算法源，与 chan-bi SKILL 共用）
+const core = require("../../chan-core/scripts/chan_core.js");
+const {
+  mergeBars, findFractals, countRaw, hasGapBetween, buildBi,
+  calcATR, calcMACD, hasMacdCrossBetween,
+  extendLastBi, lowerResOf, calibrateBiTimes, intervalSecOf,
+  fmtT, biMacdMetrics, isBiDiverge,
+  findBuyPoints, findSellPoints, anchorFirstBuy, anchorFirstSell,
+  isSameAsUpperBi, snapToOwnBar, keepRecentEach,
+} = core;
+
+// 笔数据缓存目录：由 chan-bi 画笔 SKILL 落盘，本脚本强制读取（画笔 → 标记 数据依赖）
+const CACHE_DIR = path.join(__dirname, "..", "..", "..", "..", ".cursor", "cache");
+// 品种名中的特殊字符替换为下划线，保证文件名合法（与 chan-bi 落盘规则一致）
+const bisCacheFile = (symbol) => path.join(CACHE_DIR, `bis_${String(symbol).replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
 
 // 解析命令行参数
 const args = process.argv.slice(2);
 const DRY = args.includes("--dry");
 const DEBUG = args.includes("--debug");
+core.CHAN_CFG.debug = DEBUG;
 const getArg = (name, def) => {
   const a = args.find(x => x.startsWith("--" + name + "="));
   return a ? parseFloat(a.split("=")[1]) : def;
@@ -28,6 +46,7 @@ const getStrArg = (name, def) => {
 };
 const ATR_FILTER = getArg("atr", 0.5);
 const GAP_FILTER = getArg("gap", 1.0);
+core.CHAN_CFG.gapFilter = GAP_FILTER;
 const FROM_DATE = getStrArg("from", "");
 if (!FROM_DATE) {
   console.log("错误: 必须指定起始日期 --from=YYYY-MM-DD");
@@ -43,889 +62,11 @@ if (m) {
 const PERIODS = getStrArg("periods", "D,240,60,15,3")
   .split(",").map(s => s.trim()).filter(Boolean);
 
-const MIN_WINDOW_BARS = 20;
 const ANCHOR_BUFFER = 30;
 
 // ============================================================
-// 缠论算法（与 chan-bi SKILL 保持一致）
+// 买卖点显示配置
 // ============================================================
-
-function mergeBars(rawBars) {
-  const merged = [];
-  let direction = 0;
-  for (const bar of rawBars) {
-    if (merged.length === 0) {
-      merged.push({ ...bar, _rawCount: 1, highTime: bar.time, lowTime: bar.time });
-      continue;
-    }
-    const last = merged[merged.length - 1];
-    const containUp = bar.high >= last.high && bar.low <= last.low;
-    const containDown = bar.high <= last.high && bar.low >= last.low;
-    const hasContain = containUp || containDown;
-    if (hasContain) {
-      let dir = direction;
-      if (dir === 0 && merged.length >= 2) {
-        dir = last.high >= merged[merged.length - 2].high ? 1 : -1;
-      }
-      if (dir === 0) dir = 1;
-      if (dir === 1) {
-        if (bar.high > last.high) { last.high = bar.high; last.highTime = bar.time; }
-        if (bar.low > last.low) { last.low = bar.low; last.lowTime = bar.time; }
-      } else {
-        if (bar.high < last.high) { last.high = bar.high; last.highTime = bar.time; }
-        if (bar.low < last.low) { last.low = bar.low; last.lowTime = bar.time; }
-      }
-      last._rawCount += 1;
-      last.time = bar.time;
-      direction = dir;
-    } else {
-      direction = bar.high > last.high ? 1 : -1;
-      merged.push({ ...bar, _rawCount: 1, highTime: bar.time, lowTime: bar.time });
-    }
-  }
-  return merged;
-}
-
-function findFractals(merged) {
-  const fractals = [];
-  for (let i = 1; i < merged.length - 1; i++) {
-    const prev = merged[i - 1], cur = merged[i], next = merged[i + 1];
-    if (cur.high > prev.high && cur.high > next.high && cur.low > prev.low && cur.low > next.low) {
-      fractals.push({ mergedIdx: i, type: "top", high: cur.high, low: cur.low, time: cur.highTime });
-    }
-    if (cur.low < prev.low && cur.low < next.low && cur.high < prev.high && cur.high < next.high) {
-      fractals.push({ mergedIdx: i, type: "bottom", high: cur.high, low: cur.low, time: cur.lowTime });
-    }
-  }
-  return fractals;
-}
-
-function countRaw(merged, startIdx, endIdx) {
-  let t = 0;
-  for (let k = startIdx + 1; k <= endIdx; k++) t += merged[k]._rawCount;
-  return t;
-}
-
-function hasGapBetween(merged, aIdx, bIdx, atr, gapFilter) {
-  const th = atr * gapFilter;
-  for (let i = aIdx; i < bIdx; i++) {
-    const cur = merged[i], next = merged[i + 1];
-    const gapUp = next.low - cur.high;
-    const gapDown = cur.low - next.high;
-    if (gapUp >= th || gapDown >= th) return true;
-  }
-  return false;
-}
-
-function buildBi(fractals, merged, atr, macdArr) {
-  const gapThreshold = atr ? atr * GAP_FILTER : 0;
-  const seq = [];
-  for (const f of fractals) {
-    if (seq.length === 0) { seq.push(f); continue; }
-    const last = seq[seq.length - 1];
-    if (f.type === last.type) {
-      if (f.type === "top") { if (f.high >= last.high) seq[seq.length - 1] = f; }
-      else { if (f.low <= last.low) seq[seq.length - 1] = f; }
-    } else {
-      seq.push(f);
-    }
-  }
-  const isValid = (a, b) => {
-    const gap = b.mergedIdx - a.mergedIdx;
-    if (gap < 4) return false;
-    return countRaw(merged, a.mergedIdx, b.mergedIdx) >= 5;
-  };
-  const noMoreExtremeInside = (a, b) => {
-    for (let i = a.mergedIdx + 1; i < b.mergedIdx; i++) {
-      if (b.type === "bottom" && merged[i].low < b.low) return false;
-      if (b.type === "top" && merged[i].high > b.high) return false;
-    }
-    return true;
-  };
-  // 分型范围脱离检查：一笔的两端分型不能互相"包含"。
-  // 顶分型 → 底分型（下跌笔）：底分型的底必须**低于顶分型三根K线的最低点**
-  //   （底不能在顶分型的范围内，即必须跌破顶分型形成处的价格范围才算真正转势）；
-  // 底分型 → 顶分型（上涨笔）：顶分型的顶必须**高于底分型三根K线的最高点**。
-  // 例：1小时 8-3 23:00 顶(84.54) 的三根K线低点为 8-3 22:00 的 83.11，
-  //   而 8-4 04:00 底(83.36) 未跌破 83.11，该"下跌笔"不成立。
-  const fractalRangeClear = (a, b) => {
-    const i = a.mergedIdx;
-    const rangeLow = Math.min(merged[i - 1].low, merged[i].low, merged[i + 1].low);
-    const rangeHigh = Math.max(merged[i - 1].high, merged[i].high, merged[i + 1].high);
-    if (a.type === "top" && b.type === "bottom") return b.low < rangeLow;
-    if (a.type === "bottom" && b.type === "top") return b.high > rangeHigh;
-    return true;
-  };
-  const result = [];
-  for (const k of seq) {
-    if (result.length === 0) { result.push(k); continue; }
-    const last = result[result.length - 1];
-    if (k.type === last.type) {
-      if (!last.gapLocked) {
-        if (k.type === "top") { if (k.high >= last.high) result[result.length - 1] = k; }
-        else { if (k.low <= last.low) result[result.length - 1] = k; }
-      } else {
-        if (k.type === "top") { if (k.high > last.high) result[result.length - 1] = k; }
-        else { if (k.low < last.low) result[result.length - 1] = k; }
-      }
-      continue;
-    }
-    if (result.length >= 2) {
-      const prev2 = result[result.length - 2];
-      if (prev2.macdCross === true && prev2.type === k.type &&
-          ((k.type === "top" && k.high > prev2.high) || (k.type === "bottom" && k.low < prev2.low))) {
-        k.macdCross = true;
-        result[result.length - 2] = k;
-        result.pop();
-        continue;
-      }
-    }
-    const hasGap = gapThreshold > 0 && hasGapBetween(merged, last.mergedIdx, k.mergedIdx, atr, GAP_FILTER);
-    if (hasGap) {
-      k.gapLocked = true;
-      result.push(k);
-      continue;
-    }
-    // 前顶/前底作废：prev2（result[-2]）与 k 同类型，且 prev2→last 不构成有效笔
-    // （间隔不足，prev2 是脆弱端点），而 k 比 prev2 更极端（创新高/新低）时，
-    // prev2 作为笔端点已被市场否定，应让 k 顶替 prev2 并移除中间的 last。
-    // 例：3分钟 8-12 11:18 顶(89.84) 被 12:00 顶(90.07) 突破，上涨笔应画到 90.07@12:00。
-    // 附加约束（防止误伤真实顶/底）：
-    //   1) last 不得比 prev3 更极端（否则 last 是深回调的真实转折）；
-    //   2) 回调/反弹必须浅（< 50%，深回调意味着 prev2 是真实顶/底）；
-    //   3) last 必须是「弱分型」：MACD 变色成笔且原始K线 < 5 根
-    //      （不足 5 根的 MACD 成笔点是微回调停顿，最容易被后续突破否定）。
-    if (result.length >= 3) {
-      const prev3 = result[result.length - 3];
-      const prev2 = result[result.length - 2];
-      const lastMoreExtremeThanPrev3 =
-        (prev3.type === "top" && last.high > prev3.high) ||
-        (prev3.type === "bottom" && last.low < prev3.low);
-      let shallow = true;
-      if (prev2.type === "top") {
-        const rise = prev2.high - prev3.low;
-        const pull = prev2.high - last.low;
-        shallow = pull < rise * 0.5;
-      } else {
-        const drop = prev3.high - prev2.low;
-        const bounce = last.high - prev2.low;
-        shallow = bounce < drop * 0.5;
-      }
-      if (prev2.type === k.type &&
-          !isValid(prev2, last) &&
-          !lastMoreExtremeThanPrev3 &&
-          shallow &&
-          last.macdCross === true && last.macdRaw < 5 &&
-          ((k.type === "top" && k.high > prev2.high) || (k.type === "bottom" && k.low < prev2.low))) {
-        if (prev2.macdCross === true) k.macdCross = true;
-        result[result.length - 2] = k;
-        result.pop();
-        continue;
-      }
-    }
-    if (isValid(last, k) && (noMoreExtremeInside(last, k) || last.gapLocked) && (fractalRangeClear(last, k) || last.gapLocked)) {
-      result.push(k);
-    } else if (isValid(last, k)) {
-      if (DEBUG) {
-        const fr = fractalRangeClear(last, k);
-        const ex = noMoreExtremeInside(last, k);
-        console.log(`[阶段二] 忽略 k: ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}(${k.type === "top" ? k.high : k.low}) 极值冲突=${!ex} 分型范围未脱离=${!fr}`);
-      }
-    } else {
-      const macdCross = macdArr && hasMacdCrossBetween(macdArr, merged, last.mergedIdx, k.mergedIdx, last.time, k.time);
-      const macdRawCount = countRaw(merged, last.mergedIdx, k.mergedIdx);
-      if (macdCross && macdRawCount >= 4 && noMoreExtremeInside(last, k)) {
-        k.macdCross = true;
-        k.macdRaw = macdRawCount;
-        result.push(k);
-      } else {
-        if (result.length >= 2 && result[result.length - 2].type === k.type) {
-          const prev = result[result.length - 2];
-          const moreExtreme = k.type === "top" ? k.high >= prev.high : k.low <= prev.low;
-          const gapPrevLast = last.mergedIdx - prev.mergedIdx;
-          const gapPrevK = k.mergedIdx - prev.mergedIdx;
-          if (moreExtreme && (gapPrevLast <= 12 || gapPrevK >= 4)) {
-            result[result.length - 2] = k;
-            result.pop();
-          }
-        }
-      }
-    }
-  }
-  const bis = [];
-  for (let i = 0; i + 1 < result.length; i++) {
-    const a = result[i], b = result[i + 1];
-    const startPrice = a.type === "top" ? a.high : a.low;
-    const endPrice = b.type === "top" ? b.high : b.low;
-    const isUp = b.type === "top";
-    bis.push({
-      type: isUp ? "up" : "down",
-      startIdx: a.mergedIdx,
-      endIdx: b.mergedIdx,
-      startTime: a.time,
-      endTime: b.time,
-      startPrice,
-      endPrice,
-      rawCount: countRaw(merged, a.mergedIdx, b.mergedIdx),
-      span: Math.abs(endPrice - startPrice),
-      gapLocked: b.gapLocked === true,
-      macdCross: b.macdCross === true,
-    });
-  }
-  return bis;
-}
-
-function calcATR(rawBars, period = 14) {
-  const trs = [];
-  for (let i = 1; i < rawBars.length; i++) {
-    const h = rawBars[i].high, l = rawBars[i].low, pc = rawBars[i - 1].close;
-    trs.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
-  }
-  const start = Math.max(0, trs.length - period);
-  const slice = trs.slice(start);
-  if (slice.length === 0) return 0;
-  return slice.reduce((a, b) => a + b, 0) / slice.length;
-}
-
-function calcMACD(rawBars) {
-  if (!rawBars || rawBars.length < 2) return [];
-  const closes = rawBars.map(b => b.close);
-  const ema = (period) => {
-    const k = 2 / (period + 1);
-    const out = [];
-    let prev = closes[0];
-    out.push(prev);
-    for (let i = 1; i < closes.length; i++) {
-      prev = closes[i] * k + prev * (1 - k);
-      out.push(prev);
-    }
-    return out;
-  };
-  const ema12 = ema(12);
-  const ema26 = ema(26);
-  const dif = closes.map((_, i) => ema12[i] - ema26[i]);
-  const dea = [];
-  let prevDea = dif[0];
-  dea.push(prevDea);
-  for (let i = 1; i < dif.length; i++) {
-    prevDea = dif[i] * (2 / (9 + 1)) + prevDea * (1 - (2 / (9 + 1)));
-    dea.push(prevDea);
-  }
-  return rawBars.map((b, i) => ({
-    time: b.time,
-    macd: (dif[i] - dea[i]) * 2,
-    dif: dif[i],
-    dea: dea[i],
-  }));
-}
-
-// 模块级时间格式化（供买卖点识别 DEBUG 打印使用）
-function fmtT(ts) {
-  const dt = new Date(ts * 1000);
-  const p = (n) => String(n).padStart(2, '0');
-  return `${dt.getMonth()+1}-${dt.getDate()} ${p(dt.getHours())}:${p(dt.getMinutes())}`;
-}
-
-// 计算一笔区间内的 MACD 动能指标（用于背驰判定）
-// 返回：{
-//   redArea:   红柱面积（区间内 macd>0 的柱累加）——上涨段多头动能
-//   greenArea: 绿柱面积（区间内 macd<0 的柱绝对值累加）——下跌段空头动能
-//   difHigh:   区间内 DIF（黄白线）最大值
-//   difLow:    区间内 DIF（黄白线）最小值
-// }
-function biMacdMetrics(bi, macdArr) {
-  const metrics = { redArea: 0, greenArea: 0, difHigh: -Infinity, difLow: Infinity };
-  if (!macdArr || macdArr.length === 0) return null;
-  const t0 = bi.startTime, t1 = bi.endTime;
-  let found = false;
-  for (const m of macdArr) {
-    if (m.time < t0) continue;
-    if (m.time > t1) break;
-    found = true;
-    if (m.macd > 0) metrics.redArea += m.macd;
-    else metrics.greenArea += -m.macd;
-    if (m.dif > metrics.difHigh) metrics.difHigh = m.dif;
-    if (m.dif < metrics.difLow) metrics.difLow = m.dif;
-  }
-  if (!found) return null;
-  return metrics;
-}
-
-// MACD 背驰判定（OR 关系，满足其一即算背驰）：
-//   底背驰（对应一买，下跌笔）：绿柱面积变小 或 黄白线低点抬高（下跌动能减弱）
-//   顶背驰（对应一卖，上涨笔）：红柱面积变小 或 黄白线高点变低（上涨动能减弱）
-function isBiDiverge(bi, refer, macdArr) {
-  const cur = biMacdMetrics(bi, macdArr);
-  const ref = biMacdMetrics(refer, macdArr);
-  if (!cur || !ref) return false;
-  if (bi.type === "down") {
-    // 底背驰：绿柱面积变小 或 黄白线低点抬高
-    return cur.greenArea < ref.greenArea || cur.difLow > ref.difLow;
-  }
-  // 顶背驰：红柱面积变小 或 黄白线高点变低
-  return cur.redArea < ref.redArea || cur.difHigh < ref.difHigh;
-}
-
-function hasMacdCrossBetween(macdArr, merged, aIdx, bIdx, aTime, bTime) {
-  if (!macdArr || macdArr.length === 0) return false;
-  const t0 = aTime !== undefined ? aTime : merged[aIdx].time;
-  const t1 = bTime !== undefined ? bTime : merged[bIdx].time;
-  let prev = null;
-  for (const mm of macdArr) {
-    if (mm.time < t0) continue;
-    if (mm.time > t1) break;
-    if (prev !== null) {
-      const crossed = (prev.macd >= 0 && mm.macd < 0) || (prev.macd <= 0 && mm.macd > 0);
-      if (crossed) return true;
-    }
-    prev = mm;
-  }
-  return false;
-}
-
-function extendLastBi(bisArr, bars) {
-  if (!bisArr || bisArr.length === 0) return bisArr;
-  const last = bisArr[bisArr.length - 1];
-  if (last.gapLocked) return bisArr;
-  const startIdx = bars.findIndex(k => k.time >= last.startTime);
-  if (startIdx === -1) return bisArr;
-  const tail = bars.slice(startIdx);
-  if (tail.length < 2) return bisArr;
-  if (last.type === "up") {
-    let maxBar = tail[0];
-    for (const k of tail) if (k.high > maxBar.high) maxBar = k;
-    if (maxBar.time > last.endTime && maxBar.high > last.endPrice) {
-      last.endTime = maxBar.time;
-      last.endPrice = maxBar.high;
-      last.span = maxBar.high - last.startPrice;
-    }
-  } else {
-    let minBar = tail[0];
-    for (const k of tail) if (k.low < minBar.low) minBar = k;
-    if (minBar.time > last.endTime && minBar.low < last.endPrice) {
-      last.endTime = minBar.time;
-      last.endPrice = minBar.low;
-      last.span = last.startPrice - minBar.low;
-    }
-  }
-  return bisArr;
-}
-
-function lowerResOf(res) {
-  const s = String(res).toUpperCase();
-  if (s === "D" || s === "1D") return "240";
-  if (s === "240" || s === "4H") return "60";
-  if (s === "60" || s === "1H") return "15";
-  if (s === "15") return "3";
-  return null;
-}
-
-function calibrateBiTimes(bis, bigBars, refBars, bigIntervalSec) {
-  if (!bis || bis.length === 0 || !refBars || refBars.length === 0) return bis;
-  const eps = 0.001;
-  const calibrateTime = (t, price) => {
-    const big = bigBars.find(k => k.time <= t && t < k.time + bigIntervalSec);
-    if (!big) return t;
-    const rangeEnd = big.time + bigIntervalSec;
-    let best = null;
-    for (const rb of refBars) {
-      if (rb.time < big.time || rb.time >= rangeEnd) continue;
-      if (Math.abs(rb.high - price) < eps || Math.abs(rb.low - price) < eps) {
-        best = rb;
-      }
-    }
-    return best ? best.time : t;
-  };
-  for (const b of bis) {
-    b.startTime = calibrateTime(b.startTime, b.startPrice);
-    b.endTime = calibrateTime(b.endTime, b.endPrice);
-  }
-  return bis;
-}
-
-// ============================================================
-// 买卖点识别（与 chan-bi SKILL 一致）
-// ============================================================
-
-function findBuyPoints(bis, upperBis, macdArr, barSec) {
-  if (bis.length < 3) return [];
-  const downIdx = [];
-  bis.forEach((b, i) => { if (b.type === "down") downIdx.push(i); });
-  // 候选一买：创新低 + MACD 背驰（绿柱面积变小 或 黄白线低点抬高，即下跌动能减弱）
-  const firstBuys = [];
-  for (let k = 1; k < downIdx.length; k++) {
-    const cur = bis[downIdx[k]];
-    // 本周期这笔与上一级别某笔完全重合（内部无结构，整笔即上级一笔），
-    // 本周期无法判断背驰，1买 由上一级别标记，本周期不标记
-    if (isSameAsUpperBi(cur, upperBis, barSec)) {
-      if (DEBUG) console.log(`[一买跳过-与上级笔重合] ${fmtT(cur.endTime)}(${cur.endPrice}) 整笔与上一级别完全重合，本周期不标记`);
-      continue;
-    }
-    let refer = null;
-    for (let j = k - 1; j >= 0; j--) {
-      const cand = bis[downIdx[j]];
-      if (cand.span < cur.span * 0.5) continue;
-      refer = cand;
-      break;
-    }
-    if (refer && cur.endPrice < refer.endPrice) {
-      const diverge = isBiDiverge(cur, refer, macdArr);
-      if (DEBUG) {
-        const cm = biMacdMetrics(cur, macdArr);
-        const rm = biMacdMetrics(refer, macdArr);
-        console.log(
-          `[一买候选] ${fmtT(cur.endTime)}(${cur.endPrice}) vs 参照 ${fmtT(refer.endTime)}(${refer.endPrice}) ` +
-          `| 创新低=${cur.endPrice < refer.endPrice} ` +
-          `| 绿柱面积 ${cm ? cm.greenArea.toFixed(2) : "-"} vs ${rm ? rm.greenArea.toFixed(2) : "-"} (变小=${cm && rm ? cm.greenArea < rm.greenArea : false}) ` +
-          `| DIF低点 ${cm ? cm.difLow.toFixed(3) : "-"} vs ${rm ? rm.difLow.toFixed(3) : "-"} (抬高=${cm && rm ? cm.difLow > rm.difLow : false}) ` +
-          `| 背驰=${diverge}`
-        );
-      }
-      if (diverge) {
-        firstBuys.push({ biIdx: downIdx[k], time: cur.endTime, price: cur.endPrice });
-      }
-    }
-  }
-  const firstBuy = firstBuys.length > 0 ? firstBuys[firstBuys.length - 1] : null;
-
-  const points = [];
-
-  // 2买 / 类2买（区间套）：
-  //   有上级笔时，只在「上一级别上涨笔」段内找抬高低点：
-  //     段内第一个回调低点（高于段起点）= 2买；其后第一个更高低点 = 类2买。
-  //   无上级笔（日线为最高级别）时，沿用结构底逻辑。
-  if (upperBis && upperBis.length > 0) {
-    for (const up of upperBis) {
-      if (up.type !== "up") continue;
-      const lows = [];
-      for (let i = 0; i < bis.length; i++) {
-        const b = bis[i];
-        if (b.type !== "down") continue;
-        if (b.endTime >= up.startTime && b.endTime <= up.endTime + 1) {
-          lows.push({ biIdx: i, time: b.endTime, price: b.endPrice });
-        }
-      }
-      if (lows.length === 0) continue;
-      lows.sort((a, b2) => a.time - b2.time);
-      const firstLow = lows.find(l => l.price > up.startPrice);
-      if (firstLow) {
-        points.push({ type: "2买", time: firstLow.time, price: firstLow.price });
-        const laterHigh = lows.find(l => l.time > firstLow.time && l.price > firstLow.price);
-        if (laterHigh) points.push({ type: "类2买", time: laterHigh.time, price: laterHigh.price });
-      }
-    }
-  } else {
-    // 结构底：最近一买之前（或全窗口）的最低底，作为上涨段的起点
-    let structBottomIdx = null;
-    if (firstBuy) {
-      let minP = Infinity;
-      for (const i of downIdx) {
-        if (i >= firstBuy.biIdx) break;
-        if (bis[i].endPrice < minP) { minP = bis[i].endPrice; structBottomIdx = i; }
-      }
-    }
-    if (structBottomIdx === null) {
-      let minP = Infinity;
-      for (const i of downIdx) {
-        if (bis[i].endPrice < minP) { minP = bis[i].endPrice; structBottomIdx = i; }
-      }
-    }
-    if (structBottomIdx !== null) {
-      const bottom = bis[structBottomIdx];
-      let secondBuy = null;
-      for (let i = structBottomIdx + 1; i < bis.length; i++) {
-        if (bis[i].type !== "down") continue;
-        if (bis[i].endPrice > bottom.endPrice) {
-          secondBuy = { biIdx: i, time: bis[i].endTime, price: bis[i].endPrice };
-          break;
-        }
-      }
-      if (secondBuy) {
-        points.push({ type: "2买", time: secondBuy.time, price: secondBuy.price });
-        let classSecond = null;
-        for (let i = secondBuy.biIdx + 1; i < bis.length; i++) {
-          if (bis[i].type !== "down") continue;
-          if (bis[i].endPrice > secondBuy.price) {
-            classSecond = { time: bis[i].endTime, price: bis[i].endPrice };
-            break;
-          }
-        }
-        if (classSecond) points.push({ type: "类2买", time: classSecond.time, price: classSecond.price });
-      }
-    }
-  }
-
-  // 1买：所有 MACD 背驰底（全部保留）
-  for (const fb of firstBuys) {
-    points.push({ type: "1买", time: fb.time, price: fb.price });
-  }
-
-  // 3买：2买过后的上涨段未出现背驰（上涨笔创新高、突破前顶），其后的回调就是 3买。
-  // 规则：
-  //   1) 对每一笔 2买 检查其后的上涨段，每个 2买 段最多标一个 3买，
-  //      且扫描范围限制到「下一个 2买」之前（避免跨段覆盖/重复）；
-  //   2) 前顶 = 2买 之前最近一个上涨笔的结束点；
-  //   3) 段内取「突破前顶的上涨笔 + 其后第一个回调不破前顶」中最后满足的一个；
-  //   4) 区间套：回调结束点必须位于上一级别上涨笔段内（无上级笔时跳过此检查）。
-  const twoBuys = points.filter(p => p.type === "2买").sort((a, b) => a.time - b.time);
-  const thirdBuys = [];
-  for (let k = 0; k < twoBuys.length; k++) {
-    const tb = twoBuys[k];
-    const twoIdx = bis.findIndex(b => b.endTime === tb.time);
-    if (twoIdx < 0) continue;
-    const endScan = k + 1 < twoBuys.length
-      ? bis.findIndex(b => b.endTime === twoBuys[k + 1].time)
-      : bis.length;
-    // 前顶 = 2买 之前最近一个上涨笔的结束点
-    let prevTop = null;
-    for (let j = twoIdx - 1; j >= 0; j--) {
-      if (bis[j].type === "up") { prevTop = bis[j].endPrice; break; }
-    }
-    if (prevTop === null) continue;
-    let lastValid = null;
-    for (let i = twoIdx + 1; i < endScan; i++) {
-      if (bis[i].type !== "up") continue;
-      if (bis[i].endPrice <= prevTop) continue; // 未突破前顶
-      // 其后第一个回调笔：回调低点不破前顶 → 3买候选
-      for (let mm = i + 1; mm < endScan; mm++) {
-        if (bis[mm].type !== "down") continue;
-        const bt = bis[mm].endTime, bp = bis[mm].endPrice;
-        if (bp > prevTop) {
-          // 区间套：回调结束点须位于上级上涨笔段内，且回调价须高于该上涨笔起点价
-          //（排除回调恰好落在上级笔起点/新段启动点的情况，如 7-29 00:30、8-13 22:00）
-          let inUp = true;
-          if (upperBis && upperBis.length > 0) {
-            inUp = false;
-            for (const up of upperBis) {
-              if (up.type === "up" && bt >= up.startTime && bt <= up.endTime && bp > up.startPrice) { inUp = true; break; }
-            }
-          }
-          if (inUp) lastValid = { time: bt, price: bp };
-        }
-        break; // 只检查紧跟突破笔的第一个回调
-      }
-    }
-    if (lastValid) thirdBuys.push(lastValid);
-  }
-  // 按时间去重后加入（同一位置同时满足类2买时，保留 3买）
-  for (const t of thirdBuys) {
-    if (points.some(p => p.type === "3买" && p.time === t.time)) continue;
-    const dup = points.findIndex(p => p.type === "类2买" && p.time === t.time);
-    if (dup >= 0) points.splice(dup, 1);
-    points.push({ type: "3买", time: t.time, price: t.price });
-  }
-  return points;
-}
-
-function findSellPoints(bis, upperBis, macdArr, barSec) {
-  if (bis.length < 3) return [];
-  const upIdx = [];
-  bis.forEach((b, i) => { if (b.type === "up") upIdx.push(i); });
-  // 候选一卖：创新高 + MACD 背驰（红柱面积变小 或 黄白线高点变低，即上涨动能减弱）
-  const firstSells = [];
-  for (let k = 1; k < upIdx.length; k++) {
-    const cur = bis[upIdx[k]];
-    // 本周期这笔与上一级别某笔完全重合（内部无结构，整笔即上级一笔），
-    // 本周期无法判断背驰，1卖 由上一级别标记，本周期不标记
-    if (isSameAsUpperBi(cur, upperBis, barSec)) {
-      if (DEBUG) console.log(`[一卖跳过-与上级笔重合] ${fmtT(cur.endTime)}(${cur.endPrice}) 整笔与上一级别完全重合，本周期不标记`);
-      continue;
-    }
-    let refer = null;
-    for (let j = k - 1; j >= 0; j--) {
-      const cand = bis[upIdx[j]];
-      if (cand.span < cur.span * 0.5) continue;
-      refer = cand;
-      break;
-    }
-    if (refer && cur.endPrice > refer.endPrice) {
-      const diverge = isBiDiverge(cur, refer, macdArr);
-      if (DEBUG) {
-        const cm = biMacdMetrics(cur, macdArr);
-        const rm = biMacdMetrics(refer, macdArr);
-        console.log(
-          `[一卖候选] ${fmtT(cur.endTime)}(${cur.endPrice}) vs 参照 ${fmtT(refer.endTime)}(${refer.endPrice}) ` +
-          `| 创新高=${cur.endPrice > refer.endPrice} ` +
-          `| 红柱面积 ${cm ? cm.redArea.toFixed(2) : "-"} vs ${rm ? rm.redArea.toFixed(2) : "-"} (变小=${cm && rm ? cm.redArea < rm.redArea : false}) ` +
-          `| DIF高点 ${cm ? cm.difHigh.toFixed(3) : "-"} vs ${rm ? rm.difHigh.toFixed(3) : "-"} (变低=${cm && rm ? cm.difHigh < rm.difHigh : false}) ` +
-          `| 背驰=${diverge}`
-        );
-      }
-      if (diverge) {
-        firstSells.push({ biIdx: upIdx[k], time: cur.endTime, price: cur.endPrice });
-      }
-    }
-  }
-  const firstSell = firstSells.length > 0 ? firstSells[firstSells.length - 1] : null;
-
-  // 1卖 锚定（区间套，与 1买 锚定对称）：低级别的 1卖 必须锚定到「上一级别上涨笔的结束点」。
-  // 当候选一卖位于某上级上涨笔内部（该上涨笔尚未结束，例如 15分钟 8-17 10:00 位于
-  // 1小时上涨笔 8-14 21:00→8-20 20:00 内部），该局部顶不是真正的 1卖，
-  // 1卖 应上移到上级上涨笔的结束点（上涨线段的终点）。
-  // 对**每一个**候选一卖都做锚定，全部保留；
-  // 多个候选若锚定到同一个上级上涨笔结束点（同一位置），只保留一个避免重复标记
-  const anchoredSells = [];
-  const seenSellPos = new Set();
-  for (const fs of firstSells) {
-    let anchored = fs;
-    if (upperBis && upperBis.length > 0) {
-      const a = anchorFirstSell(fs, upperBis);
-      if (a) {
-        let bestBi = null, bestDist = Infinity;
-        for (let i = 0; i < bis.length; i++) {
-          const b = bis[i];
-          if (b.type !== "up") continue;
-          const d = Math.abs(b.endTime - a.time);
-          if (d < bestDist) { bestDist = d; bestBi = i; }
-        }
-        anchored = {
-          biIdx: bestBi !== null ? bestBi : fs.biIdx,
-          time: a.time,
-          price: a.price,
-        };
-      }
-    }
-    if (seenSellPos.has(anchored.time)) continue;
-    seenSellPos.add(anchored.time);
-    anchoredSells.push(anchored);
-  }
-
-  const points = [];
-
-  // 2卖 / 类2卖（区间套）：
-  //   有上级笔时，只在「上一级别下跌笔」段内找次高点：
-  //     段内第一个次高点（低于段起点）= 2卖；其后第一个更低次高点 = 类2卖。
-  //   无上级笔（日线为最高级别）时，沿用结构顶逻辑。
-  if (upperBis && upperBis.length > 0) {
-    for (const dn of upperBis) {
-      if (dn.type !== "down") continue;
-      const highs = [];
-      for (let i = 0; i < bis.length; i++) {
-        const b = bis[i];
-        if (b.type !== "up") continue;
-        if (b.endTime >= dn.startTime && b.endTime <= dn.endTime + 1) {
-          highs.push({ biIdx: i, time: b.endTime, price: b.endPrice });
-        }
-      }
-      if (highs.length === 0) continue;
-      highs.sort((a, b2) => a.time - b2.time);
-      const firstHigh = highs.find(h => h.price < dn.startPrice);
-      if (firstHigh) {
-        points.push({ type: "2卖", time: firstHigh.time, price: firstHigh.price });
-        const laterLow = highs.find(h => h.time > firstHigh.time && h.price < firstHigh.price);
-        if (laterLow) points.push({ type: "类2卖", time: laterLow.time, price: laterLow.price });
-      }
-    }
-  } else {
-    // 结构顶：最近一卖之前（或全窗口）的最高顶，作为下跌段的起点
-    let structTopIdx = null;
-    if (firstSell) {
-      let maxP = -Infinity;
-      for (const i of upIdx) {
-        if (i >= firstSell.biIdx) break;
-        if (bis[i].endPrice > maxP) { maxP = bis[i].endPrice; structTopIdx = i; }
-      }
-    }
-    if (structTopIdx === null) {
-      let maxP = -Infinity;
-      for (const i of upIdx) {
-        if (bis[i].endPrice > maxP) { maxP = bis[i].endPrice; structTopIdx = i; }
-      }
-    }
-    if (structTopIdx !== null) {
-      const top = bis[structTopIdx];
-      let secondSell = null;
-      for (let i = structTopIdx + 1; i < bis.length; i++) {
-        if (bis[i].type !== "up") continue;
-        if (bis[i].endPrice < top.endPrice) {
-          secondSell = { biIdx: i, time: bis[i].endTime, price: bis[i].endPrice };
-          break;
-        }
-      }
-      if (secondSell) {
-        points.push({ type: "2卖", time: secondSell.time, price: secondSell.price });
-        let classSecond = null;
-        for (let i = secondSell.biIdx + 1; i < bis.length; i++) {
-          if (bis[i].type !== "up") continue;
-          if (bis[i].endPrice < secondSell.price) {
-            classSecond = { time: bis[i].endTime, price: bis[i].endPrice };
-            break;
-          }
-        }
-        if (classSecond) points.push({ type: "类2卖", time: classSecond.time, price: classSecond.price });
-      }
-    }
-  }
-
-  // 1卖：所有 MACD 背驰顶（锚定到上级上涨笔结束点），15分钟及以上周期保留全部
-  for (const as of anchoredSells) {
-    points.push({ type: "1卖", time: as.time, price: as.price });
-  }
-
-  // 3卖：2卖过后的下跌段未出现背驰（下跌笔创新低、跌破前底），其后的反弹就是 3卖。
-  // 规则（与 3买 对称）：
-  //   1) 对每一笔 2卖 检查其后的下跌段，每个 2卖 段最多标一个 3卖，
-  //      且扫描范围限制到「下一个 2卖」之前（避免跨段覆盖/重复）；
-  //   2) 前底 = 2卖 之前最近一个下跌笔的结束点；
-  //   3) 段内取「跌破前底的下跌笔 + 其后第一个反弹不破前底」中最后满足的一个；
-  //   4) 区间套：反弹结束点必须位于上一级别下跌笔段内，且反弹价低于该下跌笔起点价
-  //     （排除反弹恰好落在上级笔起点/新段启动点的情况）。
-  const twoSells = points.filter(p => p.type === "2卖").sort((a, b) => a.time - b.time);
-  const thirdSells = [];
-  for (let k = 0; k < twoSells.length; k++) {
-    const ts = twoSells[k];
-    const twoIdx = bis.findIndex(b => b.endTime === ts.time);
-    if (twoIdx < 0) continue;
-    const endScan = k + 1 < twoSells.length
-      ? bis.findIndex(b => b.endTime === twoSells[k + 1].time)
-      : bis.length;
-    // 前底 = 2卖 之前最近一个下跌笔的结束点
-    let prevLow = null;
-    for (let j = twoIdx - 1; j >= 0; j--) {
-      if (bis[j].type === "down") { prevLow = bis[j].endPrice; break; }
-    }
-    if (prevLow === null) continue;
-    let lastValid = null;
-    for (let i = twoIdx + 1; i < endScan; i++) {
-      if (bis[i].type !== "down") continue;
-      if (bis[i].endPrice >= prevLow) continue; // 未跌破前底
-      // 其后第一个反弹笔：反弹高点不破前底 → 3卖候选
-      for (let mm = i + 1; mm < endScan; mm++) {
-        if (bis[mm].type !== "up") continue;
-        const st = bis[mm].endTime, sp = bis[mm].endPrice;
-        if (sp < prevLow) {
-          // 区间套：反弹结束点须位于上级下跌笔段内，且反弹价低于该下跌笔起点价
-          let inDown = true;
-          if (upperBis && upperBis.length > 0) {
-            inDown = false;
-            for (const dn of upperBis) {
-              if (dn.type === "down" && st >= dn.startTime && st <= dn.endTime && sp < dn.startPrice) { inDown = true; break; }
-            }
-          }
-          if (inDown) lastValid = { time: st, price: sp };
-        }
-        break; // 只检查紧跟跌破笔的第一个反弹
-      }
-    }
-    if (lastValid) thirdSells.push(lastValid);
-  }
-  // 按时间去重后加入（同一位置同时满足类2卖时，保留 3卖）
-  for (const t of thirdSells) {
-    if (points.some(p => p.type === "3卖" && p.time === t.time)) continue;
-    const dup = points.findIndex(p => p.type === "类2卖" && p.time === t.time);
-    if (dup >= 0) points.splice(dup, 1);
-    points.push({ type: "3卖", time: t.time, price: t.price });
-  }
-  return points;
-}
-
-// ============================================================
-// 买卖点锚定与显示配置
-// ============================================================
-
-/**
- * 一买锚定：低级别的一买必须锚定到「上一级别某笔的起点」。
- * 在上级笔列表中取「候选一买时间之前、时间上最近的一个底部端点」
- * （上级上涨笔的起点 或 上级下跌笔的终点）。
- * 找不到则返回 null（该周期不标记一买）。
- */
-function anchorFirstBuy(cand, upperBis) {
-  if (!upperBis || upperBis.length === 0) return null;
-  let best = null;
-  for (const b of upperBis) {
-    const t = b.type === "up" ? b.startTime : b.endTime;
-    const p = b.type === "up" ? b.startPrice : b.endPrice;
-    if (t > cand.time) continue; // 只取候选一买之前的上级底
-    if (!best || cand.time - t < cand.time - best.time) best = { time: t, price: p };
-  }
-  return best;
-}
-
-/**
- * 一卖锚定：低级别的一卖必须锚定到「上一级别上涨笔的结束点」（上涨线段的终点）。
- * 1) 若候选一卖位于某上级上涨笔内部（该上涨笔尚未结束，endTime 晚于候选时间），
- *    说明上涨线段仍在延续，该局部顶不是真正的 1卖，上移到上级上涨笔的结束点；
- * 2) 否则取「候选一卖之前、时间上最近的一个顶部端点」（上级上涨笔的终点 或 下跌笔的起点）。
- * 找不到则返回 null。
- */
-function anchorFirstSell(cand, upperBis) {
-  if (!upperBis || upperBis.length === 0) return null;
-  // 1) 上涨延续中：候选一卖被上级上涨笔包含
-  for (const b of upperBis) {
-    if (b.type !== "up") continue;
-    if (b.startTime <= cand.time && b.endTime >= cand.time) {
-      return { time: b.endTime, price: b.endPrice };
-    }
-  }
-  // 2) 候选一卖之前最近的上级顶
-  let best = null;
-  for (const b of upperBis) {
-    const t = b.type === "up" ? b.endTime : b.startTime;
-    const p = b.type === "up" ? b.endPrice : b.startPrice;
-    if (t > cand.time) continue; // 只取候选一卖之前的上级顶
-    if (!best || cand.time - t < cand.time - best.time) best = { time: t, price: p };
-  }
-  return best;
-}
-
-/**
- * 判断本周期某笔是否与上一级别某笔完全重合（起点、终点时间与价格一致）。
- * 完全重合说明本周期该笔内部无更细结构（整笔就是上一级别的一笔），
- * 本周期无法在本级别判断背驰，1类买卖点应由上一级别标记，本周期不标记。
- * 例：15分钟 8-11 21:15(86.60) → 8-12 12:00(90.07) 与 1小时 同区间笔完全重合，
- *     该笔在15分钟内部没有次级别结构，15分钟不应标记 1卖，由 1小时 标记。
- */
-function isSameAsUpperBi(bi, upperBis, barSec) {
-  if (!upperBis || upperBis.length === 0) return false;
-  // 时间容差 = 本周期 1 个 bar：低级别笔用更低一级校准（如 15分钟用3分钟校准，
-  // 端点在3分钟bar边界如 21:39），上级笔用本周期校准（如 1小时用15分钟校准，
-  // 端点在15分钟bar边界如 21:30），同笔的两端点时间可能相差最多一个本周期bar。
-  // 若容差过小（60秒），会把实际同笔误判为不同笔，导致本周期仍标记1类买卖点。
-  const tEps = barSec || 900;
-  const pEps = 0.01; // 价格容差
-  for (const ub of upperBis) {
-    if (ub.type !== bi.type) continue;
-    if (Math.abs(ub.startTime - bi.startTime) <= tEps &&
-        Math.abs(ub.endTime - bi.endTime) <= tEps &&
-        Math.abs(ub.startPrice - bi.startPrice) <= pEps &&
-        Math.abs(ub.endPrice - bi.endPrice) <= pEps) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * 把极值价格/时间映射到本周期K线的 bar 边界：
- * 在本周期K线中找「high 或 low 达到该价格」的K线，取时间最接近参考时间的。
- */
-function snapToOwnBar(price, refTime, bars) {
-  const eps = 0.001;
-  let best = null, bestDist = Infinity;
-  for (const k of bars) {
-    if (Math.abs(k.high - price) < eps || Math.abs(k.low - price) < eps) {
-      const d = Math.abs(k.time - refTime);
-      if (d < bestDist) { bestDist = d; best = k.time; }
-    }
-  }
-  if (best !== null) return best;
-  // 兜底：吸附到时间上最近的K线
-  let nearest = bars.length > 0 ? bars[0].time : refTime;
-  let nd = Infinity;
-  for (const k of bars) { const d = Math.abs(k.time - refTime); if (d < nd) { nd = d; nearest = k.time; } }
-  return nearest;
-}
-
-/**
- * 低级别每类买卖点只保留时间上最近的一个（避免区间套在低级别产生大量标记）。
- */
-function keepRecentEach(points) {
-  const byType = {};
-  for (const p of points) {
-    if (!byType[p.type] || p.time > byType[p.type].time) byType[p.type] = p;
-  }
-  return Object.values(byType).sort((a, b) => a.time - b.time);
-}
 
 /**
  * 买卖点只在该周期显示：intervalsVisibilities 精确到「仅本周期」。
@@ -952,19 +93,6 @@ function onlyThisInterval(res) {
     case "D":    return { ...NONE, days: true, daysFrom: 1, daysTo: 1 };
     default:     return { ...NONE, minutes: true, minutesFrom: 1, minutesTo: 59 };
   }
-}
-
-function intervalSecOf(res) {
-  const r = String(res).toUpperCase();
-  if (r === "3") return 180;
-  if (r === "5") return 300;
-  if (r === "15") return 900;
-  if (r === "30") return 1800;
-  if (r === "60" || r === "1H") return 3600;
-  if (r === "240" || r === "4H") return 14400;
-  if (r === "D" || r === "1D") return 86400;
-  if (r === "W" || r === "1W") return 604800;
-  return 0;
 }
 
 // ============================================================
@@ -995,6 +123,33 @@ function intervalSecOf(res) {
     const originalRes = curVal.resolution;
     console.log("品种:", SYMBOL, "当前周期:", originalRes);
     console.log("将标记周期:", PERIODS.join(", "), "起始日期:", FROM_DATE);
+
+    // ============================================================
+    // 强制依赖画笔数据：读取 chan-bi 画笔 SKILL 落盘的笔数据文件
+    // 找不到文件 / 品种不匹配 → 报错退出（必须先运行画笔 SKILL）
+    // ============================================================
+    const bisCachePath = bisCacheFile(SYMBOL);
+    let bisCache = null;
+    try {
+      if (fs.existsSync(bisCachePath)) {
+        bisCache = JSON.parse(fs.readFileSync(bisCachePath, "utf8"));
+      }
+    } catch (e) {
+      console.log("错误: 笔数据文件解析失败:", e.message);
+    }
+    if (!bisCache || !bisCache.periods || Object.keys(bisCache.periods).length === 0) {
+      console.log(`错误: 未找到 ${SYMBOL} 的笔数据文件（${bisCachePath}）。`);
+      console.log("本 SKILL 强制依赖 chan-bi 画笔 SKILL：请先运行「画笔」生成笔数据（会落盘到 .cursor/cache/bis_<symbol>.json），再运行「标记买卖点」。");
+      await client.close();
+      process.exit(1);
+    }
+    if (bisCache.symbol !== SYMBOL) {
+      console.log(`错误: 笔数据文件属于 ${bisCache.symbol}，与当前品种 ${SYMBOL} 不一致（文件：${bisCachePath}）。`);
+      console.log("请先对当前品种运行「画笔」SKILL，再运行「标记买卖点」。");
+      await client.close();
+      process.exit(1);
+    }
+    console.log(`已读取画笔笔数据: ${bisCachePath}（生成于 ${bisCache.generatedAt || "未知"}，周期: ${Object.keys(bisCache.periods).join(", ")}）`);
 
     const ensureResolution = async (targetRes) => {
       await client.Runtime.evaluate({
@@ -1255,7 +410,6 @@ function intervalSecOf(res) {
 
     // 主循环：从大到小逐周期计算并标记
     let currentRes = originalRes;
-    const refCache = {};
     let upperBis = null; // 上一级周期的笔（用于一买锚定）
     const periodMarks = {}; // 各周期已生成的标记（用于跨周期共振判定：上级买卖点 ↔ 本级别1类）
     for (let pi = 0; pi < PERIODS.length; pi++) {
@@ -1279,42 +433,20 @@ function intervalSecOf(res) {
         continue;
       }
 
-      // 计算本周期笔（从起始日期开始 + 前30根缓冲）
+      // 本周期笔：强制从画笔 SKILL 落盘的笔数据读取（与图上所画笔完全一致）。
+      // 不再本地计算（mergeBars/findFractals/buildBi/ATR过滤/extendLastBi/校准 均由 chan-bi 完成并落盘）
+      let curBis = (bisCache.periods[res] || []);
+      if (curBis.length === 0) {
+        console.log(`\n[周期 ${res}] 笔数据为空（画笔未覆盖该周期），跳过`);
+        continue;
+      }
+      // 过滤到起始日期之后的笔（与画笔一致；画笔只绘制结束时间 >= 起始日期的笔）
+      curBis = curBis.filter(b => b.endTime >= FROM_TS);
+
+      // 仍需要本周期K线：用于 ATR 偏移量、买卖点吸附到本周期bar边界、MACD 背驰判定
       const rawBars = d.bars;
-      const merged = mergeBars(rawBars);
-      const fractals = findFractals(merged);
       const atr = calcATR(rawBars, 14);
       const macdArr = calcMACD(rawBars);
-      let bis = buildBi(fractals, merged, atr, macdArr);
-
-      // ATR 过滤
-      const threshold = atr * ATR_FILTER;
-      bis = bis.filter(b => b.span >= threshold);
-
-      // 只画起始日期之后的笔
-      let curBis = bis.filter(b => b.endTime >= FROM_TS);
-
-      // 未完成笔延伸
-      curBis = extendLastBi(curBis, rawBars);
-
-      // 跨周期端点校准（低一级校准，与画笔一致）
-      const lowerRes = lowerResOf(res);
-      if (lowerRes) {
-        let refBars = refCache[lowerRes];
-        if (!refBars) {
-          await ensureResolution(lowerRes);
-          const dref = await fetchBars(intervalSecOf(lowerRes), FROM_TS, ANCHOR_BUFFER);
-          if (dref && !dref.error && dref.bars && dref.bars.length > 0) {
-            refBars = dref.bars;
-            refCache[lowerRes] = refBars;
-          }
-          await ensureResolution(res);
-          currentRes = res;
-        }
-        if (refBars) {
-          curBis = calibrateBiTimes(curBis, rawBars, refBars, intervalSecOf(res));
-        }
-      }
 
       // 计算买卖点（区间套：2买/类2买 只在上级上涨笔段内，2卖/类2卖 只在上级下跌笔段内）
       // 1买/1卖 必须满足 MACD 背驰（柱状体面积变小 或 黄白线动能减弱）才标记

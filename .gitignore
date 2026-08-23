@@ -26,6 +26,7 @@ Thumbs.db
 # Cache / temp
 *.log
 .cache/
+.cursor/cache/
 
 # 生成的趋势报告（每次运行 full_report.js 重新生成）
 .cursor/skills/**/report.html

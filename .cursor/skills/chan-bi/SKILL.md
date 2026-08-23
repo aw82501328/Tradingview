@@ -8,6 +8,8 @@ disable-model-invocation: true
 
 通过 CDP 连接 TradingView Desktop，读取当前图表K线，按缠论理论（包含处理 → 分型识别 → 笔构建）在图上**画线段（笔）**。
 
+> **算法来源**：所有缠论算法由 **`chan-core`**（`.cursor/skills/chan-core/scripts/chan_core.js`）提供（唯一算法源），本脚本只负责取K线、调算法、绘制与**落盘笔数据**。修改算法规则请改 `chan-core`。
+
 ## 前置条件
 
 1. TradingView Desktop 以调试模式启动：`TradingView.exe --remote-debugging-port=9222`
@@ -20,7 +22,7 @@ disable-model-invocation: true
 # 在图表上画笔（必须指定起始日期，一次画出 日线/4小时/1小时/15分钟/3分钟 五个周期）
 node .cursor/skills/chan-bi/scripts/chan_bi.js --from=2026-07-02
 
-# 只计算并打印笔，不绘图（先验证再画）
+# 只计算并打印笔，不绘图（先验证再画，同样会落盘笔数据）
 node .cursor/skills/chan-bi/scripts/chan_bi.js --dry --from=2026-07-02
 
 # 指定K线数量（仅未指定日线起点时生效）
@@ -32,6 +34,10 @@ node .cursor/skills/chan-bi/scripts/chan_bi.js --periods=60,D
 # 调试：打印分型序列和处理过程
 node .cursor/skills/chan-bi/scripts/chan_bi.js --dry --debug
 ```
+
+> **笔数据落盘**：每次画笔（含 `--dry`）都会把各周期的最终笔数据写入
+> **`.cursor/cache/bis_<品种>.json`**（品种名中的 `:` 等特殊字符替换为 `_`，如 `TVC:UKOIL` → `bis_TVC_UKOIL.json`）。
+> `mark-buy-sell`（买卖点）SKILL **强制依赖**该文件——先画笔落盘、再标记买卖点。
 
 ### 参数说明
 
@@ -177,9 +183,8 @@ node .cursor/skills/chan-bi/scripts/chan_bi.js --dry --debug
 剔除幅度 < `K × ATR(14)` 的噪音小笔（默认 K=0.5）。
 
 > **买卖点识别已停用**：本 SKILL 当前只画线段（笔），不再在图上绘制一买/二买/三买、
-> 一卖/二卖/三卖标记。`findBuyPoints`/`findSellPoints` 算法函数仍保留在脚本中
-> （含「力度背驰参照笔跳过次级别回调」的改进），如后续需要恢复买卖点标记，
-> 可在主循环中重新调用并传入 `drawPeriod` 即可，无需重写算法。
+> 一卖/二卖/三卖标记。买卖点算法已统一收敛到 **`chan-core`**（`findBuyPoints`/`findSellPoints`），
+> 由 `mark-buy-sell` SKILL 调用并在图上标记（本脚本已删除历史版本的买卖点函数）。
 
 ### ⑦ 跨周期端点时间校准（逐级校准）
 
