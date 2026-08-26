@@ -53,13 +53,13 @@ DATA_FILE = os.path.join(BASE_DIR, "bars_all_tf.json")
 
 
 # ---------- 单周期计算 ----------
-def compute_bis(res, rawBars):
-    """单周期算笔。返回 (bis, atr, macdArr)。笔是纯单周期计算，不依赖上级。"""
+def compute_bis(res, rawBars, lockedPivots=None):
+    """单周期算笔。返回 (bis, atr, macdArr)。lockedPivots 为上级笔端点（区间套强制对齐）。"""
     merged = core.mergeBars(rawBars)
     fractals = core.findFractals(merged)
     atr = core.calcATR(rawBars, 14)
     macdArr = core.calcMACD(rawBars)
-    bis = core.buildBi(fractals, merged, atr, macdArr)
+    bis = core.buildBi(fractals, merged, atr, macdArr, lockedPivots)
     threshold = atr * ATR_FILTER
     bis = [b for b in bis if b["span"] >= threshold]
     bis = core.extendLastBi(bis, rawBars)
@@ -171,9 +171,6 @@ def run_one_period(res, upper_res, bars_self, bars_upper):
         win_self = bars_self[: i + 1]
         win_upper = [b for b in bars_upper if b["time"] + upper_sec <= close_time]
 
-        self_bis, atr, self_macd = compute_bis(res, win_self)
-        cur_atr = atr
-
         upper_bis = None
         upper_macd = None
         buy_upper, sell_upper = [], []
@@ -181,6 +178,14 @@ def run_one_period(res, upper_res, bars_self, bars_upper):
             upper_bis, _, upper_macd = compute_bis(upper_res, win_upper)
             buy_upper, sell_upper = compute_points(upper_res, upper_bis, None, upper_macd)
         upper_pts = buy_upper + sell_upper
+
+        # 区间套强制对齐：主周期笔端点对齐紧邻上级笔端点（优先级最高）
+        locked_pivots = core.lockedPivotsOf(upper_bis)
+        self_bis, atr, self_macd = compute_bis(res, win_self, locked_pivots)
+        # 区间套强制对齐：把主周期笔拐点对齐到紧邻上级笔拐点（上级底/顶=本级底/顶）
+        if upper_bis:
+            self_bis = core.alignBiToUpper(self_bis, upper_bis, upper_sec)
+        cur_atr = atr
 
         buy_self, sell_self = compute_points(res, self_bis, upper_bis, self_macd)
 
@@ -322,8 +327,8 @@ def main():
         agg["closed"] += stats["closed"]
         agg["wins"] += len([t for t in trades if t.get("pnl", 0.0) > 0])
         agg["total_pnl"] += stats["total_pnl"]
-        agg["gross_win"] += sum(t["pnl"] for t in trades if t.get("pnl", 0.0) > 0)
-        agg["gross_loss"] += sum(t["pnl"] for t in trades if t.get("pnl", 0.0) <= 0)
+        agg["gross_win"] += sum(t.get("pnl", 0.0) for t in trades if t.get("pnl", 0.0) > 0)
+        agg["gross_loss"] += sum(t.get("pnl", 0.0) for t in trades if t.get("pnl", 0.0) <= 0)
         agg["max_dd"] += compute_max_dd(equity)
 
     print("===== 多周期汇总（各周期独立账户简单加总）=====")

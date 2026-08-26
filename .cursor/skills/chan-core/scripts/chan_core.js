@@ -40,7 +40,7 @@ function mergeBars(rawBars) {
   let direction = 0;
   for (const bar of rawBars) {
     if (merged.length === 0) {
-      merged.push({ ...bar, _rawCount: 1, highTime: bar.time, lowTime: bar.time });
+      merged.push({ ...bar, _rawCount: 1, highTime: bar.time, lowTime: bar.time, rawHigh: bar.high, rawLow: bar.low });
       continue;
     }
     const last = merged[merged.length - 1];
@@ -60,12 +60,15 @@ function mergeBars(rawBars) {
         if (bar.high < last.high) { last.high = bar.high; last.highTime = bar.time; }
         if (bar.low < last.low) { last.low = bar.low; last.lowTime = bar.time; }
       }
+      // 记录覆盖原始K线的真实极值范围（跳空检测用，不受合并方向高低取舍影响）
+      if (bar.high > last.rawHigh) last.rawHigh = bar.high;
+      if (bar.low < last.rawLow) last.rawLow = bar.low;
       last._rawCount += 1;
       last.time = bar.time;
       direction = dir;
     } else {
       direction = bar.high > last.high ? 1 : -1;
-      merged.push({ ...bar, _rawCount: 1, highTime: bar.time, lowTime: bar.time });
+      merged.push({ ...bar, _rawCount: 1, highTime: bar.time, lowTime: bar.time, rawHigh: bar.high, rawLow: bar.low });
     }
   }
   return merged;
@@ -115,8 +118,14 @@ function hasGapBetween(merged, aIdx, bIdx, atr, gapFilter) {
   const th = atr * gapFilter;
   for (let i = aIdx; i < bIdx; i++) {
     const cur = merged[i], next = merged[i + 1];
-    const gapUp = next.low - cur.high;
-    const gapDown = cur.low - next.high;
+    // 用覆盖原始K线的真实极值范围判断跳空，避免合并K线（向下合并压低高点/向上合并抬高低点）
+    // 造成「假缺口」：真实原始K线之间若无价格跳空，不应被判为跳空。
+    const curHigh = cur.rawHigh !== undefined ? cur.rawHigh : cur.high;
+    const curLow = cur.rawLow !== undefined ? cur.rawLow : cur.low;
+    const nextHigh = next.rawHigh !== undefined ? next.rawHigh : next.high;
+    const nextLow = next.rawLow !== undefined ? next.rawLow : next.low;
+    const gapUp = nextLow - curHigh;
+    const gapDown = curLow - nextHigh;
     if (gapUp >= th || gapDown >= th) return true;
   }
   return false;
@@ -132,7 +141,7 @@ function hasGapBetween(merged, aIdx, bIdx, atr, gapFilter) {
  *   - 阶段二：遍历序列，处理跳空成笔 / MACD变色成笔 / 前顶前底作废 / 分型范围脱离 / 极值规则
  *   - 阶段三：两两连笔（此时首尾自然连续）
  */
-function buildBi(fractals, merged, atr, macdArr) {
+function buildBi(fractals, merged, atr, macdArr, lockedPivots) {
   const gapThreshold = atr ? atr * CHAN_CFG.gapFilter : 0;
   // 阶段一：严格交替分型序列
   const seq = [];
@@ -147,11 +156,26 @@ function buildBi(fractals, merged, atr, macdArr) {
     }
   }
 
-  // 有效笔判断：合并K线间隔 >= 4 且覆盖原始K线 >= 5
+  // 区间套强制对齐（优先级最高）：上级笔端点（lockedPivots）必须在下级笔中被保留为端点，
+  // 不能被阶段二的任何「移除中间分型」逻辑（MACD端点让位/前顶前底作废/回溯替换）吞掉。
+  // 在阶段一序列上，把与上级端点「方向一致且价格一致」的分型标记为 locked。
+  if (lockedPivots && lockedPivots.length) {
+    for (const f of seq) {
+      const p = f.type === "top" ? f.high : f.low;
+      for (const lp of lockedPivots) {
+        if (lp.dir === f.type && Math.abs(lp.price - p) <= 0.001) {
+          f.locked = true;
+          break;
+        }
+      }
+    }
+  }
+
+  // 有效笔判断：合并后K线从起点分型到终点分型（含两端分型）至少 5 根即可成笔。
+  // gap = b.mergedIdx - a.mergedIdx，等价于合并K线数 gap+1 >= 5。
   const isValid = (a, b) => {
     const gap = b.mergedIdx - a.mergedIdx;
-    if (gap < 4) return false;
-    return countRaw(merged, a.mergedIdx, b.mergedIdx) >= 5;
+    return gap >= 4;
   };
 
   // 笔内极值检查：一笔的顶/底必须是该笔范围内所有K线的最高/最低点。
@@ -176,7 +200,7 @@ function buildBi(fractals, merged, atr, macdArr) {
   };
 
   if (CHAN_CFG.debug) {
-    const ft = (s) => `${s.type === "top" ? "顶" : "底"}@${s.mergedIdx}(${s.type === "top" ? s.high : s.low})`;
+    const ft = (s) => `${s.type === "top" ? "顶" : "底"}@${s.mergedIdx}(${s.type === "top" ? s.high : s.low})${s.locked ? "(锁定)" : ""}`;
     console.log("[阶段一] 交替分型序列:", seq.map(ft).join(" → "));
   }
 
@@ -186,6 +210,10 @@ function buildBi(fractals, merged, atr, macdArr) {
     if (result.length === 0) { result.push(k); continue; }
     const last = result[result.length - 1];
     if (k.type === last.type) {
+      if (last.locked) {
+        // locked 端点（上级笔端点，区间套强制对齐）不可被同类型分型替换
+        continue;
+      }
       if (!last.gapLocked) {
         if (k.type === "top") { if (k.high >= last.high) result[result.length - 1] = k; }
         else { if (k.low <= last.low) result[result.length - 1] = k; }
@@ -202,7 +230,9 @@ function buildBi(fractals, merged, atr, macdArr) {
     // 区间内最新的绝对极值（例：92.83 应让位给更低的 92.74）。
     if (result.length >= 2) {
       const prev2 = result[result.length - 2];
+      const topOne = result[result.length - 1];
       if (prev2.macdCross === true && prev2.type === k.type &&
+          !topOne.locked &&
           ((k.type === "top" && k.high > prev2.high) || (k.type === "bottom" && k.low < prev2.low))) {
         if (CHAN_CFG.debug) console.log(`[阶段二] MACD端点让位: ${prev2.type === "top" ? "顶" : "底"}@${prev2.mergedIdx}(${prev2.type === "top" ? prev2.high : prev2.low}) → ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}(${k.type === "top" ? k.high : k.low}) 更新为更极端${k.type === "top" ? "高点" : "低点"}，移除中间分型`);
         k.macdCross = true;
@@ -247,6 +277,7 @@ function buildBi(fractals, merged, atr, macdArr) {
           !lastMoreExtremeThanPrev3 &&
           shallow &&
           last.macdCross === true && last.macdRaw < 5 &&
+          !last.locked && !prev2.locked &&
           ((k.type === "top" && k.high > prev2.high) || (k.type === "bottom" && k.low < prev2.low))) {
         if (CHAN_CFG.debug) console.log(`[阶段二] 前顶/前底作废: ${prev2.type === "top" ? "顶" : "底"}@${prev2.mergedIdx}(${prev2.type === "top" ? prev2.high : prev2.low}) 被 ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}(${k.type === "top" ? k.high : k.low}) 突破，k 顶替 prev2，移除中间 ${last.type === "top" ? "顶" : "底"}@${last.mergedIdx}`);
         if (prev2.macdCross === true) k.macdCross = true;
@@ -266,11 +297,14 @@ function buildBi(fractals, merged, atr, macdArr) {
         console.log(`[阶段二] 忽略 k: ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}(${k.type === "top" ? k.high : k.low}) 极值冲突=${!ex} 分型范围未脱离=${!fr}`);
       }
     } else {
-      // 间隔不足：先检查 last→k 区间内是否发生 MACD 红绿转换（检测区间用分型的极值时间）。
-      const macdCross = macdArr && hasMacdCrossBetween(macdArr, merged, last.mergedIdx, k.mergedIdx, last.time, k.time);
+      // 间隔不足：先检查 last→k 是否满足「合并后只有4根K + 方向性 MACD 变色」成笔。
+      // 方向性变色：底到顶(上涨) 柱状体由绿变红；顶到底(下跌) 柱状体由红变绿。
+      const gap = k.mergedIdx - last.mergedIdx;
+      const direction = last.type === "bottom" ? "up" : "down";
+      const macdCross = macdArr && hasMacdCrossBetween(macdArr, merged, last.mergedIdx, k.mergedIdx, last.time, k.time, direction);
       const macdRawCount = countRaw(merged, last.mergedIdx, k.mergedIdx);
-      if (macdCross && macdRawCount >= 4 && noMoreExtremeInside(last, k)) {
-        if (CHAN_CFG.debug) console.log(`[阶段二] MACD变色成笔: ${last.type === "top" ? "顶" : "底"}@${last.mergedIdx} → ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx} (区间内MACD红绿转换, 原始K线${macdRawCount}≥4)`);
+      if (gap === 3 && macdCross && noMoreExtremeInside(last, k)) {
+        if (CHAN_CFG.debug) console.log(`[阶段二] MACD变色成笔: ${last.type === "top" ? "顶" : "底"}@${last.mergedIdx} → ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx} (合并4根K, ${direction === "up" ? "绿变红" : "红变绿"})`);
         k.macdCross = true;
         k.macdRaw = macdRawCount;
         result.push(k);
@@ -285,8 +319,27 @@ function buildBi(fractals, merged, atr, macdArr) {
           // 仅当 prev→last 这笔是「脆弱笔」（合并间隔 <= 12）时才允许 k 回溯替换 prev；
           // 或 prev 与 k 之间已满足最小笔间隔（合并K线 >= 4）时，前顶/前底已被市场否定。
           if (moreExtreme && (gapPrevLast <= 12 || gapPrevK >= 4)) {
-            result[result.length - 2] = k;
-            result.pop();
+            // 回溯替换保护（区间套一致性）：当 last 比更早的同类型分型 result[-3] 更极端时，
+            // last 是笔内真实转折点（如插针低点/插针高点），不能无条件 pop 掉——吞掉会导致
+            // 该笔内部藏着更极值（违反笔内极值原则），且本级别笔端点与上级周期（区间套）不重合。
+            // 此时保留 last 取代 result[-3]，prev 被更高顶/更低底突破而作废移除，
+            // k 与 last 间隔不足、暂不接入，等待后续满足最小间隔的分型成笔。
+            if (result.length >= 3) {
+              const prev3 = result[result.length - 3];
+              const lastIsDeeper =
+                (k.type === "top") ? (last.low < prev3.low) : (last.high > prev3.high);
+              if (lastIsDeeper && !prev.locked && !prev3.locked) {
+                if (CHAN_CFG.debug) console.log(`[阶段二] 回溯替换保护: ${last.type === "top" ? "顶" : "底"}@${last.mergedIdx}(${last.type === "top" ? last.high : last.low}) 比 ${prev3.type === "top" ? "顶" : "底"}@${prev3.mergedIdx}(${prev3.type === "top" ? prev3.high : prev3.low}) 更极端，保留 last 为端点，作废 ${prev.type === "top" ? "顶" : "底"}@${prev.mergedIdx}(${prev.type === "top" ? prev.high : prev.low})，暂不接入 ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}`);
+                result[result.length - 3] = last;
+                result.pop();
+                result.pop();
+                continue;
+              }
+            }
+            if (!last.locked && !prev.locked) {
+              result[result.length - 2] = k;
+              result.pop();
+            }
           }
         }
       }
@@ -429,12 +482,14 @@ function isBiDiverge(bi, refer, macdArr) {
 // ============================================================
 
 /**
- * 检测两个分型（合并K线索引区间）之间是否发生 MACD 红绿转换。
- * 红变绿：MACD 柱由正转负；绿变红：由负转正。
+ * 检测两个分型（合并K线索引区间）之间是否发生方向性 MACD 红绿转换。
+ *   direction === "up"  ：底到顶（上涨），柱状体由绿变红（<=0 转 >0）
+ *   direction === "down"：顶到底（下跌），柱状体由红变绿（>0 转 <=0）
+ *   其余（undefined）：任意红绿转换（历史兼容）
  * 检测区间用「分型的极值时间」作为边界（而不是合并K线的最新时间），
  * 避免把顶底极值之后（合并K线包含区间内）的 MACD 变化误算进来。
  */
-function hasMacdCrossBetween(macdArr, merged, aIdx, bIdx, aTime, bTime) {
+function hasMacdCrossBetween(macdArr, merged, aIdx, bIdx, aTime, bTime, direction) {
   if (!macdArr || macdArr.length === 0) return false;
   const t0 = aTime !== undefined ? aTime : merged[aIdx].time;
   const t1 = bTime !== undefined ? bTime : merged[bIdx].time;
@@ -443,7 +498,14 @@ function hasMacdCrossBetween(macdArr, merged, aIdx, bIdx, aTime, bTime) {
     if (mm.time < t0) continue;
     if (mm.time > t1) break;
     if (prev !== null) {
-      const crossed = (prev.macd >= 0 && mm.macd < 0) || (prev.macd <= 0 && mm.macd > 0);
+      let crossed;
+      if (direction === "up") {
+        crossed = prev.macd <= 0 && mm.macd > 0;
+      } else if (direction === "down") {
+        crossed = prev.macd > 0 && mm.macd <= 0;
+      } else {
+        crossed = (prev.macd >= 0 && mm.macd < 0) || (prev.macd <= 0 && mm.macd > 0);
+      }
       if (crossed) return true;
     }
     prev = mm;
@@ -995,6 +1057,100 @@ function keepRecentEach(points) {
 // 导出
 // ============================================================
 
+/**
+ * 由上级笔提取「锁定端点」列表（区间套强制对齐用）：
+ * 上级笔的每个起点/终点都是一个明确的极值端点（上涨笔起点是底、终点是顶；下跌笔反之）。
+ * 下级周期画笔时，把这些端点作为 lockedPivots 传入 buildBi，保证下级笔端点与上级对齐。
+ */
+function lockedPivotsOf(prevBis) {
+  if (!prevBis || prevBis.length === 0) return null;
+  const arr = [];
+  for (const b of prevBis) {
+    if (b.type === "up") {
+      arr.push({ dir: "bottom", price: b.startPrice });
+      arr.push({ dir: "top", price: b.endPrice });
+    } else {
+      arr.push({ dir: "top", price: b.startPrice });
+      arr.push({ dir: "bottom", price: b.endPrice });
+    }
+  }
+  return arr;
+}
+
+/**
+ * 区间套强制对齐（优先级最高）：把下级周期笔的拐点对齐到上级周期笔的拐点。
+ * 上级笔的每个起点/终点都是明确极值（顶/底），下级周期必须复现相同极值。
+ * 当下级周期因包含关系把上级极值吞掉（如插针低点/高点）时，下级拐点会漂移到
+ * 次极值上（例：上级底 4311.04 被下级画成 4311.27）；本函数把「同方向且时间最近」
+ * 的下级拐点快照到上级拐点的（时间+价格），实现「上级笔与下级笔同笔」。
+ *
+ * @param {Array} lowerBis 下级周期笔（原地修改并返回）
+ * @param {Array} upperBis 上级周期笔
+ * @param {number} upperIntervalSec 上级周期K线间隔（秒），作为时间容差
+ */
+function alignBiToUpper(lowerBis, upperBis, upperIntervalSec) {
+  if (!lowerBis || !upperBis || lowerBis.length === 0 || upperBis.length === 0) return lowerBis;
+  // 上级拐点：每笔的起点+终点
+  const upperPts = [];
+  for (const b of upperBis) {
+    if (b.type === "up") {
+      upperPts.push({ time: b.startTime, price: b.startPrice, dir: "bottom" });
+      upperPts.push({ time: b.endTime, price: b.endPrice, dir: "top" });
+    } else {
+      upperPts.push({ time: b.startTime, price: b.startPrice, dir: "top" });
+      upperPts.push({ time: b.endTime, price: b.endPrice, dir: "bottom" });
+    }
+  }
+  const tol = upperIntervalSec || 0;
+
+  // 下级拐点：n 笔 → n+1 个拐点（相邻两笔共享同一拐点）
+  const n = lowerBis.length;
+  const pts = new Array(n + 1);
+  for (let i = 0; i <= n; i++) {
+    if (i === 0) {
+      const b = lowerBis[0];
+      pts[i] = { time: b.startTime, price: b.startPrice, dir: b.type === "up" ? "bottom" : "top" };
+    } else if (i === n) {
+      const b = lowerBis[n - 1];
+      pts[i] = { time: b.endTime, price: b.endPrice, dir: b.type === "up" ? "top" : "bottom" };
+    } else {
+      const b = lowerBis[i];
+      pts[i] = { time: b.startTime, price: b.startPrice, dir: b.type === "up" ? "bottom" : "top" };
+    }
+  }
+
+  // 每个上级拐点：找同方向、时间最近且未使用的下级拐点，快照对齐。
+  const used = new Array(n + 1).fill(false);
+  for (const up of upperPts) {
+    let best = -1, bestDiff = Infinity;
+    for (let i = 0; i <= n; i++) {
+      if (used[i]) continue;
+      if (pts[i].dir !== up.dir) continue;
+      const diff = Math.abs(pts[i].time - up.time);
+      if (diff <= tol && diff < bestDiff) { bestDiff = diff; best = i; }
+    }
+    if (best >= 0) {
+      const p = pts[best];
+      // 仅当下级拐点「更不极端」（漏掉上级真极值）时才对齐时间+价格；
+      // 否则（下级已找到相同极值）只对齐价格保持严格相等，保留下级更精确的时间。
+      const lessExtreme = up.dir === "bottom" ? p.price > up.price : p.price < up.price;
+      used[best] = true;
+      p.price = up.price;
+      if (lessExtreme) p.time = up.time;
+    }
+  }
+
+  // 由快照后的拐点重建笔端点
+  for (let i = 0; i < n; i++) {
+    lowerBis[i].startTime = pts[i].time;
+    lowerBis[i].startPrice = pts[i].price;
+    lowerBis[i].endTime = pts[i + 1].time;
+    lowerBis[i].endPrice = pts[i + 1].price;
+    lowerBis[i].span = Math.abs(lowerBis[i].endPrice - lowerBis[i].startPrice);
+  }
+  return lowerBis;
+}
+
 module.exports = {
   CHAN_CFG,
   // K线/分型/笔
@@ -1003,6 +1159,8 @@ module.exports = {
   countRaw,
   hasGapBetween,
   buildBi,
+  lockedPivotsOf,
+  alignBiToUpper,
   calcATR,
   calcMACD,
   hasMacdCrossBetween,

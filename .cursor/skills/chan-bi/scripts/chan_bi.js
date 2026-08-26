@@ -19,7 +19,7 @@ const CDP = require("../../../../server-cdp/node_modules/chrome-remote-interface
 // 缠论算法核心（唯一算法源，与 mark-buy-sell SKILL 共用）
 const core = require("../../chan-core/scripts/chan_core.js");
 const {
-  mergeBars, findFractals, countRaw, hasGapBetween, buildBi,
+  mergeBars, findFractals, countRaw, hasGapBetween, buildBi, lockedPivotsOf, alignBiToUpper,
   calcATR, calcMACD, hasMacdCrossBetween,
   extendLastBi, lowerResOf, calibrateBiTimes, intervalSecOf,
 } = core;
@@ -555,7 +555,10 @@ function intervalVisibility(res) {
       const atr = calcATR(rawBars, 14);
       // MACD 红绿柱，供 buildBi 的「MACD变色成笔」使用（区间内红变绿/绿变红时，间隔不足也可成笔）
       const macdArr = calcMACD(rawBars);
-      let bis = buildBi(fractals, merged, atr, macdArr);
+      // 区间套强制对齐：把上一层（更高级别）笔的端点作为锁定端点传入 buildBi，
+      // 保证本级别笔端点与上级笔的极值端点严格重合（优先级最高）。
+      const lockedPivots = lockedPivotsOf(prevBis);
+      let bis = buildBi(fractals, merged, atr, macdArr, lockedPivots);
 
       // ATR 过滤
       const threshold = atr * ATR_FILTER;
@@ -593,6 +596,12 @@ function intervalVisibility(res) {
         if (refBars) {
           drawBis = calibrateBiTimes(drawBis, rawBars, refBars, intervalSecOf(res));
         }
+      }
+
+      // 区间套强制对齐（优先级最高）：把本级别笔拐点对齐到紧邻上级笔拐点，
+      // 使上级笔的极值端点在本级别中严格复现（上级底/顶=本级底/顶，同级同笔）。
+      if (pi > 0 && prevBis && prevBis.length > 0) {
+        drawBis = alignBiToUpper(drawBis, prevBis, intervalSecOf(PERIODS[pi - 1]));
       }
 
       console.log("\n=== 缠论计算结果 [周期 " + res + "] ===");

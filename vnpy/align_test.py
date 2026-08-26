@@ -37,13 +37,16 @@ def approx(a, b, eps=EPS):
 def compute_bis(rawBarsByRes, refBarsByRes):
     """复现 chan-bi 的笔计算流程。"""
     allBis = {}
-    for res in PERIODS:
+    prevBis = None
+    for i, res in enumerate(PERIODS):
         rawBars = rawBarsByRes[res]
         merged = core.mergeBars(rawBars)
         fractals = core.findFractals(merged)
         atr = core.calcATR(rawBars, 14)
         macdArr = core.calcMACD(rawBars)
-        bis = core.buildBi(fractals, merged, atr, macdArr)
+        # 区间套强制对齐：把上一层笔端点作为锁定端点传入 buildBi
+        lockedPivots = core.lockedPivotsOf(prevBis)
+        bis = core.buildBi(fractals, merged, atr, macdArr, lockedPivots)
         threshold = atr * ATR_FILTER
         bis = [b for b in bis if b["span"] >= threshold]
         drawBis = bis
@@ -52,7 +55,11 @@ def compute_bis(rawBarsByRes, refBarsByRes):
         if lowerRes and res in refBarsByRes:
             refBars = refBarsByRes[res]
             drawBis = core.calibrateBiTimes(drawBis, rawBars, refBars, core.intervalSecOf(res))
+        # 区间套强制对齐：把本级别笔拐点对齐到紧邻上级笔拐点
+        if prevBis:
+            drawBis = core.alignBiToUpper(drawBis, prevBis, core.intervalSecOf(PERIODS[i - 1]))
         allBis[res] = drawBis
+        prevBis = drawBis
     return allBis
 
 

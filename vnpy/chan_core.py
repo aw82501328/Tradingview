@@ -44,6 +44,8 @@ def mergeBars(rawBars):
             m["_rawCount"] = 1
             m["highTime"] = bar["time"]
             m["lowTime"] = bar["time"]
+            m["rawHigh"] = bar["high"]
+            m["rawLow"] = bar["low"]
             merged.append(m)
             continue
         last = merged[-1]
@@ -70,6 +72,11 @@ def mergeBars(rawBars):
                 if bar["low"] < last["low"]:
                     last["low"] = bar["low"]
                     last["lowTime"] = bar["time"]
+            # 记录覆盖原始K线的真实极值范围（跳空检测用，不受合并方向高低取舍影响）
+            if bar["high"] > last["rawHigh"]:
+                last["rawHigh"] = bar["high"]
+            if bar["low"] < last["rawLow"]:
+                last["rawLow"] = bar["low"]
             last["_rawCount"] += 1
             last["time"] = bar["time"]
             direction = d
@@ -79,6 +86,8 @@ def mergeBars(rawBars):
             m["_rawCount"] = 1
             m["highTime"] = bar["time"]
             m["lowTime"] = bar["time"]
+            m["rawHigh"] = bar["high"]
+            m["rawLow"] = bar["low"]
             merged.append(m)
     return merged
 
@@ -121,8 +130,14 @@ def hasGapBetween(merged, aIdx, bIdx, atr, gapFilter):
     for i in range(aIdx, bIdx):
         cur = merged[i]
         nxt = merged[i + 1]
-        gapUp = nxt["low"] - cur["high"]
-        gapDown = cur["low"] - nxt["high"]
+        # 用覆盖原始K线的真实极值范围判断跳空，避免合并K线（向下合并压低高点/向上合并抬高低点）
+        # 造成「假缺口」：真实原始K线之间若无价格跳空，不应被判为跳空。
+        curHigh = cur.get("rawHigh", cur["high"])
+        curLow = cur.get("rawLow", cur["low"])
+        nextHigh = nxt.get("rawHigh", nxt["high"])
+        nextLow = nxt.get("rawLow", nxt["low"])
+        gapUp = nextLow - curHigh
+        gapDown = curLow - nextHigh
         if gapUp >= th or gapDown >= th:
             return True
     return False
@@ -133,8 +148,8 @@ def hasGapBetween(merged, aIdx, bIdx, atr, gapFilter):
 # ============================================================
 
 
-def buildBi(fractals, merged, atr, macdArr):
-    """笔构建。与 JS 版 buildBi 对齐。"""
+def buildBi(fractals, merged, atr, macdArr, lockedPivots=None):
+    """笔构建。与 JS 版 buildBi 对齐。lockedPivots 为上级笔端点（区间套强制对齐，优先级最高）。"""
     gapThreshold = atr * CHAN_CFG["gapFilter"] if atr else 0
 
     # 阶段一：严格交替分型序列
@@ -154,11 +169,21 @@ def buildBi(fractals, merged, atr, macdArr):
         else:
             seq.append(f)
 
+    # 区间套强制对齐（优先级最高）：上级笔端点（lockedPivots）必须在下级笔中被保留为端点，
+    # 不能被阶段二的任何「移除中间分型」逻辑吞掉。在阶段一序列上标记与上级端点方向/价格一致的分型。
+    if lockedPivots:
+        for f in seq:
+            p = f["high"] if f["type"] == "top" else f["low"]
+            for lp in lockedPivots:
+                if lp["dir"] == f["type"] and abs(lp["price"] - p) <= 0.001:
+                    f["locked"] = True
+                    break
+
     def isValid(a, b):
+        # 有效笔判断：合并后K线从起点分型到终点分型（含两端分型）至少 5 根即可成笔。
+        # gap = b["mergedIdx"] - a["mergedIdx"]，等价于合并K线数 gap+1 >= 5。
         gap = b["mergedIdx"] - a["mergedIdx"]
-        if gap < 4:
-            return False
-        return countRaw(merged, a["mergedIdx"], b["mergedIdx"]) >= 5
+        return gap >= 4
 
     def noMoreExtremeInside(a, b):
         for i in range(a["mergedIdx"] + 1, b["mergedIdx"]):
@@ -192,6 +217,9 @@ def buildBi(fractals, merged, atr, macdArr):
             continue
         last = result[-1]
         if k["type"] == last["type"]:
+            if last.get("locked", False):
+                # locked 端点（上级笔端点，区间套强制对齐）不可被同类型分型替换
+                continue
             if not last.get("gapLocked", False):
                 if k["type"] == "top":
                     if k["high"] >= last["high"]:
@@ -212,7 +240,9 @@ def buildBi(fractals, merged, atr, macdArr):
         # MACD 变色成笔端点让位
         if len(result) >= 2:
             prev2 = result[-2]
+            topOne = result[-1]
             if prev2.get("macdCross", False) is True and prev2["type"] == k["type"] and \
+               not topOne.get("locked", False) and \
                ((k["type"] == "top" and k["high"] > prev2["high"]) or
                 (k["type"] == "bottom" and k["low"] < prev2["low"])):
                 if CHAN_CFG["debug"]:
@@ -250,6 +280,7 @@ def buildBi(fractals, merged, atr, macdArr):
                not lastMoreExtremeThanPrev3 and \
                shallow and \
                last.get("macdCross", False) is True and last.get("macdRaw", 0) < 5 and \
+               not last.get("locked", False) and not prev2.get("locked", False) and \
                ((k["type"] == "top" and k["high"] > prev2["high"]) or
                 (k["type"] == "bottom" and k["low"] < prev2["low"])):
                 if CHAN_CFG["debug"]:
@@ -266,11 +297,15 @@ def buildBi(fractals, merged, atr, macdArr):
             if CHAN_CFG["debug"]:
                 print(f"[阶段二] 忽略 k: {k['mergedIdx']}")
         else:
-            macdCross = bool(macdArr) and hasMacdCrossBetween(macdArr, merged, last["mergedIdx"], k["mergedIdx"], last["time"], k["time"])
+            # 间隔不足：先检查 last→k 是否满足「合并后只有4根K + 方向性 MACD 变色」成笔。
+            # 方向性变色：底到顶(上涨) 柱状体由绿变红；顶到底(下跌) 柱状体由红变绿。
+            gap = k["mergedIdx"] - last["mergedIdx"]
+            direction = "up" if last["type"] == "bottom" else "down"
+            macdCross = bool(macdArr) and hasMacdCrossBetween(macdArr, merged, last["mergedIdx"], k["mergedIdx"], last["time"], k["time"], direction)
             macdRawCount = countRaw(merged, last["mergedIdx"], k["mergedIdx"])
-            if macdCross and macdRawCount >= 4 and noMoreExtremeInside(last, k):
+            if gap == 3 and macdCross and noMoreExtremeInside(last, k):
                 if CHAN_CFG["debug"]:
-                    print(f"[阶段二] MACD变色成笔: {last['mergedIdx']} -> {k['mergedIdx']} (原始K线{macdRawCount}>=4)")
+                    print(f"[阶段二] MACD变色成笔: {last['mergedIdx']} -> {k['mergedIdx']} (合并4根K, {'绿变红' if direction == 'up' else '红变绿'})")
                 k["macdCross"] = True
                 k["macdRaw"] = macdRawCount
                 result.append(k)
@@ -283,8 +318,27 @@ def buildBi(fractals, merged, atr, macdArr):
                     if CHAN_CFG["debug"]:
                         print(f"[阶段二] 间隔不足: {k['mergedIdx']} 与 {last['mergedIdx']}, moreExtreme={moreExtreme}, gapPrevLast={gapPrevLast}")
                     if moreExtreme and (gapPrevLast <= 12 or gapPrevK >= 4):
-                        result[-2] = k
-                        result.pop()
+                        # 回溯替换保护（区间套一致性）：当 last 比更早的同类型分型 result[-3] 更极端时，
+                        # last 是笔内真实转折点（如插针低点/插针高点），不能无条件 pop 掉——吞掉会导致
+                        # 该笔内部藏着更极值（违反笔内极值原则），且本级别笔端点与上级周期（区间套）不重合。
+                        # 此时保留 last 取代 result[-3]，prev 被更高顶/更低底突破而作废移除，
+                        # k 与 last 间隔不足、暂不接入，等待后续满足最小间隔的分型成笔。
+                        if len(result) >= 3:
+                            prev3 = result[-3]
+                            last_is_deeper = (
+                                (k["type"] == "top" and last["low"] < prev3["low"])
+                                or (k["type"] == "bottom" and last["high"] > prev3["high"])
+                            )
+                            if last_is_deeper and not prev.get("locked", False) and not prev3.get("locked", False):
+                                if CHAN_CFG["debug"]:
+                                    print(f"[阶段二] 回溯替换保护: {'顶' if last['type']=='top' else '底'}@{last['mergedIdx']} 比 {'顶' if prev3['type']=='top' else '底'}@{prev3['mergedIdx']} 更极端，保留 last 为端点，作废 prev，暂不接入 k")
+                                result[-3] = last
+                                result.pop()
+                                result.pop()
+                                continue
+                        if not last.get("locked", False) and not prev.get("locked", False):
+                            result[-2] = k
+                            result.pop()
 
     if CHAN_CFG["debug"]:
         def ft2(s):
@@ -314,6 +368,90 @@ def buildBi(fractals, merged, atr, macdArr):
             "macdCross": b.get("macdCross", False) is True,
         })
     return bis
+
+
+def lockedPivotsOf(prevBis):
+    """由上级笔提取「锁定端点」列表（区间套强制对齐用）。
+    上级笔的每个起点/终点都是明确的极值端点（上涨笔起点是底、终点是顶；下跌笔反之）。
+    下级周期画笔时，把这些端点作为 lockedPivots 传入 buildBi，保证下级笔端点与上级对齐。"""
+    if not prevBis:
+        return None
+    arr = []
+    for b in prevBis:
+        if b["type"] == "up":
+            arr.append({"dir": "bottom", "price": b["startPrice"]})
+            arr.append({"dir": "top", "price": b["endPrice"]})
+        else:
+            arr.append({"dir": "top", "price": b["startPrice"]})
+            arr.append({"dir": "bottom", "price": b["endPrice"]})
+    return arr
+
+
+def alignBiToUpper(lowerBis, upperBis, upperIntervalSec):
+    """区间套强制对齐（优先级最高）：把下级周期笔的拐点对齐到上级周期笔的拐点。
+    上级笔的每个起点/终点都是明确极值（顶/底），下级周期必须复现相同极值。
+    当下级周期因包含关系把上级极值吞掉（如插针低点/高点）时，下级拐点会漂移到次极值上；
+    本函数把「同方向且时间最近」的下级拐点快照到上级拐点的（时间+价格）。
+    upperIntervalSec 为上级周期K线间隔（秒），作为时间容差。原地修改并返回 lowerBis。"""
+    if not lowerBis or not upperBis:
+        return lowerBis
+
+    upperPts = []
+    for b in upperBis:
+        if b["type"] == "up":
+            upperPts.append({"time": b["startTime"], "price": b["startPrice"], "dir": "bottom"})
+            upperPts.append({"time": b["endTime"], "price": b["endPrice"], "dir": "top"})
+        else:
+            upperPts.append({"time": b["startTime"], "price": b["startPrice"], "dir": "top"})
+            upperPts.append({"time": b["endTime"], "price": b["endPrice"], "dir": "bottom"})
+    tol = upperIntervalSec or 0
+
+    n = len(lowerBis)
+    pts = [None] * (n + 1)
+    for i in range(n + 1):
+        if i == 0:
+            b = lowerBis[0]
+            pts[i] = {"time": b["startTime"], "price": b["startPrice"],
+                      "dir": "bottom" if b["type"] == "up" else "top"}
+        elif i == n:
+            b = lowerBis[n - 1]
+            pts[i] = {"time": b["endTime"], "price": b["endPrice"],
+                      "dir": "top" if b["type"] == "up" else "bottom"}
+        else:
+            b = lowerBis[i]
+            pts[i] = {"time": b["startTime"], "price": b["startPrice"],
+                      "dir": "bottom" if b["type"] == "up" else "top"}
+
+    used = [False] * (n + 1)
+    for up in upperPts:
+        best = -1
+        bestDiff = float("inf")
+        for i in range(n + 1):
+            if used[i]:
+                continue
+            if pts[i]["dir"] != up["dir"]:
+                continue
+            diff = abs(pts[i]["time"] - up["time"])
+            if diff <= tol and diff < bestDiff:
+                bestDiff = diff
+                best = i
+        if best >= 0:
+            p = pts[best]
+            # 仅当下级拐点「更不极端」（漏掉上级真极值）时才对齐时间+价格；
+            # 否则（下级已找到相同极值）只对齐价格保持严格相等，保留下级更精确的时间。
+            lessExtreme = (p["price"] > up["price"]) if up["dir"] == "bottom" else (p["price"] < up["price"])
+            used[best] = True
+            p["price"] = up["price"]
+            if lessExtreme:
+                p["time"] = up["time"]
+
+    for i in range(n):
+        lowerBis[i]["startTime"] = pts[i]["time"]
+        lowerBis[i]["startPrice"] = pts[i]["price"]
+        lowerBis[i]["endTime"] = pts[i + 1]["time"]
+        lowerBis[i]["endPrice"] = pts[i + 1]["price"]
+        lowerBis[i]["span"] = abs(lowerBis[i]["endPrice"] - lowerBis[i]["startPrice"])
+    return lowerBis
 
 
 # ============================================================
@@ -424,8 +562,11 @@ def isBiDiverge(bi, refer, macdArr):
 # ============================================================
 
 
-def hasMacdCrossBetween(macdArr, merged, aIdx, bIdx, aTime, bTime):
-    """检测两个分型之间是否发生 MACD 红绿转换（用分型极值时间作边界）。"""
+def hasMacdCrossBetween(macdArr, merged, aIdx, bIdx, aTime, bTime, direction=None):
+    """检测两个分型之间是否发生方向性 MACD 红绿转换（用分型极值时间作边界）。
+    direction="up"   ：底到顶（上涨），柱状体由绿变红（<=0 转 >0）
+    direction="down" ：顶到底（下跌），柱状体由红变绿（>0 转 <=0）
+    其余（None）：任意红绿转换（历史兼容）。"""
     if not macdArr or len(macdArr) == 0:
         return False
     t0 = aTime if aTime is not None else merged[aIdx]["time"]
@@ -437,7 +578,12 @@ def hasMacdCrossBetween(macdArr, merged, aIdx, bIdx, aTime, bTime):
         if mm["time"] > t1:
             break
         if prev is not None:
-            crossed = (prev["macd"] >= 0 and mm["macd"] < 0) or (prev["macd"] <= 0 and mm["macd"] > 0)
+            if direction == "up":
+                crossed = prev["macd"] <= 0 and mm["macd"] > 0
+            elif direction == "down":
+                crossed = prev["macd"] > 0 and mm["macd"] <= 0
+            else:
+                crossed = (prev["macd"] >= 0 and mm["macd"] < 0) or (prev["macd"] <= 0 and mm["macd"] > 0)
             if crossed:
                 return True
         prev = mm

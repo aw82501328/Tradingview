@@ -10,7 +10,7 @@
 const fs = require("fs");
 const core = require("./.cursor/skills/chan-core/scripts/chan_core.js");
 const {
-  mergeBars, findFractals, buildBi, calcATR, calcMACD,
+  mergeBars, findFractals, buildBi, lockedPivotsOf, alignBiToUpper, calcATR, calcMACD,
   extendLastBi, lowerResOf, calibrateBiTimes, intervalSecOf,
   findBuyPoints, findSellPoints, anchorFirstBuy, snapToOwnBar,
 } = core;
@@ -27,14 +27,18 @@ const barsAll = JSON.parse(fs.readFileSync("./bars_all_tf.json", "utf8"));
 const allBis = {};
 const rawBarsByRes = {};
 const refBarsByRes = {};
-for (const res of PERIODS) {
+let prevBis = null;
+for (let i = 0; i < PERIODS.length; i++) {
+  const res = PERIODS[i];
   const rawBars = barsAll[res]; // 无缓冲，FROM 之后
   rawBarsByRes[res] = rawBars;
   const merged = mergeBars(rawBars);
   const fractals = findFractals(merged);
   const atr = calcATR(rawBars, 14);
   const macdArr = calcMACD(rawBars);
-  let bis = buildBi(fractals, merged, atr, macdArr);
+  // 区间套强制对齐：把上一层笔端点作为锁定端点传入 buildBi
+  const lockedPivots = lockedPivotsOf(prevBis);
+  let bis = buildBi(fractals, merged, atr, macdArr, lockedPivots);
   const threshold = atr * ATR_FILTER;
   bis = bis.filter(b => b.span >= threshold);
   let drawBis = bis; // 无 anchor 过滤（bars_all_tf.json 已 FROM 之后）
@@ -45,7 +49,12 @@ for (const res of PERIODS) {
     refBarsByRes[res] = refBars;
     drawBis = calibrateBiTimes(drawBis, rawBars, refBars, intervalSecOf(res));
   }
+  // 区间套强制对齐：把本级别笔拐点对齐到紧邻上级笔拐点
+  if (prevBis && prevBis.length > 0) {
+    drawBis = alignBiToUpper(drawBis, prevBis, intervalSecOf(PERIODS[i - 1]));
+  }
   allBis[res] = drawBis;
+  prevBis = drawBis;
 }
 
 // ---------- 复现 mark_buy_sell：算买卖点 ----------
