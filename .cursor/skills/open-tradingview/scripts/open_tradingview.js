@@ -9,7 +9,7 @@
  *
  * 用法：node open_tradingview.js
  */
-const { spawn } = require("child_process");
+const { spawn, execFile } = require("child_process");
 const net = require("net");
 const fs = require("fs");
 const path = require("path");
@@ -45,6 +45,36 @@ function findTradingViewExe() {
   return null;
 }
 
+/**
+ * 通过 AppxPackage 查询 TradingView 安装位置（新增兜底路径）
+ *
+ * WindowsApps 目录受系统保护、普通权限无法枚举（readdirSync 会抛 PermissionDenied），
+ * 此时用系统官方接口 Get-AppxPackage 也能拿到 InstallLocation，从而定位 TradingView.exe。
+ * 仅在原 findTradingViewExe() 找不到时才调用。
+ */
+function findTradingViewExeByAppx() {
+  return new Promise((resolve) => {
+    execFile(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-AppxPackage -Name TradingView.Desktop | Select-Object -ExpandProperty InstallLocation",
+      ],
+      { timeout: 15000 },
+      (err, stdout) => {
+        if (err) return resolve(null);
+        const loc = String(stdout).trim();
+        if (!loc) return resolve(null);
+        const exe = path.join(loc, "TradingView.exe");
+        if (fs.existsSync(exe)) return resolve(exe);
+        resolve(null);
+      }
+    );
+  });
+}
+
 (async () => {
   // 1. 已运行则直接返回
   if (await isPortListening(PORT)) {
@@ -52,8 +82,8 @@ function findTradingViewExe() {
     process.exit(0);
   }
 
-  // 2. 查找可执行文件
-  const exe = findTradingViewExe();
+  // 2. 查找可执行文件（先按原逻辑枚举 WindowsApps，找不到时再走新增的 AppxPackage 查询兜底）
+  const exe = findTradingViewExe() || (await findTradingViewExeByAppx());
   if (!exe) {
     console.log("ERROR: 未找到 TradingView.exe，请确认已安装 TradingView Desktop");
     process.exit(1);

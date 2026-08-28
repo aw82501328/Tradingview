@@ -1,6 +1,6 @@
 ---
 name: chan-core
-description: 缠论算法核心库（唯一算法源），供 chan-bi（画笔）与 mark-buy-sell（买卖点）两个 SKILL 共用。纯函数模块，不连接 CDP、不绘图。Use when 修改缠论算法规则（包含处理/分型/笔构建/MACD背驰/买卖点识别），或需要定位画笔与买卖点算法不一致的问题。
+description: 缠论算法核心库（唯一算法源），供 chan-bi（画笔）、chan-zs（中枢）与 mark-buy-sell（买卖点）三个 SKILL 共用。纯函数模块，不连接 CDP、不绘图。Use when 修改缠论算法规则（包含处理/分型/笔构建/中枢/MACD背驰/买卖点识别），或需要定位画笔与买卖点算法不一致的问题。
 disable-model-invocation: true
 ---
 
@@ -23,6 +23,7 @@ disable-model-invocation: true
 | 模块 | 是否引用 chan-core | 职责 |
 |------|------------------|------|
 | `chan-bi`（画笔） | ✅ 引用 | 取K线 → 调算法算笔 → 绘制线段 → **落盘笔数据** |
+| `chan-zs`（中枢） | ✅ 引用 | 读取 chan-bi 落盘的笔数据 → 调算法算中枢 → 绘制矩形 |
 | `mark-buy-sell`（买卖点） | ✅ 引用 | 读取 chan-bi 落盘的笔数据 → 调算法算买卖点 → 绘制文字标记 |
 | `chan-core`（本模块） | — | 纯算法，**不**连接 TradingView、**不**绘图、**不**读写缓存 |
 
@@ -84,15 +85,23 @@ let bis = core.buildBi(fractals, merged, atr, macdArr); // ③ 笔构建
 | `snapToOwnBar(price, refTime, bars)` | 极值价格/时间映射到本周期bar边界 |
 | `keepRecentEach(points)` | 低级别每类买卖点只保留最近一个（历史策略保留，当前主流程已不调用） |
 
+### 缠论中枢
+
+| 函数 | 说明 |
+|------|------|
+| `buildZS(bis, barSec)` | 构建笔中枢：三笔重叠形成 → 向后延伸 → 离开笔结束；垂直区间=全部笔重叠（ZG=min高点，ZD=max低点）；水平边缘=[进入笔终点−5×barSec, 离开笔起点+5×barSec]（barSec 为本周期单根K线秒数，左右各外扩5根K线）；至少 5 笔才输出 |
+| `buildZSByUpper(lowerBis, upperBis, tolSec)` | 按上级笔分解构建中枢（分解原则不跨周期）：用上级笔时间区间把本级别笔切段，每段内独立运行 buildZS；tolSec 同时用作 buildZS 的 barSec（外扩时长） |
+
 ## 数据约定
 
 - **笔对象字段**：`type(up/down)`、`startIdx/endIdx`（合并K线索引）、`startTime/endTime`（校准后端点时间）、`startPrice/endPrice`、`rawCount`（覆盖原始K线数）、`span`（幅度）、`gapLocked`（跳空成笔）、`macdCross`（MACD变色成笔）、`macdRaw`（MACD成笔覆盖原始K线数）
+- **中枢对象字段**：`startTime/endTime`（水平边缘，已外扩）、`zd/zg`（中枢区间）、`dd/gg`（全部笔绝对低/高点）、`biCount`（笔数，含离开笔）、`extended`（是否延伸）、`exitTime`（离开笔起点）、`enterEndTime`（进入笔终点，外扩前）、`exitStartTime`（离开笔起点，外扩前）、`upperStart/upperEnd`（所属上级笔范围，buildZSByUpper 附加）
 - **时间**：全部为 Unix 秒（UTC），与 TradingView K线时间一致
 - **配置**：`CHAN_CFG.gapFilter`（跳空阈值，默认 1.0）、`CHAN_CFG.debug`（调试打印）
 
 ## 注意事项
 
 - 本模块为纯函数库，**不产生任何外部副作用**（不连 CDP、不写文件、不绘图）；
-- 修改算法规则时（如笔构建、背驰判定、买卖点定义），**只改本模块**，`chan-bi` 与 `mark-buy-sell` 会自动生效；
-- 修改后建议用两个 SKILL 的 `--dry` 模式回归验证输出与预期一致；
+- 修改算法规则时（如笔构建、中枢、背驰判定、买卖点定义），**只改本模块**，`chan-bi`、`chan-zs` 与 `mark-buy-sell` 会自动生效；
+- 修改后建议用各 SKILL 的 `--dry` 模式回归验证输出与预期一致；
 - `keepRecentEach` 为历史保留函数，主流程已不再调用（现所有周期全部保留买卖点）。

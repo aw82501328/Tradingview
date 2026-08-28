@@ -9,6 +9,8 @@ disable-model-invocation: true
 通过 CDP 连接 TradingView Desktop，读取当前图表K线，按缠论理论（包含处理 → 分型识别 → 笔构建）在图上**画线段（笔）**。
 
 > **算法来源**：所有缠论算法由 **`chan-core`**（`.cursor/skills/chan-core/scripts/chan_core.js`）提供（唯一算法源），本脚本只负责取K线、调算法、绘制与**落盘笔数据**。修改算法规则请改 `chan-core`。
+>
+> **中枢绘制已拆分**：缠论中枢（矩形）由独立的 **`chan-zs`** SKILL（`.cursor/skills/chan-zs/`）绘制——它读取本脚本落盘的笔数据 `.cursor/cache/bis_<品种>.json` 来计算并绘制中枢。本脚本只画笔，不画中枢。
 
 ## 前置条件
 

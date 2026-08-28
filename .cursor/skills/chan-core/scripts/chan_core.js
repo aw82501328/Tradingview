@@ -40,7 +40,7 @@ function mergeBars(rawBars) {
   let direction = 0;
   for (const bar of rawBars) {
     if (merged.length === 0) {
-      merged.push({ ...bar, _rawCount: 1, highTime: bar.time, lowTime: bar.time, rawHigh: bar.high, rawLow: bar.low });
+      merged.push({ ...bar, _rawCount: 1, highTime: bar.time, lowTime: bar.time, rawHigh: bar.high, rawLow: bar.low, rawHighTime: bar.time, rawLowTime: bar.time });
       continue;
     }
     const last = merged[merged.length - 1];
@@ -60,15 +60,16 @@ function mergeBars(rawBars) {
         if (bar.high < last.high) { last.high = bar.high; last.highTime = bar.time; }
         if (bar.low < last.low) { last.low = bar.low; last.lowTime = bar.time; }
       }
-      // 记录覆盖原始K线的真实极值范围（跳空检测用，不受合并方向高低取舍影响）
-      if (bar.high > last.rawHigh) last.rawHigh = bar.high;
-      if (bar.low < last.rawLow) last.rawLow = bar.low;
+      // 记录覆盖原始K线的真实极值范围（跳空检测用，不受合并方向高低取舍影响），
+      // 同时记录极值出现的原始K线时间（端点极值修正用，见 fixBiExtremes）
+      if (bar.high > last.rawHigh) { last.rawHigh = bar.high; last.rawHighTime = bar.time; }
+      if (bar.low < last.rawLow) { last.rawLow = bar.low; last.rawLowTime = bar.time; }
       last._rawCount += 1;
       last.time = bar.time;
       direction = dir;
     } else {
       direction = bar.high > last.high ? 1 : -1;
-      merged.push({ ...bar, _rawCount: 1, highTime: bar.time, lowTime: bar.time, rawHigh: bar.high, rawLow: bar.low });
+      merged.push({ ...bar, _rawCount: 1, highTime: bar.time, lowTime: bar.time, rawHigh: bar.high, rawLow: bar.low, rawHighTime: bar.time, rawLowTime: bar.time });
     }
   }
   return merged;
@@ -314,11 +315,14 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots) {
           const prev = result[result.length - 2];
           const moreExtreme = k.type === "top" ? k.high >= prev.high : k.low <= prev.low;
           const gapPrevLast = last.mergedIdx - prev.mergedIdx;
-          const gapPrevK = k.mergedIdx - prev.mergedIdx;
           if (CHAN_CFG.debug) console.log(`[阶段二] 间隔不足: ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx} 与 ${last.type === "top" ? "顶" : "底"}@${last.mergedIdx}, 回溯比较同类型 prev, moreExtreme=${moreExtreme}, gapPrevLast=${gapPrevLast}`);
-          // 仅当 prev→last 这笔是「脆弱笔」（合并间隔 <= 12）时才允许 k 回溯替换 prev；
-          // 或 prev 与 k 之间已满足最小笔间隔（合并K线 >= 4）时，前顶/前底已被市场否定。
-          if (moreExtreme && (gapPrevLast <= 12 || gapPrevK >= 4)) {
+          // 前顶/前底作废原则（缠论）：顶被更高顶突破时，作废前顶的条件是「前顶右侧是否已有足够K线构成笔」。
+          //   prev→last 构成有效笔（间隔>=4 且 笔内无更极值 且 分型范围脱离）→ 前顶有效，保留，
+          //     不能被更高顶作废（如 8-20 04:00顶→20:00底 间隔 11 根合并K线，已成有效下跌笔，
+          //     23:00 的更高顶 4541.045 无法与右侧成笔，应作废的是新顶而非前顶）；
+          //   仅当 prev→last 不构成有效笔（前顶右侧不足以成笔）时，更高顶 k 才能顶替 prev。
+          const prevLastValidBi = gapPrevLast >= 4 && noMoreExtremeInside(prev, last) && fractalRangeClear(prev, last);
+          if (moreExtreme && !prevLastValidBi) {
             // 回溯替换保护（区间套一致性）：当 last 比更早的同类型分型 result[-3] 更极端时，
             // last 是笔内真实转折点（如插针低点/插针高点），不能无条件 pop 掉——吞掉会导致
             // 该笔内部藏着更极值（违反笔内极值原则），且本级别笔端点与上级周期（区间套）不重合。
@@ -373,6 +377,235 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots) {
     });
   }
   return bis;
+}
+
+/**
+ * 端点极值修正（方向A）：
+ * 包含关系合并时（如向上合并取「高高」会把更低的插针低点抬高，向下合并取「低低」会把更高的插针高点压低），
+ * 笔的端点分型可能不是该区域内的真实极值，导致笔终点落在次极值上（例：60分钟 7-29 09:00 真实低点 4010.41
+ * 被 08:00/09:00 的包含合并吞掉，下跌笔终点停在 7-28 22:00 的 4011.765）。
+ * 本函数对每笔检查「终点分型之后、下一笔终点分型之前」的合并K线，若存在「被包含合并掩盖」
+ * （rawLow<low / rawHigh>high）且比当前端点更极端的真实极值，把本笔终点与下一笔起点同步平移到该极值
+ * 所在K线（保持首尾连续）。只处理被掩盖的极值——未掩盖的极值若重要，会正常形成分型、由 buildBi 处理。
+ * 跳空独立成笔（gapLocked）端点固定在缺口处，不参与修正。
+ *
+ * @param {Array} bis    buildBi 产出的笔数组（原地修改并返回）
+ * @param {Array} merged mergeBars 产出的合并K线数组（需含 rawLow/rawHigh/rawLowTime/rawHighTime）
+ */
+function fixBiExtremes(bis, merged) {
+  if (!bis || bis.length === 0 || !merged || merged.length === 0) return bis;
+  const eps = 1e-9;
+  for (let i = 0; i < bis.length; i++) {
+    const b = bis[i];
+    if (b.gapLocked) continue; // 跳空成笔端点固定在缺口处
+    const next = bis[i + 1];
+    if (!next) continue; // 最后一笔由 extendLastBi 负责延伸
+    const fromIdx = b.endIdx + 1;
+    const toIdx = next.endIdx - 1; // 不含下一笔终点分型，避免笔退化
+    if (fromIdx > toIdx) continue;
+    let extreme = null;
+    if (b.type === "down") {
+      // 终点是底：找被合并掩盖的更低的真实低点
+      for (let k = fromIdx; k <= toIdx; k++) {
+        const mk = merged[k];
+        if (mk.rawLow === undefined || mk.rawLow >= mk.low) continue; // 未被掩盖
+        if (mk.rawLow < b.endPrice - eps && (!extreme || mk.rawLow < extreme.price)) {
+          extreme = { price: mk.rawLow, time: mk.rawLowTime, idx: k };
+        }
+      }
+    } else {
+      // 终点是顶：找被合并掩盖的更高的真实高点
+      for (let k = fromIdx; k <= toIdx; k++) {
+        const mk = merged[k];
+        if (mk.rawHigh === undefined || mk.rawHigh <= mk.high) continue; // 未被掩盖
+        if (mk.rawHigh > b.endPrice + eps && (!extreme || mk.rawHigh > extreme.price)) {
+          extreme = { price: mk.rawHigh, time: mk.rawHighTime, idx: k };
+        }
+      }
+    }
+    if (!extreme) continue;
+    if (CHAN_CFG.debug) console.log(`[端点极值修正] ${b.type === "up" ? "上涨" : "下跌"}笔终点 ${b.endPrice} 平移到更极端 ${extreme.price}@idx=${extreme.idx}`);
+    // 本笔终点更新
+    b.endPrice = extreme.price;
+    b.endTime = extreme.time;
+    b.endIdx = extreme.idx;
+    b.span = b.type === "up" ? b.endPrice - b.startPrice : b.startPrice - b.endPrice;
+    b.rawCount = countRaw(merged, b.startIdx, b.endIdx);
+    // 下一笔起点联动（保持两笔端点连续）
+    next.startPrice = extreme.price;
+    next.startTime = extreme.time;
+    next.startIdx = extreme.idx;
+    next.span = next.type === "up" ? next.endPrice - next.startPrice : next.startPrice - next.endPrice;
+    next.rawCount = countRaw(merged, next.startIdx, next.endIdx);
+  }
+  return bis;
+}
+
+// ============================================================
+// 5. ATR / MACD
+// ============================================================
+
+/**
+ * 构建笔中枢（基于笔序列，标准缠论笔中枢）
+ * 取连续三笔（笔序列天然交替）的重叠区间构成中枢：
+ *   中枢上沿 ZG = min(三笔高点)，中枢下沿 ZD = max(三笔低点)，ZG > ZD 时成立。
+ * 中枢形成后支持延伸：后续笔与 [ZD, ZG] 有重叠则纳入中枢（GG/DD 扩展），
+ * 出现离开中枢的笔时中枢结束：
+ *   - 笔与中枢区间完全无重叠 → 离开；
+ *   - 笔的起点在中枢区间内、终点突破中枢边界（从中枢内向边界外突破）→ 也视为离开。
+ * biCount 包含离开笔。
+ * 中枢区间 [zd, zg] 取「构成中枢的全部笔（含离开笔）的重叠部分」：
+ *   ZG = min(全部笔高点)，ZD = max(全部笔低点)。
+ * 中枢水平边缘（用户规则：[进入笔最后一根K-5, 离开笔第一根K+5]）：
+ *   - 左边缘 = 进入笔（三笔重叠形成中枢的第一笔 bis[i]）的终点 - 5×barSec
+ *   - 右边缘 = 离开笔（bis[j]，识别出 exitTime 的笔）的起点 + 5×barSec
+ *   - 无离开笔时右边缘 = 构成中枢最后一笔的终点 + 5×barSec
+ * 从该离开笔之后重新扫描下一个中枢。
+ *
+ * @param {Array} bis 笔数组（已排序，含 startTime/endTime/startPrice/endPrice）
+ * @param {number} barSec 本周期单根K线时长（秒），用于左右各外扩 5 根K线；默认 0 表示不外扩
+ * @returns {Array} 中枢列表 [{ startTime, endTime, zd, zg, dd, gg, biCount, extended, exitTime, enterEndTime, exitStartTime }]
+ */
+function buildZS(bis, barSec) {
+  if (!bis || bis.length < 3) return [];
+  const n = bis.length;
+  const pad = (barSec || 0) * 5; // 左右各外扩 5 根K线（本周期时长）
+  const hi = (b) => Math.max(b.startPrice, b.endPrice);
+  const lo = (b) => Math.min(b.startPrice, b.endPrice);
+  const zss = [];
+  let i = 0;
+  while (i + 2 < n) {
+    const b1 = bis[i], b2 = bis[i + 1], b3 = bis[i + 2];
+    const H1 = hi(b1), L1 = lo(b1);
+    const H2 = hi(b2), L2 = lo(b2);
+    const H3 = hi(b3), L3 = lo(b3);
+    const zg = Math.min(H1, H2, H3);
+    const zd = Math.max(L1, L2, L3);
+    if (zg > zd) {
+      // 三笔重叠 → 形成中枢，向后延伸扫描
+      let j = i + 3;
+      let dd = Math.min(L1, L2, L3);
+      let gg = Math.max(H1, H2, H3);
+      let exitTime = null; // 离开中枢的笔的起点时间（若有），中枢右边缘以此为基础外扩
+      const eps = 1e-9;
+      while (j < n) {
+        const bj = bis[j];
+        const Hj = hi(bj), Lj = lo(bj);
+        if (Lj <= zg && Hj >= zd) { // 与中枢区间有重叠 → 判断延伸还是离开
+          // 离开判定：笔的起点在中枢区间内、终点突破中枢边界（如从中枢内向下跌破下沿的下跌笔、
+          // 或从内部向上突破上沿的上涨笔），视为「离开中枢的笔」——它虽然起点还在中枢内，
+          // 但整笔朝区间外突破，中枢震荡在此笔起点处已结束。
+          // 起点在中枢区间外（另一侧）的穿越笔仍算延伸（如从下穿越到上）。
+          const startIn = bj.startPrice >= zd - eps && bj.startPrice <= zg + eps;
+          const endBreak = bj.endPrice < zd - eps || bj.endPrice > zg + eps;
+          if (startIn && endBreak) {
+            exitTime = bj.startTime; // 离开笔起点
+            break;
+          }
+          dd = Math.min(dd, Lj);
+          gg = Math.max(gg, Hj);
+          j++;
+        } else {
+          exitTime = bj.startTime; // 与中枢区间完全无重叠 → 离开中枢，中枢结束
+          break;
+        }
+      }
+      // 笔数 = 构成中枢的笔（i..j-1）+ 离开笔（若有 1 笔）
+      const biCount = (exitTime !== null ? 1 : 0) + (j - i);
+      // 新增：至少 5 笔才画中枢（用户要求：只有上下上/下上下 3 笔的不画）。
+      // 3~4 笔的中枢是最基础的重叠结构（单一上下上/下上下及一次延伸），中枢强度不足，
+      // 不输出；仍保留原有扫描/延伸逻辑，仅在输出时过滤。跳过这些笔继续向后扫描。
+      if (biCount < 5) { i = j; continue; }
+      // 中枢区间 = 构成中枢的全部笔（i..i+biCount-1，含离开笔）的重叠部分：
+      //   ZG = min(全部笔高点)，ZD = max(全部笔低点)。
+      // 这样中枢上沿会收敛到离开笔/次高笔的高点，如 8-25~8-27 中枢的 5 笔
+      // （4697.105→4605.29→4673.765→4583.065→4643.21→4564.27）重叠上沿 = 4643.21。
+      let zsZd = -Infinity, zsZg = Infinity;
+      for (let k = i; k < i + biCount; k++) {
+        const bk = bis[k];
+        zsZd = Math.max(zsZd, lo(bk));
+        zsZg = Math.min(zsZg, hi(bk));
+      }
+      // 全部笔重叠后仍可能 zg <= zd（如笔数过多、覆盖区间收窄为空），防御性跳过
+      if (zsZg <= zsZd) { i = j; continue; }
+      // 水平边缘（用户规则：[进入笔最后一根K-5, 离开笔第一根K+5]）：
+      //   进入笔 = 三笔重叠形成中枢的第一笔 bis[i]，其最后一根K即终点；
+      //   离开笔 = 中枢结束时的笔（exitTime 的笔，即 bis[j]），其第一根K即起点。
+      //   无离开笔时右边缘取构成中枢最后一笔的终点。
+      const enterEndTime = b1.endTime;                                  // 进入笔终点（外扩前）
+      const exitStartTime = exitTime !== null ? exitTime : bis[j - 1].endTime; // 离开笔起点（外扩前）
+      zss.push({
+        startTime: enterEndTime - pad,  // 左边缘 = 进入笔终点 - 5根K
+        endTime: exitStartTime + pad,   // 右边缘 = 离开笔起点 + 5根K
+        zd: zsZd, zg: zsZg, dd, gg,
+        biCount,
+        extended: biCount > 3,
+        exitTime,               // 离开中枢的笔的起点时间（记录，供排查）
+        enterEndTime,           // 进入笔终点（外扩前原始时间）
+        exitStartTime,          // 离开笔起点（外扩前原始时间）
+      });
+      i = j; // 从离开中枢的笔开始重新扫描
+    } else {
+      i++; // 三笔不重叠，滑窗
+    }
+  }
+  return zss;
+}
+
+/**
+ * 按上级笔分解构建中枢（分解原则，不跨周期）：
+ * 本级别中枢只能构建在「同一个上级笔」内部。用上级笔时间区间把本级别笔切段，
+ * 每段内独立运行 buildZS，保证中枢不跨上级笔端点。
+ * 例如 15分钟中枢一定落在同一个 60分钟笔内（上级笔 = 上一层的最终绘制笔）。
+ *
+ * @param {Array} lowerBis   本级别笔（已校准/对齐的最终绘制笔）
+ * @param {Array} upperBis   上一级别笔（用于分解约束，可为空数组）
+ * @param {number} tolSec    时间容差（秒）：本级别端点经低一级校准后可能与上级端点有
+ *                           最多一个本级别bar的偏移，如 15分钟 09:03 vs 60分钟 09:00；
+ *                           同时作为 buildZS 的 barSec——中枢水平边缘左右各外扩 5×tolSec
+ *                           （如 1小时周期 tolSec=3600 → 外扩 5 小时）
+ * @returns {Array} 中枢列表，每项额外含 upperStart/upperEnd（所属上级笔时间范围）
+ */
+function buildZSByUpper(lowerBis, upperBis, tolSec) {
+  if (!lowerBis || lowerBis.length < 3) return [];
+  const tol = tolSec || 0;
+  const out = [];
+  if (!upperBis || upperBis.length === 0) {
+    // 无上级约束（如最外层）：直接用本级别全部笔构建
+    for (const z of buildZS(lowerBis, tol)) {
+      z.upperStart = lowerBis[0].startTime;
+      z.upperEnd = lowerBis[lowerBis.length - 1].endTime;
+      out.push(z);
+    }
+    return out;
+  }
+  // 按时间完整归属到上级笔区间：笔必须 startTime 与 endTime 都落在同一上级笔内
+  // （含 tol 容差，因本级别端点经低一级校准可能与上级端点有最多一个bar的偏移）。
+  // 只按 startTime 归属会把「起点在段内、终点已越出段边界」的笔误纳入本段，
+  // 导致中枢延伸跨越上级笔端点（违反分解原则）。不完整落在任何上级笔内的笔不参与中枢。
+  const segments = [];
+  let cur = null; // { upper, bis: [] }
+  for (const b of lowerBis) {
+    let ub = null;
+    for (const u of upperBis) {
+      if (b.startTime >= u.startTime - tol && b.endTime <= u.endTime + tol) { ub = u; break; }
+    }
+    if (!ub) continue; // 不完整归属任何上级笔的零散笔不参与中枢
+    if (!cur || cur.upper !== ub) {
+      if (cur && cur.bis.length) segments.push(cur);
+      cur = { upper: ub, bis: [] };
+    }
+    cur.bis.push(b);
+  }
+  if (cur && cur.bis.length) segments.push(cur);
+  for (const seg of segments) {
+    for (const z of buildZS(seg.bis, tol)) {
+      z.upperStart = seg.upper.startTime;
+      z.upperEnd = seg.upper.endTime;
+      out.push(z);
+    }
+  }
+  return out;
 }
 
 // ============================================================
@@ -1159,6 +1392,9 @@ module.exports = {
   countRaw,
   hasGapBetween,
   buildBi,
+  fixBiExtremes,
+  buildZS,
+  buildZSByUpper,
   lockedPivotsOf,
   alignBiToUpper,
   calcATR,

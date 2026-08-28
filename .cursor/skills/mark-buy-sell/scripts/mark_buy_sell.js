@@ -11,6 +11,7 @@
  *   --periods=...       要标记的周期列表（逗号分隔，默认 D,240,60,15,3）
  *   --dry               只计算不绘图
  *   --debug             打印锚定过程、标记列表等调试信息
+ *   --nearp=0.3         1买与2买（1卖与2卖）价差阈值（ATR 倍数），价差不超过该值视为很近并合并标注「真1买/真1卖」
  */
 const fs = require("fs");
 const path = require("path");
@@ -47,6 +48,9 @@ const getStrArg = (name, def) => {
 const ATR_FILTER = getArg("atr", 0.5);
 const GAP_FILTER = getArg("gap", 1.0);
 core.CHAN_CFG.gapFilter = GAP_FILTER;
+// 1类 与 2类 邻近判定：1买/1卖 与 2买/2卖 的「K线最低/最高价差」不超过 nearp×ATR（至少 0.05）时
+// 视为「很近」（不限制时间差），直接把 1类 合并到 2类 标记上标注为「真1买/真1卖」（见 mergeNearFirstSecond）
+const NEAR_ATR_RATIO = Math.max(parseFloat(getArg("nearp", 0.3)) || 0.3, 0);
 const FROM_DATE = getStrArg("from", "");
 if (!FROM_DATE) {
   console.log("错误: 必须指定起始日期 --from=YYYY-MM-DD");
@@ -93,6 +97,49 @@ function onlyThisInterval(res) {
     case "D":    return { ...NONE, days: true, daysFrom: 1, daysTo: 1 };
     default:     return { ...NONE, minutes: true, minutesFrom: 1, minutesTo: 59 };
   }
+}
+
+/**
+ * 新增：1类 与 2类 买卖点价格很接近时，直接把 1类 标记合并到最近的 2类 标记上，标注为「真1买/真1卖」。
+ *
+ * 缠论中 1买（MACD 背驰底，时间在前）与 2买（其后回调不破前低的确认买点，时间在后）若价格很近
+ * （2买 对应K线最低价与 1买 的最低价之差不超过阈值，不限制时间差），说明回调极浅、底部确认
+ * 非常强，该 1买 是可靠的「真1买」——直接在 2买 标记上新增「真1买」，避免图上两个紧邻标记。
+ * 原 1买 标记移除（由「真1买」替代），2买 标记保留；一个 2类 标记最多承接一个 1类 标记。
+ * 1卖/2卖 对称处理（合并为「真1卖」）。附近没有价格接近的 2类 标记的 1类 标记保持原名不变。
+ *
+ * @param {Array} points 买卖点列表 [{type,time,price}, ...]
+ * @param {string} firstType  一买或一卖的类型名（"1买"/"1卖"）
+ * @param {string} secondType 二买或二卖的类型名（"2买"/"2卖"）
+ * @param {string} mergedType 合并后的类型名（"真1买"/"真1卖"）
+ * @param {number} nearPrice  邻近判定阈值（价格）：1类与2类价格差不超过该值视为「很近」
+ */
+function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPrice) {
+  const firsts = points.filter(p => p.type === firstType);
+  if (firsts.length === 0) return points;
+  const seconds = points.filter(p => p.type === secondType);
+  if (seconds.length === 0) return points;
+  const usedSecond = new Set();
+  const out = [];
+  for (const p of points) {
+    if (p.type !== firstType) { out.push(p); continue; }
+    // 找时间上在 1类 之后（确认点）、价格最接近、且尚未承接过的 2类 标记
+    let best = null, bestDiff = Infinity;
+    for (const s of seconds) {
+      if (s.time < p.time) continue;
+      if (usedSecond.has(s.time)) continue;
+      const d = Math.abs(s.price - p.price);
+      if (d < bestDiff) { bestDiff = d; best = s; }
+    }
+    if (best && bestDiff <= nearPrice) {
+      usedSecond.add(best.time);
+      out.push({ type: mergedType, time: best.time, price: best.price });
+      if (DEBUG) console.log(`[邻近合并] ${firstType}@${fmtT(p.time)}(${p.price}) 与 ${secondType}@${fmtT(best.time)}(${best.price}) 价差 ${bestDiff.toFixed(3)}，合并为 ${mergedType}@${fmtT(best.time)}`);
+    } else {
+      out.push(p); // 附近无价格接近的 2类 标记，保留原 1类 标记
+    }
+  }
+  return out;
 }
 
 // ============================================================
@@ -481,17 +528,27 @@ function onlyThisInterval(res) {
         ];
       }
 
+      // 新增：1类 与 2类 买卖点价格很接近时，直接把 1类 合并到 2类 标记上，标注为「真1买/真1卖」。
+      // 判定基于价格（不限制时间差）：1买/1卖 与 2买/2卖 的价差不超过 nearp×ATR（至少 0.05）视为很近
+      const nearPrice = Math.max(atr * NEAR_ATR_RATIO, 0.05);
+      anchoredBuyPts = mergeNearFirstSecond(anchoredBuyPts, "1买", "2买", "真1买", nearPrice);
+      sellPts = mergeNearFirstSecond(sellPts, "1卖", "2卖", "真1卖", nearPrice);
+
       // 汇总标记：把时间吸附到本周期bar边界
       // rawTime/rawPrice 保存未吸附的原始点位，用于跨周期共振判定
       const marks = [];
       const offset = Math.max(atr * 0.5, 0.05);
       for (const p of anchoredBuyPts) {
         const t = snapToOwnBar(p.price, p.time, rawBars);
-        marks.push({ label: p.type, time: t, price: p.price - offset, rawTime: p.time, rawPrice: p.price });
+        // 真1买 与 2买 同点位，文字偏移双倍（更靠下）避免重叠
+        const mul = p.type === "真1买" ? 2 : 1;
+        marks.push({ label: p.type, time: t, price: p.price - offset * mul, rawTime: p.time, rawPrice: p.price });
       }
       for (const p of sellPts) {
         const t = snapToOwnBar(p.price, p.time, rawBars);
-        marks.push({ label: p.type, time: t, price: p.price + offset, rawTime: p.time, rawPrice: p.price });
+        // 真1卖 与 2卖 同点位，文字偏移双倍（更靠上）避免重叠
+        const mul = p.type === "真1卖" ? 2 : 1;
+        marks.push({ label: p.type, time: t, price: p.price + offset * mul, rawTime: p.time, rawPrice: p.price });
       }
 
       // 跨周期共振：本级别的 1买/1卖 若与紧邻上一级别的 1/2/3 类买卖点落在同一点位

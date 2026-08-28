@@ -1,9 +1,10 @@
 /**
  * 缠论画笔脚本
- * 在 TradingView Desktop 图表上按缠论理论画笔（笔 + 一买/二买/三买）
+ * 在 TradingView Desktop 图表上按缠论理论画笔（笔）
+ * 中枢（缠论中枢矩形）由独立的 chan-zs SKILL 绘制（读取本脚本落盘的笔数据）。
  *
  * 用法：
- *   node chan_bi.js --dry   只计算并打印笔和买点，不绘图
+ *   node chan_bi.js --dry   只计算并打印笔，不绘图
  *   node chan_bi.js         计算并绘制到图表
  *
  * 参数：
@@ -19,7 +20,7 @@ const CDP = require("../../../../server-cdp/node_modules/chrome-remote-interface
 // 缠论算法核心（唯一算法源，与 mark-buy-sell SKILL 共用）
 const core = require("../../chan-core/scripts/chan_core.js");
 const {
-  mergeBars, findFractals, countRaw, hasGapBetween, buildBi, lockedPivotsOf, alignBiToUpper,
+  mergeBars, findFractals, countRaw, hasGapBetween, buildBi, fixBiExtremes, lockedPivotsOf, alignBiToUpper,
   calcATR, calcMACD, hasMacdCrossBetween,
   extendLastBi, lowerResOf, calibrateBiTimes, intervalSecOf,
 } = core;
@@ -560,6 +561,10 @@ function intervalVisibility(res) {
       const lockedPivots = lockedPivotsOf(prevBis);
       let bis = buildBi(fractals, merged, atr, macdArr, lockedPivots);
 
+      // 端点极值修正：包含合并可能吞掉更极端的插针低点/高点（如 60分钟 7-29 09:00 的 4010.41 被
+      // 08:00/09:00 的向上合并吞掉），把笔终点平移到区间内被掩盖的真实极值，使笔终点落在真实极值K线上
+      bis = fixBiExtremes(bis, merged);
+
       // ATR 过滤
       const threshold = atr * ATR_FILTER;
       const beforeFilter = bis.length;
@@ -618,6 +623,7 @@ function intervalVisibility(res) {
           `笔${i + 1} [${dir}] ${b.startPrice}(${toT(b.startTime)}) -> ${b.endPrice}(${toT(b.endTime)}) | 幅度 ${b.span.toFixed(2)} | 原始K线 ${b.rawCount}${tag}`
         );
       });
+
       // 记录本层实际绘制的笔，作为下一层（更小周期）的锚定依据
       prevBis = drawBis;
       // 收集本周期最终笔数据（绘制阶段完成后再追加，确保与图上一致）
