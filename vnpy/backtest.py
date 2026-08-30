@@ -183,8 +183,10 @@ def run_one_period(res, upper_res, bars_self, bars_upper):
         locked_pivots = core.lockedPivotsOf(upper_bis)
         self_bis, atr, self_macd = compute_bis(res, win_self, locked_pivots)
         # 区间套强制对齐：把主周期笔拐点对齐到紧邻上级笔拐点（上级底/顶=本级底/顶）
+        # 第4参 win_self：幽灵端点防御——上级极值在主周期K线中不存在（跨周期数据源
+        # 聚合差异）时跳过对齐，保留主周期真实极值
         if upper_bis:
-            self_bis = core.alignBiToUpper(self_bis, upper_bis, upper_sec)
+            self_bis = core.alignBiToUpper(self_bis, upper_bis, upper_sec, win_self)
         cur_atr = atr
 
         buy_self, sell_self = compute_points(res, self_bis, upper_bis, self_macd)

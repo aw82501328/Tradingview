@@ -70,8 +70,8 @@ let bis = core.buildBi(fractals, merged, atr, macdArr); // ③ 笔构建
 | 函数 | 说明 |
 |------|------|
 | `fmtT(ts)` | 时间格式化（调试打印用） |
-| `biMacdMetrics(bi, macdArr)` | 一笔区间内的 `{redArea, greenArea, difHigh, difLow}` |
-| `isBiDiverge(bi, refer, macdArr)` | 背驰判定：柱面积变小 **或** 黄白线动能减弱（OR） |
+| `biMacdMetrics(bi, macdArr)` | 一笔区间内的 `{redArea, greenArea, difHigh, difLow, redMax, greenMax}` |
+| `isBiDiverge(bi, refer, macdArr)` | 背驰判定：柱面积变小 **或** 黄白线动能减弱 **或** 柱最大高度变小（OR） |
 
 ### 买卖点识别
 

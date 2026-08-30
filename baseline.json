@@ -288713,25 +288713,25 @@
       {
         "type": "down",
         "startIdx": 27,
-        "endIdx": 46,
+        "endIdx": 42,
         "startTime": 1782958140,
-        "endTime": 1782963900,
+        "endTime": 1782962100,
         "startPrice": 71.1,
         "endPrice": 70.63,
-        "rawCount": 32,
+        "rawCount": 23,
         "span": 0.46999999999999886,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "up",
-        "startIdx": 46,
+        "startIdx": 42,
         "endIdx": 61,
-        "startTime": 1782963900,
+        "startTime": 1782962100,
         "endTime": 1782968220,
         "startPrice": 70.63,
         "endPrice": 70.93,
-        "rawCount": 23,
+        "rawCount": 32,
         "span": 0.30000000000001137,
         "gapLocked": false,
         "macdCross": false
@@ -289025,25 +289025,25 @@
       {
         "type": "down",
         "startIdx": 305,
-        "endIdx": 315,
+        "endIdx": 310,
         "startTime": 1783049040,
-        "endTime": 1783052280,
+        "endTime": 1783050480,
         "startPrice": 72.37,
         "endPrice": 72.19,
-        "rawCount": 18,
+        "rawCount": 8,
         "span": 0.18000000000000682,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "up",
-        "startIdx": 315,
+        "startIdx": 310,
         "endIdx": 321,
-        "startTime": 1783052280,
+        "startTime": 1783050480,
         "endTime": 1783053720,
         "startPrice": 72.19,
         "endPrice": 72.32,
-        "rawCount": 8,
+        "rawCount": 18,
         "span": 0.12999999999999545,
         "gapLocked": false,
         "macdCross": false
@@ -289415,26 +289415,26 @@
       {
         "type": "down",
         "startIdx": 668,
-        "endIdx": 680,
+        "endIdx": 672,
         "startTime": 1783339920,
-        "endTime": 1783342980,
+        "endTime": 1783340820,
         "startPrice": 72.15,
-        "endPrice": 71.56,
-        "rawCount": 18,
-        "span": 0.5900000000000034,
+        "endPrice": 71.58,
+        "rawCount": 5,
+        "span": 0.5700000000000074,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "up",
-        "startIdx": 680,
+        "startIdx": 672,
         "endIdx": 687,
-        "startTime": 1783342980,
+        "startTime": 1783340820,
         "endTime": 1783344600,
-        "startPrice": 71.56,
+        "startPrice": 71.58,
         "endPrice": 72.37,
-        "rawCount": 8,
-        "span": 0.8100000000000023,
+        "rawCount": 21,
+        "span": 0.7900000000000063,
         "gapLocked": false,
         "macdCross": false
       },
@@ -289532,13 +289532,39 @@
       {
         "type": "up",
         "startIdx": 734,
-        "endIdx": 762,
+        "endIdx": 749,
         "startTime": 1783357560,
-        "endTime": 1783366020,
+        "endTime": 1783361160,
         "startPrice": 71.66,
+        "endPrice": 72.04,
+        "rawCount": 18,
+        "span": 0.38000000000000966,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 749,
+        "endIdx": 753,
+        "startTime": 1783361160,
+        "endTime": 1783362780,
+        "startPrice": 72.04,
+        "endPrice": 71.8,
+        "rawCount": 10,
+        "span": 0.2400000000000091,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 753,
+        "endIdx": 762,
+        "startTime": 1783362780,
+        "endTime": 1783366020,
+        "startPrice": 71.8,
         "endPrice": 72.18,
-        "rawCount": 45,
-        "span": 0.5200000000000102,
+        "rawCount": 17,
+        "span": 0.38000000000000966,
         "gapLocked": false,
         "macdCross": false
       },
@@ -289675,26 +289701,26 @@
       {
         "type": "down",
         "startIdx": 895,
-        "endIdx": 917,
+        "endIdx": 911,
         "startTime": 1783415340,
-        "endTime": 1783420200,
+        "endTime": 1783418940,
         "startPrice": 73.31,
-        "endPrice": 72.63,
-        "rawCount": 28,
-        "span": 0.6800000000000068,
+        "endPrice": 72.66,
+        "rawCount": 20,
+        "span": 0.6500000000000057,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "up",
-        "startIdx": 917,
+        "startIdx": 911,
         "endIdx": 925,
-        "startTime": 1783420200,
+        "startTime": 1783418940,
         "endTime": 1783422000,
-        "startPrice": 72.63,
+        "startPrice": 72.66,
         "endPrice": 73.06,
-        "rawCount": 10,
-        "span": 0.4300000000000068,
+        "rawCount": 18,
+        "span": 0.4000000000000057,
         "gapLocked": false,
         "macdCross": false
       },
@@ -290117,13 +290143,39 @@
       {
         "type": "down",
         "startIdx": 1221,
-        "endIdx": 1270,
+        "endIdx": 1238,
         "startTime": 1783502460,
-        "endTime": 1783515240,
+        "endTime": 1783506600,
         "startPrice": 79.26,
+        "endPrice": 77.77,
+        "rawCount": 23,
+        "span": 1.490000000000009,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 1238,
+        "endIdx": 1254,
+        "startTime": 1783506600,
+        "endTime": 1783510560,
+        "startPrice": 77.77,
+        "endPrice": 78.63,
+        "rawCount": 22,
+        "span": 0.8599999999999994,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 1254,
+        "endIdx": 1270,
+        "startTime": 1783510560,
+        "endTime": 1783515240,
+        "startPrice": 78.63,
         "endPrice": 77.18,
-        "rawCount": 70,
-        "span": 2.0799999999999983,
+        "rawCount": 25,
+        "span": 1.4499999999999886,
         "gapLocked": false,
         "macdCross": false
       },
@@ -290273,13 +290325,39 @@
       {
         "type": "down",
         "startIdx": 1434,
-        "endIdx": 1471,
+        "endIdx": 1444,
         "startTime": 1783565460,
-        "endTime": 1783576260,
+        "endTime": 1783567980,
         "startPrice": 79.21,
+        "endPrice": 78.69,
+        "rawCount": 14,
+        "span": 0.519999999999996,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 1444,
+        "endIdx": 1454,
+        "startTime": 1783567980,
+        "endTime": 1783571220,
+        "startPrice": 78.69,
+        "endPrice": 78.98,
+        "rawCount": 18,
+        "span": 0.29000000000000625,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 1454,
+        "endIdx": 1471,
+        "startTime": 1783571220,
+        "endTime": 1783576260,
+        "startPrice": 78.98,
         "endPrice": 77.51,
-        "rawCount": 62,
-        "span": 1.6999999999999886,
+        "rawCount": 30,
+        "span": 1.4699999999999989,
         "gapLocked": false,
         "macdCross": false
       },
@@ -290377,28 +290455,28 @@
       {
         "type": "down",
         "startIdx": 1739,
-        "endIdx": 1755,
+        "endIdx": 1748,
         "startTime": 1783656900,
-        "endTime": 1783661400,
+        "endTime": 1783659240,
         "startPrice": 76.85,
-        "endPrice": 76.42,
-        "rawCount": 24,
-        "span": 0.4299999999999926,
+        "endPrice": 76.43,
+        "rawCount": 12,
+        "span": 0.4199999999999875,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "up",
-        "startIdx": 1755,
+        "startIdx": 1748,
         "endIdx": 1758,
-        "startTime": 1783661400,
+        "startTime": 1783659240,
         "endTime": 1783661940,
-        "startPrice": 76.42,
+        "startPrice": 76.43,
         "endPrice": 76.66,
-        "rawCount": 4,
-        "span": 0.23999999999999488,
+        "rawCount": 16,
+        "span": 0.22999999999998977,
         "gapLocked": false,
-        "macdCross": true
+        "macdCross": false
       },
       {
         "type": "down",
@@ -290442,26 +290520,26 @@
       {
         "type": "up",
         "startIdx": 1805,
-        "endIdx": 1870,
+        "endIdx": 1837,
         "startTime": 1783675080,
-        "endTime": 1783693980,
+        "endTime": 1783684980,
         "startPrice": 75.74,
-        "endPrice": 77.52,
-        "rawCount": 105,
-        "span": 1.7800000000000011,
+        "endPrice": 77.15,
+        "rawCount": 55,
+        "span": 1.4100000000000108,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "down",
-        "startIdx": 1870,
+        "startIdx": 1837,
         "endIdx": 1887,
-        "startTime": 1783693980,
+        "startTime": 1783684980,
         "endTime": 1783698840,
-        "startPrice": 77.52,
+        "startPrice": 77.15,
         "endPrice": 75.3,
-        "rawCount": 27,
-        "span": 2.219999999999999,
+        "rawCount": 77,
+        "span": 1.8500000000000085,
         "gapLocked": false,
         "macdCross": false
       },
@@ -290494,13 +290572,39 @@
       {
         "type": "up",
         "startIdx": 1901,
-        "endIdx": 1924,
+        "endIdx": 1911,
         "startTime": 1783702080,
-        "endTime": 1783708200,
+        "endTime": 1783705140,
         "startPrice": 75.48,
+        "endPrice": 75.92,
+        "rawCount": 16,
+        "span": 0.4399999999999977,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 1911,
+        "endIdx": 1916,
+        "startTime": 1783705140,
+        "endTime": 1783706220,
+        "startPrice": 75.92,
+        "endPrice": 75.68,
+        "rawCount": 6,
+        "span": 0.23999999999999488,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 1916,
+        "endIdx": 1924,
+        "startTime": 1783706220,
+        "endTime": 1783708200,
+        "startPrice": 75.68,
         "endPrice": 76.15,
-        "rawCount": 33,
-        "span": 0.6700000000000017,
+        "rawCount": 11,
+        "span": 0.46999999999999886,
         "gapLocked": false,
         "macdCross": false
       },
@@ -290897,26 +291001,26 @@
       {
         "type": "down",
         "startIdx": 2347,
-        "endIdx": 2359,
+        "endIdx": 2352,
         "startTime": 1783999980,
-        "endTime": 1784002860,
+        "endTime": 1784001060,
         "startPrice": 85.01,
-        "endPrice": 84.5,
-        "rawCount": 15,
-        "span": 0.5100000000000051,
+        "endPrice": 84.52,
+        "rawCount": 5,
+        "span": 0.4900000000000091,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "up",
-        "startIdx": 2359,
+        "startIdx": 2352,
         "endIdx": 2364,
-        "startTime": 1784002860,
+        "startTime": 1784001060,
         "endTime": 1784004660,
-        "startPrice": 84.5,
+        "startPrice": 84.52,
         "endPrice": 85.03,
-        "rawCount": 10,
-        "span": 0.5300000000000011,
+        "rawCount": 20,
+        "span": 0.5100000000000051,
         "gapLocked": false,
         "macdCross": false
       },
@@ -291144,13 +291248,39 @@
       {
         "type": "up",
         "startIdx": 2736,
-        "endIdx": 2760,
+        "endIdx": 2743,
         "startTime": 1784106000,
-        "endTime": 1784111220,
+        "endTime": 1784107800,
         "startPrice": 84.51,
+        "endPrice": 85.42,
+        "rawCount": 10,
+        "span": 0.9099999999999966,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 2743,
+        "endIdx": 2747,
+        "startTime": 1784107800,
+        "endTime": 1784108520,
+        "startPrice": 85.42,
+        "endPrice": 85.05,
+        "rawCount": 4,
+        "span": 0.37000000000000455,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 2747,
+        "endIdx": 2760,
+        "startTime": 1784108520,
+        "endTime": 1784111220,
+        "startPrice": 85.05,
         "endPrice": 85.85,
-        "rawCount": 29,
-        "span": 1.3399999999999892,
+        "rawCount": 15,
+        "span": 0.7999999999999972,
         "gapLocked": false,
         "macdCross": false
       },
@@ -291248,13 +291378,39 @@
       {
         "type": "up",
         "startIdx": 2867,
-        "endIdx": 2895,
+        "endIdx": 2882,
         "startTime": 1784136600,
-        "endTime": 1784143980,
+        "endTime": 1784140560,
         "startPrice": 84.1,
+        "endPrice": 85.22,
+        "rawCount": 23,
+        "span": 1.1200000000000045,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 2882,
+        "endIdx": 2890,
+        "startTime": 1784140560,
+        "endTime": 1784142720,
+        "startPrice": 85.22,
+        "endPrice": 84.89,
+        "rawCount": 12,
+        "span": 0.3299999999999983,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 2890,
+        "endIdx": 2895,
+        "startTime": 1784142720,
+        "endTime": 1784143980,
+        "startPrice": 84.89,
         "endPrice": 86.09,
-        "rawCount": 42,
-        "span": 1.990000000000009,
+        "rawCount": 7,
+        "span": 1.2000000000000028,
         "gapLocked": false,
         "macdCross": false
       },
@@ -291339,39 +291495,39 @@
       {
         "type": "down",
         "startIdx": 3007,
-        "endIdx": 3024,
+        "endIdx": 3016,
         "startTime": 1784183400,
-        "endTime": 1784188800,
+        "endTime": 1784185920,
         "startPrice": 84.91,
-        "endPrice": 84.22,
-        "rawCount": 31,
-        "span": 0.6899999999999977,
+        "endPrice": 84.3,
+        "rawCount": 15,
+        "span": 0.6099999999999994,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "up",
-        "startIdx": 3024,
-        "endIdx": 3029,
-        "startTime": 1784188800,
-        "endTime": 1784191140,
-        "startPrice": 84.22,
-        "endPrice": 84.74,
-        "rawCount": 14,
-        "span": 0.519999999999996,
+        "startIdx": 3016,
+        "endIdx": 3022,
+        "startTime": 1784185920,
+        "endTime": 1784187720,
+        "startPrice": 84.3,
+        "endPrice": 84.88,
+        "rawCount": 9,
+        "span": 0.5799999999999983,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "down",
-        "startIdx": 3029,
+        "startIdx": 3022,
         "endIdx": 3037,
-        "startTime": 1784191140,
+        "startTime": 1784187720,
         "endTime": 1784193120,
-        "startPrice": 84.74,
+        "startPrice": 84.88,
         "endPrice": 83.83,
-        "rawCount": 9,
-        "span": 0.9099999999999966,
+        "rawCount": 30,
+        "span": 1.0499999999999972,
         "gapLocked": false,
         "macdCross": false
       },
@@ -292600,13 +292756,39 @@
       {
         "type": "up",
         "startIdx": 4380,
-        "endIdx": 4418,
+        "endIdx": 4393,
         "startTime": 1784739240,
-        "endTime": 1784747520,
+        "endTime": 1784741940,
         "startPrice": 93.22,
+        "endPrice": 94.19,
+        "rawCount": 15,
+        "span": 0.9699999999999989,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 4393,
+        "endIdx": 4400,
+        "startTime": 1784741940,
+        "endTime": 1784743920,
+        "startPrice": 94.19,
+        "endPrice": 93.88,
+        "rawCount": 11,
+        "span": 0.3100000000000023,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 4400,
+        "endIdx": 4418,
+        "startTime": 1784743920,
+        "endTime": 1784747520,
+        "startPrice": 93.88,
         "endPrice": 94.41,
-        "rawCount": 47,
-        "span": 1.1899999999999977,
+        "rawCount": 21,
+        "span": 0.5300000000000011,
         "gapLocked": false,
         "macdCross": false
       },
@@ -292626,13 +292808,39 @@
       {
         "type": "up",
         "startIdx": 4432,
-        "endIdx": 4458,
+        "endIdx": 4438,
         "startTime": 1784750580,
-        "endTime": 1784765340,
+        "endTime": 1784752380,
         "startPrice": 93.52,
+        "endPrice": 94.05,
+        "rawCount": 10,
+        "span": 0.5300000000000011,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 4438,
+        "endIdx": 4443,
+        "startTime": 1784752380,
+        "endTime": 1784754180,
+        "startPrice": 94.05,
+        "endPrice": 93.67,
+        "rawCount": 10,
+        "span": 0.37999999999999545,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 4443,
+        "endIdx": 4458,
+        "startTime": 1784754180,
+        "endTime": 1784765340,
+        "startPrice": 93.67,
         "endPrice": 96.09,
-        "rawCount": 42,
-        "span": 2.5700000000000074,
+        "rawCount": 22,
+        "span": 2.4200000000000017,
         "gapLocked": false,
         "macdCross": false
       },
@@ -293055,39 +293263,65 @@
       {
         "type": "down",
         "startIdx": 4901,
-        "endIdx": 4923,
+        "endIdx": 4917,
         "startTime": 1784889540,
-        "endTime": 1784894220,
+        "endTime": 1784892960,
         "startPrice": 98.29,
-        "endPrice": 96.81,
-        "rawCount": 27,
-        "span": 1.480000000000004,
+        "endPrice": 97.25,
+        "rawCount": 20,
+        "span": 1.0400000000000063,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "up",
-        "startIdx": 4923,
+        "startIdx": 4917,
         "endIdx": 4941,
-        "startTime": 1784894220,
+        "startTime": 1784892960,
         "endTime": 1784899440,
-        "startPrice": 96.81,
+        "startPrice": 97.25,
         "endPrice": 98.18,
-        "rawCount": 28,
-        "span": 1.3700000000000045,
+        "rawCount": 35,
+        "span": 0.9300000000000068,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "down",
         "startIdx": 4941,
-        "endIdx": 4967,
+        "endIdx": 4954,
         "startTime": 1784899440,
-        "endTime": 1784907360,
+        "endTime": 1784903580,
         "startPrice": 98.18,
+        "endPrice": 96.72,
+        "rawCount": 23,
+        "span": 1.460000000000008,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 4954,
+        "endIdx": 4960,
+        "startTime": 1784903580,
+        "endTime": 1784905560,
+        "startPrice": 96.72,
+        "endPrice": 97.48,
+        "rawCount": 11,
+        "span": 0.7600000000000051,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 4960,
+        "endIdx": 4967,
+        "startTime": 1784905560,
+        "endTime": 1784907360,
+        "startPrice": 97.48,
         "endPrice": 95.13,
-        "rawCount": 45,
-        "span": 3.0500000000000114,
+        "rawCount": 11,
+        "span": 2.3500000000000085,
         "gapLocked": false,
         "macdCross": false
       },
@@ -293146,13 +293380,39 @@
       {
         "type": "up",
         "startIdx": 5001,
-        "endIdx": 5052,
+        "endIdx": 5006,
         "startTime": 1784916720,
-        "endTime": 1784929140,
+        "endTime": 1784917800,
         "startPrice": 95.95,
+        "endPrice": 96.89,
+        "rawCount": 6,
+        "span": 0.9399999999999977,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 5006,
+        "endIdx": 5010,
+        "startTime": 1784917800,
+        "endTime": 1784918700,
+        "startPrice": 96.89,
+        "endPrice": 96.31,
+        "rawCount": 6,
+        "span": 0.5799999999999983,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 5010,
+        "endIdx": 5052,
+        "startTime": 1784918700,
+        "endTime": 1784929140,
+        "startPrice": 96.31,
         "endPrice": 98.87,
-        "rawCount": 68,
-        "span": 2.9200000000000017,
+        "rawCount": 56,
+        "span": 2.5600000000000023,
         "gapLocked": false,
         "macdCross": false
       },
@@ -293211,13 +293471,39 @@
       {
         "type": "down",
         "startIdx": 5113,
-        "endIdx": 5149,
+        "endIdx": 5131,
         "startTime": 1785119400,
-        "endTime": 1785127320,
+        "endTime": 1785123360,
         "startPrice": 88.6,
+        "endPrice": 87.91,
+        "rawCount": 22,
+        "span": 0.6899999999999977,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 5131,
+        "endIdx": 5137,
+        "startTime": 1785123360,
+        "endTime": 1785124440,
+        "startPrice": 87.91,
+        "endPrice": 88.19,
+        "rawCount": 6,
+        "span": 0.28000000000000114,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 5137,
+        "endIdx": 5149,
+        "startTime": 1785124440,
+        "endTime": 1785127320,
+        "startPrice": 88.19,
         "endPrice": 87.17,
-        "rawCount": 44,
-        "span": 1.4299999999999926,
+        "rawCount": 16,
+        "span": 1.019999999999996,
         "gapLocked": false,
         "macdCross": false
       },
@@ -293874,13 +294160,39 @@
       {
         "type": "up",
         "startIdx": 5824,
-        "endIdx": 5857,
+        "endIdx": 5828,
         "startTime": 1785314880,
-        "endTime": 1785322440,
+        "endTime": 1785315780,
         "startPrice": 84.3,
+        "endPrice": 84.89,
+        "rawCount": 4,
+        "span": 0.5900000000000034,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 5828,
+        "endIdx": 5834,
+        "startTime": 1785315780,
+        "endTime": 1785316860,
+        "startPrice": 84.89,
+        "endPrice": 84.54,
+        "rawCount": 7,
+        "span": 0.3499999999999943,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 5834,
+        "endIdx": 5857,
+        "startTime": 1785316860,
+        "endTime": 1785322440,
+        "startPrice": 84.54,
         "endPrice": 86,
-        "rawCount": 41,
-        "span": 1.7000000000000028,
+        "rawCount": 30,
+        "span": 1.4599999999999937,
         "gapLocked": false,
         "macdCross": false
       },
@@ -294069,25 +294381,25 @@
       {
         "type": "down",
         "startIdx": 6015,
-        "endIdx": 6051,
+        "endIdx": 6044,
         "startTime": 1785372300,
-        "endTime": 1785380040,
+        "endTime": 1785378780,
         "startPrice": 88.09,
         "endPrice": 86.8,
-        "rawCount": 43,
+        "rawCount": 36,
         "span": 1.2900000000000063,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "up",
-        "startIdx": 6051,
+        "startIdx": 6044,
         "endIdx": 6068,
-        "startTime": 1785380040,
+        "startTime": 1785378780,
         "endTime": 1785384900,
         "startPrice": 86.8,
         "endPrice": 87.37,
-        "rawCount": 27,
+        "rawCount": 34,
         "span": 0.5700000000000074,
         "gapLocked": false,
         "macdCross": false
@@ -294290,13 +294602,39 @@
       {
         "type": "up",
         "startIdx": 6253,
-        "endIdx": 6313,
+        "endIdx": 6262,
         "startTime": 1785428820,
-        "endTime": 1785443580,
+        "endTime": 1785431700,
         "startPrice": 86.65,
+        "endPrice": 87.29,
+        "rawCount": 16,
+        "span": 0.6400000000000006,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 6262,
+        "endIdx": 6267,
+        "startTime": 1785431700,
+        "endTime": 1785432780,
+        "startPrice": 87.29,
+        "endPrice": 86.76,
+        "rawCount": 6,
+        "span": 0.5300000000000011,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 6267,
+        "endIdx": 6313,
+        "startTime": 1785432780,
+        "endTime": 1785443580,
+        "startPrice": 86.76,
         "endPrice": 87.44,
-        "rawCount": 84,
-        "span": 0.789999999999992,
+        "rawCount": 62,
+        "span": 0.6799999999999926,
         "gapLocked": false,
         "macdCross": false
       },
@@ -294472,13 +294810,39 @@
       {
         "type": "up",
         "startIdx": 6452,
-        "endIdx": 6494,
+        "endIdx": 6477,
         "startTime": 1785488220,
-        "endTime": 1785498120,
+        "endTime": 1785494160,
         "startPrice": 85.72,
+        "endPrice": 87.86,
+        "rawCount": 34,
+        "span": 2.1400000000000006,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 6477,
+        "endIdx": 6481,
+        "startTime": 1785494160,
+        "endTime": 1785495060,
+        "startPrice": 87.86,
+        "endPrice": 87.49,
+        "rawCount": 4,
+        "span": 0.37000000000000455,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 6481,
+        "endIdx": 6494,
+        "startTime": 1785495060,
+        "endTime": 1785498120,
+        "startPrice": 87.49,
         "endPrice": 88.59,
-        "rawCount": 56,
-        "span": 2.8700000000000045,
+        "rawCount": 18,
+        "span": 1.1000000000000085,
         "gapLocked": false,
         "macdCross": false
       },
@@ -294745,13 +295109,39 @@
       {
         "type": "down",
         "startIdx": 6708,
-        "endIdx": 6728,
+        "endIdx": 6716,
         "startTime": 1785728700,
-        "endTime": 1785734820,
+        "endTime": 1785731040,
         "startPrice": 83.79,
+        "endPrice": 83.34,
+        "rawCount": 14,
+        "span": 0.45000000000000284,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 6716,
+        "endIdx": 6720,
+        "startTime": 1785731040,
+        "endTime": 1785732120,
+        "startPrice": 83.34,
+        "endPrice": 83.56,
+        "rawCount": 6,
+        "span": 0.21999999999999886,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 6720,
+        "endIdx": 6728,
+        "startTime": 1785732120,
+        "endTime": 1785734820,
+        "startPrice": 83.56,
         "endPrice": 83.15,
-        "rawCount": 35,
-        "span": 0.6400000000000006,
+        "rawCount": 15,
+        "span": 0.4099999999999966,
         "gapLocked": false,
         "macdCross": false
       },
@@ -295200,13 +295590,39 @@
       {
         "type": "up",
         "startIdx": 7033,
-        "endIdx": 7071,
+        "endIdx": 7054,
         "startTime": 1785823920,
-        "endTime": 1785833640,
+        "endTime": 1785829500,
         "startPrice": 84.64,
+        "endPrice": 85.05,
+        "rawCount": 30,
+        "span": 0.4099999999999966,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 7054,
+        "endIdx": 7058,
+        "startTime": 1785829500,
+        "endTime": 1785830580,
+        "startPrice": 85.05,
+        "endPrice": 84.61,
+        "rawCount": 6,
+        "span": 0.4399999999999977,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 7058,
+        "endIdx": 7071,
+        "startTime": 1785830580,
+        "endTime": 1785833640,
+        "startPrice": 84.61,
         "endPrice": 86.33,
-        "rawCount": 53,
-        "span": 1.6899999999999977,
+        "rawCount": 17,
+        "span": 1.7199999999999989,
         "gapLocked": false,
         "macdCross": false
       },
@@ -295408,39 +295824,39 @@
       {
         "type": "up",
         "startIdx": 7329,
-        "endIdx": 7343,
+        "endIdx": 7335,
         "startTime": 1785908160,
-        "endTime": 1785911580,
+        "endTime": 1785909960,
         "startPrice": 78.49,
-        "endPrice": 79.36,
-        "rawCount": 19,
-        "span": 0.8700000000000045,
+        "endPrice": 79.17,
+        "rawCount": 10,
+        "span": 0.6800000000000068,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "down",
-        "startIdx": 7343,
-        "endIdx": 7350,
-        "startTime": 1785911580,
-        "endTime": 1785913200,
-        "startPrice": 79.36,
-        "endPrice": 78.89,
-        "rawCount": 9,
-        "span": 0.46999999999999886,
+        "startIdx": 7335,
+        "endIdx": 7340,
+        "startTime": 1785909960,
+        "endTime": 1785910860,
+        "startPrice": 79.17,
+        "endPrice": 78.78,
+        "rawCount": 6,
+        "span": 0.39000000000000057,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "up",
-        "startIdx": 7350,
+        "startIdx": 7340,
         "endIdx": 7359,
-        "startTime": 1785913200,
+        "startTime": 1785910860,
         "endTime": 1785915180,
-        "startPrice": 78.89,
+        "startPrice": 78.78,
         "endPrice": 80.5,
-        "rawCount": 11,
-        "span": 1.6099999999999994,
+        "rawCount": 23,
+        "span": 1.7199999999999989,
         "gapLocked": false,
         "macdCross": false
       },
@@ -296149,27 +296565,27 @@
       {
         "type": "down",
         "startIdx": 8115,
-        "endIdx": 8124,
+        "endIdx": 8126,
         "startTime": 1786135680,
-        "endTime": 1786138740,
+        "endTime": 1786139460,
         "startPrice": 82.52,
-        "endPrice": 82.07,
-        "rawCount": 13,
-        "span": 0.45000000000000284,
-        "gapLocked": false,
+        "endPrice": 82.11,
+        "rawCount": 15,
+        "span": 0.4099999999999966,
+        "gapLocked": true,
         "macdCross": false
       },
       {
         "type": "up",
-        "startIdx": 8124,
+        "startIdx": 8126,
         "endIdx": 8131,
-        "startTime": 1786138740,
+        "startTime": 1786139460,
         "endTime": 1786313160,
-        "startPrice": 82.07,
+        "startPrice": 82.11,
         "endPrice": 84.97,
-        "rawCount": 7,
-        "span": 2.9000000000000057,
-        "gapLocked": false,
+        "rawCount": 5,
+        "span": 2.8599999999999994,
+        "gapLocked": true,
         "macdCross": false
       },
       {
@@ -296799,13 +297215,39 @@
       {
         "type": "down",
         "startIdx": 9022,
-        "endIdx": 9059,
+        "endIdx": 9042,
         "startTime": 1786559400,
-        "endTime": 1786582800,
+        "endTime": 1786566960,
         "startPrice": 89.11,
+        "endPrice": 88.31,
+        "rawCount": 44,
+        "span": 0.7999999999999972,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 9042,
+        "endIdx": 9047,
+        "startTime": 1786566960,
+        "endTime": 1786571460,
+        "startPrice": 88.31,
+        "endPrice": 88.74,
+        "rawCount": 12,
+        "span": 0.4299999999999926,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 9047,
+        "endIdx": 9059,
+        "startTime": 1786571460,
+        "endTime": 1786582800,
+        "startPrice": 88.74,
         "endPrice": 87.67,
-        "rawCount": 79,
-        "span": 1.4399999999999977,
+        "rawCount": 23,
+        "span": 1.0699999999999932,
         "gapLocked": false,
         "macdCross": false
       },
@@ -296825,26 +297267,26 @@
       {
         "type": "down",
         "startIdx": 9067,
-        "endIdx": 9074,
+        "endIdx": 9077,
         "startTime": 1786584600,
-        "endTime": 1786586580,
+        "endTime": 1786587480,
         "startPrice": 88.21,
-        "endPrice": 87.87,
-        "rawCount": 12,
-        "span": 0.3399999999999892,
+        "endPrice": 87.82,
+        "rawCount": 15,
+        "span": 0.39000000000000057,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "up",
-        "startIdx": 9074,
+        "startIdx": 9077,
         "endIdx": 9084,
-        "startTime": 1786586580,
+        "startTime": 1786587480,
         "endTime": 1786589820,
-        "startPrice": 87.87,
+        "startPrice": 87.82,
         "endPrice": 88.09,
-        "rawCount": 17,
-        "span": 0.21999999999999886,
+        "rawCount": 14,
+        "span": 0.27000000000001023,
         "gapLocked": false,
         "macdCross": false
       },
@@ -297696,13 +298138,39 @@
       {
         "type": "up",
         "startIdx": 9860,
-        "endIdx": 9880,
+        "endIdx": 9870,
         "startTime": 1786978260,
-        "endTime": 1786982400,
+        "endTime": 1786980240,
         "startPrice": 88.41,
+        "endPrice": 89.14,
+        "rawCount": 11,
+        "span": 0.730000000000004,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 9870,
+        "endIdx": 9874,
+        "startTime": 1786980240,
+        "endTime": 1786981140,
+        "startPrice": 89.14,
+        "endPrice": 88.69,
+        "rawCount": 5,
+        "span": 0.45000000000000284,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 9874,
+        "endIdx": 9880,
+        "startTime": 1786981140,
+        "endTime": 1786982400,
+        "startPrice": 88.69,
         "endPrice": 89.17,
-        "rawCount": 23,
-        "span": 0.7600000000000051,
+        "rawCount": 7,
+        "span": 0.480000000000004,
         "gapLocked": false,
         "macdCross": false
       },
@@ -298450,416 +298918,13 @@
       {
         "type": "up",
         "startIdx": 10637,
-        "endIdx": 10656,
+        "endIdx": 10642,
         "startTime": 1787205600,
-        "endTime": 1787211000,
+        "endTime": 1787333400,
         "startPrice": 91.75,
-        "endPrice": 93.3,
-        "rawCount": 26,
-        "span": 1.5499999999999972,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "down",
-        "startIdx": 10656,
-        "endIdx": 10663,
-        "startTime": 1787211000,
-        "endTime": 1787212800,
-        "startPrice": 93.3,
-        "endPrice": 92.49,
-        "rawCount": 11,
-        "span": 0.8100000000000023,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "up",
-        "startIdx": 10663,
-        "endIdx": 10723,
-        "startTime": 1787212800,
-        "endTime": 1787228460,
-        "startPrice": 92.49,
-        "endPrice": 94.71,
-        "rawCount": 86,
-        "span": 2.219999999999999,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "down",
-        "startIdx": 10723,
-        "endIdx": 10736,
-        "startTime": 1787228460,
-        "endTime": 1787232060,
-        "startPrice": 94.71,
-        "endPrice": 93.46,
-        "rawCount": 20,
-        "span": 1.25,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "up",
-        "startIdx": 10736,
-        "endIdx": 10739,
-        "startTime": 1787232060,
-        "endTime": 1787232600,
-        "startPrice": 93.46,
-        "endPrice": 94.24,
-        "rawCount": 4,
-        "span": 0.7800000000000011,
-        "gapLocked": false,
-        "macdCross": true
-      },
-      {
-        "type": "down",
-        "startIdx": 10739,
-        "endIdx": 10764,
-        "startTime": 1787232600,
-        "endTime": 1787238540,
-        "startPrice": 94.24,
-        "endPrice": 92.83,
-        "rawCount": 34,
-        "span": 1.4099999999999966,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "up",
-        "startIdx": 10764,
-        "endIdx": 10770,
-        "startTime": 1787238540,
-        "endTime": 1787240520,
-        "startPrice": 92.83,
-        "endPrice": 93.97,
-        "rawCount": 9,
-        "span": 1.1400000000000006,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "down",
-        "startIdx": 10770,
-        "endIdx": 10792,
-        "startTime": 1787240520,
-        "endTime": 1787245200,
-        "startPrice": 93.97,
-        "endPrice": 92.85,
-        "rawCount": 27,
-        "span": 1.1200000000000045,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "up",
-        "startIdx": 10792,
-        "endIdx": 10800,
-        "startTime": 1787245200,
-        "endTime": 1787248080,
-        "startPrice": 92.85,
-        "endPrice": 93.62,
-        "rawCount": 15,
-        "span": 0.7700000000000102,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "down",
-        "startIdx": 10800,
-        "endIdx": 10803,
-        "startTime": 1787248080,
-        "endTime": 1787249160,
-        "startPrice": 93.62,
-        "endPrice": 93.26,
-        "rawCount": 7,
-        "span": 0.35999999999999943,
-        "gapLocked": false,
-        "macdCross": true
-      },
-      {
-        "type": "up",
-        "startIdx": 10803,
-        "endIdx": 10809,
-        "startTime": 1787249160,
-        "endTime": 1787250960,
-        "startPrice": 93.26,
-        "endPrice": 93.94,
-        "rawCount": 11,
-        "span": 0.6799999999999926,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "down",
-        "startIdx": 10809,
-        "endIdx": 10846,
-        "startTime": 1787250960,
-        "endTime": 1787271840,
-        "startPrice": 93.94,
-        "endPrice": 93.08,
-        "rawCount": 64,
-        "span": 0.8599999999999994,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "up",
-        "startIdx": 10846,
-        "endIdx": 10863,
-        "startTime": 1787271840,
-        "endTime": 1787276700,
-        "startPrice": 93.08,
-        "endPrice": 94,
-        "rawCount": 26,
-        "span": 0.9200000000000017,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "down",
-        "startIdx": 10863,
-        "endIdx": 10888,
-        "startTime": 1787276700,
-        "endTime": 1787282820,
-        "startPrice": 94,
-        "endPrice": 93.41,
-        "rawCount": 34,
-        "span": 0.5900000000000034,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "up",
-        "startIdx": 10888,
-        "endIdx": 10895,
-        "startTime": 1787282820,
-        "endTime": 1787284260,
-        "startPrice": 93.41,
-        "endPrice": 93.65,
-        "rawCount": 7,
-        "span": 0.2400000000000091,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "down",
-        "startIdx": 10895,
-        "endIdx": 10905,
-        "startTime": 1787284260,
-        "endTime": 1787288760,
-        "startPrice": 93.65,
-        "endPrice": 93.15,
-        "rawCount": 22,
-        "span": 0.5,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "up",
-        "startIdx": 10905,
-        "endIdx": 10943,
-        "startTime": 1787288760,
-        "endTime": 1787299560,
-        "startPrice": 93.15,
-        "endPrice": 93.88,
-        "rawCount": 60,
-        "span": 0.7299999999999898,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "down",
-        "startIdx": 10943,
-        "endIdx": 10958,
-        "startTime": 1787299560,
-        "endTime": 1787302980,
-        "startPrice": 93.88,
-        "endPrice": 92.74,
-        "rawCount": 20,
-        "span": 1.1400000000000006,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "up",
-        "startIdx": 10958,
-        "endIdx": 10976,
-        "startTime": 1787302980,
-        "endTime": 1787307120,
-        "startPrice": 92.74,
-        "endPrice": 94.34,
-        "rawCount": 22,
-        "span": 1.6000000000000085,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "down",
-        "startIdx": 10976,
-        "endIdx": 10980,
-        "startTime": 1787307120,
-        "endTime": 1787308200,
-        "startPrice": 94.34,
-        "endPrice": 93.44,
+        "endPrice": 94.83,
         "rawCount": 6,
-        "span": 0.9000000000000057,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "up",
-        "startIdx": 10980,
-        "endIdx": 10994,
-        "startTime": 1787308200,
-        "endTime": 1787310900,
-        "startPrice": 93.44,
-        "endPrice": 94.15,
-        "rawCount": 15,
-        "span": 0.710000000000008,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "down",
-        "startIdx": 10994,
-        "endIdx": 11000,
-        "startTime": 1787310900,
-        "endTime": 1787312160,
-        "startPrice": 94.15,
-        "endPrice": 93.01,
-        "rawCount": 7,
-        "span": 1.1400000000000006,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "up",
-        "startIdx": 11000,
-        "endIdx": 11012,
-        "startTime": 1787312160,
-        "endTime": 1787314860,
-        "startPrice": 93.01,
-        "endPrice": 94.43,
-        "rawCount": 16,
-        "span": 1.4200000000000017,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "down",
-        "startIdx": 11012,
-        "endIdx": 11036,
-        "startTime": 1787314860,
-        "endTime": 1787320980,
-        "startPrice": 94.43,
-        "endPrice": 93.53,
-        "rawCount": 34,
-        "span": 0.9000000000000057,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "up",
-        "startIdx": 11036,
-        "endIdx": 11042,
-        "startTime": 1787320980,
-        "endTime": 1787322780,
-        "startPrice": 93.53,
-        "endPrice": 94.11,
-        "rawCount": 9,
-        "span": 0.5799999999999983,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "down",
-        "startIdx": 11042,
-        "endIdx": 11049,
-        "startTime": 1787322780,
-        "endTime": 1787324760,
-        "startPrice": 94.11,
-        "endPrice": 93.55,
-        "rawCount": 11,
-        "span": 0.5600000000000023,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "up",
-        "startIdx": 11049,
-        "endIdx": 11064,
-        "startTime": 1787324760,
-        "endTime": 1787328360,
-        "startPrice": 93.55,
-        "endPrice": 94.46,
-        "rawCount": 20,
-        "span": 0.9099999999999966,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "down",
-        "startIdx": 11064,
-        "endIdx": 11067,
-        "startTime": 1787328360,
-        "endTime": 1787329260,
-        "startPrice": 94.46,
-        "endPrice": 93.8,
-        "rawCount": 9,
-        "span": 0.6599999999999966,
-        "gapLocked": false,
-        "macdCross": true
-      },
-      {
-        "type": "up",
-        "startIdx": 11067,
-        "endIdx": 11073,
-        "startTime": 1787329260,
-        "endTime": 1787331600,
-        "startPrice": 93.8,
-        "endPrice": 94.41,
-        "rawCount": 9,
-        "span": 0.6099999999999994,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "down",
-        "startIdx": 11073,
-        "endIdx": 11114,
-        "startTime": 1787331600,
-        "endTime": 1787342400,
-        "startPrice": 94.41,
-        "endPrice": 93.84,
-        "rawCount": 60,
-        "span": 0.5699999999999932,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "up",
-        "startIdx": 11114,
-        "endIdx": 11122,
-        "startTime": 1787342400,
-        "endTime": 1787344020,
-        "startPrice": 93.84,
-        "endPrice": 94.15,
-        "rawCount": 9,
-        "span": 0.3100000000000023,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "down",
-        "startIdx": 11122,
-        "endIdx": 11130,
-        "startTime": 1787344020,
-        "endTime": 1787349420,
-        "startPrice": 94.15,
-        "endPrice": 93.59,
-        "rawCount": 20,
-        "span": 0.5600000000000023,
+        "span": 3.0799999999999983,
         "gapLocked": false,
         "macdCross": false
       }
@@ -298867,14 +298932,66 @@
     "15": [
       {
         "type": "up",
+        "startIdx": 8,
+        "endIdx": 18,
+        "startTime": 1782962820,
+        "endTime": 1782980100,
+        "startPrice": 70.63,
+        "endPrice": 71.22,
+        "rawCount": 20,
+        "span": 0.5900000000000034,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 18,
+        "endIdx": 29,
+        "startTime": 1782980100,
+        "endTime": 1782991980,
+        "startPrice": 71.22,
+        "endPrice": 70.14,
+        "rawCount": 13,
+        "span": 1.0799999999999983,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
         "startIdx": 29,
-        "endIdx": 53,
+        "endIdx": 37,
         "startTime": 1782991980,
-        "endTime": 1783016820,
+        "endTime": 1783000080,
         "startPrice": 70.14,
+        "endPrice": 71.17,
+        "rawCount": 9,
+        "span": 1.0300000000000011,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 37,
+        "endIdx": 44,
+        "startTime": 1783000080,
+        "endTime": 1783007100,
+        "startPrice": 71.17,
+        "endPrice": 70.42,
+        "rawCount": 8,
+        "span": 0.75,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 44,
+        "endIdx": 53,
+        "startTime": 1783007100,
+        "endTime": 1783016820,
+        "startPrice": 70.42,
         "endPrice": 71.92,
-        "rawCount": 28,
-        "span": 1.7800000000000011,
+        "rawCount": 11,
+        "span": 1.5,
         "gapLocked": false,
         "macdCross": false
       },
@@ -299310,26 +299427,26 @@
       {
         "type": "up",
         "startIdx": 391,
-        "endIdx": 411,
+        "endIdx": 403,
         "startTime": 1783670940,
-        "endTime": 1783693980,
+        "endTime": 1783684980,
         "startPrice": 75.36,
-        "endPrice": 77.52,
-        "rawCount": 27,
-        "span": 2.1599999999999966,
+        "endPrice": 77.15,
+        "rawCount": 16,
+        "span": 1.7900000000000063,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "down",
-        "startIdx": 411,
+        "startIdx": 403,
         "endIdx": 415,
-        "startTime": 1783693980,
+        "startTime": 1783684980,
         "endTime": 1783698840,
-        "startPrice": 77.52,
+        "startPrice": 77.15,
         "endPrice": 75.3,
-        "rawCount": 4,
-        "span": 2.219999999999999,
+        "rawCount": 15,
+        "span": 1.8500000000000085,
         "gapLocked": false,
         "macdCross": false
       },
@@ -299765,26 +299882,26 @@
       {
         "type": "down",
         "startIdx": 817,
-        "endIdx": 847,
+        "endIdx": 839,
         "startTime": 1784573280,
-        "endTime": 1784621340,
+        "endTime": 1784612880,
         "startPrice": 89.76,
-        "endPrice": 87.87,
-        "rawCount": 46,
-        "span": 1.8900000000000006,
+        "endPrice": 88.11,
+        "rawCount": 36,
+        "span": 1.6500000000000057,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "up",
-        "startIdx": 847,
+        "startIdx": 839,
         "endIdx": 867,
-        "startTime": 1784621340,
+        "startTime": 1784612880,
         "endTime": 1784644380,
-        "startPrice": 87.87,
+        "startPrice": 88.11,
         "endPrice": 91.99,
-        "rawCount": 25,
-        "span": 4.11999999999999,
+        "rawCount": 35,
+        "span": 3.8799999999999955,
         "gapLocked": false,
         "macdCross": false
       },
@@ -299817,52 +299934,26 @@
       {
         "type": "down",
         "startIdx": 917,
-        "endIdx": 937,
+        "endIdx": 928,
         "startTime": 1784713860,
-        "endTime": 1784735460,
+        "endTime": 1784727180,
         "startPrice": 95.47,
-        "endPrice": 92.82,
-        "rawCount": 24,
-        "span": 2.6500000000000057,
+        "endPrice": 93.16,
+        "rawCount": 15,
+        "span": 2.3100000000000023,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "up",
-        "startIdx": 937,
-        "endIdx": 945,
-        "startTime": 1784735460,
-        "endTime": 1784747520,
-        "startPrice": 92.82,
-        "endPrice": 94.41,
-        "rawCount": 14,
-        "span": 1.5900000000000034,
-        "gapLocked": false,
-        "macdCross": false
-      },
-      {
-        "type": "down",
-        "startIdx": 945,
-        "endIdx": 948,
-        "startTime": 1784747520,
-        "endTime": 1784750580,
-        "startPrice": 94.41,
-        "endPrice": 93.52,
-        "rawCount": 3,
-        "span": 0.8900000000000006,
-        "gapLocked": false,
-        "macdCross": true
-      },
-      {
-        "type": "up",
-        "startIdx": 948,
+        "startIdx": 928,
         "endIdx": 959,
-        "startTime": 1784750580,
+        "startTime": 1784727180,
         "endTime": 1784776680,
-        "startPrice": 93.52,
+        "startPrice": 93.16,
         "endPrice": 96.47,
-        "rawCount": 21,
-        "span": 2.950000000000003,
+        "rawCount": 47,
+        "span": 3.3100000000000023,
         "gapLocked": false,
         "macdCross": false
       },
@@ -300038,26 +300129,26 @@
       {
         "type": "up",
         "startIdx": 1165,
-        "endIdx": 1175,
+        "endIdx": 1170,
         "startTime": 1785207600,
-        "endTime": 1785217140,
+        "endTime": 1785212100,
         "startPrice": 84.09,
-        "endPrice": 85.57,
-        "rawCount": 11,
-        "span": 1.4799999999999898,
+        "endPrice": 85.2,
+        "rawCount": 5,
+        "span": 1.1099999999999994,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "down",
-        "startIdx": 1175,
+        "startIdx": 1170,
         "endIdx": 1186,
-        "startTime": 1785217140,
+        "startTime": 1785212100,
         "endTime": 1785228480,
-        "startPrice": 85.57,
+        "startPrice": 85.2,
         "endPrice": 82.78,
-        "rawCount": 12,
-        "span": 2.789999999999992,
+        "rawCount": 18,
+        "span": 2.4200000000000017,
         "gapLocked": false,
         "macdCross": false
       },
@@ -300246,13 +300337,39 @@
       {
         "type": "up",
         "startIdx": 1407,
-        "endIdx": 1440,
+        "endIdx": 1413,
         "startTime": 1785708000,
-        "endTime": 1785747060,
+        "endTime": 1785715380,
         "startPrice": 81.55,
+        "endPrice": 84.22,
+        "rawCount": 8,
+        "span": 2.6700000000000017,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 1413,
+        "endIdx": 1434,
+        "startTime": 1785715380,
+        "endTime": 1785740040,
+        "startPrice": 84.22,
+        "endPrice": 82.63,
+        "rawCount": 27,
+        "span": 1.5900000000000034,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 1434,
+        "endIdx": 1440,
+        "startTime": 1785740040,
+        "endTime": 1785747060,
+        "startPrice": 82.63,
         "endPrice": 84.66,
-        "rawCount": 43,
-        "span": 3.1099999999999994,
+        "rawCount": 8,
+        "span": 2.030000000000001,
         "gapLocked": false,
         "macdCross": false
       },
@@ -300818,26 +300935,26 @@
       {
         "type": "up",
         "startIdx": 2131,
-        "endIdx": 2164,
+        "endIdx": 2145,
         "startTime": 1787077800,
-        "endTime": 1787130540,
+        "endTime": 1787104080,
         "startPrice": 90.86,
-        "endPrice": 92.38,
-        "rawCount": 48,
-        "span": 1.519999999999996,
+        "endPrice": 92.05,
+        "rawCount": 20,
+        "span": 1.1899999999999977,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "down",
-        "startIdx": 2164,
+        "startIdx": 2145,
         "endIdx": 2177,
-        "startTime": 1787130540,
+        "startTime": 1787104080,
         "endTime": 1787143140,
-        "startPrice": 92.38,
+        "startPrice": 92.05,
         "endPrice": 90.4,
-        "rawCount": 15,
-        "span": 1.9799999999999898,
+        "rawCount": 43,
+        "span": 1.6499999999999915,
         "gapLocked": false,
         "macdCross": false
       },
@@ -300963,26 +301080,26 @@
       {
         "type": "down",
         "startIdx": 16,
-        "endIdx": 33,
+        "endIdx": 21,
         "startTime": 1783058400,
-        "endTime": 1783323900,
+        "endTime": 1783081800,
         "startPrice": 72.49,
-        "endPrice": 71.02,
-        "rawCount": 23,
-        "span": 1.4699999999999989,
+        "endPrice": 71.3,
+        "rawCount": 6,
+        "span": 1.1899999999999977,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "up",
-        "startIdx": 33,
+        "startIdx": 21,
         "endIdx": 69,
-        "startTime": 1783323900,
+        "startTime": 1783081800,
         "endTime": 1783525500,
-        "startPrice": 71.02,
+        "startPrice": 71.3,
         "endPrice": 80.59,
-        "rawCount": 50,
-        "span": 9.570000000000007,
+        "rawCount": 67,
+        "span": 9.290000000000006,
         "gapLocked": false,
         "macdCross": false
       },
@@ -301444,13 +301561,39 @@
       {
         "type": "up",
         "startIdx": 492,
-        "endIdx": 549,
+        "endIdx": 527,
         "startTime": 1786714200,
-        "endTime": 1787228100,
+        "endTime": 1787103900,
         "startPrice": 86.53,
+        "endPrice": 92.05,
+        "rawCount": 56,
+        "span": 5.519999999999996,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "down",
+        "startIdx": 527,
+        "endIdx": 534,
+        "startTime": 1787103900,
+        "endTime": 1787142600,
+        "startPrice": 92.05,
+        "endPrice": 90.4,
+        "rawCount": 12,
+        "span": 1.6499999999999915,
+        "gapLocked": false,
+        "macdCross": false
+      },
+      {
+        "type": "up",
+        "startIdx": 534,
+        "endIdx": 549,
+        "startTime": 1787142600,
+        "endTime": 1787228100,
+        "startPrice": 90.4,
         "endPrice": 94.71,
-        "rawCount": 89,
-        "span": 8.179999999999993,
+        "rawCount": 21,
+        "span": 4.309999999999988,
         "gapLocked": false,
         "macdCross": false
       },
@@ -301537,26 +301680,26 @@
       {
         "type": "up",
         "startIdx": 76,
-        "endIdx": 90,
+        "endIdx": 83,
         "startTime": 1785254400,
-        "endTime": 1785531600,
+        "endTime": 1785391200,
         "startPrice": 80.67,
-        "endPrice": 91.36,
-        "rawCount": 19,
-        "span": 10.689999999999998,
+        "endPrice": 89.5,
+        "rawCount": 9,
+        "span": 8.829999999999998,
         "gapLocked": false,
         "macdCross": false
       },
       {
         "type": "down",
-        "startIdx": 90,
+        "startIdx": 83,
         "endIdx": 97,
-        "startTime": 1785531600,
+        "startTime": 1785391200,
         "endTime": 1785895200,
-        "startPrice": 91.36,
+        "startPrice": 89.5,
         "endPrice": 78.11,
-        "rawCount": 13,
-        "span": 13.25,
+        "rawCount": 23,
+        "span": 11.39,
         "gapLocked": false,
         "macdCross": false
       },
@@ -301634,13 +301777,18 @@
       "buyPts": [
         {
           "type": "2买",
+          "time": 1782970560,
+          "price": 70.66
+        },
+        {
+          "type": "2买",
           "time": 1782994680,
           "price": 70.17
         },
         {
-          "type": "类2买",
-          "time": 1783007100,
-          "price": 70.42
+          "type": "2买",
+          "time": 1783010340,
+          "price": 71.02
         },
         {
           "type": "2买",
@@ -301649,7 +301797,7 @@
         },
         {
           "type": "类2买",
-          "time": 1783052280,
+          "time": 1783050480,
           "price": 72.19
         },
         {
@@ -301674,13 +301822,13 @@
         },
         {
           "type": "2买",
-          "time": 1783368180,
-          "price": 72.01
+          "time": 1783362780,
+          "price": 71.8
         },
         {
           "type": "类2买",
-          "time": 1783387080,
-          "price": 72.04
+          "time": 1783368180,
+          "price": 72.01
         },
         {
           "type": "2买",
@@ -301738,6 +301886,11 @@
           "price": 75.48
         },
         {
+          "type": "类2买",
+          "time": 1783706220,
+          "price": 75.68
+        },
+        {
           "type": "2买",
           "time": 1783913400,
           "price": 78.91
@@ -301759,8 +301912,18 @@
         },
         {
           "type": "2买",
+          "time": 1784108520,
+          "price": 85.05
+        },
+        {
+          "type": "2买",
           "time": 1784136600,
           "price": 84.1
+        },
+        {
+          "type": "类2买",
+          "time": 1784142720,
+          "price": 84.89
         },
         {
           "type": "2买",
@@ -301824,13 +301987,13 @@
         },
         {
           "type": "2买",
-          "time": 1784739240,
-          "price": 93.22
+          "time": 1784731500,
+          "price": 93.48
         },
         {
-          "type": "2买",
-          "time": 1784768040,
-          "price": 95.38
+          "type": "类2买",
+          "time": 1784743920,
+          "price": 93.88
         },
         {
           "type": "2买",
@@ -301859,11 +302022,6 @@
         },
         {
           "type": "2买",
-          "time": 1785216240,
-          "price": 84.68
-        },
-        {
-          "type": "2买",
           "time": 1785230820,
           "price": 83.39
         },
@@ -301884,12 +302042,12 @@
         },
         {
           "type": "类2买",
-          "time": 1785325680,
-          "price": 85
+          "time": 1785316860,
+          "price": 84.54
         },
         {
           "type": "2买",
-          "time": 1785380040,
+          "time": 1785378780,
           "price": 86.8
         },
         {
@@ -301923,9 +302081,9 @@
           "price": 83.52
         },
         {
-          "type": "类2买",
-          "time": 1785717000,
-          "price": 83.57
+          "type": "2买",
+          "time": 1785743640,
+          "price": 83.27
         },
         {
           "type": "2买",
@@ -301936,6 +302094,11 @@
           "type": "类2买",
           "time": 1785794040,
           "price": 83.59
+        },
+        {
+          "type": "2买",
+          "time": 1785830580,
+          "price": 84.61
         },
         {
           "type": "2买",
@@ -301974,8 +302137,8 @@
         },
         {
           "type": "2买",
-          "time": 1786138740,
-          "price": 82.07
+          "time": 1786139460,
+          "price": 82.11
         },
         {
           "type": "2买",
@@ -301994,8 +302157,8 @@
         },
         {
           "type": "2买",
-          "time": 1786586580,
-          "price": 87.87
+          "time": 1786587480,
+          "price": 87.82
         },
         {
           "type": "2买",
@@ -302024,8 +302187,8 @@
         },
         {
           "type": "类2买",
-          "time": 1786983660,
-          "price": 88.68
+          "time": 1786981140,
+          "price": 88.69
         },
         {
           "type": "2买",
@@ -302038,11 +302201,6 @@
           "price": 91.25
         },
         {
-          "type": "类2买",
-          "time": 1787107320,
-          "price": 91.51
-        },
-        {
           "type": "2买",
           "time": 1787184000,
           "price": 91.47
@@ -302051,21 +302209,6 @@
           "type": "2买",
           "time": 1787205600,
           "price": 91.75
-        },
-        {
-          "type": "2买",
-          "time": 1787308200,
-          "price": 93.44
-        },
-        {
-          "type": "类2买",
-          "time": 1787320980,
-          "price": 93.53
-        },
-        {
-          "type": "3买",
-          "time": 1783010340,
-          "price": 71.02
         },
         {
           "type": "3买",
@@ -302091,6 +302234,11 @@
           "type": "3买",
           "time": 1784711160,
           "price": 94.01
+        },
+        {
+          "type": "3买",
+          "time": 1784768040,
+          "price": 95.38
         },
         {
           "type": "3买",
@@ -302138,19 +302286,14 @@
           "price": 91.19
         },
         {
-          "type": "3买",
-          "time": 1787110920,
-          "price": 91.49
-        },
-        {
-          "type": "3买",
-          "time": 1787212800,
-          "price": 92.49
-        },
-        {
           "type": "1买",
           "time": 1782991980,
           "price": 70.14
+        },
+        {
+          "type": "1买",
+          "time": 1783007100,
+          "price": 70.42
         },
         {
           "type": "1买",
@@ -302164,6 +302307,11 @@
         },
         {
           "type": "1买",
+          "time": 1783324260,
+          "price": 71.02
+        },
+        {
+          "type": "1买",
           "time": 1783357560,
           "price": 71.66
         },
@@ -302171,6 +302319,11 @@
           "type": "1买",
           "time": 1783426140,
           "price": 72.41
+        },
+        {
+          "type": "1买",
+          "time": 1783515240,
+          "price": 77.18
         },
         {
           "type": "1买",
@@ -302229,13 +302382,18 @@
         },
         {
           "type": "1买",
-          "time": 1784621340,
-          "price": 87.87
+          "time": 1784612880,
+          "price": 88.11
         },
         {
           "type": "1买",
           "time": 1784657160,
           "price": 90.64
+        },
+        {
+          "type": "1买",
+          "time": 1784727180,
+          "price": 93.16
         },
         {
           "type": "1买",
@@ -302291,6 +302449,11 @@
           "type": "1买",
           "time": 1785708000,
           "price": 81.55
+        },
+        {
+          "type": "1买",
+          "time": 1785740040,
+          "price": 82.63
         },
         {
           "type": "1买",
@@ -302396,19 +302559,14 @@
           "type": "1买",
           "time": 1787203080,
           "price": 91.63
-        },
-        {
-          "type": "1买",
-          "time": 1787302980,
-          "price": 92.74
-        },
-        {
-          "type": "1买",
-          "time": 1787349420,
-          "price": 93.59
         }
       ],
       "sellPts": [
+        {
+          "type": "2卖",
+          "time": 1782989280,
+          "price": 70.76
+        },
         {
           "type": "2卖",
           "time": 1783020780,
@@ -302446,8 +302604,13 @@
         },
         {
           "type": "2卖",
-          "time": 1783580940,
-          "price": 78.19
+          "time": 1783510560,
+          "price": 78.63
+        },
+        {
+          "type": "2卖",
+          "time": 1783571220,
+          "price": 78.98
         },
         {
           "type": "2卖",
@@ -302556,6 +302719,11 @@
         },
         {
           "type": "2卖",
+          "time": 1785124440,
+          "price": 88.19
+        },
+        {
+          "type": "类2卖",
           "time": 1785128760,
           "price": 87.69
         },
@@ -302611,13 +302779,23 @@
         },
         {
           "type": "类2卖",
-          "time": 1785466620,
-          "price": 86.01
+          "time": 1785431700,
+          "price": 87.29
         },
         {
           "type": "2卖",
           "time": 1785510360,
           "price": 88.76
+        },
+        {
+          "type": "2卖",
+          "time": 1785718800,
+          "price": 84.17
+        },
+        {
+          "type": "类2卖",
+          "time": 1785724200,
+          "price": 84.01
         },
         {
           "type": "2卖",
@@ -302751,13 +302929,13 @@
         },
         {
           "type": "2卖",
-          "time": 1787133780,
-          "price": 92.09
+          "time": 1787108760,
+          "price": 91.82
         },
         {
           "type": "类2卖",
-          "time": 1787139540,
-          "price": 91.96
+          "time": 1787112540,
+          "price": 91.81
         },
         {
           "type": "2卖",
@@ -302770,24 +302948,9 @@
           "price": 92.21
         },
         {
-          "type": "2卖",
-          "time": 1787232600,
-          "price": 94.24
-        },
-        {
-          "type": "类2卖",
-          "time": 1787240520,
-          "price": 93.97
-        },
-        {
-          "type": "2卖",
-          "time": 1787344020,
-          "price": 94.15
-        },
-        {
           "type": "1卖",
-          "time": 1782973620,
-          "price": 71.04
+          "time": 1782980100,
+          "price": 71.22
         },
         {
           "type": "1卖",
@@ -302843,6 +303006,11 @@
           "type": "1卖",
           "time": 1783656900,
           "price": 76.85
+        },
+        {
+          "type": "1卖",
+          "time": 1783708920,
+          "price": 76.15
         },
         {
           "type": "1卖",
@@ -302916,8 +303084,8 @@
         },
         {
           "type": "1卖",
-          "time": 1785217140,
-          "price": 85.57
+          "time": 1785212100,
+          "price": 85.2
         },
         {
           "type": "1卖",
@@ -303011,8 +303179,8 @@
         },
         {
           "type": "1卖",
-          "time": 1787130540,
-          "price": 92.38
+          "time": 1787104080,
+          "price": 92.05
         },
         {
           "type": "1卖",
@@ -303021,18 +303189,23 @@
         },
         {
           "type": "1卖",
-          "time": 1787228460,
-          "price": 94.71
+          "time": 1787333400,
+          "price": 94.83
         },
         {
           "type": "3卖",
-          "time": 1784899440,
-          "price": 98.18
+          "time": 1783580940,
+          "price": 78.19
         },
         {
           "type": "3卖",
-          "time": 1785133980,
-          "price": 86.79
+          "time": 1784905560,
+          "price": 97.48
+        },
+        {
+          "type": "3卖",
+          "time": 1785139380,
+          "price": 87.56
         },
         {
           "type": "3卖",
@@ -303048,6 +303221,11 @@
           "type": "3卖",
           "time": 1785474720,
           "price": 85.41
+        },
+        {
+          "type": "3卖",
+          "time": 1785732120,
+          "price": 83.56
         },
         {
           "type": "3卖",
@@ -303085,18 +303263,18 @@
       "buyPts": [
         {
           "type": "2买",
-          "time": 1783041300,
-          "price": 71.44
+          "time": 1783007100,
+          "price": 70.42
         },
         {
           "type": "2买",
-          "time": 1783357560,
-          "price": 71.66
+          "time": 1783091700,
+          "price": 71.62
         },
         {
           "type": "类2买",
-          "time": 1783396080,
-          "price": 72.35
+          "time": 1783309140,
+          "price": 71.63
         },
         {
           "type": "2买",
@@ -303130,8 +303308,8 @@
         },
         {
           "type": "2买",
-          "time": 1784750580,
-          "price": 93.52
+          "time": 1784784600,
+          "price": 95.45
         },
         {
           "type": "2买",
@@ -303145,13 +303323,13 @@
         },
         {
           "type": "2买",
-          "time": 1785764340,
-          "price": 82.71
+          "time": 1785740040,
+          "price": 82.63
         },
         {
           "type": "类2买",
-          "time": 1785780180,
-          "price": 83.02
+          "time": 1785764340,
+          "price": 82.71
         },
         {
           "type": "2买",
@@ -303189,6 +303367,21 @@
           "price": 88.1
         },
         {
+          "type": "2买",
+          "time": 1787168520,
+          "price": 91.13
+        },
+        {
+          "type": "类2买",
+          "time": 1787203080,
+          "price": 91.63
+        },
+        {
+          "type": "3买",
+          "time": 1783041300,
+          "price": 71.44
+        },
+        {
           "type": "3买",
           "time": 1783515240,
           "price": 77.18
@@ -303200,13 +303393,13 @@
         },
         {
           "type": "3买",
-          "time": 1784784600,
-          "price": 95.45
+          "time": 1785370680,
+          "price": 86.7
         },
         {
           "type": "3买",
-          "time": 1785370680,
-          "price": 86.7
+          "time": 1785826980,
+          "price": 84.29
         },
         {
           "type": "3买",
@@ -303220,8 +303413,8 @@
         },
         {
           "type": "3买",
-          "time": 1787203080,
-          "price": 91.63
+          "time": 1787077800,
+          "price": 90.86
         },
         {
           "type": "1买",
@@ -303257,24 +303450,9 @@
           "type": "1买",
           "time": 1786629600,
           "price": 85.85
-        },
-        {
-          "type": "1买",
-          "time": 1786714200,
-          "price": 86.53
         }
       ],
       "sellPts": [
-        {
-          "type": "2卖",
-          "time": 1783087560,
-          "price": 72.28
-        },
-        {
-          "type": "类2卖",
-          "time": 1783097820,
-          "price": 72.18
-        },
         {
           "type": "2卖",
           "time": 1783546920,
@@ -303312,8 +303490,8 @@
         },
         {
           "type": "2卖",
-          "time": 1785217140,
-          "price": 85.57
+          "time": 1785212100,
+          "price": 85.2
         },
         {
           "type": "类2卖",
@@ -303407,8 +303585,8 @@
         },
         {
           "type": "1卖",
-          "time": 1787228100,
-          "price": 94.71
+          "time": 1787103900,
+          "price": 92.05
         },
         {
           "type": "3卖",
@@ -303421,8 +303599,8 @@
       "buyPts": [
         {
           "type": "2买",
-          "time": 1783323900,
-          "price": 71.02
+          "time": 1783081800,
+          "price": 71.3
         },
         {
           "type": "2买",
@@ -303436,11 +303614,6 @@
         },
         {
           "type": "2买",
-          "time": 1785475800,
-          "price": 84.62
-        },
-        {
-          "type": "2买",
           "time": 1786105800,
           "price": 81.5
         },
@@ -303448,6 +303621,11 @@
           "type": "2买",
           "time": 1786714200,
           "price": 86.53
+        },
+        {
+          "type": "类2买",
+          "time": 1787142600,
+          "price": 90.4
         },
         {
           "type": "3买",
@@ -303493,8 +303671,8 @@
         },
         {
           "type": "1卖",
-          "time": 1785531600,
-          "price": 91.36
+          "time": 1785391200,
+          "price": 89.5
         },
         {
           "type": "1卖",
@@ -303529,8 +303707,8 @@
       "sellPts": [
         {
           "type": "2卖",
-          "time": 1785531600,
-          "price": 91.36
+          "time": 1785391200,
+          "price": 89.5
         },
         {
           "type": "1卖",
@@ -303548,6 +303726,14 @@
     "3": [
       {
         "label": "2买",
+        "time": 1782970560,
+        "price": 70.61,
+        "rawTime": 1782970560,
+        "rawPrice": 70.66,
+        "color": "#F23645"
+      },
+      {
+        "label": "2买",
         "time": 1782994680,
         "price": 70.12,
         "rawTime": 1782994680,
@@ -303555,11 +303741,11 @@
         "color": "#F23645"
       },
       {
-        "label": "类2买",
-        "time": 1783007100,
-        "price": 70.37,
-        "rawTime": 1783007100,
-        "rawPrice": 70.42,
+        "label": "2买",
+        "time": 1783010340,
+        "price": 70.97,
+        "rawTime": 1783010340,
+        "rawPrice": 71.02,
         "color": "#F23645"
       },
       {
@@ -303572,9 +303758,9 @@
       },
       {
         "label": "类2买",
-        "time": 1783052280,
+        "time": 1783050480,
         "price": 72.14,
-        "rawTime": 1783052280,
+        "rawTime": 1783050480,
         "rawPrice": 72.19,
         "color": "#F23645"
       },
@@ -303612,18 +303798,18 @@
       },
       {
         "label": "2买",
-        "time": 1783368180,
-        "price": 71.96000000000001,
-        "rawTime": 1783368180,
-        "rawPrice": 72.01,
+        "time": 1783362780,
+        "price": 71.75,
+        "rawTime": 1783362780,
+        "rawPrice": 71.8,
         "color": "#F23645"
       },
       {
         "label": "类2买",
-        "time": 1783387080,
-        "price": 71.99000000000001,
-        "rawTime": 1783387080,
-        "rawPrice": 72.04,
+        "time": 1783368180,
+        "price": 71.96000000000001,
+        "rawTime": 1783368180,
+        "rawPrice": 72.01,
         "color": "#F23645"
       },
       {
@@ -303715,6 +303901,14 @@
         "color": "#F23645"
       },
       {
+        "label": "类2买",
+        "time": 1783706220,
+        "price": 75.63000000000001,
+        "rawTime": 1783706220,
+        "rawPrice": 75.68,
+        "color": "#F23645"
+      },
+      {
         "label": "2买",
         "time": 1783913400,
         "price": 78.86,
@@ -303748,10 +303942,26 @@
       },
       {
         "label": "2买",
+        "time": 1784108520,
+        "price": 85,
+        "rawTime": 1784108520,
+        "rawPrice": 85.05,
+        "color": "#F23645"
+      },
+      {
+        "label": "2买",
         "time": 1784136600,
         "price": 84.05,
         "rawTime": 1784136600,
         "rawPrice": 84.1,
+        "color": "#F23645"
+      },
+      {
+        "label": "类2买",
+        "time": 1784142720,
+        "price": 84.84,
+        "rawTime": 1784142720,
+        "rawPrice": 84.89,
         "color": "#F23645"
       },
       {
@@ -303852,18 +304062,18 @@
       },
       {
         "label": "2买",
-        "time": 1784739240,
-        "price": 93.17,
-        "rawTime": 1784739240,
-        "rawPrice": 93.22,
+        "time": 1784731500,
+        "price": 93.43,
+        "rawTime": 1784731500,
+        "rawPrice": 93.48,
         "color": "#F23645"
       },
       {
-        "label": "2买",
-        "time": 1784768040,
-        "price": 95.33,
-        "rawTime": 1784768040,
-        "rawPrice": 95.38,
+        "label": "类2买",
+        "time": 1784743920,
+        "price": 93.83,
+        "rawTime": 1784743920,
+        "rawPrice": 93.88,
         "color": "#F23645"
       },
       {
@@ -303908,14 +304118,6 @@
       },
       {
         "label": "2买",
-        "time": 1785216240,
-        "price": 84.63000000000001,
-        "rawTime": 1785216240,
-        "rawPrice": 84.68,
-        "color": "#F23645"
-      },
-      {
-        "label": "2买",
         "time": 1785230820,
         "price": 83.34,
         "rawTime": 1785230820,
@@ -303948,17 +304150,17 @@
       },
       {
         "label": "类2买",
-        "time": 1785325680,
-        "price": 84.95,
-        "rawTime": 1785325680,
-        "rawPrice": 85,
+        "time": 1785316860,
+        "price": 84.49000000000001,
+        "rawTime": 1785316860,
+        "rawPrice": 84.54,
         "color": "#F23645"
       },
       {
         "label": "2买",
-        "time": 1785380040,
+        "time": 1785378780,
         "price": 86.75,
-        "rawTime": 1785380040,
+        "rawTime": 1785378780,
         "rawPrice": 86.8,
         "color": "#F23645"
       },
@@ -304011,11 +304213,11 @@
         "color": "#F23645"
       },
       {
-        "label": "类2买",
-        "time": 1785717000,
-        "price": 83.52,
-        "rawTime": 1785717000,
-        "rawPrice": 83.57,
+        "label": "2买",
+        "time": 1785743640,
+        "price": 83.22,
+        "rawTime": 1785743640,
+        "rawPrice": 83.27,
         "color": "#F23645"
       },
       {
@@ -304032,6 +304234,14 @@
         "price": 83.54,
         "rawTime": 1785794040,
         "rawPrice": 83.59,
+        "color": "#F23645"
+      },
+      {
+        "label": "2买",
+        "time": 1785830580,
+        "price": 84.56,
+        "rawTime": 1785830580,
+        "rawPrice": 84.61,
         "color": "#F23645"
       },
       {
@@ -304092,10 +304302,10 @@
       },
       {
         "label": "2买",
-        "time": 1786138740,
-        "price": 82.02,
-        "rawTime": 1786138740,
-        "rawPrice": 82.07,
+        "time": 1786139460,
+        "price": 82.06,
+        "rawTime": 1786139460,
+        "rawPrice": 82.11,
         "color": "#F23645"
       },
       {
@@ -304124,10 +304334,10 @@
       },
       {
         "label": "2买",
-        "time": 1786586580,
-        "price": 87.82000000000001,
-        "rawTime": 1786586580,
-        "rawPrice": 87.87,
+        "time": 1786587480,
+        "price": 87.77,
+        "rawTime": 1786587480,
+        "rawPrice": 87.82,
         "color": "#F23645"
       },
       {
@@ -304172,10 +304382,10 @@
       },
       {
         "label": "类2买",
-        "time": 1786983660,
-        "price": 88.63000000000001,
-        "rawTime": 1786983660,
-        "rawPrice": 88.68,
+        "time": 1786981140,
+        "price": 88.64,
+        "rawTime": 1786981140,
+        "rawPrice": 88.69,
         "color": "#F23645"
       },
       {
@@ -304195,14 +304405,6 @@
         "color": "#F23645"
       },
       {
-        "label": "类2买",
-        "time": 1787107320,
-        "price": 91.46000000000001,
-        "rawTime": 1787107320,
-        "rawPrice": 91.51,
-        "color": "#F23645"
-      },
-      {
         "label": "2买",
         "time": 1787184000,
         "price": 91.42,
@@ -304216,30 +304418,6 @@
         "price": 91.7,
         "rawTime": 1787205600,
         "rawPrice": 91.75,
-        "color": "#F23645"
-      },
-      {
-        "label": "2买",
-        "time": 1787308200,
-        "price": 93.39,
-        "rawTime": 1787308200,
-        "rawPrice": 93.44,
-        "color": "#F23645"
-      },
-      {
-        "label": "类2买",
-        "time": 1787320980,
-        "price": 93.48,
-        "rawTime": 1787320980,
-        "rawPrice": 93.53,
-        "color": "#F23645"
-      },
-      {
-        "label": "3买",
-        "time": 1783010340,
-        "price": 70.97,
-        "rawTime": 1783010340,
-        "rawPrice": 71.02,
         "color": "#F23645"
       },
       {
@@ -304280,6 +304458,14 @@
         "price": 93.96000000000001,
         "rawTime": 1784711160,
         "rawPrice": 94.01,
+        "color": "#F23645"
+      },
+      {
+        "label": "3买",
+        "time": 1784768040,
+        "price": 95.33,
+        "rawTime": 1784768040,
+        "rawPrice": 95.38,
         "color": "#F23645"
       },
       {
@@ -304355,28 +304541,20 @@
         "color": "#F23645"
       },
       {
-        "label": "3买",
-        "time": 1787110920,
-        "price": 91.44,
-        "rawTime": 1787110920,
-        "rawPrice": 91.49,
-        "color": "#F23645"
-      },
-      {
-        "label": "3买",
-        "time": 1787212800,
-        "price": 92.44,
-        "rawTime": 1787212800,
-        "rawPrice": 92.49,
-        "color": "#F23645"
-      },
-      {
         "label": "1买",
         "time": 1782991980,
         "price": 70.09,
         "rawTime": 1782991980,
         "rawPrice": 70.14,
         "color": "#F23645"
+      },
+      {
+        "label": "1买",
+        "time": 1783007100,
+        "price": 70.37,
+        "rawTime": 1783007100,
+        "rawPrice": 70.42,
+        "color": "#089981"
       },
       {
         "label": "1买",
@@ -304396,11 +304574,19 @@
       },
       {
         "label": "1买",
+        "time": 1783324260,
+        "price": 70.97,
+        "rawTime": 1783324260,
+        "rawPrice": 71.02,
+        "color": "#F23645"
+      },
+      {
+        "label": "1买",
         "time": 1783357560,
         "price": 71.61,
         "rawTime": 1783357560,
         "rawPrice": 71.66,
-        "color": "#089981"
+        "color": "#F23645"
       },
       {
         "label": "1买",
@@ -304409,6 +304595,14 @@
         "rawTime": 1783426140,
         "rawPrice": 72.41,
         "color": "#F23645"
+      },
+      {
+        "label": "1买",
+        "time": 1783515240,
+        "price": 77.13000000000001,
+        "rawTime": 1783515240,
+        "rawPrice": 77.18,
+        "color": "#089981"
       },
       {
         "label": "1买",
@@ -304500,10 +304694,10 @@
       },
       {
         "label": "1买",
-        "time": 1784621340,
-        "price": 87.82000000000001,
-        "rawTime": 1784621340,
-        "rawPrice": 87.87,
+        "time": 1784612880,
+        "price": 88.06,
+        "rawTime": 1784612880,
+        "rawPrice": 88.11,
         "color": "#F23645"
       },
       {
@@ -304513,6 +304707,14 @@
         "rawTime": 1784657160,
         "rawPrice": 90.64,
         "color": "#089981"
+      },
+      {
+        "label": "1买",
+        "time": 1784727180,
+        "price": 93.11,
+        "rawTime": 1784727180,
+        "rawPrice": 93.16,
+        "color": "#F23645"
       },
       {
         "label": "1买",
@@ -304604,6 +304806,14 @@
       },
       {
         "label": "1买",
+        "time": 1785740040,
+        "price": 82.58,
+        "rawTime": 1785740040,
+        "rawPrice": 82.63,
+        "color": "#089981"
+      },
+      {
+        "label": "1买",
         "time": 1785764340,
         "price": 82.66,
         "rawTime": 1785764340,
@@ -304616,7 +304826,7 @@
         "price": 82.97,
         "rawTime": 1785780180,
         "rawPrice": 83.02,
-        "color": "#089981"
+        "color": "#F23645"
       },
       {
         "label": "1买",
@@ -304624,7 +304834,7 @@
         "price": 84.24000000000001,
         "rawTime": 1785826980,
         "rawPrice": 84.29,
-        "color": "#F23645"
+        "color": "#089981"
       },
       {
         "label": "1买",
@@ -304744,7 +304954,7 @@
         "price": 90.81,
         "rawTime": 1787077800,
         "rawPrice": 90.86,
-        "color": "#F23645"
+        "color": "#089981"
       },
       {
         "label": "1买",
@@ -304760,7 +304970,7 @@
         "price": 91.08,
         "rawTime": 1787168520,
         "rawPrice": 91.13,
-        "color": "#F23645"
+        "color": "#089981"
       },
       {
         "label": "1买",
@@ -304771,19 +304981,11 @@
         "color": "#089981"
       },
       {
-        "label": "1买",
-        "time": 1787302980,
-        "price": 92.69,
-        "rawTime": 1787302980,
-        "rawPrice": 92.74,
-        "color": "#F23645"
-      },
-      {
-        "label": "1买",
-        "time": 1787349420,
-        "price": 93.54,
-        "rawTime": 1787349420,
-        "rawPrice": 93.59,
+        "label": "2卖",
+        "time": 1782989280,
+        "price": 70.81,
+        "rawTime": 1782989280,
+        "rawPrice": 70.76,
         "color": "#F23645"
       },
       {
@@ -304844,10 +305046,18 @@
       },
       {
         "label": "2卖",
-        "time": 1783580940,
-        "price": 78.24,
-        "rawTime": 1783580940,
-        "rawPrice": 78.19,
+        "time": 1783510560,
+        "price": 78.67999999999999,
+        "rawTime": 1783510560,
+        "rawPrice": 78.63,
+        "color": "#F23645"
+      },
+      {
+        "label": "2卖",
+        "time": 1783571220,
+        "price": 79.03,
+        "rawTime": 1783571220,
+        "rawPrice": 78.98,
         "color": "#F23645"
       },
       {
@@ -305020,6 +305230,14 @@
       },
       {
         "label": "2卖",
+        "time": 1785124440,
+        "price": 88.24,
+        "rawTime": 1785124440,
+        "rawPrice": 88.19,
+        "color": "#F23645"
+      },
+      {
+        "label": "类2卖",
         "time": 1785128760,
         "price": 87.74,
         "rawTime": 1785128760,
@@ -305108,10 +305326,10 @@
       },
       {
         "label": "类2卖",
-        "time": 1785466620,
-        "price": 86.06,
-        "rawTime": 1785466620,
-        "rawPrice": 86.01,
+        "time": 1785431700,
+        "price": 87.34,
+        "rawTime": 1785431700,
+        "rawPrice": 87.29,
         "color": "#F23645"
       },
       {
@@ -305120,6 +305338,22 @@
         "price": 88.81,
         "rawTime": 1785510360,
         "rawPrice": 88.76,
+        "color": "#F23645"
+      },
+      {
+        "label": "2卖",
+        "time": 1785718800,
+        "price": 84.22,
+        "rawTime": 1785718800,
+        "rawPrice": 84.17,
+        "color": "#F23645"
+      },
+      {
+        "label": "类2卖",
+        "time": 1785724200,
+        "price": 84.06,
+        "rawTime": 1785724200,
+        "rawPrice": 84.01,
         "color": "#F23645"
       },
       {
@@ -305332,18 +305566,18 @@
       },
       {
         "label": "2卖",
-        "time": 1787133780,
-        "price": 92.14,
-        "rawTime": 1787133780,
-        "rawPrice": 92.09,
+        "time": 1787108760,
+        "price": 91.86999999999999,
+        "rawTime": 1787108760,
+        "rawPrice": 91.82,
         "color": "#F23645"
       },
       {
         "label": "类2卖",
-        "time": 1787139540,
-        "price": 92.00999999999999,
-        "rawTime": 1787139540,
-        "rawPrice": 91.96,
+        "time": 1787112540,
+        "price": 91.86,
+        "rawTime": 1787112540,
+        "rawPrice": 91.81,
         "color": "#F23645"
       },
       {
@@ -305363,35 +305597,11 @@
         "color": "#F23645"
       },
       {
-        "label": "2卖",
-        "time": 1787232600,
-        "price": 94.28999999999999,
-        "rawTime": 1787232600,
-        "rawPrice": 94.24,
-        "color": "#F23645"
-      },
-      {
-        "label": "类2卖",
-        "time": 1787240520,
-        "price": 94.02,
-        "rawTime": 1787240520,
-        "rawPrice": 93.97,
-        "color": "#F23645"
-      },
-      {
-        "label": "2卖",
-        "time": 1787344020,
-        "price": 94.2,
-        "rawTime": 1787344020,
-        "rawPrice": 94.15,
-        "color": "#F23645"
-      },
-      {
         "label": "1卖",
-        "time": 1782973620,
-        "price": 71.09,
-        "rawTime": 1782973620,
-        "rawPrice": 71.04,
+        "time": 1782980100,
+        "price": 71.27,
+        "rawTime": 1782980100,
+        "rawPrice": 71.22,
         "color": "#F23645"
       },
       {
@@ -305416,7 +305626,7 @@
         "price": 72.23,
         "rawTime": 1783097820,
         "rawPrice": 72.18,
-        "color": "#089981"
+        "color": "#F23645"
       },
       {
         "label": "1卖",
@@ -305480,6 +305690,14 @@
         "price": 76.89999999999999,
         "rawTime": 1783656900,
         "rawPrice": 76.85,
+        "color": "#089981"
+      },
+      {
+        "label": "1卖",
+        "time": 1783708920,
+        "price": 76.2,
+        "rawTime": 1783708920,
+        "rawPrice": 76.15,
         "color": "#089981"
       },
       {
@@ -305596,10 +305814,10 @@
       },
       {
         "label": "1卖",
-        "time": 1785217140,
-        "price": 85.61999999999999,
-        "rawTime": 1785217140,
-        "rawPrice": 85.57,
+        "time": 1785212100,
+        "price": 85.25,
+        "rawTime": 1785212100,
+        "rawPrice": 85.2,
         "color": "#089981"
       },
       {
@@ -305748,10 +305966,10 @@
       },
       {
         "label": "1卖",
-        "time": 1787130540,
-        "price": 92.42999999999999,
-        "rawTime": 1787130540,
-        "rawPrice": 92.38,
+        "time": 1787104080,
+        "price": 92.1,
+        "rawTime": 1787104080,
+        "rawPrice": 92.05,
         "color": "#F23645"
       },
       {
@@ -305764,26 +305982,34 @@
       },
       {
         "label": "1卖",
-        "time": 1787228460,
-        "price": 94.75999999999999,
-        "rawTime": 1787228460,
-        "rawPrice": 94.71,
+        "time": 1787333400,
+        "price": 94.88,
+        "rawTime": 1787333400,
+        "rawPrice": 94.83,
         "color": "#F23645"
       },
       {
         "label": "3卖",
-        "time": 1784899440,
-        "price": 98.23,
-        "rawTime": 1784899440,
-        "rawPrice": 98.18,
+        "time": 1783580940,
+        "price": 78.24,
+        "rawTime": 1783580940,
+        "rawPrice": 78.19,
         "color": "#F23645"
       },
       {
         "label": "3卖",
-        "time": 1785133980,
-        "price": 86.84,
-        "rawTime": 1785133980,
-        "rawPrice": 86.79,
+        "time": 1784905560,
+        "price": 97.53,
+        "rawTime": 1784905560,
+        "rawPrice": 97.48,
+        "color": "#F23645"
+      },
+      {
+        "label": "3卖",
+        "time": 1785139380,
+        "price": 87.61,
+        "rawTime": 1785139380,
+        "rawPrice": 87.56,
         "color": "#F23645"
       },
       {
@@ -305808,6 +306034,14 @@
         "price": 85.46,
         "rawTime": 1785474720,
         "rawPrice": 85.41,
+        "color": "#F23645"
+      },
+      {
+        "label": "3卖",
+        "time": 1785732120,
+        "price": 83.61,
+        "rawTime": 1785732120,
+        "rawPrice": 83.56,
         "color": "#F23645"
       },
       {
@@ -305862,26 +306096,26 @@
     "15": [
       {
         "label": "2买",
-        "time": 1783041300,
-        "price": 71.34,
-        "rawTime": 1783041300,
-        "rawPrice": 71.44,
+        "time": 1783007100,
+        "price": 70.32000000000001,
+        "rawTime": 1783007100,
+        "rawPrice": 70.42,
         "color": "#F23645"
       },
       {
         "label": "2买",
-        "time": 1783357200,
-        "price": 71.56,
-        "rawTime": 1783357560,
-        "rawPrice": 71.66,
+        "time": 1783091700,
+        "price": 71.52000000000001,
+        "rawTime": 1783091700,
+        "rawPrice": 71.62,
         "color": "#F23645"
       },
       {
         "label": "类2买",
-        "time": 1783395900,
-        "price": 72.25,
-        "rawTime": 1783396080,
-        "rawPrice": 72.35,
+        "time": 1783308600,
+        "price": 71.53,
+        "rawTime": 1783309140,
+        "rawPrice": 71.63,
         "color": "#F23645"
       },
       {
@@ -305934,10 +306168,10 @@
       },
       {
         "label": "2买",
-        "time": 1784750400,
-        "price": 93.42,
-        "rawTime": 1784750580,
-        "rawPrice": 93.52,
+        "time": 1784784600,
+        "price": 95.35000000000001,
+        "rawTime": 1784784600,
+        "rawPrice": 95.45,
         "color": "#F23645"
       },
       {
@@ -305958,18 +306192,18 @@
       },
       {
         "label": "2买",
-        "time": 1785763800,
-        "price": 82.61,
-        "rawTime": 1785764340,
-        "rawPrice": 82.71,
+        "time": 1785739500,
+        "price": 82.53,
+        "rawTime": 1785740040,
+        "rawPrice": 82.63,
         "color": "#F23645"
       },
       {
         "label": "类2买",
-        "time": 1785780000,
-        "price": 82.92,
-        "rawTime": 1785780180,
-        "rawPrice": 83.02,
+        "time": 1785763800,
+        "price": 82.61,
+        "rawTime": 1785764340,
+        "rawPrice": 82.71,
         "color": "#F23645"
       },
       {
@@ -306029,6 +306263,30 @@
         "color": "#F23645"
       },
       {
+        "label": "2买",
+        "time": 1787167800,
+        "price": 91.03,
+        "rawTime": 1787168520,
+        "rawPrice": 91.13,
+        "color": "#F23645"
+      },
+      {
+        "label": "类2买",
+        "time": 1787202900,
+        "price": 91.53,
+        "rawTime": 1787203080,
+        "rawPrice": 91.63,
+        "color": "#F23645"
+      },
+      {
+        "label": "3买",
+        "time": 1783041300,
+        "price": 71.34,
+        "rawTime": 1783041300,
+        "rawPrice": 71.44,
+        "color": "#F23645"
+      },
+      {
         "label": "3买",
         "time": 1783514700,
         "price": 77.08000000000001,
@@ -306046,18 +306304,18 @@
       },
       {
         "label": "3买",
-        "time": 1784784600,
-        "price": 95.35000000000001,
-        "rawTime": 1784784600,
-        "rawPrice": 95.45,
-        "color": "#F23645"
-      },
-      {
-        "label": "3买",
         "time": 1785370500,
         "price": 86.60000000000001,
         "rawTime": 1785370680,
         "rawPrice": 86.7,
+        "color": "#F23645"
+      },
+      {
+        "label": "3买",
+        "time": 1785826800,
+        "price": 84.19000000000001,
+        "rawTime": 1785826980,
+        "rawPrice": 84.29,
         "color": "#F23645"
       },
       {
@@ -306078,10 +306336,10 @@
       },
       {
         "label": "3买",
-        "time": 1787202900,
-        "price": 91.53,
-        "rawTime": 1787203080,
-        "rawPrice": 91.63,
+        "time": 1787077800,
+        "price": 90.76,
+        "rawTime": 1787077800,
+        "rawPrice": 90.86,
         "color": "#F23645"
       },
       {
@@ -306122,7 +306380,7 @@
         "price": 84.52000000000001,
         "rawTime": 1785475800,
         "rawPrice": 84.62,
-        "color": "#089981"
+        "color": "#F23645"
       },
       {
         "label": "1买",
@@ -306138,30 +306396,6 @@
         "price": 85.75,
         "rawTime": 1786629600,
         "rawPrice": 85.85,
-        "color": "#F23645"
-      },
-      {
-        "label": "1买",
-        "time": 1786714200,
-        "price": 86.43,
-        "rawTime": 1786714200,
-        "rawPrice": 86.53,
-        "color": "#089981"
-      },
-      {
-        "label": "2卖",
-        "time": 1783087200,
-        "price": 72.38,
-        "rawTime": 1783087560,
-        "rawPrice": 72.28,
-        "color": "#F23645"
-      },
-      {
-        "label": "类2卖",
-        "time": 1783097100,
-        "price": 72.28,
-        "rawTime": 1783097820,
-        "rawPrice": 72.18,
         "color": "#F23645"
       },
       {
@@ -306222,10 +306456,10 @@
       },
       {
         "label": "2卖",
-        "time": 1785216600,
-        "price": 85.66999999999999,
-        "rawTime": 1785217140,
-        "rawPrice": 85.57,
+        "time": 1785212100,
+        "price": 85.3,
+        "rawTime": 1785212100,
+        "rawPrice": 85.2,
         "color": "#F23645"
       },
       {
@@ -306374,10 +306608,10 @@
       },
       {
         "label": "1卖",
-        "time": 1787228100,
-        "price": 94.80999999999999,
-        "rawTime": 1787228100,
-        "rawPrice": 94.71,
+        "time": 1787103900,
+        "price": 92.14999999999999,
+        "rawTime": 1787103900,
+        "rawPrice": 92.05,
         "color": "#F23645"
       },
       {
@@ -306392,10 +306626,10 @@
     "60": [
       {
         "label": "2买",
-        "time": 1783321200,
-        "price": 70.68107142857143,
-        "rawTime": 1783323900,
-        "rawPrice": 71.02,
+        "time": 1783080000,
+        "price": 70.96107142857143,
+        "rawTime": 1783081800,
+        "rawPrice": 71.3,
         "color": "#F23645"
       },
       {
@@ -306416,14 +306650,6 @@
       },
       {
         "label": "2买",
-        "time": 1785474000,
-        "price": 84.28107142857144,
-        "rawTime": 1785475800,
-        "rawPrice": 84.62,
-        "color": "#F23645"
-      },
-      {
-        "label": "2买",
         "time": 1786104000,
         "price": 81.16107142857143,
         "rawTime": 1786105800,
@@ -306436,6 +306662,14 @@
         "price": 86.19107142857143,
         "rawTime": 1786714200,
         "rawPrice": 86.53,
+        "color": "#F23645"
+      },
+      {
+        "label": "类2买",
+        "time": 1787140800,
+        "price": 90.06107142857144,
+        "rawTime": 1787142600,
+        "rawPrice": 90.4,
         "color": "#F23645"
       },
       {
@@ -306504,10 +306738,10 @@
       },
       {
         "label": "1卖",
-        "time": 1785531600,
-        "price": 91.69892857142857,
-        "rawTime": 1785531600,
-        "rawPrice": 91.36,
+        "time": 1785391200,
+        "price": 89.83892857142857,
+        "rawTime": 1785391200,
+        "rawPrice": 89.5,
         "color": "#089981"
       },
       {
@@ -306554,10 +306788,10 @@
       },
       {
         "label": "2卖",
-        "time": 1785528000,
-        "price": 91.91107142857143,
-        "rawTime": 1785531600,
-        "rawPrice": 91.36,
+        "time": 1785384000,
+        "price": 90.05107142857143,
+        "rawTime": 1785391200,
+        "rawPrice": 89.5,
         "color": "#F23645"
       },
       {

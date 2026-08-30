@@ -387,14 +387,34 @@ def lockedPivotsOf(prevBis):
     return arr
 
 
-def alignBiToUpper(lowerBis, upperBis, upperIntervalSec):
+def alignBiToUpper(lowerBis, upperBis, upperIntervalSec, lowerBars=None):
     """区间套强制对齐（优先级最高）：把下级周期笔的拐点对齐到上级周期笔的拐点。
     上级笔的每个起点/终点都是明确极值（顶/底），下级周期必须复现相同极值。
     当下级周期因包含关系把上级极值吞掉（如插针低点/高点）时，下级拐点会漂移到次极值上；
     本函数把「同方向且时间最近」的下级拐点快照到上级拐点的（时间+价格）。
-    upperIntervalSec 为上级周期K线间隔（秒），作为时间容差。原地修改并返回 lowerBis。"""
+    upperIntervalSec 为上级周期K线间隔（秒），作为时间容差。
+    lowerBars 为本级别原始K线（可选）：幽灵端点防御——上级极值可能只存在于上级聚合
+    数据中（跨周期数据源差异，如日K聚合低点低于该日所有日内K线），本级K线无法复现该
+    极值；若上级极值超出「上级bar时间跨度内本级K线的局部价格范围」，跳过对该拐点对齐
+    （保留本级别真实极值），避免画出本级不存在的幽灵端点。原地修改并返回 lowerBis。"""
     if not lowerBis or not upperBis:
         return lowerBis
+
+    tol = upperIntervalSec or 0
+
+    def local_price_range(up):
+        if not lowerBars:
+            return None
+        mn = mx = None
+        t_end = up["time"] + tol
+        for b in lowerBars:
+            if b["time"] < up["time"] or b["time"] >= t_end:
+                continue
+            if "low" in b and (mn is None or b["low"] < mn):
+                mn = b["low"]
+            if "high" in b and (mx is None or b["high"] > mx):
+                mx = b["high"]
+        return {"mn": mn, "mx": mx} if (mn is not None and mx is not None) else None
 
     upperPts = []
     for b in upperBis:
@@ -404,7 +424,6 @@ def alignBiToUpper(lowerBis, upperBis, upperIntervalSec):
         else:
             upperPts.append({"time": b["startTime"], "price": b["startPrice"], "dir": "top"})
             upperPts.append({"time": b["endTime"], "price": b["endPrice"], "dir": "bottom"})
-    tol = upperIntervalSec or 0
 
     n = len(lowerBis)
     pts = [None] * (n + 1)
@@ -440,6 +459,16 @@ def alignBiToUpper(lowerBis, upperBis, upperIntervalSec):
             # 仅当下级拐点「更不极端」（漏掉上级真极值）时才对齐时间+价格；
             # 否则（下级已找到相同极值）只对齐价格保持严格相等，保留下级更精确的时间。
             lessExtreme = (p["price"] > up["price"]) if up["dir"] == "bottom" else (p["price"] < up["price"])
+            # 幽灵端点防御：上级极值在本级数据中不存在（跨周期数据源聚合差异）→
+            # 跳过对齐，保留本级别真实极值
+            if lessExtreme:
+                r = local_price_range(up)
+                if r is not None:
+                    price_tol = 0.01  # 价格容差，仅防浮点误差
+                    if up["dir"] == "bottom" and up["price"] < r["mn"] - price_tol:
+                        continue
+                    if up["dir"] == "top" and up["price"] > r["mx"] + price_tol:
+                        continue
             used[best] = True
             p["price"] = up["price"]
             if lessExtreme:

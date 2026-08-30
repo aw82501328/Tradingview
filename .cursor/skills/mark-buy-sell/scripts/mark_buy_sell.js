@@ -65,8 +65,15 @@ if (m) {
 }
 const PERIODS = getStrArg("periods", "D,240,60,15,3")
   .split(",").map(s => s.trim()).filter(Boolean);
+// 每类买卖点保留的个数（默认 1，即每类只保留时间上最近的一个，减少图上标记数量）
+const KEEP = Math.max(1, parseInt(getStrArg("keep", "1"), 10) || 1);
 
 const ANCHOR_BUFFER = 30;
+
+// 小周期只加载最近 N 天的K线：3分钟最近15天、15分钟最近30天，
+// 与画笔 chan-bi 的 DRAW_WINDOW_DAYS 保持一致——画笔只绘制窗口内笔，
+// 本脚本加载K线只需覆盖窗口内买卖点即可，避免为覆盖起始日期加载数月完整历史而超时。
+const DRAW_WINDOW_DAYS = { '3': 15, '15': 30 };
 
 // ============================================================
 // 买卖点显示配置
@@ -222,7 +229,7 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
       }
     };
 
-    const fetchBars = async (expectedIntervalSec, fromTs, buffer) => {
+    const fetchBars = async (expectedIntervalSec, fromTs, buffer, windowDays) => {
       const tolerance = Math.max(expectedIntervalSec * 24, 6 * 3600);
       let lastD = null;
       for (let attempt = 0; attempt < 90; attempt++) {
@@ -243,12 +250,17 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
             gaps.sort((a, b) => a - b);
             const gap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 0;
             const fromTs = ${JSON.stringify(fromTs)};
+            const windowDays = ${JSON.stringify(windowDays || null)};
             const tolerance = ${JSON.stringify(tolerance)};
-            if (fromTs) {
-              if (bars[0].time > fromTs + tolerance) {
+            // 小周期窗口：覆盖目标从 fromTs 改为 max(fromTs, 最新K线时间 - windowDays*86400)，
+            // 只需加载最近 N 天数据即可通过覆盖检查，避免为覆盖起始日期加载数月完整历史而超时
+            const latestTs = bars.length ? bars[bars.length - 1].time : 0;
+            const effFrom = (fromTs && windowDays) ? Math.max(fromTs, latestTs - windowDays * 86400) : fromTs;
+            if (effFrom) {
+              if (bars[0].time > effFrom + tolerance) {
                 return { bars: [], resolution: String(chart.resolution()), gap, len: bars.length, notCovered: true };
               }
-              const fromIdx = bars.findIndex(k => k.time >= fromTs);
+              const fromIdx = bars.findIndex(k => k.time >= effFrom);
               const buf = ${buffer || 0};
               const start = Math.max(0, fromIdx - buf);
               return { bars: bars.slice(start), resolution: String(chart.resolution()), gap, len: bars.length };
@@ -466,14 +478,14 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
         currentRes = res;
       }
 
-      let d = await fetchBars(intervalSecOf(res), FROM_TS, ANCHOR_BUFFER);
+      let d = await fetchBars(intervalSecOf(res), FROM_TS, ANCHOR_BUFFER, DRAW_WINDOW_DAYS[res]);
       if (!d || d.error || !d.bars || d.bars.length === 0) {
         // 数据未加载好（切换周期时序问题），等待后重试一次
         console.log(`\n[周期 ${res}] 首次取数失败，等待重试...`);
         await sleep(3000);
         await ensureResolution(res);
         currentRes = res;
-        d = await fetchBars(intervalSecOf(res), FROM_TS, ANCHOR_BUFFER);
+        d = await fetchBars(intervalSecOf(res), FROM_TS, ANCHOR_BUFFER, DRAW_WINDOW_DAYS[res]);
       }
       if (!d || d.error || !d.bars || d.bars.length === 0) {
         console.log(`\n[周期 ${res}] 无K线数据或切换失败，跳过`);
@@ -500,7 +512,7 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
       let buyPts = findBuyPoints(curBis, upperBis, macdArr, intervalSecOf(res));
       let sellPts = findSellPoints(curBis, upperBis, macdArr, intervalSecOf(res));
 
-      // 所有周期（含 3分钟）都保留区间套下识别出的全部买卖点，不做每类只留最近一个的过滤
+      // 保留区间套下识别出的全部买卖点，再做邻近合并后，按 --keep 每类只保留最近 N 个（默认 1，减少图上标记数量）
 
       // 一买锚定：除日线外，每个一买都锚定到上一级某笔的底部端点
       // 注意：2买/类2买 基于结构底，不依赖一买锚定，予以保留
@@ -533,6 +545,10 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
       const nearPrice = Math.max(atr * NEAR_ATR_RATIO, 0.05);
       anchoredBuyPts = mergeNearFirstSecond(anchoredBuyPts, "1买", "2买", "真1买", nearPrice);
       sellPts = mergeNearFirstSecond(sellPts, "1卖", "2卖", "真1卖", nearPrice);
+
+      // 每类买卖点只保留时间上最近 KEEP 个（--keep=N，默认 1），避免图上标记过多
+      anchoredBuyPts = keepRecentEach(anchoredBuyPts, KEEP);
+      sellPts = keepRecentEach(sellPts, KEEP);
 
       // 汇总标记：把时间吸附到本周期bar边界
       // rawTime/rawPrice 保存未吸附的原始点位，用于跨周期共振判定

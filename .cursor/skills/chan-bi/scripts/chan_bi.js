@@ -69,6 +69,11 @@ const MIN_WINDOW_BARS = 20;
 // 内层计算缓冲：锚点前额外取的K线数，保证窗口起点处能形成完整分型
 const ANCHOR_BUFFER = 30;
 
+// 小周期只加载并绘制最近 N 天的笔：3分钟最近15天、15分钟最近30天，
+// 避免从起始日期到最新的全部笔堆叠导致图上过密，同时缩小加载量、
+// 避免 3 分钟为覆盖起始日期加载数月完整历史而超时。
+const DRAW_WINDOW_DAYS = { '3': 15, '15': 30 };
+
 // ============================================================
 // 绘制配置（笔的颜色与周期可见范围）
 // ============================================================
@@ -198,7 +203,7 @@ function intervalVisibility(res) {
       }
     };
 
-    const fetchBars = async (expectedIntervalSec, fromTs, buffer) => {
+    const fetchBars = async (expectedIntervalSec, fromTs, buffer, windowDays) => {
       const needCover = fromTs !== null && fromTs !== undefined;
       // 允许K线起点与起始日期有小偏差：
       // 实际第一根K线通常晚于起始日 00:00（如 15分钟 7-2 03:15 > 7-2 00:00），
@@ -226,13 +231,18 @@ function intervalVisibility(res) {
             gaps.sort((a, b) => a - b);
             const gap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 0;
             const fromTs = ${JSON.stringify(fromTs)};
+            const windowDays = ${JSON.stringify(windowDays || null)};
             const tolerance = ${JSON.stringify(tolerance)};
-            if (fromTs) {
-              // 数据起点仍晚于起始日期较多（尚未覆盖）→ 返回 notCovered，触发历史加载
-              if (bars[0].time > fromTs + tolerance) {
+            // 小周期窗口：覆盖目标从 fromTs 改为 max(fromTs, 最新K线时间 - windowDays*86400)，
+            // 只要求加载最近 N 天数据即可通过覆盖检查，避免为覆盖起始日期加载数月完整历史而超时
+            const latestTs = bars.length ? bars[bars.length - 1].time : 0;
+            const effFrom = (fromTs && windowDays) ? Math.max(fromTs, latestTs - windowDays * 86400) : fromTs;
+            if (effFrom) {
+              // 数据起点仍晚于目标日期较多（尚未覆盖）→ 返回 notCovered，触发历史加载
+              if (bars[0].time > effFrom + tolerance) {
                 return { bars: [], resolution: String(chart.resolution()), gap, len: bars.length, notCovered: true };
               }
-              const fromIdx = bars.findIndex(k => k.time >= fromTs);
+              const fromIdx = bars.findIndex(k => k.time >= effFrom);
               const buf = ${buffer || 0};
               const start = Math.max(0, fromIdx - buf);
               return { bars: bars.slice(start), resolution: String(chart.resolution()), gap, len: bars.length };
@@ -503,7 +513,7 @@ function intervalVisibility(res) {
         currentRes = res;
       }
 
-      const d = await fetchBars(intervalSecOf(res), FROM_TS, ANCHOR_BUFFER);
+      const d = await fetchBars(intervalSecOf(res), FROM_TS, ANCHOR_BUFFER, DRAW_WINDOW_DAYS[res]);
       if (!d || d.error || !d.bars || d.bars.length === 0) {
         console.log(`\n[周期 ${res}] 无K线数据或切换失败，跳过`);
         continue;
@@ -589,7 +599,7 @@ function intervalVisibility(res) {
         let refBars = refCache[lowerRes];
         if (!refBars) {
           await ensureResolution(lowerRes);
-          const dref = await fetchBars(intervalSecOf(lowerRes), FROM_TS, ANCHOR_BUFFER);
+          const dref = await fetchBars(intervalSecOf(lowerRes), FROM_TS, ANCHOR_BUFFER, DRAW_WINDOW_DAYS[lowerRes]);
           if (dref && !dref.error && dref.bars && dref.bars.length > 0) {
             refBars = dref.bars;
             refCache[lowerRes] = refBars;
@@ -605,8 +615,21 @@ function intervalVisibility(res) {
 
       // 区间套强制对齐（优先级最高）：把本级别笔拐点对齐到紧邻上级笔拐点，
       // 使上级笔的极值端点在本级别中严格复现（上级底/顶=本级底/顶，同级同笔）。
+      // 第4参 rawBars：幽灵端点防御——上级极值在本级K线中不存在（跨周期数据源聚合
+      // 差异）时跳过对齐，保留本级别真实极值
       if (pi > 0 && prevBis && prevBis.length > 0) {
-        drawBis = alignBiToUpper(drawBis, prevBis, intervalSecOf(PERIODS[pi - 1]));
+        drawBis = alignBiToUpper(drawBis, prevBis, intervalSecOf(PERIODS[pi - 1]), rawBars);
+      }
+
+      // 小周期绘制窗口：只保留最近 N 天内结束的笔（窗口起点 = 最新K线时间往前推 N 天），
+      // 用于 3分钟/15分钟 等小周期避免从起始日期到最新的全部笔堆叠导致图上过密。
+      const winDays = DRAW_WINDOW_DAYS[res];
+      if (winDays) {
+        const latestTs = rawBars[rawBars.length - 1].time;
+        const windowStart = latestTs - winDays * 86400;
+        const beforeWin = drawBis.length;
+        drawBis = drawBis.filter(b => b.endTime >= windowStart);
+        if (DEBUG) console.log(`[绘制窗口] ${res} 只绘制最近 ${winDays} 天（${toT(windowStart)} 之后）的笔，过滤 ${beforeWin - drawBis.length} 根`);
       }
 
       console.log("\n=== 缠论计算结果 [周期 " + res + "] ===");

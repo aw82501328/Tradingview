@@ -675,10 +675,10 @@ function fmtT(ts) {
 
 /**
  * 计算一笔区间内的 MACD 动能指标（用于背驰判定）
- * 返回：{ redArea, greenArea, difHigh, difLow }
+ * 返回：{ redArea, greenArea, difHigh, difLow, redMax, greenMax }
  */
 function biMacdMetrics(bi, macdArr) {
-  const metrics = { redArea: 0, greenArea: 0, difHigh: -Infinity, difLow: Infinity };
+  const metrics = { redArea: 0, greenArea: 0, difHigh: -Infinity, difLow: Infinity, redMax: 0, greenMax: 0 };
   if (!macdArr || macdArr.length === 0) return null;
   const t0 = bi.startTime, t1 = bi.endTime;
   let found = false;
@@ -686,8 +686,13 @@ function biMacdMetrics(bi, macdArr) {
     if (m.time < t0) continue;
     if (m.time > t1) break;
     found = true;
-    if (m.macd > 0) metrics.redArea += m.macd;
-    else metrics.greenArea += -m.macd;
+    if (m.macd > 0) {
+      metrics.redArea += m.macd;
+      if (m.macd > metrics.redMax) metrics.redMax = m.macd;
+    } else {
+      metrics.greenArea += -m.macd;
+      if (-m.macd > metrics.greenMax) metrics.greenMax = -m.macd;
+    }
     if (m.dif > metrics.difHigh) metrics.difHigh = m.dif;
     if (m.dif < metrics.difLow) metrics.difLow = m.dif;
   }
@@ -697,17 +702,17 @@ function biMacdMetrics(bi, macdArr) {
 
 /**
  * MACD 背驰判定（OR 关系，满足其一即算背驰）：
- *   底背驰（对应一买，下跌笔）：绿柱面积变小 或 黄白线低点抬高（下跌动能减弱）
- *   顶背驰（对应一卖，上涨笔）：红柱面积变小 或 黄白线高点变低（上涨动能减弱）
+ *   底背驰（对应一买，下跌笔）：绿柱面积变小 或 黄白线低点抬高 或 绿柱最大高度变小（下跌动能减弱）
+ *   顶背驰（对应一卖，上涨笔）：红柱面积变小 或 黄白线高点变低 或 红柱最大高度变小（上涨动能减弱）
  */
 function isBiDiverge(bi, refer, macdArr) {
   const cur = biMacdMetrics(bi, macdArr);
   const ref = biMacdMetrics(refer, macdArr);
   if (!cur || !ref) return false;
   if (bi.type === "down") {
-    return cur.greenArea < ref.greenArea || cur.difLow > ref.difLow;
+    return cur.greenArea < ref.greenArea || cur.difLow > ref.difLow || cur.greenMax < ref.greenMax;
   }
-  return cur.redArea < ref.redArea || cur.difHigh < ref.difHigh;
+  return cur.redArea < ref.redArea || cur.difHigh < ref.difHigh || cur.redMax < ref.redMax;
 }
 
 // ============================================================
@@ -958,6 +963,7 @@ function findBuyPoints(bis, upperBis, macdArr, barSec) {
           `| 创新低=${cur.endPrice < refer.endPrice} ` +
           `| 绿柱面积 ${cm ? cm.greenArea.toFixed(2) : "-"} vs ${rm ? rm.greenArea.toFixed(2) : "-"} (变小=${cm && rm ? cm.greenArea < rm.greenArea : false}) ` +
           `| DIF低点 ${cm ? cm.difLow.toFixed(3) : "-"} vs ${rm ? rm.difLow.toFixed(3) : "-"} (抬高=${cm && rm ? cm.difLow > rm.difLow : false}) ` +
+          `| 绿柱最大高度 ${cm ? cm.greenMax.toFixed(2) : "-"} vs ${rm ? rm.greenMax.toFixed(2) : "-"} (变小=${cm && rm ? cm.greenMax < rm.greenMax : false}) ` +
           `| 背驰=${diverge}`
         );
       }
@@ -1122,6 +1128,7 @@ function findSellPoints(bis, upperBis, macdArr, barSec) {
           `| 创新高=${cur.endPrice > refer.endPrice} ` +
           `| 红柱面积 ${cm ? cm.redArea.toFixed(2) : "-"} vs ${rm ? rm.redArea.toFixed(2) : "-"} (变小=${cm && rm ? cm.redArea < rm.redArea : false}) ` +
           `| DIF高点 ${cm ? cm.difHigh.toFixed(3) : "-"} vs ${rm ? rm.difHigh.toFixed(3) : "-"} (变低=${cm && rm ? cm.difHigh < rm.difHigh : false}) ` +
+          `| 红柱最大高度 ${cm ? cm.redMax.toFixed(2) : "-"} vs ${rm ? rm.redMax.toFixed(2) : "-"} (变小=${cm && rm ? cm.redMax < rm.redMax : false}) ` +
           `| 背驰=${diverge}`
         );
       }
@@ -1278,12 +1285,28 @@ function findSellPoints(bis, upperBis, macdArr, barSec) {
 }
 
 /** 低级别每类买卖点只保留时间上最近的一个（历史策略保留，现主流程已不调用） */
-function keepRecentEach(points) {
+function keepRecentEach(points, keep = 1) {
+  // keep：每类买卖点保留的个数（默认 1，即每类只保留时间上最近的一个）
+  const n = Math.max(1, Math.floor(keep) || 1);
   const byType = {};
   for (const p of points) {
     if (!byType[p.type] || p.time > byType[p.type].time) byType[p.type] = p;
   }
-  return Object.values(byType).sort((a, b) => a.time - b.time);
+  if (n === 1) {
+    return Object.values(byType).sort((a, b) => a.time - b.time);
+  }
+  // keep > 1：每类按时间倒序取最近 n 个（保证保留的是时间上最新的一组）
+  const groups = {};
+  for (const p of points) {
+    if (!groups[p.type]) groups[p.type] = [];
+    groups[p.type].push(p);
+  }
+  const out = [];
+  for (const key of Object.keys(groups)) {
+    groups[key].sort((a, b) => b.time - a.time);
+    out.push(...groups[key].slice(0, n));
+  }
+  return out.sort((a, b) => a.time - b.time);
 }
 
 // ============================================================
@@ -1320,9 +1343,34 @@ function lockedPivotsOf(prevBis) {
  * @param {Array} lowerBis 下级周期笔（原地修改并返回）
  * @param {Array} upperBis 上级周期笔
  * @param {number} upperIntervalSec 上级周期K线间隔（秒），作为时间容差
+ * @param {Array} lowerBars 本级别原始K线（可选）。幽灵端点防御用：若上级极值超出
+ *   上级bar时间跨度内本级别K线的局部价格范围（跨周期数据源聚合差异），跳过对该拐点对齐。
  */
-function alignBiToUpper(lowerBis, upperBis, upperIntervalSec) {
+function alignBiToUpper(lowerBis, upperBis, upperIntervalSec, lowerBars) {
   if (!lowerBis || !upperBis || lowerBis.length === 0 || upperBis.length === 0) return lowerBis;
+  const tol = upperIntervalSec || 0;
+
+  // 幽灵端点防御（可选，lowerBars 未传时跳过，保持向后兼容）：
+  // 上级极值可能只存在于上级聚合数据中（跨周期数据源差异，如日K聚合低点低于该日
+  // 所有日内K线），此时在本级K线中无法复现该极值。若把本级拐点强行对齐到该价格，
+  // 会画出本级数据中不存在的「幽灵端点」。
+  // 判定：取上级拐点所在上级bar时间跨度 [up.time, up.time+tol) 内本级K线的局部价格范围，
+  // 若上级极值超出该范围（底低于局部所有K线最低价 / 顶高于局部所有K线最高价），
+  // 视为幽灵端点，跳过对该拐点的对齐（保留本级别真实极值）。
+  // 注：不能只校验全局范围——本窗口其他时段可能有更极端的低点（如更早的插针），
+  // 全局范围校验会漏判「本局部时段内不存在」的上级极值。
+  const localPriceRange = (up) => {
+    if (!lowerBars || lowerBars.length === 0) return null;
+    let mn = null, mx = null;
+    const tEnd = up.time + tol;
+    for (const b of lowerBars) {
+      if (b.time < up.time || b.time >= tEnd) continue;
+      if (b.low !== undefined && (mn === null || b.low < mn)) mn = b.low;
+      if (b.high !== undefined && (mx === null || b.high > mx)) mx = b.high;
+    }
+    return (mn !== null && mx !== null) ? { mn, mx } : null;
+  };
+
   // 上级拐点：每笔的起点+终点
   const upperPts = [];
   for (const b of upperBis) {
@@ -1334,7 +1382,6 @@ function alignBiToUpper(lowerBis, upperBis, upperIntervalSec) {
       upperPts.push({ time: b.endTime, price: b.endPrice, dir: "bottom" });
     }
   }
-  const tol = upperIntervalSec || 0;
 
   // 下级拐点：n 笔 → n+1 个拐点（相邻两笔共享同一拐点）
   const n = lowerBis.length;
@@ -1367,6 +1414,16 @@ function alignBiToUpper(lowerBis, upperBis, upperIntervalSec) {
       // 仅当下级拐点「更不极端」（漏掉上级真极值）时才对齐时间+价格；
       // 否则（下级已找到相同极值）只对齐价格保持严格相等，保留下级更精确的时间。
       const lessExtreme = up.dir === "bottom" ? p.price > up.price : p.price < up.price;
+      // 幽灵端点防御：上级极值在本级数据中不存在（跨周期数据源聚合差异）→
+      // 跳过对齐，保留本级别真实极值
+      if (lessExtreme) {
+        const r = localPriceRange(up);
+        if (r) {
+          const PRICE_TOL = 0.01; // 价格容差，仅防浮点误差
+          if (up.dir === "bottom" && up.price < r.mn - PRICE_TOL) continue;
+          if (up.dir === "top" && up.price > r.mx + PRICE_TOL) continue;
+        }
+      }
       used[best] = true;
       p.price = up.price;
       if (lessExtreme) p.time = up.time;

@@ -56,8 +56,9 @@ def compute_bis(rawBarsByRes, refBarsByRes):
             refBars = refBarsByRes[res]
             drawBis = core.calibrateBiTimes(drawBis, rawBars, refBars, core.intervalSecOf(res))
         # 区间套强制对齐：把本级别笔拐点对齐到紧邻上级笔拐点
+        # 第4参 rawBars：幽灵端点防御（与 chan_bi.js 口径一致）
         if prevBis:
-            drawBis = core.alignBiToUpper(drawBis, prevBis, core.intervalSecOf(PERIODS[i - 1]))
+            drawBis = core.alignBiToUpper(drawBis, prevBis, core.intervalSecOf(PERIODS[i - 1]), rawBars)
         allBis[res] = drawBis
         prevBis = drawBis
     return allBis
