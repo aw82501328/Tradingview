@@ -136,8 +136,8 @@ function isRangeBound(bis, bars, atr, cfg) {
 
 /**
  * 依据买卖点类型生成交易策略（用户规则）。
- *   1卖 → 多头（逆势），等待反弹后做2卖；
- *   1买 → 空头（逆势），等待回调后做2买；
+ *   1卖 → 空头，等待反弹后做2卖；
+ *   1买 → 多头，等待回调后做2买；
  *   2买/类2买/3买 → 买点后过左高不背驰：多头，等待回调后的新买点；
  *                    其他分类：多头（逆势），等待高点附近的一卖；
  *   2卖/类2卖/3卖 → 卖点后过左低不背驰：空头，等待反弹后的新卖点；
@@ -150,8 +150,8 @@ function isRangeBound(bis, bars, atr, cfg) {
  */
 function strategyOf(res, type, reason, label, cls) {
   const base = { res, reason, label };
-  if (type === "1卖") return { ...base, direction: "多头（逆势）", strategy: "等待反弹后做2卖" };
-  if (type === "1买") return { ...base, direction: "空头（逆势）", strategy: "等待回调后做2买" };
+  if (type === "1卖") return { ...base, direction: "空头", strategy: "等待反弹后做2卖" };
+  if (type === "1买") return { ...base, direction: "多头", strategy: "等待回调后做2买" };
   if (type === "2买" || type === "类2买" || type === "3买") {
     if (cls === "过左高不背驰") return { ...base, direction: "多头", strategy: "等待回调后的新买点" };
     return { ...base, direction: "多头（逆势）", strategy: "等待高点附近的一卖" };
@@ -656,6 +656,7 @@ async function main() {
     let currentRes = originalRes;
     let upperBis = null;
     const reportRows = []; // [{symbol, res, direction, strategy}]
+    const planRows = {}; // {res: {direction, strategy, reason, pointDesc}}，落盘供 mark-entry 读取
     for (let pi = 0; pi < PERIODS.length; pi++) {
       const res = PERIODS[pi];
       if (res !== currentRes) { await ensureResolution(res); currentRes = res; }
@@ -694,6 +695,13 @@ async function main() {
 
       // 汇总报告行
       reportRows.push({ symbol: SYMBOL, res, direction: p.direction, strategy: p.strategy, reason: p.reason || "" });
+      // 计划结果落盘收集（供 mark-entry 进出场读取：方向/策略/最近买卖点描述）
+      planRows[res] = {
+        direction: p.direction,
+        strategy: p.strategy,
+        reason: p.reason || "",
+        pointDesc: p.pointDesc || "",
+      };
 
       // 绘图：蓝色文字标记该周期策略（放可见范围顶部空白，最新bar右侧）
       // 内容：方向 + 策略，若找到最近买卖点则追加一行「最近买卖点:类型@时间(价格)」
@@ -709,6 +717,23 @@ async function main() {
     // 表格形式输出全部周期交易计划
     console.log("\n=== 各周期交易计划 ===");
     printPlanTable(reportRows);
+
+    // 计划结果落盘（供 mark-entry 进出场 SKILL 读取，判定各周期进场状态）
+    // 含 --dry 也落盘（与 chan-bi/mark-sr-flip 落盘行为一致）
+    try {
+      fs.mkdirSync(CACHE_DIR, { recursive: true });
+      const planFile = cacheFile("plan", SYMBOL);
+      const planPayload = {
+        symbol: SYMBOL,
+        from: null,
+        generatedAt: new Date().toISOString(),
+        periods: planRows,
+      };
+      fs.writeFileSync(planFile, JSON.stringify(planPayload, null, 2), "utf8");
+      console.log(`\n交易计划已落盘: ${planFile}（${Object.keys(planRows).length} 个周期）`);
+    } catch (e) {
+      console.log("警告: 交易计划落盘失败:", e.message);
+    }
 
     // 切回原周期
     if (originalRes !== currentRes) {

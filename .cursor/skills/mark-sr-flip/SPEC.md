@@ -134,3 +134,12 @@ score = 0.6 × norm(touchCount) + 0.4 × norm(barsPassed)
 | `chan-bi`（画笔） | **强制依赖**：读取其落盘笔数据；无笔数据不运行 |
 | `chan-core` | 仅复用 `calcATR` 等工具函数 |
 | `mark-entry`（进出场） | **读取本脚本落盘 `srflip_<品种>.json` 的 `merged` 字段**判断「靠近支阻位」；本脚本字段变更需保持 `merged` 结构兼容 |
+
+**运行依赖链**（完整执行顺序，各技能依序运行）：
+
+```
+画笔（chan-bi）→ 标记买卖点（mark-buy-sell）→ 支阻互换位（mark-sr-flip）→ 交易计划（trading-plan）→ 进出场（mark-entry）
+```
+
+- 本 SKILL（支阻互换位）在链中位于标记买卖点之后、交易计划之前，只**强制依赖画笔**的笔数据；
+- 落盘的 `srflip_<品种>.json` 供下游 `mark-entry` 判断「靠近支阻位」。
