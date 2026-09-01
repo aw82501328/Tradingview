@@ -19,7 +19,7 @@ import bisect
 
 from .chan_core import (
     buildBi, fixBiExtremes, calcATR, calcMACD, intervalSecOf, fmtT,
-    MacdAccumulator, AtrAccumulator, extendLastBi,
+    MacdAccumulator, AtrAccumulator, extendLastBi, extendLastBiFrom,
 )
 from .mark_buy_sell import compute_all_marks
 from .sr_flip import compute_srflip
@@ -77,8 +77,8 @@ class BacktestEngine:
     # ---------------- 增量计算 ----------------
 
     def _append_bars(self, res, new_bars):
-        """把 res 周期新增的K线逐根并入增量状态；返回该周期笔是否变化。"""
-        from .chan_core import _mergeStep, updateFractalsTail, extendLastBi
+        """把 res 周期新增的K线逐根并入增量状态；返回该周期笔结构是否变化（新分型或延伸推进）。"""
+        from .chan_core import _mergeStep, updateFractalsTail, extendLastBiFrom
         merged = self._merged[res]
         direction = self._merge_dir[res]
         macd = self._macd[res]
@@ -97,8 +97,18 @@ class BacktestEngine:
         if bis_changed:
             self._bis[res] = self._build_bis(merged, new_f, macd.to_list(), atr.value)
         # 最后一笔始终延伸到最新极端价（与 chan-bi 落盘数据一致）
-        sl = self.bars[res]["_list"][: self._cut[res]]
-        self._bis[res] = extendLastBi(self._bis[res], sl)
+        if self._bis[res]:
+            # 用二分定位最后笔起点在时间轴上的索引（O(log n)），只从该位置起增量扫描，
+            # 避免每根K线从 bars 头部全量扫描与整段切片复制导致的 O(n²)
+            last_start = self._bis[res][-1].get("startTime")
+            start_idx = bisect.bisect_left(self._times[res], last_start) if last_start is not None else 0
+            prev_end = (self._bis[res][-1].get("endTime"), self._bis[res][-1].get("endPrice"))
+            self._bis[res] = extendLastBiFrom(self._bis[res], self.bars[res]["_list"],
+                                              start_idx, endIdx=self._cut[res])
+            # 延伸实际推进了最后笔端点也算笔结构变化（供链路短路判断）
+            cur_end = (self._bis[res][-1].get("endTime"), self._bis[res][-1].get("endPrice"))
+            if cur_end != prev_end:
+                bis_changed = True
         return bis_changed
 
     def _build_bis(self, merged, fractals, macd, atr):
@@ -141,11 +151,18 @@ class BacktestEngine:
             self._advance_cut(t)
         log(f"预热完成：最小周期 {self.fine_res} 已到第 {start_i} 根（{fmtT(fine[start_i-1]['time'])}）")
 
+        # 预热后先做一次全量链路重算（含支阻位/计划/进出场），之后只在笔结构变化时重算，
+        # 避免每根K线全量重算链路（O(n) 扫描）导致回测 O(n²) 卡死
+        self._rebuild_chain()
+        pending = self._collect_signals(allSignals, seen, stats)
+
         for i in range(start_i, end_i):
             t = fine[i]["time"]
-            self._advance_cut(t)
-            self._rebuild_chain()
-            pending = self._collect_signals(allSignals, seen, stats)
+            changed = self._advance_cut(t)
+            # 笔结构无变化时仅推进K线，不重算链路、不产新信号（信号锚定在笔端点确认时出现）
+            if changed:
+                self._rebuild_chain()
+                pending = self._collect_signals(allSignals, seen, stats)
             # 上一根收集到的信号在下一根开盘价成交（延迟一拍）
             if i + 1 < end_i:
                 self._fill_pending(trades, pending, fine[i + 1]["open"], fine[i + 1]["time"], stats)
@@ -159,7 +176,8 @@ class BacktestEngine:
         return self._finish(allSignals, trades, stats)
 
     def _advance_cut(self, t):
-        """把各周期切片推进到 time<=t，逐根并入增量状态。"""
+        """把各周期切片推进到 time<=t，逐根并入增量状态；返回是否有周期笔结构变化。"""
+        changed = False
         for res in self.periods:
             times = self._times[res]
             k = bisect.bisect_right(times, t)
@@ -167,7 +185,9 @@ class BacktestEngine:
             if k != old:
                 self._cut[res] = k
                 new_bars = self.bars[res]["_list"][old:k]
-                self._append_bars(res, new_bars)
+                if self._append_bars(res, new_bars):
+                    changed = True
+        return changed
 
     def _rebuild_chain(self):
         """链路重算：买卖点 → 支阻位 → 交易计划 → 进出场（使用增量缓存指标）。"""

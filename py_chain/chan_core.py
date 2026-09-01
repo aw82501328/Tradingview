@@ -24,6 +24,8 @@
     ...
 """
 
+import bisect
+
 from datetime import datetime
 
 # ============================================================
@@ -363,10 +365,17 @@ def buildBi(fractals, merged, atr, macdArr, lockedPivots=None):
                     prev = result[-2]
                     moreExtreme = k["high"] >= prev["high"] if k["type"] == "top" else k["low"] <= prev["low"]
                     gapPrevLast = last["mergedIdx"] - prev["mergedIdx"]
-                    gapPrevK = k["mergedIdx"] - prev["mergedIdx"]
                     if CHAN_CFG["debug"]:
                         print(f"[阶段二] 间隔不足: {k['mergedIdx']} 与 {last['mergedIdx']}, moreExtreme={moreExtreme}, gapPrevLast={gapPrevLast}")
-                    if moreExtreme and (gapPrevLast <= 12 or gapPrevK >= 4):
+                    # 前顶/前底作废原则（缠论，与 JS chan-core 一致）：顶被更高顶突破时，
+                    # 作废前顶的条件是「前顶右侧是否已有足够K线构成笔」：
+                    #   prev→last 构成有效笔（间隔>=4 且 笔内无更极值 且 分型范围脱离）
+                    #   → 前顶有效，保留，不能被更高顶作废（如已走出有效下跌笔后，
+                    #     更高顶无法与右侧成笔，应作废的是新顶而非前顶）；
+                    # 仅当 prev→last 不构成有效笔时，更极端的 k 才能顶替 prev。
+                    prev_last_valid_bi = gapPrevLast >= 4 and \
+                        noMoreExtremeInside(prev, last) and fractalRangeClear(prev, last)
+                    if moreExtreme and not prev_last_valid_bi:
                         # 回溯替换保护（区间套一致性）：当 last 比更早的同类型分型 result[-3] 更极端时，
                         # last 是笔内真实转折点（如插针低点/插针高点），不能无条件 pop 掉——吞掉会导致
                         # 该笔内部藏着更极值（违反笔内极值原则），且本级别笔端点与上级周期（区间套）不重合。
@@ -752,8 +761,11 @@ def fmtT(ts):
 
 
 def biMacdMetrics(bi, macdArr):
-    """计算一笔区间内的 MACD 动能指标 { redArea, greenArea, difHigh, difLow }。"""
-    metrics = {"redArea": 0.0, "greenArea": 0.0, "difHigh": float("-inf"), "difLow": float("inf")}
+    """计算一笔区间内的 MACD 动能指标
+    { redArea, greenArea, difHigh, difLow, redMax, greenMax }。
+    与 JS 版一致：redMax=单根红柱最大高度、greenMax=单根绿柱最大绝对值。"""
+    metrics = {"redArea": 0.0, "greenArea": 0.0, "difHigh": float("-inf"),
+               "difLow": float("inf"), "redMax": 0.0, "greenMax": 0.0}
     if not macdArr or len(macdArr) == 0:
         return None
     t0 = bi["startTime"]
@@ -767,8 +779,12 @@ def biMacdMetrics(bi, macdArr):
         found = True
         if m["macd"] > 0:
             metrics["redArea"] += m["macd"]
+            if m["macd"] > metrics["redMax"]:
+                metrics["redMax"] = m["macd"]
         else:
             metrics["greenArea"] += -m["macd"]
+            if -m["macd"] > metrics["greenMax"]:
+                metrics["greenMax"] = -m["macd"]
         if m["dif"] > metrics["difHigh"]:
             metrics["difHigh"] = m["dif"]
         if m["dif"] < metrics["difLow"]:
@@ -779,14 +795,18 @@ def biMacdMetrics(bi, macdArr):
 
 
 def isBiDiverge(bi, refer, macdArr):
-    """MACD 背驰判定（OR 关系，满足其一即算背驰）。"""
+    """MACD 背驰判定（OR 关系，满足其一即算背驰，与 JS 一致）：
+    底背驰（对应一买，下跌笔）：绿柱面积变小 或 黄白线低点抬高 或 绿柱最大高度变小；
+    顶背驰（对应一卖，上涨笔）：红柱面积变小 或 黄白线高点变低 或 红柱最大高度变小。"""
     cur = biMacdMetrics(bi, macdArr)
     ref = biMacdMetrics(refer, macdArr)
     if cur is None or ref is None:
         return False
     if bi["type"] == "down":
-        return cur["greenArea"] < ref["greenArea"] or cur["difLow"] > ref["difLow"]
-    return cur["redArea"] < ref["redArea"] or cur["difHigh"] < ref["difHigh"]
+        return (cur["greenArea"] < ref["greenArea"] or cur["difLow"] > ref["difLow"]
+                or cur["greenMax"] < ref["greenMax"])
+    return (cur["redArea"] < ref["redArea"] or cur["difHigh"] < ref["difHigh"]
+            or cur["redMax"] < ref["redMax"])
 
 
 # ============================================================
@@ -828,20 +848,39 @@ def hasMacdCrossBetween(macdArr, merged, aIdx, bIdx, aTime, bTime, direction=Non
 
 
 def extendLastBi(bisArr, bars):
-    """未完成笔延伸：最后一笔推进到最新极端价。"""
+    """未完成笔延伸：最后一笔推进到最新极端价。
+
+    原逻辑：从头线性扫描 bars 找最后笔起点（O(n)），再扫描起点到末尾取极端价。
+    现改为：用二分（bars 时间升序）定位起点（O(log n)），再复用 extendLastBiFrom 做增量延伸。
+    对外行为与原来完全一致（gapLocked 不延伸、up 找更高高点、down 找更低低点）。
+    """
     if not bisArr or len(bisArr) == 0:
         return bisArr
     last = bisArr[-1]
     if last.get("gapLocked", False):
         return bisArr
-    startIdx = -1
-    for i, k in enumerate(bars):
-        if k["time"] >= last["startTime"]:
-            startIdx = i
-            break
-    if startIdx == -1:
+    startIdx = bisect.bisect_left(bars, last["startTime"], key=lambda k: k["time"])
+    return extendLastBiFrom(bisArr, bars, startIdx)
+
+
+def extendLastBiFrom(bisArr, bars, startIdx, endIdx=None):
+    """未完成笔延伸（增量入口）：从 startIdx 起只扫描新到K线，推进最后一笔到最新极端价。
+
+    与原 extendLastBi 主体逻辑完全一致（gapLocked 不延伸、up 找更高高点、down 找更低低点、
+    仅当极端价时间晚于当前 endTime 且价格更极端时才推进终点），
+    区别只在于扫描窗口为 bars[startIdx:endIdx]（调用方传已记录的最后笔起点索引），
+    避免从 bars 头部重复扫描与整段切片复制（O(n²) → O(窗口)）。
+    """
+    if not bisArr or len(bisArr) == 0:
         return bisArr
-    tail = bars[startIdx:]
+    last = bisArr[-1]
+    if last.get("gapLocked", False):
+        return bisArr
+    if endIdx is None:
+        endIdx = len(bars)
+    if startIdx < 0 or startIdx >= endIdx:
+        return bisArr
+    tail = bars[startIdx:endIdx]
     if len(tail) < 2:
         return bisArr
 

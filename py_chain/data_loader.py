@@ -59,7 +59,9 @@ class CDPClient:
         """GET /json 找 tradingview.com 页面，建立 WebSocket 连接。"""
         ws_url = self._find_target()
         import websocket  # 延迟导入，websocket-client
-        self._ws = websocket.create_connection(ws_url, timeout=60)
+        # suppress_origin：Chromium 新版默认拒绝非白名单 origin 的 WS 握手（403），
+        # 桌面端启动参数未带 --remote-allow-origins 时，必须抑制 Origin 头才能连上。
+        self._ws = websocket.create_connection(ws_url, timeout=60, suppress_origin=True)
         self._msg_id = 0
         self._log(f"已连接 CDP：{ws_url}")
 

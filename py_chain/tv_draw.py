@@ -21,33 +21,39 @@ BUY_COLOR = "#F23645"      # 红
 SELL_COLOR = "#089981"     # 绿
 MARK_PREFIX = "BT·"
 CHUNK = 50
+# localStorage 键：记录上次回测画的 shape id（createShape 返回），下次按 id 精准删除。
+# 新版 TradingView 桌面端没有 removeShape/getShapes API，且 mainSeries().entities()
+# 已移除；改用 chartModel().dataSourceForId(id) + removeSource(ds)（已验证可用）。
+IDS_KEY = "bt_arrow_ids"
 
 
 def _clear_markers(c):
-    """清除文本以 BT· 开头的 shape（上次回测画的箭头）。"""
+    """清除上次回测画的箭头：读取 localStorage 记录的 shape id 逐个删除。
+
+    返回删除数量；localStorage 为空或 id 已失效（图表切换/手动删除）时返回 0，不误删用户图形。
+    """
     expr = (
-        "(function(){ const chart = TradingViewApi.activeChart(); "
+        "(async () => { "
+        "const chart = TradingViewApi.activeChart(); "
         "if (!chart) return -1; "
-        "const series = chart.chartModel().mainSeries(); "
+        "const cm = chart.chartModel(); "
+        "let ids = []; "
+        "try { ids = JSON.parse(localStorage.getItem('" + IDS_KEY + "') || '[]'); } catch (e) {} "
         "let removed = 0; "
-        "try { "
-        "  const ent = series.entities(); "
-        "  const items = ent.items ? ent.items() : (ent._items || {}); "
-        "  for (const k of Object.keys(items)) { "
-        "    const e = items[k]; "
-        "    if (e && e.type === 'shape' && e.entityData && "
-        "        String(e.entityData.text || '').indexOf('" + MARK_PREFIX + "') === 0) { "
-        "      try { series.removeEntity(k); removed++; } catch (err) {} "
-        "    } "
-        "  } "
-        "} catch (err) { return -2; } "
+        "for (const id of ids) { "
+        "  try { "
+        "    const ds = cm.dataSourceForId(id); "
+        "    if (ds) { cm.removeSource(ds); removed++; } "
+        "  } catch (err) {} "
+        "} "
+        "try { localStorage.setItem('" + IDS_KEY + "', '[]'); } catch (e) {} "
         "return removed; })()"
     )
     return c.evaluate(expr)
 
 
 def _draw_chunk(c, chunk):
-    """一次 CDP 执行画出一批箭头。"""
+    """一次 CDP 执行画出一批箭头，并把新 shape id 累积记录到 localStorage。"""
     calls = []
     for t in chunk:
         shape = "arrow_up" if t["direction"] == "long" else "arrow_down"
@@ -64,6 +70,9 @@ def _draw_chunk(c, chunk):
         "(async () => { const chart = TradingViewApi.activeChart(); "
         "if (!chart) return { error: 'no_chart' }; const ids = []; "
         + "; ".join(f"ids.push(await ({c}))" for c in calls) +
+        "; "
+        "try { const old = JSON.parse(localStorage.getItem('" + IDS_KEY + "') || '[]'); "
+        "localStorage.setItem('" + IDS_KEY + "', JSON.stringify(old.concat(ids))); } catch (e) {} "
         "; return ids; })()"
     )
     return c.evaluate(expr)
