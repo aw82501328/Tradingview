@@ -16,6 +16,7 @@ MACD / ATR 在各周期切片变化时缓存。注意：本引擎的判定结果
 """
 
 import bisect
+import time
 
 from .chan_core import (
     buildBi, fixBiExtremes, calcATR, calcMACD, intervalSecOf, fmtT,
@@ -74,6 +75,13 @@ class BacktestEngine:
         self._plan = {}
         self._entries = {}
 
+        # 实时监控状态（step_to 使用）：跨轮询保持信号去重与统计
+        self._replay_needed = set()   # 需要整周期重放修正增量状态的周期（实时bar被覆盖）
+        self._live_allSignals = {}
+        self._live_seen = set()
+        self._live_stats = {"steps": 0, "signals": 0, "executed": 0,
+                            "long": 0, "short": 0, "markRes": {}, "strategyKeys": {}}
+
     # ---------------- 增量计算 ----------------
 
     def _append_bars(self, res, new_bars):
@@ -120,14 +128,93 @@ class BacktestEngine:
         bis = fixBiExtremes(bis, merged) or bis
         return bis
 
+    # ---------------- 实时监控 ----------------
+
+    def _rewind_res(self, res):
+        """把 res 周期增量状态重置并从 0 重放到当前已加载K线。
+
+        实时bar（未收盘）的 OHLC 每轮更新时，合并/分型/MACD/ATR/笔等增量状态
+        需随新数据修正，故整周期重放（保证与全量计算一致）。返回 True 触发链路重算。
+        """
+        self._merged[res] = []
+        self._merge_dir[res] = 0
+        self._fractals[res] = []
+        self._bis[res] = []
+        self._macd[res] = MacdAccumulator()
+        self._atr[res] = AtrAccumulator(14)
+        self._cut[res] = len(self.bars[res]["_list"])
+        self._append_bars(res, self.bars[res]["_list"])
+        return True
+
+    def append_bars(self, res, new_bars):
+        """实时并入轮询到的K线：返回 'append' | 'override' | None。
+
+        - 时间戳晚于已加载最后一根 → 追加为新bar（'append'）；
+        - 时间戳等于已加载最后一根（未收盘实时bar在更新） → 覆盖该bar OHLC
+          （'override'），并登记到 _replay_needed，由 step_to 整周期重放修正增量状态；
+        - 时间戳更早 → 历史已加载，跳过。
+        """
+        bl = self.bars[res]["_list"]
+        if not bl:
+            bl.extend(dict(b) for b in new_bars)
+            self._times[res] = [b["time"] for b in new_bars]
+            return "append"
+        by_time = {}
+        for b in new_bars:
+            by_time[b["time"]] = b
+        new_bars = sorted(by_time.values(), key=lambda x: x["time"])
+        last_t = self._times[res][-1]
+        appended = False
+        overridden = False
+        for b in new_bars:
+            t = b["time"]
+            if t > last_t:
+                bl.append(dict(b))
+                self._times[res].append(t)
+                last_t = t
+                appended = True
+            elif t == last_t:
+                bl[-1] = dict(b)
+                overridden = True
+            # t < last_t：已加载过，跳过
+        if overridden:
+            self._replay_needed.add(res)
+        return "append" if appended else ("override" if overridden else None)
+
+    def step_to(self, t):
+        """实时推进到时刻 t，返回本轮新进场信号列表（已去重，不做成交）。
+
+        先处理被覆盖的实时bar（整周期重放修正增量状态），再增量推进各周期切片；
+        仅当某周期笔结构变化时重算链路并收集新信号（与回测 run 的短路语义一致）。
+        """
+        changed = False
+        if self._replay_needed:
+            for res in self._replay_needed:
+                if self._rewind_res(res):
+                    changed = True
+            self._replay_needed.clear()
+        if self._advance_cut(t):
+            changed = True
+        if not changed:
+            return []
+        self._rebuild_chain()
+        return self._collect_signals(self._live_allSignals, self._live_seen, self._live_stats)
+
     # ---------------- 主循环 ----------------
 
-    def run(self, to_ts=None, log=None, log_every=2000):
+    def run(self, to_ts=None, log=None, log_every=2000,
+            on_progress=None, on_signal=None, on_trade=None,
+            paused=None, stopped=None):
         """逐根K线重放。
 
         @param to_ts      结束时间戳（None 表示回测到最后一根）
         @param log        日志函数（None 不输出）
         @param log_every  每 N 根输出一次进度
+        @param on_progress 可选：每根推进后调用 on_progress(i, end_i)（供进度条/后台线程）
+        @param on_signal  可选：收集到新信号后逐个调用 on_signal(s)
+        @param on_trade   可选：新成交产生后逐个调用 on_trade(t)
+        @param paused     可选：threading.Event，置位时回测挂起等待（clear 后继续）
+        @param stopped    可选：threading.Event，置位时提前停止并返回当前部分结果
         @returns dict：{ signals, trades, stats, ... }，见 _finish
         """
         log = log or (lambda *a, **k: None)
@@ -145,29 +232,70 @@ class BacktestEngine:
         stats = {"steps": 0, "signals": 0, "executed": 0,
                  "long": 0, "short": 0, "markRes": {}, "strategyKeys": {}}
 
+        def _wait_if_paused():
+            """paused 置位时挂起等待（同时响应 stopped 中断），供外部暂停/继续。"""
+            while paused is not None and paused.is_set():
+                if stopped is not None and stopped.is_set():
+                    return False
+                time.sleep(0.2)
+            return True
+
+        def _emit_signal(s):
+            if on_signal:
+                try:
+                    on_signal(s)
+                except Exception:
+                    pass
+
         # 预热阶段（warmup 之前），先把切片推进到位（仅计算，不判定进场）
         for i in range(start_i):
+            if stopped is not None and stopped.is_set():
+                break
+            if not _wait_if_paused():
+                break
             t = fine[i]["time"]
             self._advance_cut(t)
+        if stopped is not None and stopped.is_set():
+            return self._finish(allSignals, trades, stats)
         log(f"预热完成：最小周期 {self.fine_res} 已到第 {start_i} 根（{fmtT(fine[start_i-1]['time'])}）")
 
         # 预热后先做一次全量链路重算（含支阻位/计划/进出场），之后只在笔结构变化时重算，
         # 避免每根K线全量重算链路（O(n) 扫描）导致回测 O(n²) 卡死
         self._rebuild_chain()
         pending = self._collect_signals(allSignals, seen, stats)
+        for s in pending:
+            _emit_signal(s)
 
         for i in range(start_i, end_i):
+            if stopped is not None and stopped.is_set():
+                break
+            if not _wait_if_paused():
+                break
             t = fine[i]["time"]
             changed = self._advance_cut(t)
             # 笔结构无变化时仅推进K线，不重算链路、不产新信号（信号锚定在笔端点确认时出现）
             if changed:
                 self._rebuild_chain()
                 pending = self._collect_signals(allSignals, seen, stats)
+                for s in pending:
+                    _emit_signal(s)
             # 上一根收集到的信号在下一根开盘价成交（延迟一拍）
             if i + 1 < end_i:
+                n_trades_before = len(trades)
                 self._fill_pending(trades, pending, fine[i + 1]["open"], fine[i + 1]["time"], stats)
+                for tr in trades[n_trades_before:]:
+                    if on_trade:
+                        try:
+                            on_trade(tr)
+                        except Exception:
+                            pass
                 pending = []
             stats["steps"] += 1
+            if on_progress:
+                try:
+                    on_progress(i + 1, end_i)
+                except Exception:
+                    pass
             if log and (i + 1) % log_every == 0:
                 log(f"回测进度：第 {i + 1}/{end_i} 根，累计信号 {stats['signals']}，成交 {stats['executed']}")
 

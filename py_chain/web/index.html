@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>三模式控制台 · 缠论回测</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #1a1d24;
+    --card-2: #21252f;
+    --border: #2c313c;
+    --text: #d5d9e0;
+    --muted: #8b93a1;
+    --accent: #3b82f6;
+    --buy: #f23645;
+    --sell: #089981;
+    --ok: #089981;
+    --warn: #f0b90b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    padding: 20px;
+    font-size: 14px;
+  }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 20px; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .card h2 { font-size: 15px; display: flex; align-items: center; justify-content: space-between; }
+  .badge {
+    font-size: 11px; padding: 2px 8px; border-radius: 10px;
+    background: #2a2f3a; color: var(--muted);
+  }
+  .badge.running { background: #0d3b31; color: var(--ok); }
+  .badge.paused  { background: #3d3208; color: var(--warn); }
+  .badge.done    { background: #0d3b31; color: var(--ok); }
+  .badge.error   { background: #4a1015; color: var(--buy); }
+  .field { display: flex; flex-direction: column; gap: 3px; }
+  .field label { font-size: 11px; color: var(--muted); }
+  input, select {
+    background: var(--card-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 5px 8px; font-size: 13px; width: 100%;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  .row { display: flex; gap: 8px; }
+  .row .field { flex: 1; }
+  .btn-row { display: flex; gap: 8px; margin-top: auto; flex-wrap: wrap; }
+  button {
+    background: var(--card-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 6px 14px; font-size: 13px; cursor: pointer;
+    transition: background .15s;
+  }
+  button:hover:not(:disabled) { background: #2b313d; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.start { background: #123; border-color: #1d4ed8; color: #7cb0ff; }
+  button.danger { background: #2a1014; border-color: #8f1d2a; color: #ff8fa3; }
+  .progress { height: 6px; background: var(--card-2); border-radius: 3px; overflow: hidden; }
+  .progress > div { height: 100%; width: 0%; background: var(--accent); transition: width .3s; }
+  .progress-label { font-size: 11px; color: var(--muted); }
+  .log-box {
+    background: #0b0d11; border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px; font-family: Consolas, monospace; font-size: 11px;
+    height: 110px; overflow-y: auto; color: var(--muted); white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .table-wrap { background: var(--card); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .table-wrap .head { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 8px 10px; text-align: left; border-top: 1px solid var(--border); white-space: nowrap; }
+  th { background: var(--card-2); color: var(--muted); font-weight: 600; position: sticky; top: 0; }
+  td.long { color: var(--buy); }
+  td.short { color: var(--sell); }
+  .mode-tag { font-size: 11px; padding: 1px 7px; border-radius: 8px; background: #2a2f3a; }
+  .mode-tag.backtest { color: #7cb0ff; }
+  .mode-tag.replay   { color: #c9a0ff; }
+  .mode-tag.live     { color: #7fe0b0; }
+  .status-tag { font-size: 11px; padding: 1px 7px; border-radius: 8px; }
+  .status-tag.sig { background: #123; color: #7cb0ff; }
+  .status-tag.filled { background: #0d3b31; color: var(--ok); }
+  .scroll { max-height: 420px; overflow-y: auto; }
+</style>
+</head>
+<body>
+<h1>三模式控制台</h1>
+<div class="sub">全量回测（纯后台） · K线回放 · 实时监控 — 同一时间最多运行一种；进场信号实时记录到下方表格</div>
+
+<div class="grid" id="cards"></div>
+
+<div class="table-wrap">
+  <div class="head">
+    <strong>进场信号记录</strong>
+    <div>
+      <span id="count" style="color:var(--muted);font-size:12px;margin-right:10px;">共 0 条</span>
+      <button id="btn-clear" class="danger">清空表格</button>
+    </div>
+  </div>
+  <div class="scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th><th>模式</th><th>信号时间</th><th>方向</th><th>检测周期</th>
+          <th>策略</th><th>背驰级别</th><th>价格</th><th>近支阻</th><th>状态</th><th>成交时间</th><th>成交价</th>
+        </tr>
+      </thead>
+      <tbody id="sig-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const MODES = [
+  { id: 'backtest', name: '全量回测', color: '#7cb0ff', desc: '纯后台逐根推进，可用缓存离线运行' },
+  { id: 'replay', name: 'K线回放', color: '#c9a0ff', desc: '驱动软件 Bar Replay 自动播放，信号触发切周期标记' },
+  { id: 'live', name: '实时监控', color: '#7fe0b0', desc: '固定 3m，新收盘 bar 全周期刷新' },
+];
+
+const state = { active: null, modes: {} };
+let sigRows = [];
+let logs = { backtest: [], replay: [], live: [] };
+
+function el(id) { return document.getElementById(id); }
+
+// ---------- 卡片渲染 ----------
+function buildCard(m) {
+  const cfg = {
+    symbol: { label: '品种', type: 'text', def: 'OANDA:XAUUSD' },
+    periods: { label: '周期', type: 'text', def: 'D,240,60,15,3' },
+    from: { label: '起始日期', type: 'text', def: '2026-07-02' },
+    extra: [],
+  };
+  const extras = {
+    backtest: [
+      { k: 'warmup', label: '预热根数', type: 'text', def: '60' },
+    ],
+    replay: [
+      { k: 'start', label: '回放起点', type: 'text', def: '2026-08-01' },
+      { k: 'speed', label: '速度 ms/bar', type: 'text', def: '1000' },
+      { k: 'hold', label: '信号停留 s', type: 'text', def: '2' },
+    ],
+    live: [
+      { k: 'interval', label: '轮询间隔 s', type: 'text', def: '15' },
+    ],
+  };
+  const rows = [];
+  rows.push(`<div class="row">
+    <div class="field"><label>品种</label><input data-cfg="symbol" value="OANDA:XAUUSD"></div>
+    <div class="field"><label>周期</label><input data-cfg="periods" value="D,240,60,15,3"></div>
+    <div class="field"><label>${m.id === 'replay' ? '起始日期' : '起始日期'}</label><input data-cfg="from" value="2026-07-02"></div>
+  </div>`);
+  const extraHtml = (extras[m.id] || []).map(f => `
+    <div class="field"><label>${f.label}</label><input data-cfg="${f.k}" value="${f.def}"></div>
+  `).join('');
+  rows.push(`<div class="row">${extraHtml}
+    <div class="field"><label>缓存</label><select data-cfg="use_cache"><option value="false">不读缓存</option><option value="true">读缓存</option></select></div>
+  </div>`);
+  return `
+  <div class="card" id="card-${m.id}">
+    <h2><span>${m.name}</span><span class="badge" id="badge-${m.id}">idle</span></h2>
+    <div style="font-size:11px;color:var(--muted);">${m.desc}</div>
+    ${rows.join('')}
+    <div class="progress"><div id="bar-${m.id}"></div></div>
+    <div class="progress-label" id="plabel-${m.id}"></div>
+    <div class="log-box" id="log-${m.id}"></div>
+    <div class="btn-row">
+      <button class="start" id="btn-start-${m.id}">启动</button>
+      <button id="btn-pause-${m.id}" disabled>暂停</button>
+      <button id="btn-resume-${m.id}" disabled>继续</button>
+      <button class="danger" id="btn-stop-${m.id}" disabled>停止</button>
+    </div>
+  </div>`;
+}
+
+// ---------- 表格 ----------
+function fmtTime(t) {
+  if (!t) return '-';
+  const d = new Date(t * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth()+1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+}
+function modeName(id) { return MODES.find(m => m.id === id)?.name || id; }
+function renderTable() {
+  const body = el('sig-body');
+  body.innerHTML = sigRows.map(r => `
+    <tr>
+      <td>${r.id}</td>
+      <td><span class="mode-tag ${r.mode}">${modeName(r.mode)}</span></td>
+      <td>${fmtTime(r.time)}</td>
+      <td class="${r.direction === 'long' ? 'long' : 'short'}">${r.direction === 'long' ? '做多' : '做空'}</td>
+      <td>${r.periodX || '-'}</td>
+      <td>${r.strategyKey || '-'}</td>
+      <td>${r.markRes || '-'}</td>
+      <td>${r.price != null ? Number(r.price).toFixed(2) : '-'}</td>
+      <td>${r.nearSr != null ? Number(r.nearSr).toFixed(2) : '-'}</td>
+      <td><span class="status-tag ${r.status === '已成交' ? 'filled' : 'sig'}">${r.status}</span></td>
+      <td>${fmtTime(r.entryTime)}</td>
+      <td>${r.entryPrice != null ? Number(r.entryPrice).toFixed(2) : '-'}</td>
+    </tr>`).join('');
+  el('count').textContent = `共 ${sigRows.length} 条`;
+}
+
+// ---------- 状态更新 ----------
+function setBadge(m, s) {
+  const b = el(`badge-${m}`);
+  b.textContent = s;
+  b.className = 'badge' + (s === 'running' || s === 'done' ? ' running'
+    : s === 'paused' ? ' paused' : s === 'error' ? ' error' : '');
+  const running = ['running', 'paused'].includes(s);
+  el(`btn-start-${m}`).disabled = running || (state.active && state.active !== m);
+  el(`btn-pause-${m}`).disabled = s !== 'running';
+  el(`btn-resume-${m}`).disabled = s !== 'paused';
+  el(`btn-stop-${m}`).disabled = !running;
+  if (state.active && state.active !== m) {
+    el(`btn-start-${m}`).disabled = true;
+  }
+}
+
+function applyStatus(status) {
+  state.active = status.active;
+  for (const [m, w] of Object.entries(status.modes)) {
+    if (!state.modes[m]) state.modes[m] = {};
+    state.modes[m] = w;
+    setBadge(m, w.state);
+    if (w.error) addLog(m, `错误：${w.error}`);
+    const bar = el(`bar-${m}`);
+    const p = w.progress || {};
+    if (p.pct != null) { bar.style.width = p.pct + '%'; el(`plabel-${m}`).textContent = `${p.current}/${p.total} (${p.pct}%)`; }
+    else { bar.style.width = w.state === 'running' ? '100%' : '0%'; el(`plabel-${m}`).textContent = ''; }
+  }
+}
+
+function addLog(m, msg) {
+  logs[m].push(msg);
+  if (logs[m].length > 200) logs[m].shift();
+  const box = el(`log-${m}`);
+  box.textContent = logs[m].join('\n');
+  box.scrollTop = box.scrollHeight;
+}
+
+// ---------- 控制调用 ----------
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await r.json();
+  if (!r.ok || !data.ok) {
+    alert(data.error || `请求失败 ${r.status}`);
+    return null;
+  }
+  return data;
+}
+
+function collectCfg(m) {
+  const cfg = {};
+  document.querySelectorAll(`#card-${m} [data-cfg]`).forEach(inp => {
+    const v = inp.value;
+    cfg[inp.dataset.cfg] = v === 'true' ? true : v === 'false' ? false : v;
+  });
+  cfg.periods = cfg.periods.split(',').map(s => s.trim()).filter(Boolean);
+  return cfg;
+}
+
+// ---------- 绑定 ----------
+function bindCard(m) {
+  el(`btn-start-${m}`).onclick = async () => {
+    const cfg = collectCfg(m);
+    const r = await api(`/api/${m}/start`, { cfg });
+    if (r) { addLog(m, '启动请求已发送'); }
+  };
+  el(`btn-pause-${m}`).onclick = () => api(`/api/${m}/pause`);
+  el(`btn-resume-${m}`).onclick = () => api(`/api/${m}/resume`);
+  el(`btn-stop-${m}`).onclick = () => api(`/api/${m}/stop`);
+}
+
+// ---------- SSE ----------
+function connectSSE() {
+  const es = new EventSource('/api/stream');
+  es.onopen = () => console.log('SSE 已连接');
+  es.onerror = () => { /* 自动重连 */ };
+  es.addEventListener('init', e => applyStatus(JSON.parse(e.data)));
+  es.addEventListener('status', e => {
+    const d = JSON.parse(e.data);
+    applyStatus({ active: state.active, modes: { [d.mode]: { ...state.modes[d.mode], state: d.state } } });
+  });
+  es.addEventListener('log', e => {
+    const d = JSON.parse(e.data);
+    addLog(d.mode, d.msg);
+  });
+  es.addEventListener('signal', e => {
+    const d = JSON.parse(e.data);
+    const row = d.row;
+    const idx = sigRows.findIndex(r => r.id === row.id);
+    if (idx >= 0) sigRows[idx] = row; else sigRows.push(row);
+    renderTable();
+  });
+  es.addEventListener('progress', e => {
+    const d = JSON.parse(e.data);
+    if (!state.modes[d.mode]) state.modes[d.mode] = {};
+    state.modes[d.mode].progress = { current: d.current, total: d.total, pct: d.pct };
+    const bar = el(`bar-${d.mode}`);
+    if (d.pct != null) { bar.style.width = d.pct + '%'; el(`plabel-${d.mode}`).textContent = `${d.current}/${d.total} (${d.pct}%)`; }
+  });
+  es.addEventListener('signals_cleared', () => { sigRows = []; renderTable(); });
+}
+
+// ---------- 初始化 ----------
+async function init() {
+  el('cards').innerHTML = MODES.map(buildCard).join('');
+  MODES.forEach(m => bindCard(m.id));
+  el('btn-clear').onclick = async () => {
+    const r = await api('/api/signals/clear');
+    if (r) sigRows = [];
+    renderTable();
+  };
+  const status = await (await fetch('/api/status')).json();
+  sigRows = (await (await fetch('/api/signals')).json()).rows || [];
+  applyStatus(status);
+  renderTable();
+  connectSSE();
+}
+init();
+</script>
+</body>
+</html>
