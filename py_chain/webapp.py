@@ -30,12 +30,16 @@ from .backtest import BacktestEngine
 from .main import parse_from
 from .chan_core import fmtT
 from .monitor import LiveMonitor, ReplayMonitor, clear_rt_markers
+from .marks import draw_signal_marks, clear_signal_marks
 
 # ============================================================
 # 全局互斥：三种模式同一时间最多运行一种
 # ============================================================
 _active_lock = threading.Lock()
 _active_mode = None          # 当前运行中的模式名（backtest/replay/live）或 None
+
+# 标记操作（marks/draw、marks/clear）互斥：后台线程执行期间防止并发
+_marks_lock = threading.Lock()
 
 
 def acquire_active(mode):
@@ -59,6 +63,17 @@ def release_active(mode):
 def active_mode():
     with _active_lock:
         return _active_mode
+
+
+def ensure_idle():
+    """检查三种模式是否均未运行，供标记操作使用。
+
+    @returns (True, None) 全部空闲可操作；或 (False, 提示信息)
+    """
+    mode = active_mode()
+    if mode is not None:
+        return False, f"有 {mode} 模式运行中，请先停止再标记"
+    return True, None
 
 
 # ============================================================
@@ -298,7 +313,7 @@ class BacktestWorker(ModeWorker):
                  f"use_cache={cfg.get('use_cache')}")
         bars = load_bars(periods=periods, from_ts=cfg.get("from_ts", 0),
                          use_cache=cfg.get("use_cache", False),
-                         symbol=cfg.get("symbol"))
+                         symbol=cfg.get("symbol"), log=self.log)
         for res in periods:
             n = len(bars.get(res, []) or [])
             if n:
@@ -506,6 +521,16 @@ def make_handler(app):
         def log_message(self, fmt, *args):
             pass
 
+        def handle_one_request(self):
+            """覆盖基类：读取请求头阶段客户端中断连接（浏览器刷新/关闭）时，
+            Windows 抛 ConnectionAbortedError/ConnectionResetError，基类不捕获会刷屏日志。
+            这里静默忽略这类连接异常，其余走原逻辑。
+            """
+            try:
+                super().handle_one_request()
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                pass
+
         def do_GET(self):
             parsed = urlparse(self.path)
             path = parsed.path
@@ -531,6 +556,55 @@ def make_handler(app):
                 n = app.signals.clear()
                 app.broadcaster.emit("signals_cleared", {"n": n})
                 self._send_json({"ok": True, "cleared": n})
+                return
+            if path == "/api/marks/draw":
+                ok, err = ensure_idle()
+                if not ok:
+                    self._send_json({"ok": False, "error": err}, 409)
+                    return
+                body = self._read_body()
+                colors = body.get("colors") or {}
+                rows = app.signals.list(None)
+                if not rows:
+                    self._send_json({"ok": False, "error": "信号列表为空，无可标记的进场点"})
+                    return
+                if not _marks_lock.acquire(blocking=False):
+                    self._send_json({"ok": False, "error": "已有标记操作进行中，请稍候"}, 409)
+                    return
+
+                def _job():
+                    def log(msg):
+                        app.broadcaster.emit("log", {"mode": "mark", "msg": str(msg)})
+                    try:
+                        draw_signal_marks(rows, cfg=CDPConfig(),
+                                          clear_first=True, colors=colors, log=log)
+                    finally:
+                        _marks_lock.release()
+                        app.broadcaster.emit("mark_done", {"op": "draw"})
+
+                threading.Thread(target=_job, daemon=True, name="marks-draw").start()
+                self._send_json({"ok": True, "started": True})
+                return
+            if path == "/api/marks/clear":
+                ok, err = ensure_idle()
+                if not ok:
+                    self._send_json({"ok": False, "error": err}, 409)
+                    return
+                if not _marks_lock.acquire(blocking=False):
+                    self._send_json({"ok": False, "error": "已有标记操作进行中，请稍候"}, 409)
+                    return
+
+                def _job():
+                    def log(msg):
+                        app.broadcaster.emit("log", {"mode": "mark", "msg": str(msg)})
+                    try:
+                        clear_signal_marks(cfg=CDPConfig(), log=log)
+                    finally:
+                        _marks_lock.release()
+                        app.broadcaster.emit("mark_done", {"op": "clear"})
+
+                threading.Thread(target=_job, daemon=True, name="marks-clear").start()
+                self._send_json({"ok": True, "started": True})
                 return
             # /api/{mode}/start|pause|resume|stop
             parts = [p for p in path.split("/") if p]
@@ -591,7 +665,8 @@ def make_handler(app):
                     except queue.Empty:
                         self.wfile.write(b": keepalive\n\n")
                         self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+            # Windows 下浏览器关闭/刷新页面会中止连接，抛 ConnectionAbortedError（WinError 10053）
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
             finally:
                 app.broadcaster.unsubscribe(q)

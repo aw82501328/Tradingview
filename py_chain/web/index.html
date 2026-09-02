@@ -61,6 +61,12 @@
   button:disabled { opacity: .4; cursor: not-allowed; }
   button.start { background: #123; border-color: #1d4ed8; color: #7cb0ff; }
   button.danger { background: #2a1014; border-color: #8f1d2a; color: #ff8fa3; }
+  button.mark { background: #101c12; border-color: #1d8f3a; color: #7fe0b0; }
+  input[type="color"] {
+    background: var(--card-2); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px; width: 32px; height: 26px; cursor: pointer;
+  }
+  #mark-status { max-width: 340px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .progress { height: 6px; background: var(--card-2); border-radius: 3px; overflow: hidden; }
   .progress > div { height: 100%; width: 0%; background: var(--accent); transition: width .3s; }
   .progress-label { font-size: 11px; color: var(--muted); }
@@ -96,8 +102,15 @@
 <div class="table-wrap">
   <div class="head">
     <strong>进场信号记录</strong>
-    <div>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
       <span id="count" style="color:var(--muted);font-size:12px;margin-right:10px;">共 0 条</span>
+      <span style="color:var(--muted);font-size:12px;">做多</span>
+      <input type="color" id="mark-color-buy" value="#F23645" title="做多箭头颜色">
+      <span style="color:var(--muted);font-size:12px;">做空</span>
+      <input type="color" id="mark-color-sell" value="#089981" title="做空箭头颜色">
+      <button id="btn-mark-draw">标记进场点</button>
+      <button id="btn-mark-clear">删除标记</button>
+      <span id="mark-status" style="color:var(--muted);font-size:12px;"></span>
       <button id="btn-clear" class="danger">清空表格</button>
     </div>
   </div>
@@ -124,8 +137,24 @@ const MODES = [
 const state = { active: null, modes: {} };
 let sigRows = [];
 let logs = { backtest: [], replay: [], live: [] };
+let markBusy = false;   // 标记操作（画/删）进行中
 
 function el(id) { return document.getElementById(id); }
+
+// ---------- 标记工具条 ----------
+function setMarkStatus(msg, isError) {
+  const s = el('mark-status');
+  s.textContent = msg || '';
+  s.style.color = isError ? 'var(--buy)' : 'var(--muted)';
+}
+function updateMarkButtons() {
+  const busy = markBusy;
+  el('btn-mark-draw').disabled = busy || isAnyModeRunning();
+  el('btn-mark-clear').disabled = busy || isAnyModeRunning();
+}
+function isAnyModeRunning() {
+  return Object.values(state.modes).some(w => ['running', 'paused'].includes(w.state));
+}
 
 // ---------- 卡片渲染 ----------
 function buildCard(m) {
@@ -233,6 +262,7 @@ function applyStatus(status) {
     if (p.pct != null) { bar.style.width = p.pct + '%'; el(`plabel-${m}`).textContent = `${p.current}/${p.total} (${p.pct}%)`; }
     else { bar.style.width = w.state === 'running' ? '100%' : '0%'; el(`plabel-${m}`).textContent = ''; }
   }
+  updateMarkButtons();
 }
 
 function addLog(m, msg) {
@@ -292,7 +322,17 @@ function connectSSE() {
   });
   es.addEventListener('log', e => {
     const d = JSON.parse(e.data);
-    addLog(d.mode, d.msg);
+    if (d.mode === 'mark') {
+      setMarkStatus(d.msg);
+    } else {
+      addLog(d.mode, d.msg);
+    }
+  });
+  es.addEventListener('mark_done', e => {
+    const d = JSON.parse(e.data);
+    markBusy = false;
+    updateMarkButtons();
+    setMarkStatus(d.op === 'draw' ? '标记完成' : '已清除标记');
   });
   es.addEventListener('signal', e => {
     const d = JSON.parse(e.data);
@@ -320,6 +360,24 @@ async function init() {
     if (r) sigRows = [];
     renderTable();
   };
+  el('btn-mark-draw').onclick = async () => {
+    if (markBusy || isAnyModeRunning()) return;
+    markBusy = true;
+    updateMarkButtons();
+    setMarkStatus('标记中...');
+    const colors = { buy: el('mark-color-buy').value, sell: el('mark-color-sell').value };
+    const r = await api('/api/marks/draw', { colors });
+    if (!r) { markBusy = false; updateMarkButtons(); setMarkStatus('标记请求失败', true); }
+  };
+  el('btn-mark-clear').onclick = async () => {
+    if (markBusy || isAnyModeRunning()) return;
+    markBusy = true;
+    updateMarkButtons();
+    setMarkStatus('清除中...');
+    const r = await api('/api/marks/clear');
+    if (!r) { markBusy = false; updateMarkButtons(); setMarkStatus('清除请求失败', true); }
+  };
+  updateMarkButtons();
   const status = await (await fetch('/api/status')).json();
   sigRows = (await (await fetch('/api/signals')).json()).rows || [];
   applyStatus(status);

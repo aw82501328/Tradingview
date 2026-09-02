@@ -340,7 +340,7 @@ class LiveMonitor:
         # 1. 全量历史初始化增量引擎
         self.log(f"加载历史K线：symbol={symbol} periods={self.periods} use_cache={use_cache}")
         bars_by_period = load_bars(periods=self.periods, from_ts=from_ts,
-                                   use_cache=use_cache, symbol=symbol)
+                                   use_cache=use_cache, symbol=symbol, log=self.log)
         for res in self.periods:
             n = len(bars_by_period.get(res, []) or [])
             if n:
@@ -540,7 +540,7 @@ class ReplayMonitor(LiveMonitor):
         # 1. 全量历史初始化增量引擎（不预热，回放从起始点逐步推进）
         self.log(f"加载历史K线：symbol={symbol} periods={self.periods} use_cache={use_cache}")
         bars_by_period = load_bars(periods=self.periods, from_ts=from_ts,
-                                   use_cache=use_cache, symbol=symbol)
+                                   use_cache=use_cache, symbol=symbol, log=self.log)
         for res in self.periods:
             n = len(bars_by_period.get(res, []) or [])
             if n:
