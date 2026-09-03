@@ -20,7 +20,7 @@ const CDP = require("../../../../server-cdp/node_modules/chrome-remote-interface
 // 缠论算法核心（唯一算法源，与 mark-buy-sell SKILL 共用）
 const core = require("../../chan-core/scripts/chan_core.js");
 const {
-  mergeBars, findFractals, countRaw, hasGapBetween, buildBi, fixBiExtremes, lockedPivotsOf, alignBiToUpper,
+  markWickBars, mergeBars, findFractals, countRaw, hasGapBetween, buildBi, fixBiExtremes, lockedPivotsOf, alignBiToUpper,
   calcATR, calcMACD, hasMacdCrossBetween,
   extendLastBi, lowerResOf, calibrateBiTimes, intervalSecOf,
 } = core;
@@ -48,6 +48,9 @@ const GAP_FILTER = getArg("gap", 1.0);
 const DEBUG = args.includes("--debug");
 core.CHAN_CFG.debug = DEBUG;
 core.CHAN_CFG.gapFilter = GAP_FILTER;
+// 长影标记参数（见 chan-core markWickBars）：影线占比阈值 + 绝对长度下限（wickAtrK*ATR）
+core.CHAN_CFG.wickRatio = getArg("wick-ratio", core.CHAN_CFG.wickRatio);
+core.CHAN_CFG.wickAtrK = getArg("wick-atr", core.CHAN_CFG.wickAtrK);
 // 指定的日线起点日期（如 2026-07-02），解析为 UTC 当天 0 点的时间戳
 const FROM_DATE = getStrArg("from", "");
 let FROM_TS = null;
@@ -155,9 +158,15 @@ function intervalVisibility(res) {
 (async () => {
   let client;
   try {
+    // 多标签场景：可用 --page=<url片段> 指定操作的图表页面（如 --page=urA9iDWS 按 /chart/urA9iDWS 匹配），
+    // 未指定时取列表第一个 tradingview.com 页面（与历史行为一致）
+    const PAGE_MATCH = getStrArg("page", "");
     const targets = await CDP.List({ port: 9222 });
-    const pg = targets.find(t => t.type === "page" && t.url.includes("tradingview.com"));
-    if (!pg) { console.log("ERROR: 未找到 TradingView 页面"); process.exit(1); }
+    const tvs = targets.filter(t => t.type === "page" && t.url.includes("tradingview.com"));
+    let pg = tvs.find(t => PAGE_MATCH && t.url.includes(PAGE_MATCH)) || null;
+    if (!pg && !PAGE_MATCH) pg = tvs[0] || null;
+    if (!pg) { console.log("ERROR: 未找到 TradingView 页面" + (PAGE_MATCH ? `（匹配 ${PAGE_MATCH}）` : "")); process.exit(1); }
+    if (PAGE_MATCH) console.log("目标页面:", pg.url.split("/chart/")[1] || pg.url);
     client = await CDP({ target: pg.id, port: 9222 });
     await client.Page.enable();
     await client.Runtime.enable();
@@ -560,12 +569,17 @@ function intervalVisibility(res) {
       }
 
       const rawBars = windowBars;
-      const merged = mergeBars(rawBars);
-      const fractals = findFractals(merged);
-      // ATR 需要提前计算，供 buildBi 的跳空独立成笔使用
+      // ATR/MACD 基于未剔除的原始K线计算（ATR 是波动率度量，插针也属波动；
+      // MACD 用收盘价序列，不受长影剔除影响）
       const atr = calcATR(rawBars, 14);
-      // MACD 红绿柱，供 buildBi 的「MACD变色成笔」使用（区间内红变绿/绿变红时，间隔不足也可成笔）
       const macdArr = calcMACD(rawBars);
+      // 长影标记（chan-core markWickBars）：影线占比 >= 70% 且 >= 0.5*稳定ATR（全窗口TR均值）
+      // 的冲高/探底插针打 _wickTop/_wickBottom 标记——bar 原值保留（影线可成端点，
+      // 如 60m 7-16 02:00 的 4081.52 成为反弹笔顶），仅影线不参与区间内竞争
+      //（避免插针污染笔区间阻止合法分型成笔；稳定ATR避免结果随局部行情抖动）
+      const trimmedBars = markWickBars(rawBars);
+      const merged = mergeBars(trimmedBars);
+      const fractals = findFractals(merged);
       // 区间套强制对齐：把上一层（更高级别）笔的端点作为锁定端点传入 buildBi，
       // 保证本级别笔端点与上级笔的极值端点严格重合（优先级最高）。
       const lockedPivots = lockedPivotsOf(prevBis);
@@ -588,8 +602,8 @@ function intervalVisibility(res) {
       }
 
       // 未完成笔延伸：最后一笔若未推进到当前K线（如末端单调上涨/下跌无新分型），
-      // 延伸到窗口内该方向上的最新极端价所在K线
-      drawBis = extendLastBi(drawBis, rawBars);
+      // 延伸到窗口内该方向上的最新极端价所在K线（trimmedBars：延伸不能指向已剔除的插针价）
+      drawBis = extendLastBi(drawBis, trimmedBars);
 
       // 逐级端点时间校准：用「低一级」周期K线校准本周期笔的端点时间，
       // 使不同周期对同一极值的标记位置在图上重合
@@ -601,7 +615,9 @@ function intervalVisibility(res) {
           await ensureResolution(lowerRes);
           const dref = await fetchBars(intervalSecOf(lowerRes), FROM_TS, ANCHOR_BUFFER, DRAW_WINDOW_DAYS[lowerRes]);
           if (dref && !dref.error && dref.bars && dref.bars.length > 0) {
-            refBars = dref.bars;
+            // 校准基准同样做长影标记（markWickBars 内部用全窗口稳定 ATR），
+            // 避免把已剔除的插针端点校准回插针时间
+            refBars = markWickBars(dref.bars);
             refCache[lowerRes] = refBars;
             if (DEBUG) console.log(`[校准基准] ${res} 用 ${lowerRes} 校准，已加载 ${refBars.length} 根 ${lowerRes} 分钟K线`);
           }
@@ -609,16 +625,17 @@ function intervalVisibility(res) {
           currentRes = res;
         }
         if (refBars) {
-          drawBis = calibrateBiTimes(drawBis, rawBars, refBars, intervalSecOf(res));
+          drawBis = calibrateBiTimes(drawBis, trimmedBars, refBars, intervalSecOf(res));
         }
       }
 
       // 区间套强制对齐（优先级最高）：把本级别笔拐点对齐到紧邻上级笔拐点，
       // 使上级笔的极值端点在本级别中严格复现（上级底/顶=本级底/顶，同级同笔）。
-      // 第4参 rawBars：幽灵端点防御——上级极值在本级K线中不存在（跨周期数据源聚合
-      // 差异）时跳过对齐，保留本级别真实极值
+      // 第4参 trimmedBars：幽灵端点防御——上级极值在本级K线中不存在（跨周期数据源聚合
+      // 差异）时跳过对齐，保留本级别真实极值（须用长影剔除后的K线，否则 4443.715 这类插针
+      // 会让上级极值被误判为"本级存在"而错误对齐）
       if (pi > 0 && prevBis && prevBis.length > 0) {
-        drawBis = alignBiToUpper(drawBis, prevBis, intervalSecOf(PERIODS[pi - 1]), rawBars);
+        drawBis = alignBiToUpper(drawBis, prevBis, intervalSecOf(PERIODS[pi - 1]), trimmedBars);
       }
 
       // 小周期绘制窗口：只保留最近 N 天内结束的笔（窗口起点 = 最新K线时间往前推 N 天），

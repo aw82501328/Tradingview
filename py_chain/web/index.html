@@ -209,7 +209,8 @@ function buildCard(m) {
 // ---------- 表格 ----------
 function fmtTime(t) {
   if (!t) return '-';
-  const d = new Date(t * 1000);
+  // UTC+8（北京时间）显示：China Standard Time 无夏令时，偏移直接加 8 小时
+  const d = new Date((t + 8 * 3600) * 1000);
   const p = n => String(n).padStart(2, '0');
   return `${d.getUTCFullYear()}-${p(d.getUTCMonth()+1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
 }

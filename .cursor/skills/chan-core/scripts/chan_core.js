@@ -22,8 +22,87 @@
 
 const CHAN_CFG = {
   gapFilter: 1.0, // 跳空独立成笔阈值：相邻K线缺口 >= gapFilter*ATR 时强制独立成笔
+  wickRatio: 0.70, // 长影剔除：影线占整根K线振幅的比例阈值（>= 时视为冲高/探底插针）
+  wickAtrK: 0.5,   // 长影剔除：影线绝对长度下限 = wickAtrK * ATR（窄幅小K线免疫）
   debug: false,   // 调试打印（buildBi / 买卖点识别过程）
 };
+
+// ============================================================
+// 0. 长影线标记（冲高/探底插针：影线可成端点、不参与区间竞争）
+// ============================================================
+
+/**
+ * 长影线处理（冲高插针，压平 + 端点候选价）：
+ *   影线占比 >= wickRatio 且 >= wickAtrK*稳定ATR 的长上影K线一律压平 high 至实体顶
+ *   （保持历史验收的合并/笔结构——避免影线价参与合并改变结构或污染笔区间），但：
+ *   若该 bar 的 low 不低于左右相邻原始K线低点（压平会消灭一个本可成立的顶分型中心，
+ *   如 60m 7-16 02:00 bar L4058.10 > 01:00 L4033.11 且 > 03:00 L4048.10），
+ *   记 `_topCand = 原 high`——findFractals 在该 bar（或其合并 bar）成为顶分型中心时
+ *   用影线价作端点价（7-15 反弹笔顶 = 4081.52），结构本身保持压平版。
+ *   反之（low 条件不满足，如 15m 9-3 16:00 bar L4428.135 < 16:15 L4430.735、
+ *   60m 8-28 22:00 bar L4530.02 < 23:00 L4524.125）→ 纯压平：插针本就不成顶分型，
+ *   影线价不出现，不会阻止 17:00 4442.04 等合法顶成笔。
+ * 下影探底插针不处理（原值保留）：探底低点可被 fixBiExtremes 恢复为端点
+ * （60m 7-29 4010.41、7-15 16:00 底），属用户认可行为。
+ * ATR 用全窗口 TR 均值（见函数内说明），不随最近几十根K线的局部行情抖动。
+ *
+ * @param {Array} rawBars 原始K线 [{time,open,high,low,close}, ...]（不原地修改）
+ * @returns {Array} 处理后的K线数组：长上影 high 压平，可成顶分型中心的带 _topCand
+ */
+function markWickBars(rawBars) {
+  const ratio = CHAN_CFG.wickRatio;
+  // 稳定波动基准：全窗口 TR 均值（而非 calcATR 的「尾部 14 根」——3分钟仅 42 分钟，
+  // 行情急涨段会使 ATR 数倍放大（实测 3.4→9.0），长影下限随之漂移，导致同一插针
+  // 在平静行情被剔、急涨行情保留，剔除结果随行情抖动）。全窗口均值随窗口渐稳，
+  // 只反映该周期整体波动水平。
+  let avgAtr = 0;
+  const n = rawBars.length;
+  if (n > 1) {
+    let sum = 0;
+    for (let i = 1; i < n; i++) {
+      const h = rawBars[i].high, l = rawBars[i].low, pc = rawBars[i - 1].close;
+      sum += Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc));
+    }
+    avgAtr = sum / (n - 1);
+  }
+  const minWick = avgAtr * CHAN_CFG.wickAtrK;
+  const out = [];
+  const len = rawBars.length;
+  for (let idx = 0; idx < len; idx++) {
+    const bar = rawBars[idx];
+    const b = { ...bar };
+    const amp = b.high - b.low;
+    if (amp > 0) {
+      const bodyTop = Math.max(b.open, b.close);
+      const bodyBottom = Math.min(b.open, b.close);
+      const upper = b.high - bodyTop;
+      const lower = bodyBottom - b.low;
+      if (upper >= ratio * amp && upper >= minWick) {
+        // 长上影（冲高插针）：high 一律压平至实体顶（与历史验收的合并/笔结构一致，
+        // 避免影线价参与合并改变结构或污染笔区间——基线中 60m 8-28 的 4631.98
+        // 弱反弹、15m 9-3 16:00 的 4443.715 均因此被拒/不成端点）；但若该 bar 的
+        // low 不低于左右相邻原始K线低点（压平会消灭一个本可成立的顶分型中心端点，
+        // 如 60m 7-16 02:00 bar L4058.10 > 01:00 L4033.11 且 > 03:00 L4048.10，
+        // 用户要求其 4081.52 成为 7-15 反弹笔顶），记 _topCand = 原 high ——
+        // findFractals 在该 bar 成为顶分型中心时用 _topCand 作端点价（影线可成端点），
+        // 结构本身保持压平版。
+        const prev = rawBars[idx - 1];
+        const next = rawBars[idx + 1];
+        if (prev && next && b.low >= prev.low && b.low >= next.low) {
+          b._topCand = b.high;
+        }
+        b.high = bodyTop;
+      } else if (lower >= ratio * amp && lower >= minWick) {
+        // 长下影（探底插针）：low 压平至实体底（与历史验收结构一致）。
+        //（4010.41/4017.475 等探底端点不受影响——其 bar 的下影占比不足或由
+        //  分型/端点修正正常产生）
+        b.low = bodyBottom;
+      }
+    }
+    out.push(b);
+  }
+  return out;
+}
 
 // ============================================================
 // 1. 包含关系处理（合并K线）
@@ -38,9 +117,16 @@ const CHAN_CFG = {
 function mergeBars(rawBars) {
   const merged = [];
   let direction = 0;
+  const pushBar = (bar) => {
+    merged.push({
+      ...bar, _rawCount: 1,
+      highTime: bar.time, lowTime: bar.time,
+      rawHigh: bar.high, rawLow: bar.low, rawHighTime: bar.time, rawLowTime: bar.time,
+    });
+  };
   for (const bar of rawBars) {
     if (merged.length === 0) {
-      merged.push({ ...bar, _rawCount: 1, highTime: bar.time, lowTime: bar.time, rawHigh: bar.high, rawLow: bar.low, rawHighTime: bar.time, rawLowTime: bar.time });
+      pushBar(bar);
       continue;
     }
     const last = merged[merged.length - 1];
@@ -64,12 +150,21 @@ function mergeBars(rawBars) {
       // 同时记录极值出现的原始K线时间（端点极值修正用，见 fixBiExtremes）
       if (bar.high > last.rawHigh) { last.rawHigh = bar.high; last.rawHighTime = bar.time; }
       if (bar.low < last.rawLow) { last.rawLow = bar.low; last.rawLowTime = bar.time; }
+      // 端点候选价（_topCand）随覆盖范围传播：覆盖范围内「可成顶分型中心」的
+      // 长影 bar（markWickBars 记 _topCand）的影线价，作为合并 bar 成为顶分型
+      // 中心时的端点价（影线可成端点——60m 7-16 02:00 的 4081.52），
+      // 同时记录影线价所在原始K线时间（端点时间用——合并 bar 的 highTime 可能
+      // 被抬高的普通 bar 占据，需用 _topCandTime 定位真实冲高 bar）
+      if (bar._topCand !== undefined && bar._topCand > (last._topCand || 0)) {
+        last._topCand = bar._topCand;
+        last._topCandTime = bar.time;
+      }
       last._rawCount += 1;
       last.time = bar.time;
       direction = dir;
     } else {
       direction = bar.high > last.high ? 1 : -1;
-      merged.push({ ...bar, _rawCount: 1, highTime: bar.time, lowTime: bar.time, rawHigh: bar.high, rawLow: bar.low, rawHighTime: bar.time, rawLowTime: bar.time });
+      pushBar(bar);
     }
   }
   return merged;
@@ -90,7 +185,17 @@ function findFractals(merged) {
   for (let i = 1; i < merged.length - 1; i++) {
     const prev = merged[i - 1], cur = merged[i], next = merged[i + 1];
     if (cur.high > prev.high && cur.high > next.high && cur.low > prev.low && cur.low > next.low) {
-      fractals.push({ mergedIdx: i, type: "top", high: cur.high, low: cur.low, time: cur.highTime });
+      // 端点价：覆盖范围内若含「可成顶分型的长影 bar」（markWickBars _topCand，
+      // 如 60m 7-16 02:00 bar 的 4081.52），顶分型价用其影线价——结构保持压平版，
+      // 影线价只在该 bar 成为分型中心端点时生效（用户要求：7-15 反弹笔顶 = 4081.52）；
+      // 端点时间用影线价所在原始K线时间（_topCandTime，缺省回落 cur.highTime）
+      const useCand = cur._topCand !== undefined && cur._topCand > cur.high;
+      fractals.push({
+        mergedIdx: i, type: "top",
+        high: useCand ? cur._topCand : cur.high,
+        low: cur.low,
+        time: useCand && cur._topCandTime !== undefined ? cur._topCandTime : cur.highTime,
+      });
     }
     if (cur.low < prev.low && cur.low < next.low && cur.high < prev.high && cur.high < next.high) {
       fractals.push({ mergedIdx: i, type: "bottom", high: cur.high, low: cur.low, time: cur.lowTime });
@@ -180,6 +285,9 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots) {
   };
 
   // 笔内极值检查：一笔的顶/底必须是该笔范围内所有K线的最高/最低点。
+  //（9-3 16:00 插针已由 markWickBars 压平（其 low 条件不满足），影线价不再出现在
+  // merged 中，无需额外免疫；可成端点的长影 bar（_topCand）其端点价=影线价，
+  // 作为本区间端点时不在此区间内检查。）
   const noMoreExtremeInside = (a, b) => {
     for (let i = a.mergedIdx + 1; i < b.mergedIdx; i++) {
       if (b.type === "bottom" && merged[i].low < b.low) return false;
@@ -188,15 +296,39 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots) {
     return true;
   };
 
-  // 分型范围脱离检查：一笔的两端分型不能互相"包含"。
-  // 顶分型 → 底分型（下跌笔）：底分型的底必须**低于顶分型三根K线的最低点**；
-  // 底分型 → 顶分型（上涨笔）：顶分型的顶必须**高于底分型三根K线的最高点**。
+  // 分型范围脱离检查（双向）：一笔的两端分型不能互相"包含"。
+  // 起点侧（对称两根，排除段外的反向结构 bar）：
+  //   下跌笔（顶@a → 底@b）用顶分型 [中心, 右 bar] 的最低——不用左 bar，否则主升前夜/
+  //   起涨点的旧低点会错误抬高"必须跌破"的阈值，误杀后续健康反弹。
+  //   例：60m 7-14 20:00 顶 4104.05 的顶分型左 bar（19:00 主升前夜 bar）低点 4015.485
+  //   只比 7-15 16:00 的真实底 4017.475 低 2 点，旧规则（三根最低）使该底被拒、
+  //   60 点反弹（→7-15 21:00 顶 4074.175）整段消失；对称化后阈值 =
+  //   min(中心 4071.00, 右 4064.725) → 底通过 → 反弹成笔。
+  //   上涨笔（底@a → 顶@b）对称用 [左 bar, 中心] 的最高。
+  // 终点侧（三根，防反向吞没）：
+  //   下跌笔的底分型三根K线最高价不得涨回起点顶价之上；上涨笔的顶分型三根K线最低价
+  //   不得跌破起点底价（顶后崩盘 bar 跌回起点之下 = 中继弱反弹，不成笔；
+  //   中心 bar 的崩盘低点可能被包含合并抬高，须依赖三根中的右 bar 提供证据）。
+  //   例：240 笔16 顶分型中心 8-28 21:00 bar（H4631.98 开盘1小时内冲高，bar 内暴跌收 4479），
+  //   三根最低 4445.455（8-29 01:00 bar）< 起点底 4564.27 → 该上涨笔被拒；
+  //   60m 8-28 22:00 bar 同型（H4631.98→L4530.02，崩盘低点被 up 合并抬到 4596.26）
+  //   → 右 bar（23:00 L4524.125）< 起点 4571.66 → 同样被拒。
+  //   对比 7-15 反弹顶 4074.175：三根最低 4035.955 > 起点底 4017.475 → 健康反弹通过。
   const fractalRangeClear = (a, b) => {
     const i = a.mergedIdx;
-    const rangeLow = Math.min(merged[i - 1].low, merged[i].low, merged[i + 1].low);
-    const rangeHigh = Math.max(merged[i - 1].high, merged[i].high, merged[i + 1].high);
-    if (a.type === "top" && b.type === "bottom") return b.low < rangeLow;
-    if (a.type === "bottom" && b.type === "top") return b.high > rangeHigh;
+    const j = b.mergedIdx;
+    // 起点侧：与段同侧的两根（中心 + 终点方向邻 bar）
+    const rangeLow = a.type === "top"
+      ? Math.min(merged[i].low, merged[i + 1].low)
+      : Math.min(merged[i - 1].low, merged[i].low);
+    const rangeHigh = a.type === "top"
+      ? Math.max(merged[i].high, merged[i + 1].high)
+      : Math.max(merged[i - 1].high, merged[i].high);
+    // 终点侧：分型自身三根范围（防反向吞没；含终点外侧 bar 提供崩盘/暴涨证据）
+    const endLow = Math.min(merged[j - 1].low, merged[j].low, merged[j + 1].low);
+    const endHigh = Math.max(merged[j - 1].high, merged[j].high, merged[j + 1].high);
+    if (a.type === "top" && b.type === "bottom") return b.low < rangeLow && endHigh < a.high;
+    if (a.type === "bottom" && b.type === "top") return b.high > rangeHigh && endLow > a.low;
     return true;
   };
 
@@ -405,7 +537,8 @@ function fixBiExtremes(bis, merged) {
     if (fromIdx > toIdx) continue;
     let extreme = null;
     if (b.type === "down") {
-      // 终点是底：找被合并掩盖的更低的真实低点
+      // 终点是底：找被合并掩盖的更低的真实低点（rawLow 原值——探底插针低点
+      // 允许恢复为端点，如 60m 7-29 09:00 的 4010.41、240 的 4009.39）
       for (let k = fromIdx; k <= toIdx; k++) {
         const mk = merged[k];
         if (mk.rawLow === undefined || mk.rawLow >= mk.low) continue; // 未被掩盖
@@ -414,7 +547,9 @@ function fixBiExtremes(bis, merged) {
         }
       }
     } else {
-      // 终点是顶：找被合并掩盖的更高的真实高点
+      // 终点是顶：找被合并掩盖的更高的真实高点（rawHigh 原值；9-3 16:00 类插针
+      // 已被 markWickBars 压平，其影线价不再出现在 rawHigh 中，不会把 17:00 顶
+      // 4442.04 平移回插针价）
       for (let k = fromIdx; k <= toIdx; k++) {
         const mk = merged[k];
         if (mk.rawHigh === undefined || mk.rawHigh <= mk.high) continue; // 未被掩盖
@@ -1444,6 +1579,7 @@ function alignBiToUpper(lowerBis, upperBis, upperIntervalSec, lowerBars) {
 module.exports = {
   CHAN_CFG,
   // K线/分型/笔
+  markWickBars,
   mergeBars,
   findFractals,
   countRaw,

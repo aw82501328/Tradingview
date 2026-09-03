@@ -63,8 +63,11 @@ def _draw_chunk(c, chunk):
         calls.append(
             "await chart.createShape("
             f"{{ time: {t['entryTime']}, price: {t['entryPrice']} }}, "
-            f"{{ shape: '{shape}', text: '{text}', lock: true, "
-            f"color: '{color}', textColor: '{color}' }})"
+            f"{{ shape: '{shape}', text: '{text}', lock: false, "
+            f"color: '{color}', textColor: '{color}', "
+            # arrow_up/arrow_down 工具箭头图标颜色为独立字段 arrowColor，
+            # 不走顶层 color/textColor（否则恒为默认黄 #FFEB3B），须用 overrides 指定
+            f"overrides: {{ arrowColor: '{color}' }} }})"
         )
     expr = (
         "(async () => { const chart = TradingViewApi.activeChart(); "
