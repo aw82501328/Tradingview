@@ -271,6 +271,18 @@ def _read_bars(c):
     return c.evaluate(expr)
 
 
+def _dedup_sorted(bars):
+    """去重 + 时间升序。"""
+    seen = set()
+    uniq = []
+    for b in sorted(bars, key=lambda x: x["time"]):
+        if b["time"] in seen:
+            continue
+        seen.add(b["time"])
+        uniq.append(b)
+    return uniq
+
+
 def fetch_bars(cfg=None, from_ts=0, cache=True, cache_file=CACHE_FILE, symbol=None, log=None):
     """通过 CDP 拉取多周期历史K线。
 
@@ -292,6 +304,21 @@ def fetch_bars(cfg=None, from_ts=0, cache=True, cache_file=CACHE_FILE, symbol=No
         for res in cfg.periods:
             _set_resolution(c, res)
             time.sleep(cfg.res_wait)
+            sec = intervalSecOf(res) or 0
+            if 0 < sec < 60:
+                # 秒级周期（如 30S）：密度是分钟级的数十倍且 TV 历史深度有限，
+                # 不做 scrollToFirstBar（为覆盖起始日期加载数万根必超时），
+                # 直接读当前已加载K线，只保留最近 3 天（与 JS 端 chan-bi --with-30s 窗口一致）
+                d = _read_bars(c)
+                if not d or not d.get("bars"):
+                    log(f"警告：周期 {res} 未读到K线")
+                    continue
+                latest = d["bars"][-1]["time"]
+                cutoff = max(from_ts, latest - 3 * 86400)
+                bars = [b for b in d["bars"] if b["time"] >= cutoff]
+                data[res] = _dedup_sorted(bars)
+                log(f"已加载 {res}：共 {d['total']} 根，秒级窗口保留 {len(data[res])} 根（最近3天）")
+                continue
             _scroll_to_first_bar(c)
             time.sleep(cfg.scroll_wait)
             d = _read_bars(c)
@@ -300,15 +327,8 @@ def fetch_bars(cfg=None, from_ts=0, cache=True, cache_file=CACHE_FILE, symbol=No
                 continue
             bars = [b for b in d["bars"] if b["time"] >= from_ts]
             # 去重 + 时间升序
-            seen = set()
-            uniq = []
-            for b in sorted(bars, key=lambda x: x["time"]):
-                if b["time"] in seen:
-                    continue
-                seen.add(b["time"])
-                uniq.append(b)
-            data[res] = uniq
-            log(f"已加载 {res}：共 {d['total']} 根，保留 {len(uniq)} 根")
+            data[res] = _dedup_sorted(bars)
+            log(f"已加载 {res}：共 {d['total']} 根，保留 {len(data[res])} 根")
     if cache:
         with open(cache_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)

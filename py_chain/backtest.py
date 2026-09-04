@@ -318,8 +318,14 @@ class BacktestEngine:
         return changed
 
     def _rebuild_chain(self):
-        """链路重算：买卖点 → 支阻位 → 交易计划 → 进出场（使用增量缓存指标）。"""
+        """链路重算：买卖点 → 支阻位 → 交易计划 → 进出场（使用增量缓存指标）。
+
+        30S（periods 含时）只进 bis 与进出场，不进买卖点/支阻位/交易计划——
+        与 JS 端语义一致（mark-buy-sell/mark-sr-flip/trading-plan 周期不含 30S，
+        sr_flip 的 LEVEL_ORDER 未收录 30S）。
+        """
         periodBis = self._bis
+        core = [p for p in self.periods if str(p).upper() != "30S"]
         barsByPeriod = {}
         periodMacd = {res: self._macd[res].to_list() for res in self.periods}
         periodAtr = {res: self._atr[res].value for res in self.periods}
@@ -328,30 +334,31 @@ class BacktestEngine:
         # 1. 买卖点（全链路完整性；默认关闭以提速，可由 --with-marks 开启）
         if self.with_marks:
             try:
-                self._marks = compute_all_marks(periodBis, barsByPeriod, self.periods,
+                self._marks = compute_all_marks(periodBis, barsByPeriod, core,
                                                 fromTs=None, periodMacd=periodMacd,
                                                 periodAtr=periodAtr)
             except Exception:
                 self._marks = {}
         # 2. 支阻位
         try:
-            self._sr = compute_srflip(periodBis, barsByPeriod, self.periods,
+            self._sr = compute_srflip(periodBis, barsByPeriod, core,
                                       periodAtrsIn=periodAtr)
         except Exception:
             self._sr = None
         # 3. 交易计划
         try:
-            self._plan = compute_plan(periodBis, barsByPeriod, self.periods,
+            self._plan = compute_plan(periodBis, barsByPeriod, core,
                                       periodMacd=periodMacd, periodAtr=periodAtr)
         except Exception:
             self._plan = {}
-        # 4. 进出场（检测周期与 JS 一致：不含日线）
+        # 4. 进出场（检测周期与 JS 一致：不含日线、不含 30S——30S 仅作背驰级别）
         srLevels = (self._sr or {}).get("merged") or []
-        detectPeriods = [p for p in self.periods if str(p).upper() != "D"]
+        detectPeriods = [p for p in core if str(p).upper() != "D"]
         try:
             self._entries = compute_entries(periodBis, barsByPeriod, self._plan, srLevels,
                                             detectPeriods=detectPeriods,
-                                            periodMacd=periodMacd, periodAtr=periodAtr)
+                                            periodMacd=periodMacd, periodAtr=periodAtr,
+                                            with_30s=any(str(p).upper() == "30S" for p in self.periods))
         except Exception:
             self._entries = {}
 

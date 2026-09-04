@@ -60,6 +60,12 @@ def _interval_visibility_js(res):
     if up in ("W", "1W", "M", "1M"):
         # 周/月线暂无对应范围字段约定，保持默认不限
         return None
+    if "S" in up and up[:-1].isdigit():
+        # 秒级周期（如 30S）：仅显示在该秒级图表上（minutes=0 会误返回 None 导致全周期可见）
+        s = int(up[:-1])
+        return ("{ seconds: true, "
+                f"secondsFrom: {s}, secondsTo: {s}, "
+                "minutes: false, hours: false, days: false, weeks: false, months: false }")
     if res.isdigit():
         minutes = int(res)
     else:

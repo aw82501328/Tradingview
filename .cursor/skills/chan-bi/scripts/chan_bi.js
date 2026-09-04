@@ -13,6 +13,8 @@
  *   --gap=0.5       跳空独立成笔阈值（跳空缺口 >= gap*ATR 时强制独立成笔）
  *   --periods=...   要绘制的周期列表（逗号分隔，默认 D,240,60,15,3）
  *   --from=YYYY-MM-DD  指定日线起点日期（从该日期的日K开始画，嵌套到各级别）
+ *   --with-30s      启用 30 秒级别（追加 30S 周期：只计算并落盘笔数据，不在图上绘制；
+ *                   供 mark-entry --with-30s 的「以下级别背驰」使用。关闭后重跑本脚本即移除 30S 数据）
  */
 const fs = require("fs");
 const path = require("path");
@@ -64,8 +66,11 @@ if (FROM_DATE) {
 }
 // 要绘制的周期列表，按从大到小排列（日线 → 4小时 → 1小时 → 15分钟 → 3分钟）
 // 外层先画，内层以外层一笔的起点为锚，嵌套迭代画内部笔
+// --with-30s：追加 30 秒级别（30S 只计算落盘、不绘制，见 COMPUTE_ONLY）
+const WITH_30S = args.includes("--with-30s");
 const PERIODS = getStrArg("periods", "D,240,60,15,3")
   .split(",").map(s => s.trim()).filter(Boolean);
+if (WITH_30S && !PERIODS.includes("30S")) PERIODS.push("30S");
 
 // 内层窗口最小K线数：锚点范围内K线不足时向前扩展
 const MIN_WINDOW_BARS = 20;
@@ -75,7 +80,12 @@ const ANCHOR_BUFFER = 30;
 // 小周期只加载并绘制最近 N 天的笔：3分钟最近15天、15分钟最近30天，
 // 避免从起始日期到最新的全部笔堆叠导致图上过密，同时缩小加载量、
 // 避免 3 分钟为覆盖起始日期加载数月完整历史而超时。
-const DRAW_WINDOW_DAYS = { '3': 15, '15': 30 };
+// 30秒密度是 3 分钟的 6 倍，窗口取 3 天（≈5.5k 根，与 3分钟×15天 同量级）。
+const DRAW_WINDOW_DAYS = { '3': 15, '15': 30, '30S': 3 };
+
+// 只计算不绘制的周期：30秒笔太密不画在图上，仅计算并落盘到 bis_<品种>.json，
+// 供 mark-entry --with-30s 的「以下级别背驰」检测使用（笔计算/锚定/窗口过滤全部照常）。
+const COMPUTE_ONLY = new Set(["30S"]);
 
 // ============================================================
 // 绘制配置（笔的颜色与周期可见范围）
@@ -99,6 +109,7 @@ function resolutionColor(res) {
     case "D":    return "#F23645";  // 红色
     case "1W":
     case "W":    return "#089981";  // 绿色
+    case "30S":  return "#FF6D00";  // 橙色（30秒只计算落盘不绘制，此颜色仅用于日志展示）
     default:     return "#8A2BE2";  // 紫色（默认）
   }
 }
@@ -669,7 +680,9 @@ function intervalVisibility(res) {
       // 收集本周期最终笔数据（绘制阶段完成后再追加，确保与图上一致）
       allBis[res] = drawBis;
 
-      if (DRY) continue;
+      // 30秒等 COMPUTE_ONLY 周期：只计算落盘、不绘制（笔太密画图上不可读），
+      // 也不做清除（从未画过就无残留）
+      if (DRY || COMPUTE_ONLY.has(res)) continue;
 
       // 清除阶段：切回源周期，只清除本周期旧笔（源周期下本周期笔一定可见）
       if (res !== currentRes) {

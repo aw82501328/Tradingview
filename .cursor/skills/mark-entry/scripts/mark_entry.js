@@ -55,6 +55,9 @@ let FROM_TS = null;
   else console.log("警告: --from 日期格式应为 YYYY-MM-DD，忽略该参数");
 }
 // 检测周期列表（默认 4小时/1小时/15分钟/3分钟，从大到小）
+// --with-30s：启用 30 秒级别（ALL_RES 追加 30S，3分钟状态可用 30S 背驰产生进场信号，
+// 箭头画在 30S 级别；30S 自身无更低级别，不作为检测周期）
+const WITH_30S = args.includes("--with-30s");
 const PERIODS = getStrArg("periods", "240,60,15,3")
   .split(",").map(s => s.trim()).filter(Boolean);
 
@@ -83,6 +86,7 @@ function onlyThisInterval(res) {
     months: false, monthsFrom: 1, monthsTo: 12,
   };
   switch (s) {
+    case "30S":  return { ...NONE, seconds: true, secondsFrom: 30, secondsTo: 30 };
     case "3":    return { ...NONE, minutes: true, minutesFrom: 3, minutesTo: 3 };
     case "15":   return { ...NONE, minutes: true, minutesFrom: 15, minutesTo: 15 };
     case "60":
@@ -491,7 +495,10 @@ function evaluateEntry(ctx, strategy) {
     };
 
     // 读取K线（从起始日期开始，含缓冲；数据未覆盖时自动加载完整历史）
-    const fetchBars = async (fromTs, buffer) => {
+    // windowDays：小周期窗口（如 30S 只取最近 N 天）——秒级K线为覆盖数月前的起始日期
+    // 而加载完整历史必然超时，仿 chan-bi 的 effFrom 写法，覆盖目标改为
+    // max(fromTs, 最新K线时间 - windowDays*86400)
+    const fetchBars = async (fromTs, buffer, windowDays) => {
       const tolerance = 6 * 3600;
       for (let attempt = 0; attempt < 60; attempt++) {
         const dataRes = await client.Runtime.evaluate({
@@ -504,11 +511,14 @@ function evaluateEntry(ctx, strategy) {
               time: i.value[0], open: i.value[1], high: i.value[2], low: i.value[3], close: i.value[4], volume: i.value[5]
             }));
             const fromTs = ${JSON.stringify(fromTs)};
+            const windowDays = ${JSON.stringify(windowDays || null)};
             const tolerance = ${JSON.stringify(tolerance)};
-            if (bars[0].time > fromTs + tolerance) {
+            const latestTs = bars.length ? bars[bars.length - 1].time : 0;
+            const effFrom = (fromTs && windowDays) ? Math.max(fromTs, latestTs - windowDays * 86400) : fromTs;
+            if (bars[0].time > effFrom + tolerance) {
               return { bars: [], notCovered: true, len: bars.length, resolution: String(chart.resolution()) };
             }
-            const fromIdx = bars.findIndex(k => k.time >= fromTs);
+            const fromIdx = bars.findIndex(k => k.time >= effFrom);
             const buf = ${buffer || 0};
             const start = Math.max(0, fromIdx - buf);
             return { bars: bars.slice(start), len: bars.length, resolution: String(chart.resolution()) };
@@ -627,7 +637,15 @@ function evaluateEntry(ctx, strategy) {
     // 预取各周期数据（K线/ATR/MACD），供策略条件判定与「以下级别背驰」检测
     // ============================================================
     // 全部参与判定的周期：检测周期（PERIODS）+ 日线（仅作为 240 的上一级别笔）。
-    const ALL_RES = ["D", "240", "60", "15", "3"].filter(r => periodBis[r] && periodBis[r].length > 0);
+    // --with-30s：追加 30S（需 bis 数据中存在 30S 笔，即先用 chan_bi --with-30s 画过笔），
+    // 使 3 分钟状态的「以下级别背驰」可以落到 30S 上。
+    const ALL_RES = ["D", "240", "60", "15", "3", ...(WITH_30S ? ["30S"] : [])]
+      .filter(r => periodBis[r] && periodBis[r].length > 0);
+    // 小周期数据窗口（与 chan-bi/mark-buy-sell 的 DRAW_WINDOW_DAYS 一致）：
+    // 3分钟只取最近 15 天、15分钟最近 30 天、30秒（--with-30s）最近 3 天。
+    // 笔数据（bis）本身就只含这些窗口（chan-bi 窗口过滤后落盘），K线/MACD 取同窗口即对齐；
+    // 不加窗口会把 3m 历史往回加载到 --from（数月、数万根），TV 加载不到该深度导致周期被跳过。
+    const DRAW_WINDOW_DAYS = { "3": 15, "15": 30, "30S": 3 };
     const periodData = {};
     let loadRes = originalRes;
     for (const res of ALL_RES) {
@@ -635,7 +653,7 @@ function evaluateEntry(ctx, strategy) {
         await ensureResolution(res);
         loadRes = res;
       }
-      const d = await fetchBars(FROM_TS, BAR_BUFFER);
+      const d = await fetchBars(FROM_TS, BAR_BUFFER, DRAW_WINDOW_DAYS[res]);
       if (!d || !d.bars || d.bars.length === 0) {
         console.log(`\n[周期 ${res}] 读取K线失败，跳过该周期数据`);
         continue;
@@ -872,8 +890,8 @@ function evaluateEntry(ctx, strategy) {
       const entries = allEntries[res];
       if (!entries || entries.length === 0) continue;
       // 箭头创建在「低一级」周期：低一级周期 bar 边界更细，锚点时间（笔端点已校准到
-      // 低一级边界）在其上精确定位；其中 3 分钟是最小周期，锚点在 3 分钟读取始终
-      // 返回原始时间（即使数据未覆盖），是天然稳定锚定周期。
+      // 低一级边界）在其上精确定位；最小周期（默认 3 分钟、--with-30s 时为 30 秒）
+      // 无更低级别、锚点在其自身读取始终返回原始时间（即使数据未覆盖），是天然稳定锚定周期。
       const drawRes = lowerResOf(res) || res;
       if (drawRes !== drawCurrentRes) {
         await ensureResolution(drawRes);

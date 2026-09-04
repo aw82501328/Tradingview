@@ -301,12 +301,14 @@ def evaluateEntry(ctx, strategy):
 # 汇总计算（供回测链路调用）
 # ============================================================
 
-# 全部参与判定的周期（与 JS 一致）：检测周期 + 日线（仅作为 240 的上一级别笔）
+# 全部参与判定的周期（与 JS 一致）：检测周期 + 日线（仅作为 240 的上一级别笔）。
+# with_30s=True 时追加 30S（3 分钟状态可用 30S 背驰产生进场信号，箭头画在 30S 级别）
 ALL_RES = ["D", "240", "60", "15", "3"]
+ALL_RES_WITH_30S = ["D", "240", "60", "15", "3", "30S"]
 
 
 def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriods,
-                    nearAtr=NEAR_ATR, periodMacd=None, periodAtr=None):
+                    nearAtr=NEAR_ATR, periodMacd=None, periodAtr=None, with_30s=False):
     """逐周期判定进场状态（依赖交易计划 plan 结果）→ 生成进场信号。
 
     @param periodBis     各周期笔 { 周期: [bis] }
@@ -317,13 +319,15 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
     @param nearAtr       靠近支阻位阈值（×检测周期ATR）
     @param periodMacd    可选：各周期预计算 MACD { 周期: [macdArr] }
     @param periodAtr     可选：各周期预计算 ATR { 周期: atr }
+    @param with_30s      启用 30 秒级别（ALL_RES 追加 30S，仍按数据存在性过滤）
     @returns { 标记级别: [信号...] }，信号含 { periodX, time, price, direction, strategyKey,
              nearSr, color, markRes }
     """
     periodMacd = periodMacd or {}
     periodAtr = periodAtr or {}
+    all_res = ALL_RES_WITH_30S if with_30s else ALL_RES
     periodData = {}
-    for res in ALL_RES:
+    for res in all_res:
         bis = periodBis.get(res, []) or []
         if not bis:
             continue

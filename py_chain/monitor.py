@@ -5,10 +5,11 @@
 实时监控（默认 --mode live）：
   1. 初始化：load_bars 全量加载多周期历史 → BacktestEngine 增量引擎，step_to 预热到最新
      （初始已存在的进场信号忽略，不提醒不画）；
-  2. 每轮 tick：读取 3m 尾部K线（监控期间图表固定在 3m，每轮零切换零等待），
-     增量并入 3m；仅当检测到「新的已收盘 3m bar」（约每 3 分钟一次）时才做一次
-     全周期（D/240/60/15/3）切换刷新（避免每轮都切 5 个周期导致图表频繁跳动），
-     刷新后回到 3m；Ctrl+C 退出时恢复监控前的图表周期；
+  2. 每轮 tick：读取最细周期尾部K线（监控期间图表固定在最细周期，每轮零切换零等待；
+     默认 3m；periods 含 30S（--with-30s）时为 30 秒，约每 30 秒触发一次全周期刷新），
+     增量并入该周期；仅当检测到「新的已收盘 bar」时才做一次
+     全周期（如 D/240/60/15/3[/30S]）切换刷新（避免每轮都切多个周期导致图表频繁跳动），
+     刷新后回到最细周期；Ctrl+C 退出时恢复监控前的图表周期；
   3. 推进链路（step_to）收集新进场信号（按 (periodX,time,direction,strategyKey) 去重）；
   4. 新信号处理：控制台醒目提醒 + winsound 系统提示音，并在 TradingView 盘面追加
      RT· 箭头标记（多=红上箭头、空=绿下箭头，前缀 RT· 与回测 BT· 隔离），
@@ -16,8 +17,9 @@
 
 K线回放回测（--mode replay）：
   1. 复用 load_bars 全量加载历史（不预热），驱动 TradingView Bar Replay 自动播放；
-  2. 每轮读 currentDate() 回放位置，按 3m 粒度逐根追赶补齐 step_to，不漏中间 bar 信号；
-  3. 信号触发时暂停回放 → 切到信号周期画箭头 → 停留 --hold 秒 → 切回 3m 恢复播放；
+  2. 每轮读 currentDate() 回放位置，按最细周期粒度（默认 3m、含 30S 时 30s）逐根追赶
+     补齐 step_to，不漏中间 bar 信号；
+  3. 信号触发时暂停回放 → 切到信号周期画箭头 → 停留 --hold 秒 → 切回最细周期恢复播放；
   4. 回放结束或 Ctrl+C 时 stopReplay 并恢复用户原周期。
 
 用法：
@@ -37,7 +39,7 @@ from .data_loader import (
     CDPClient, CDPConfig, DEFAULT_PERIODS, DEFAULT_CDP_PORT, load_bars,
 )
 from .backtest import BacktestEngine
-from .chan_core import fmtT
+from .chan_core import fmtT, intervalSecOf
 from .main import parse_from
 
 # 箭头颜色与文本前缀：与回测回画(tv_draw)约定一致
@@ -329,16 +331,18 @@ class LiveMonitor:
         self.tail = int(tail)
         self.log = log or (lambda *a, **k: print(*a))
 
-        # 0. 记录图表初始周期；监控期间图表固定在 3m（主检测周期），退出时恢复原周期
+        # 0. 记录图表初始周期；监控期间图表固定在最细周期（默认 3m，含 30S 时为 30 秒），
+        #    作为收盘 bar 触发与快速轮询周期，退出时恢复原周期
+        self._tick_res = min(self.periods, key=lambda r: intervalSecOf(str(r)) or 0)
         try:
             with CDPClient(self.cfg, log=self.log) as c:
                 r = c.evaluate("String(TradingViewApi.activeChart().resolution());")
                 self._display_res = str(r)
-                if _ensure_res(c, "3"):
+                if _ensure_res(c, self._tick_res):
                     time.sleep(FAST_WAIT)
         except Exception:
             self._display_res = self.periods[-1]
-        self.log(f"图表初始周期：{self._display_res}（监控期间固定在 3m，退出时恢复）")
+        self.log(f"图表初始周期：{self._display_res}（监控期间固定在 {self._tick_res}，退出时恢复）")
 
         # 1. 全量历史初始化增量引擎
         self.log(f"加载历史K线：symbol={symbol} periods={self.periods} use_cache={use_cache}")
@@ -395,39 +399,41 @@ class LiveMonitor:
         return last_ts
 
     def tick(self):
-        """轮询一轮：3m 快速检查，仅在新收盘 3m bar 时全周期刷新 → 推进链路。
+        """轮询一轮：最细周期快速检查，仅在新收盘 bar 时全周期刷新 → 推进链路。
 
         返回本轮新进场信号列表（预热时的历史信号已忽略，这里均为实时新信号）。
+        监控固定周期默认 3m；periods 含 30S 时为 30 秒（30S 信号依赖 30s 收盘 bar 推进）。
         """
+        tr = self._tick_res
         last_ts = 0
         with CDPClient(self.cfg, log=self.log) as c:
-            # 1. 3m 快速检查（监控固定周期为 3m，每轮通常零切换零等待）
+            # 1. 最细周期快速检查（监控固定周期，每轮通常零切换零等待）
             try:
-                if _ensure_res(c, "3"):
+                if _ensure_res(c, tr):
                     time.sleep(FAST_WAIT)
                 d = read_tail(c, self.tail)
                 if d and d.get("bars"):
-                    kind = self.engine.append_bars("3", d["bars"])
-                    n = len(self.engine.bars["3"]["_list"])
+                    kind = self.engine.append_bars(tr, d["bars"])
+                    n = len(self.engine.bars[tr]["_list"])
                     if kind:
-                        self.log(f"  [  3] 并入 {len(d['bars'])} 根（{kind}），累计 {n} 根")
-                    # 3m 尾部倒数第二根 = 最新已收盘 bar（最新一根始终是进行中 bar）
-                    bars3 = self.engine.bars["3"]["_list"]
-                    last_closed = bars3[-2]["time"] if len(bars3) >= 2 else None
+                        self.log(f"  [{tr:>4}] 并入 {len(d['bars'])} 根（{kind}），累计 {n} 根")
+                    # 尾部倒数第二根 = 最新已收盘 bar（最新一根始终是进行中 bar）
+                    barsTr = self.engine.bars[tr]["_list"]
+                    last_closed = barsTr[-2]["time"] if len(barsTr) >= 2 else None
                     # 首轮（None）或已出现新的收盘 bar → 全周期切换刷新
                     if last_closed is not None and last_closed != self._last_closed:
                         if self._last_closed is not None:
-                            self.log(f"  [  3] 检测到新收盘 bar（{fmtT(last_closed)}），全周期刷新")
+                            self.log(f"  [{tr:>4}] 检测到新收盘 bar（{fmtT(last_closed)}），全周期刷新")
                         self._last_closed = last_closed
                         last_ts = max(last_ts, self._full_refresh(c))
-                        # 全周期刷新后确保回到监控固定周期 3m
-                        if _ensure_res(c, "3"):
+                        # 全周期刷新后确保回到监控固定周期
+                        if _ensure_res(c, tr):
                             time.sleep(FAST_WAIT)
-                    times = self.engine.bars["3"]["_times"]
+                    times = self.engine.bars[tr]["_times"]
                     if times:
                         last_ts = max(last_ts, times[-1])
             except Exception as e:
-                self.log(f"  [  3] 读取失败（忽略）：{e}")
+                self.log(f"  [{tr:>4}] 读取失败（忽略）：{e}")
         if not last_ts:
             return []
         return self.engine.step_to(last_ts)
@@ -529,16 +535,18 @@ class ReplayMonitor(LiveMonitor):
         self._stopped = False
         self._finished = False    # 回放是否已结束（isReplayStarted=false）
 
-        # 0. 记录图表初始周期；回放期间默认驻留 3m（信号触发时临时切换），退出时恢复
+        # 0. 记录图表初始周期；回放期间默认驻留最细周期（默认 3m，含 30S 时为 30 秒；
+        #    信号触发时临时切换），退出时恢复
+        self._tick_res = min(self.periods, key=lambda r: intervalSecOf(str(r)) or 0)
         try:
             with CDPClient(self.cfg, log=self.log) as c:
                 r = c.evaluate("String(TradingViewApi.activeChart().resolution());")
                 self._display_res = str(r)
-                if _ensure_res(c, "3"):
+                if _ensure_res(c, self._tick_res):
                     time.sleep(FAST_WAIT)
         except Exception:
             self._display_res = self.periods[-1]
-        self.log(f"图表初始周期：{self._display_res}（回放期间默认驻留 3m，退出时恢复）")
+        self.log(f"图表初始周期：{self._display_res}（回放期间默认驻留 {self._tick_res}，退出时恢复）")
 
         # 1. 全量历史初始化增量引擎（不预热，回放从起始点逐步推进）
         self.log(f"加载历史K线：symbol={symbol} periods={self.periods} use_cache={use_cache}")
@@ -652,8 +660,8 @@ class ReplayMonitor(LiveMonitor):
             return sigs
 
     def _catch_up(self, pos):
-        """从 _last_pos 到 pos 按 3m 粒度逐根补齐，返回新信号列表。"""
-        step = 180    # 3m 粒度（秒）
+        """从 _last_pos 到 pos 按最细周期粒度逐根补齐，返回新信号列表。"""
+        step = intervalSecOf(self._tick_res) or 180    # 步进粒度（秒），默认 3m、含 30S 时 30
         max_steps = 500
         sigs = []
         if self._last_pos is None:
@@ -683,7 +691,7 @@ class ReplayMonitor(LiveMonitor):
         return sigs
 
     def _handle_signal_pause(self, c, sigs):
-        """信号触发：暂停回放 → 切到信号周期画箭头 → 停留 → 切回 3m → 恢复播放。"""
+        """信号触发：暂停回放 → 切到信号周期画箭头 → 停留 → 切回最细周期 → 恢复播放。"""
         try:
             replay_toggle_autoplay(c)    # 暂停自动播放
             time.sleep(0.3)
@@ -695,7 +703,7 @@ class ReplayMonitor(LiveMonitor):
                 time.sleep(RES_WAIT)
             self._mark_signals(c, sigs)
             time.sleep(self.hold_sec)
-            if _ensure_res(c, "3"):
+            if _ensure_res(c, self._tick_res):
                 time.sleep(FAST_WAIT)
             replay_toggle_autoplay(c)    # 恢复自动播放
         except Exception as e:

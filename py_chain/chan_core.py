@@ -25,6 +25,7 @@
 """
 
 import bisect
+import re
 
 from datetime import datetime
 
@@ -949,8 +950,10 @@ def calibrateBiTimes(bis, bigBars, refBars, bigIntervalSec):
 
 
 def intervalSecOf(res):
-    """周期 → 单根K线时长（秒）。"""
+    """周期 → 单根K线时长（秒）。注意 "30" = 30分钟，"30S" = 30秒（TradingView resolution 后缀 S 表秒级）。"""
     r = str(res).upper()
+    if re.fullmatch(r"\d+S", r):
+        return int(r[:-1])  # "30S" → 30（秒级）
     if r == "3":
         return 180
     if r == "5":

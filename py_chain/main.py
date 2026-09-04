@@ -35,16 +35,23 @@ def parse_from(s):
 
 
 def build_full_chain(bars_by_period, periods, with_marks=True):
-    """全链路（对整段数据一次性计算），返回各阶段结果。"""
+    """全链路（对整段数据一次性计算），返回各阶段结果。
+
+    30S（--with-30s 追加）只参与 bis 计算与进出场（compute_entries），
+    不进 marks/sr/plan——与 JS 端语义一致（mark-buy-sell/mark-sr-flip/trading-plan
+    的周期不含 30S，sr_flip 的 LEVEL_ORDER 也未收录 30S）。
+    """
+    core = [p for p in periods if str(p).upper() != "30S"]
     bis = build_bis(bars_by_period, periods)
     marks = {}
     if with_marks:
-        marks = compute_all_marks(bis, bars_by_period, periods, fromTs=None)
-    sr = compute_srflip(bis, bars_by_period, periods)
-    plan = compute_plan(bis, bars_by_period, periods)
+        marks = compute_all_marks(bis, bars_by_period, core, fromTs=None)
+    sr = compute_srflip(bis, bars_by_period, core)
+    plan = compute_plan(bis, bars_by_period, core)
     srLevels = (sr or {}).get("merged") or []
     entries = compute_entries(bis, bars_by_period, plan, srLevels,
-                              detectPeriods=[p for p in periods if p != "D"])
+                              detectPeriods=[p for p in core if p != "D"],
+                              with_30s=any(str(p).upper() == "30S" for p in periods))
     return {"bis": bis, "marks": marks, "sr": sr, "plan": plan, "entries": entries}
 
 
@@ -104,6 +111,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Python 化回测链路：取数→全链路→回测→回画→统计")
     ap.add_argument("--symbol", default=None, help="品种，如 OANDA:XAUUSD（先切换图表品种再取数）")
     ap.add_argument("--periods", default=",".join(DEFAULT_PERIODS), help="周期列表，默认 D,240,60,15,3")
+    ap.add_argument("--with-30s", action="store_true", help="追加 30 秒级别（30S 只取最近3天数据，供 3 分钟的进场背驰检测）")
     ap.add_argument("--from", dest="from_date", default="2026-07-02", help="起始日期 YYYY-MM-DD（UTC）")
     ap.add_argument("--port", type=int, default=9222, help="CDP 调试端口，默认 9222")
     ap.add_argument("--use-cache", action="store_true", help="优先读 bars_all_tf.json 缓存")
@@ -113,6 +121,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     periods = [p.strip() for p in args.periods.split(",") if p.strip()]
+    if args.with_30s and "30S" not in periods:
+        periods.append("30S")
     from_ts = parse_from(args.from_date)
 
     # 1. 取数（CDP 或缓存）

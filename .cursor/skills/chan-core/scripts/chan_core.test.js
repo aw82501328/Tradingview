@@ -589,6 +589,7 @@ describe("lowerResOf 逐级校准映射", () => {
     assert.equal(core.lowerResOf("60"), "15");
     assert.equal(core.lowerResOf("15"), "3");
     assert.equal(core.lowerResOf("3"), null);
+    assert.equal(core.lowerResOf("30S"), null); // 30秒为最小级别，不校准（与 3 分钟同为未校准叶子）
     assert.equal(core.lowerResOf("1D"), "240");
     assert.equal(core.lowerResOf("4H"), "60");
     assert.equal(core.lowerResOf("1H"), "15");
@@ -601,6 +602,7 @@ describe("intervalSecOf 周期时长", () => {
     assert.equal(core.intervalSecOf("5"), 300);
     assert.equal(core.intervalSecOf("15"), 900);
     assert.equal(core.intervalSecOf("30"), 1800);
+    assert.equal(core.intervalSecOf("30S"), 30); // 30秒（秒级 S 后缀）
     assert.equal(core.intervalSecOf("60"), 3600);
     assert.equal(core.intervalSecOf("1H"), 3600);
     assert.equal(core.intervalSecOf("240"), 14400);

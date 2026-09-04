@@ -188,6 +188,7 @@ function buildCard(m) {
   `).join('');
   rows.push(`<div class="row">${extraHtml}
     <div class="field"><label>缓存</label><select data-cfg="use_cache"><option value="false">不读缓存</option><option value="true">读缓存</option></select></div>
+    <div class="field"><label>30秒级别</label><select data-cfg="with_30s"><option value="false">关闭</option><option value="true">开启（仅落盘，增加3m进场信号）</option></select></div>
   </div>`);
   return `
   <div class="card" id="card-${m.id}">
@@ -296,6 +297,9 @@ function collectCfg(m) {
     cfg[inp.dataset.cfg] = v === 'true' ? true : v === 'false' ? false : v;
   });
   cfg.periods = cfg.periods.split(',').map(s => s.trim()).filter(Boolean);
+  // 30秒级别开关：开启时向 periods 追加 30S（只落盘最近3天数据，供 3 分钟进场背驰检测）
+  if (cfg.with_30s === true && !cfg.periods.includes('30S')) cfg.periods.push('30S');
+  if (cfg.with_30s === false) cfg.periods = cfg.periods.filter(p => p !== '30S');
   return cfg;
 }
 
