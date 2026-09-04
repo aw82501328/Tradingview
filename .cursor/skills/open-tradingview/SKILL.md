@@ -14,7 +14,9 @@ disable-model-invocation: true
 1. **端口检查**：若 9222 已监听（TradingView 已在运行），直接返回，不重复启动
 2. **自动查找**：在 `C:\Program Files\WindowsApps` 中按通配符查找
    `TradingView.Desktop_*\TradingView.exe`（兼容不同版本号）
-3. **调试模式启动**：以 `--remote-debugging-port=9222` 参数启动
+3. **调试模式启动**：以 `--remote-debugging-port=9222` 参数启动，三级兜底：
+   node spawn → PowerShell Start-Process → `Invoke-CommandInDesktopPackage` 包内启动
+   （部分机器 MSIX 应用不允许脱离包身份直启 exe，前两种会"启动即退"，包内方式可正常带参启动）
 4. **等待就绪**：轮询端口最多 30 秒，确认 CDP 可用后返回
 
 ## 使用方式

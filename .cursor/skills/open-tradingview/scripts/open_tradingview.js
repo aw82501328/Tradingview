@@ -4,7 +4,7 @@
  * 功能：
  *   1. 检查端口 9222 是否已监听（已运行则直接返回）
  *   2. 在 WindowsApps 目录查找 TradingView.exe（MSIX 安装，版本号通配）
- *   3. 以 --remote-debugging-port=9222 启动
+ *   3. 以 --remote-debugging-port=9222 启动（spawn → PowerShell → 包内启动三级兜底）
  *   4. 轮询等待调试端口就绪（最多 30 秒）
  *
  * 用法：node open_tradingview.js
@@ -118,6 +118,27 @@ function launchWithPowerShell(exe) {
   });
 }
 
+/**
+ * 通过 Invoke-CommandInDesktopPackage 在包内上下文启动（最终兜底方式）
+ *
+ * 实测：部分机器上 MSIX 打包的 TradingView 不允许脱离包身份直接跑 exe，
+ * spawn 与 PowerShell Start-Process 都会"启动即退"（进程秒退、端口不监听）；
+ * 而用包内命令执行方式携带调试参数可以正常启动并开放 CDP 端口。
+ */
+function launchInPackageContext() {
+  const ps = [
+    "$pkg = Get-AppxPackage -Name TradingView.Desktop",
+    "if (-not $pkg) { exit 1 }",
+    "$appId = (Get-AppxPackageManifest $pkg).Package.Applications.Application.Id | Select-Object -First 1",
+    "Invoke-CommandInDesktopPackage -PackageFamilyName $pkg.PackageFamilyName -AppId $appId -Command (Join-Path $pkg.InstallLocation 'TradingView.exe') -Args '--remote-debugging-port=" + PORT + "'",
+  ].join("; ");
+  return new Promise((resolve) => {
+    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { timeout: 30000 }, (err) =>
+      resolve(!err)
+    );
+  });
+}
+
 /** 轮询等待调试端口就绪（最多 seconds 秒），就绪返回 true */
 async function waitPortReady(seconds) {
   for (let i = 0; i < seconds; i++) {
@@ -168,7 +189,25 @@ async function waitPortReady(seconds) {
     process.exit(0);
   }
 
-  // 5. 仍超时则报错退出
+  // 5. Start-Process 仍超时：MSIX 应用可能不允许脱离包身份直启 exe（启动即退），
+  //    改用 Invoke-CommandInDesktopPackage 在包内上下文携带调试参数启动（最终兜底）
+  if (await hasTradingViewProcess()) {
+    console.log(`调试端口 ${PORT} 仍未就绪，清理残留进程后改用包内方式启动...`);
+    await killTradingView();
+    if (!(await waitProcessExit())) {
+      console.log("WARN: 清理 TradingView 进程超时，继续尝试包内启动");
+    }
+  }
+  const sentInPkg = await launchInPackageContext();
+  console.log(sentInPkg
+    ? `已通过 Invoke-CommandInDesktopPackage 发出启动命令（调试端口 ${PORT}），等待加载...`
+    : "包内启动命令发送失败，继续等待端口超时检查");
+  if (await waitPortReady(20)) {
+    console.log(`SUCCESS: TradingView 启动成功，CDP 端口 ${PORT} 已就绪`);
+    process.exit(0);
+  }
+
+  // 6. 仍超时则报错退出
   console.log(`ERROR: 等待端口 ${PORT} 超时，TradingView 可能启动失败`);
   process.exit(1);
 })();
