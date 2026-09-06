@@ -35,6 +35,10 @@ from datetime import datetime
 
 CHAN_CFG = {
     "gapFilter": 1.0,  # 跳空独立成笔阈值：相邻K线缺口 >= gapFilter*ATR 时强制独立成笔
+    "divergeDurRatio": 3,  # 背驰面积判据的时长可比上限：面积Σ=柱高×K线根数、与区间时长线性相关，
+                           # 两段时长比 > 该值时不具可比性，面积项不计入背驰（只用 DIF/柱高判据）
+    "nearDoubleAtrK": 0.3,  # 近等双顶/双底平台取后顶/后底：价差与回调深度的 ATR 系数
+    "nearDoublePct": 0.001,  # 近等双顶/双底平台取后顶/后底：价差下限（价格比例，与 ATR 项取 max）
     "debug": False,    # 调试打印（buildBi / 买卖点识别过程）
 }
 
@@ -200,8 +204,9 @@ def hasGapBetween(merged, aIdx, bIdx, atr, gapFilter):
 # ============================================================
 
 
-def buildBi(fractals, merged, atr, macdArr, lockedPivots=None):
-    """笔构建。与 JS 版 buildBi 对齐。lockedPivots 为上级笔端点（区间套强制对齐，优先级最高）。"""
+def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False):
+    """笔构建。与 JS 版 buildBi 对齐。lockedPivots 为上级笔端点（区间套强制对齐，优先级最高）；
+    nearDouble=True 时启用「近等双顶/双底平台取后顶/后底」（≥60m 周期由调用方开启）。"""
     gapThreshold = atr * CHAN_CFG["gapFilter"] if atr else 0
 
     # 阶段一：严格交替分型序列
@@ -286,6 +291,40 @@ def buildBi(fractals, merged, atr, macdArr, lockedPivots=None):
                         result[-1] = k
                 else:
                     if k["low"] < last["low"]:
+                        result[-1] = k
+            # 近等双顶/双底平台取后顶/后底（走势终完美；≥60m 周期由调用方开启 nearDouble）：
+            #   后顶/后底 k 与前顶/前底 last 近同价（k 略不极端，差 ≤ max(nearDoubleAtrK×ATR,
+            #   nearDoublePct×价)），且 last→k 间所有相邻分型间隔 <4（拆不出笔的平台/直拉，
+            #   段内无可确认回调结构，走势未完美）；中间确有一次 ≥thr 真实回调。单跳封顶：
+            #   被替换端点打 nearDouble 标记，不二次替换（防平台内累积漂移超阈值）。
+            if (nearDouble and not last.get("gapLocked", False) and not k.get("locked", False)
+                    and not last.get("nearDouble", False)):
+                # locked/gapLocked 不参与；macdCross 不豁免（该端点本就是间隔不足靠 MACD 变色
+                # 凑出的脆弱顶/底，如 1h 8-31 顶 4464.23，与近等平台取后顶语义一致）
+                ref_price = last["high"] if k["type"] == "top" else last["low"]
+                thr = max(atr * CHAN_CFG["nearDoubleAtrK"], ref_price * CHAN_CFG["nearDoublePct"])
+                diff = (last["high"] - k["high"]) if k["type"] == "top" else (k["low"] - last["low"])
+                if 0 <= diff <= thr:
+                    plateau, pull, prev_f, cnt = True, False, last, 0
+                    for f in fractals:
+                        if f["mergedIdx"] <= last["mergedIdx"] or f["mergedIdx"] >= k["mergedIdx"]:
+                            continue
+                        cnt += 1
+                        if f["mergedIdx"] - prev_f["mergedIdx"] >= 4:
+                            plateau = False
+                        if k["type"] == "top" and f["type"] == "bottom" and last["high"] - f["low"] >= thr:
+                            pull = True
+                        if k["type"] == "bottom" and f["type"] == "top" and f["high"] - last["low"] >= thr:
+                            pull = True
+                        prev_f = f
+                    if k["mergedIdx"] - prev_f["mergedIdx"] >= 4:
+                        plateau = False
+                    if cnt > 0 and plateau and pull:
+                        if CHAN_CFG["debug"]:
+                            print(f"[阶段二] 近等双顶/双底平台取后: {k['type']}@{last['mergedIdx']}({ref_price}) -> "
+                                  f"{k['type']}@{k['mergedIdx']}({k['high'] if k['type']=='top' else k['low']}) "
+                                  f"（差 {diff:.2f} ≤ {thr:.2f}，平台内无成笔结构）")
+                        k["nearDouble"] = True  # 单跳封顶
                         result[-1] = k
             continue
         # 异类型
@@ -586,7 +625,7 @@ def buildZS(bis, barSec=0):
     return zss
 
 
-def buildZSByUpper(lowerBis, upperBis, tolSec=0):
+def buildZSByUpper(lowerBis, upperBis, tolSec=0, open_last=True):
     """按上级笔分解构建中枢（分解原则，不跨周期）：
     本级别中枢只能构建在「同一个上级笔」内部。用上级笔时间区间把本级别笔切段，
     每段内独立运行 buildZS，保证中枢不跨上级笔端点。
@@ -594,6 +633,11 @@ def buildZSByUpper(lowerBis, upperBis, tolSec=0):
     @param upperBis 上一级别笔（用于分解约束，可为空数组）
     @param tolSec 时间容差（秒）：本级别端点经低一级校准后可能与上级端点有最多一个
                   本级别bar的偏移；同时作为 buildZS 的 barSec——中枢水平边缘左右各外扩 5×tolSec
+    @param open_last 最后一段开放段（默认 True）：最后一个上级笔的 endTime 视为 +∞（当下）——
+                  形成中的下级笔归属于形成中的上级笔（正在走的行情天然属于正在走的上级笔）。
+                  否则上级形成笔的终点只随上级 bar 收盘延伸，下级最新笔会因 endTime 超出
+                  上级段被丢弃，导致「出中枢力度对比」（zsExitWeak）在够笔当下无法评估、
+                  只能等上级 bar 收盘（曾致 8-21 15:48 信号延后 15 分钟才触发）。
     @returns 中枢列表，每项额外含 upperStart/upperEnd（所属上级笔时间范围）
     """
     if not lowerBis or len(lowerBis) < 3:
@@ -609,12 +653,15 @@ def buildZSByUpper(lowerBis, upperBis, tolSec=0):
         return out
     # 按时间完整归属到上级笔区间：笔必须 startTime 与 endTime 都落在同一上级笔内
     # （含 tol 容差）。不完整落在任何上级笔内的笔不参与中枢。
+    # 最后一段开放段：最后一个上级笔的 endTime 边界视为 +∞（见 open_last 说明）。
+    last_u = upperBis[len(upperBis) - 1]
     segments = []
     cur = None  # { upper, bis }
     for b in lowerBis:
         ub = None
         for u in upperBis:
-            if b["startTime"] >= u["startTime"] - tol and b["endTime"] <= u["endTime"] + tol:
+            end_ok = b["endTime"] <= u["endTime"] + tol or (open_last and u is last_u)
+            if b["startTime"] >= u["startTime"] - tol and end_ok:
                 ub = u
                 break
         if ub is None:
@@ -795,18 +842,32 @@ def biMacdMetrics(bi, macdArr):
     return metrics
 
 
+def _areaDurComparable(a, b):
+    """面积判据的时长可比门：面积Σ=柱高×K线根数的累加，与区间时长线性相关——
+    时长悬殊的两段（如 15.65h 缓跌 vs 4.7h 急跌，Σ=136.2 vs 22.7）面积差主要来自
+    时长而非动能，直接比较会把「短时急跌」误判为背驰。两段时长比 > divergeDurRatio
+    （或某段时长为 0/负）时返回 False → 面积项不计入背驰，只用 DIF/柱高判据。"""
+    da = (a.get("endTime") or 0) - (a.get("startTime") or 0)
+    db = (b.get("endTime") or 0) - (b.get("startTime") or 0)
+    mx, mn = max(da, db), min(da, db)
+    return mn > 0 and mx / mn <= CHAN_CFG["divergeDurRatio"]
+
+
 def isBiDiverge(bi, refer, macdArr):
     """MACD 背驰判定（OR 关系，满足其一即算背驰，与 JS 一致）：
     底背驰（对应一买，下跌笔）：绿柱面积变小 或 黄白线低点抬高 或 绿柱最大高度变小；
-    顶背驰（对应一卖，上涨笔）：红柱面积变小 或 黄白线高点变低 或 红柱最大高度变小。"""
+    顶背驰（对应一卖，上涨笔）：红柱面积变小 或 黄白线高点变低 或 红柱最大高度变小。
+    面积两项受 _areaDurComparable 时长门约束（两段时长不可比时仅用 DIF/柱高判据）。"""
     cur = biMacdMetrics(bi, macdArr)
     ref = biMacdMetrics(refer, macdArr)
     if cur is None or ref is None:
         return False
     if bi["type"] == "down":
-        return (cur["greenArea"] < ref["greenArea"] or cur["difLow"] > ref["difLow"]
+        return ((_areaDurComparable(bi, refer) and cur["greenArea"] < ref["greenArea"])
+                or cur["difLow"] > ref["difLow"]
                 or cur["greenMax"] < ref["greenMax"])
-    return (cur["redArea"] < ref["redArea"] or cur["difHigh"] < ref["difHigh"]
+    return ((_areaDurComparable(bi, refer) and cur["redArea"] < ref["redArea"])
+            or cur["difHigh"] < ref["difHigh"]
             or cur["redMax"] < ref["redMax"])
 
 

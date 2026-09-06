@@ -24,7 +24,11 @@ const CHAN_CFG = {
   gapFilter: 1.0, // 跳空独立成笔阈值：相邻K线缺口 >= gapFilter*ATR 时强制独立成笔
   wickRatio: 0.70, // 长影剔除：影线占整根K线振幅的比例阈值（>= 时视为冲高/探底插针）
   wickAtrK: 0.5,   // 长影剔除：影线绝对长度下限 = wickAtrK * ATR（窄幅小K线免疫）
+  divergeDurRatio: 3, // 背驰面积判据的时长可比上限：面积Σ = 柱高×K线根数、与区间时长线性相关，
+                      // 两段时长比 > 该值时不具可比性，面积项不计入背驰（只用 DIF/柱高判据）
   debug: false,   // 调试打印（buildBi / 买卖点识别过程）
+  nearDoubleAtrK: 0.3, // 近等双顶/双底平台取后顶/后底：价差与回调深度的 ATR 系数
+  nearDoublePct: 0.001, // 近等双顶/双底平台取后顶/后底：价差下限（价格比例，与 ATR 项取 max）
 };
 
 // ============================================================
@@ -93,9 +97,16 @@ function markWickBars(rawBars) {
         }
         b.high = bodyTop;
       } else if (lower >= ratio * amp && lower >= minWick) {
-        // 长下影（探底插针）：low 压平至实体底（与历史验收结构一致）。
-        //（4010.41/4017.475 等探底端点不受影响——其 bar 的下影占比不足或由
-        //  分型/端点修正正常产生）
+        // 长下影（探底插针）：low 压平至实体底（结构/区间竞争保持压平语义，
+        // 与历史验收结构一致——4010.41/4017.475 等探底端点不受影响，其 bar 的
+        // 下影占比不足或由分型/端点修正正常产生）。
+        // 但压平会销毁真低（rawLow 记录的是压平值），若该真低是笔底区域的
+        // 绝对极值（如 1h 9-2 11:00 4282.625，下影 93%、实底更高），笔底将虚高
+        // 并派生出伪 2买/类2买。故压平前把原低记入 _origLow/_origLowTime，
+        // 经 mergeBars 传播，由 fixBiExtremes 恢复为更低的真实笔底端点
+        //（只进端点恢复通道，不进 rawLow/rawHigh——跳空检测保持压平语义）。
+        b._origLow = b.low;
+        b._origLowTime = b.time;
         b.low = bodyBottom;
       }
     }
@@ -158,6 +169,14 @@ function mergeBars(rawBars) {
       if (bar._topCand !== undefined && bar._topCand > (last._topCand || 0)) {
         last._topCand = bar._topCand;
         last._topCandTime = bar.time;
+      }
+      // 探底插针真低（_origLow）随覆盖范围传播：markWickBars 压平长下影时保留的
+      // 原低（及所在原始K线时间），供 fixBiExtremes 在笔终点后恢复为更低的真实
+      // 端点。只进端点恢复通道，不写入 rawLow/rawHigh——跳空检测与分型结构
+      // 保持压平语义（与 _topCand 同模式：结构压平、真值旁路保留）
+      if (bar._origLow !== undefined && (last._origLow === undefined || bar._origLow < last._origLow)) {
+        last._origLow = bar._origLow;
+        last._origLowTime = bar._origLowTime !== undefined ? bar._origLowTime : bar.time;
       }
       last._rawCount += 1;
       last.time = bar.time;
@@ -247,7 +266,7 @@ function hasGapBetween(merged, aIdx, bIdx, atr, gapFilter) {
  *   - 阶段二：遍历序列，处理跳空成笔 / MACD变色成笔 / 前顶前底作废 / 分型范围脱离 / 极值规则
  *   - 阶段三：两两连笔（此时首尾自然连续）
  */
-function buildBi(fractals, merged, atr, macdArr, lockedPivots) {
+function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble) {
   const gapThreshold = atr ? atr * CHAN_CFG.gapFilter : 0;
   // 阶段一：严格交替分型序列
   const seq = [];
@@ -355,6 +374,40 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots) {
         if (k.type === "top") { if (k.high > last.high) result[result.length - 1] = k; }
         else { if (k.low < last.low) result[result.length - 1] = k; }
       }
+      // 近等双顶/双底平台取后顶/后底（走势终完美；由调用方对 ≥60m 周期开启 nearDouble）：
+      //   后顶/后底 k 与前顶/前底 last 近同价（k 略不极端，差 ≤ max(nearDoubleAtrK×ATR,
+      //   nearDoublePct×价)），且 last→k 之间所有相邻分型间隔 <4——整段为「拆不出笔的
+      //   平台/直拉」，段内部没有任何可确认的回调结构（走势未完美，前顶只是影线级高点，
+      //   不应终止本段）；但中间确有一次 ≥thr 的真实回调（平台震荡存在）。
+      //   例：1h 8-31 19:00 顶 4464.23 → 9-1 08:00 顶 4461.7（差 2.53），12 小时平台
+      //   （4415.75~4464）内所有分型间隔均 <4。
+      //   单跳封顶：被本规则替换的端点打 nearDouble 标记，不再二次替换（防止平台内连续
+      //   近等端点被反复后移、累积漂移超过阈值——实测 3 跳累计可超 1×ATR）。
+      //   locked（区间套对齐）/gapLocked（跳空）端点不参与；macdCross 端点不豁免——该端点
+      //   本就是间隔不足时靠 MACD 变色凑出的「脆弱」笔顶/底（如 1h 8-31 顶 4464.23），
+      //   与近等平台取后顶的语义一致，应允许被更晚的后顶/后底替换。
+      if (nearDouble && !last.gapLocked && !k.locked && !last.nearDouble) {
+        const refPrice = k.type === "top" ? last.high : last.low;
+        const thr = Math.max(atr * CHAN_CFG.nearDoubleAtrK, refPrice * CHAN_CFG.nearDoublePct);
+        const diff = k.type === "top" ? last.high - k.high : k.low - last.low;
+        if (diff >= 0 && diff <= thr) {
+          let plateau = true, pull = false, prevF = last, cnt = 0;
+          for (const f of fractals) {
+            if (f.mergedIdx <= last.mergedIdx || f.mergedIdx >= k.mergedIdx) continue;
+            cnt++;
+            if (f.mergedIdx - prevF.mergedIdx >= 4) plateau = false;
+            if (k.type === "top" && f.type === "bottom" && last.high - f.low >= thr) pull = true;
+            if (k.type === "bottom" && f.type === "top" && f.high - last.low >= thr) pull = true;
+            prevF = f;
+          }
+          if (k.mergedIdx - prevF.mergedIdx >= 4) plateau = false;
+          if (cnt > 0 && plateau && pull) {
+            if (CHAN_CFG.debug) console.log(`[阶段二] 近等双顶/双底平台取后: ${k.type === "top" ? "顶" : "底"}@${last.mergedIdx}(${refPrice}) → ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}(${k.type === "top" ? k.high : k.low})（差 ${diff.toFixed(2)} ≤ ${thr.toFixed(2)}，平台内无成笔结构）`);
+            k.nearDouble = true; // 单跳封顶
+            result[result.length - 1] = k;
+          }
+        }
+      }
       continue;
     }
     // 异类型
@@ -454,7 +507,27 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots) {
           //     23:00 的更高顶 4541.045 无法与右侧成笔，应作废的是新顶而非前顶）；
           //   仅当 prev→last 不构成有效笔（前顶右侧不足以成笔）时，更高顶 k 才能顶替 prev。
           const prevLastValidBi = gapPrevLast >= 4 && noMoreExtremeInside(prev, last) && fractalRangeClear(prev, last);
-          if (moreExtreme && !prevLastValidBi) {
+          // 最小间隔脆弱笔例外：prev→last 虽构成有效笔，但间隔恰为最小值（gapPrevLast === 4，
+          // 即刚够 5 根合并K线）且回调/反弹浅（< 前段涨跌幅的 50%）时，该笔尚未被确认——
+          // 随后 k 即创更高顶/更低底说明整段仍是同一笔的延伸（缠论：顶被更高顶突破即作废，
+          // 上涨笔延伸到新极值），prev 应被 k 顶替。
+          //   例：15m 9-3 顶 4496.01(21:03)→底 4466.02 间隔恰 4、回调 39%（浅），
+          //   23:15 新高 4510.93 顶替前顶，上涨笔延伸至 4510.93（与 60m/3m 端点一致）。
+          //   8-20 04:00 顶→20:00 底（间隔 11 根）等坚实笔不受影响；深回调（≥50%）时
+          //   last 是真实转折点，同样不受影响（如 8-14 早盘 底4327.27→顶4347.42 反弹 121%）。
+          let fragileMinimal = false;
+          if (prevLastValidBi && gapPrevLast === 4 && result.length >= 3) {
+            const p3 = result[result.length - 3];
+            if (prev.type === "top") {
+              const rise = prev.high - p3.low;
+              fragileMinimal = rise > 0 && (prev.high - last.low) < rise * 0.5;
+            } else {
+              const drop = p3.high - prev.low;
+              fragileMinimal = drop > 0 && (last.high - prev.low) < drop * 0.5;
+            }
+            if (CHAN_CFG.debug && fragileMinimal) console.log(`[阶段二] 最小间隔脆弱笔: ${prev.type === "top" ? "顶" : "底"}@${prev.mergedIdx}(${prev.type === "top" ? prev.high : prev.low})→${last.type === "top" ? "顶" : "底"}@${last.mergedIdx} 间隔恰4且回调浅，允许被 ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}(${k.type === "top" ? k.high : k.low}) 顶替`);
+          }
+          if (moreExtreme && (!prevLastValidBi || fragileMinimal)) {
             // 回溯替换保护（区间套一致性）：当 last 比更早的同类型分型 result[-3] 更极端时，
             // last 是笔内真实转折点（如插针低点/插针高点），不能无条件 pop 掉——吞掉会导致
             // 该笔内部藏着更极值（违反笔内极值原则），且本级别笔端点与上级周期（区间套）不重合。
@@ -519,6 +592,8 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots) {
  * 本函数对每笔检查「终点分型之后、下一笔终点分型之前」的合并K线，若存在「被包含合并掩盖」
  * （rawLow<low / rawHigh>high）且比当前端点更极端的真实极值，把本笔终点与下一笔起点同步平移到该极值
  * 所在K线（保持首尾连续）。只处理被掩盖的极值——未掩盖的极值若重要，会正常形成分型、由 buildBi 处理。
+ * 下影方向额外恢复 markWickBars 压平的长下影真低（_origLow：压平发生在合并前，rawLow 已是
+ * 压平值；若该真低是笔底区域绝对极值，不恢复则笔底虚高——如 1h 9-2 11:00 4282.625）。
  * 跳空独立成笔（gapLocked）端点固定在缺口处，不参与修正。
  *
  * @param {Array} bis    buildBi 产出的笔数组（原地修改并返回）
@@ -532,25 +607,49 @@ function fixBiExtremes(bis, merged) {
     if (b.gapLocked) continue; // 跳空成笔端点固定在缺口处
     const next = bis[i + 1];
     if (!next) continue; // 最后一笔由 extendLastBi 负责延伸
-    const fromIdx = b.endIdx + 1;
-    const toIdx = next.endIdx - 1; // 不含下一笔终点分型，避免笔退化
-    if (fromIdx > toIdx) continue;
+    // 不含下一笔终点分型（避免笔退化）；顶/底分支各自决定是否扫本笔端点分型中心：
+    const toIdx = next.endIdx - 1;
     let extreme = null;
     if (b.type === "down") {
-      // 终点是底：找被合并掩盖的更低的真实低点（rawLow 原值——探底插针低点
-      // 允许恢复为端点，如 60m 7-29 09:00 的 4010.41、240 的 4009.39）
-      for (let k = fromIdx; k <= toIdx; k++) {
+      // 终点是底：从 b.endIdx 起扫（含分型中心）——中心合并K线可能因包含合并/长下影
+      // 压平把更低的真低藏在自身 low 之下（如 1h 9-2 10:00 底分型中心吞并 11:00
+      // 插针 bar，_origLow=4282.625 < 分型价 4287.27），仅扫 endIdx 之后会漏掉。
+      // 若真低恰在分型中心上（k === b.endIdx），只改价/时间、idx 不动，笔结构无损。
+      const k0 = b.endIdx;
+      if (k0 > toIdx) continue;
+      // 候选真低 = _origLow（markWickBars 压平的长下影原低）或 rawLow 原值
+      // （探底插针低点允许恢复为端点：60m 7-29 09:00 4010.41 被包含合并吞掉
+      //   —— 走 rawLow；1h 9-2 4282.625 被长下影压平 —— 走 _origLow；
+      //   240 7-29 底 4009.39 在本次修复后进一步下移到压平真低 3996.055）
+      for (let k = k0; k <= toIdx; k++) {
         const mk = merged[k];
-        if (mk.rawLow === undefined || mk.rawLow >= mk.low) continue; // 未被掩盖
-        if (mk.rawLow < b.endPrice - eps && (!extreme || mk.rawLow < extreme.price)) {
-          extreme = { price: mk.rawLow, time: mk.rawLowTime, idx: k };
+        // 分型中心 bar（k === b.endIdx）只认 _origLow：中心可能因向上合并把早于
+        // 本笔结构的老蜡烛吞入链内，其 rawLow 未必属于笔底区间（恢复 rawLow 会
+        // 过度下移，超出本次修复目标）；而中心上被 markWickBars 压平的真低
+        // （_origLow，如 1h 9-2 4282.625）是本次修复目标，必须恢复。
+        // 中心之后的 bar 两者都认（rawLow 恢复 = 原行为，4010.41 先例）。
+        const isCenter = k === b.endIdx;
+        const candLow = isCenter && mk._origLow === undefined
+          ? undefined
+          : (mk._origLow !== undefined ? mk._origLow : mk.rawLow);
+        if (candLow === undefined || candLow >= mk.low) continue; // 未被合并/压平掩盖
+        if (candLow < b.endPrice - eps && (!extreme || candLow < extreme.price)) {
+          extreme = {
+            price: candLow,
+            time: mk._origLowTime !== undefined ? mk._origLowTime : mk.rawLowTime,
+            idx: k,
+          };
         }
       }
     } else {
-      // 终点是顶：找被合并掩盖的更高的真实高点（rawHigh 原值；9-3 16:00 类插针
-      // 已被 markWickBars 压平，其影线价不再出现在 rawHigh 中，不会把 17:00 顶
+      // 终点是顶：保持 endIdx+1 起扫（上影压平不产生 _origHigh，分型中心自身即端点
+      // 价，无同类需求；避免影响 4443.715 类历史验收结构）
+      const k0 = b.endIdx + 1;
+      if (k0 > toIdx) continue;
+      // 被包含合并掩盖的更高真实高点（rawHigh 原值；9-3 16:00 类插针已被
+      // markWickBars 压平，其影线价不再出现在 rawHigh 中，不会把 17:00 顶
       // 4442.04 平移回插针价）
-      for (let k = fromIdx; k <= toIdx; k++) {
+      for (let k = k0; k <= toIdx; k++) {
         const mk = merged[k];
         if (mk.rawHigh === undefined || mk.rawHigh <= mk.high) continue; // 未被掩盖
         if (mk.rawHigh > b.endPrice + eps && (!extreme || mk.rawHigh > extreme.price)) {
@@ -836,18 +935,34 @@ function biMacdMetrics(bi, macdArr) {
 }
 
 /**
+ * 面积判据的时长可比门：面积Σ = 柱高×K线根数的累加，与区间时长线性相关——
+ * 时长悬殊的两段（如 15.65h 缓跌 vs 4.7h 急跌，Σ=136.2 vs 22.7）面积差主要来自
+ * 时长而非动能，直接比较会把「短时急跌」误判为背驰。两段时长比 > divergeDurRatio
+ * （或某段时长为 0/负）时返回 false → 面积项不计入背驰，只用 DIF/柱高判据。
+ */
+function areaDurComparable(a, b) {
+  const da = (a.endTime || 0) - (a.startTime || 0);
+  const db = (b.endTime || 0) - (b.startTime || 0);
+  const mx = Math.max(da, db), mn = Math.min(da, db);
+  return mn > 0 && mx / mn <= CHAN_CFG.divergeDurRatio;
+}
+
+/**
  * MACD 背驰判定（OR 关系，满足其一即算背驰）：
  *   底背驰（对应一买，下跌笔）：绿柱面积变小 或 黄白线低点抬高 或 绿柱最大高度变小（下跌动能减弱）
  *   顶背驰（对应一卖，上涨笔）：红柱面积变小 或 黄白线高点变低 或 红柱最大高度变小（上涨动能减弱）
+ *   面积两项受 areaDurComparable 时长门约束（两段时长不可比时仅用 DIF/柱高判据）。
  */
 function isBiDiverge(bi, refer, macdArr) {
   const cur = biMacdMetrics(bi, macdArr);
   const ref = biMacdMetrics(refer, macdArr);
   if (!cur || !ref) return false;
   if (bi.type === "down") {
-    return cur.greenArea < ref.greenArea || cur.difLow > ref.difLow || cur.greenMax < ref.greenMax;
+    return (areaDurComparable(bi, refer) && cur.greenArea < ref.greenArea)
+      || cur.difLow > ref.difLow || cur.greenMax < ref.greenMax;
   }
-  return cur.redArea < ref.redArea || cur.difHigh < ref.difHigh || cur.redMax < ref.redMax;
+  return (areaDurComparable(bi, refer) && cur.redArea < ref.redArea)
+    || cur.difHigh < ref.difHigh || cur.redMax < ref.redMax;
 }
 
 // ============================================================

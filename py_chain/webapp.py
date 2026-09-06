@@ -110,13 +110,21 @@ class SignalLog:
                 "status": "信号",
                 "entryTime": None,
                 "entryPrice": None,
+                # 出场相关（成交/出场时回填）
+                "stopRef": None,
+                "state": None,
+                "exitTime": None,
+                "exitPrice": None,
+                "exitType": None,
+                "exits": [],
+                "pnl": None,
             }
             self.rows.append(row)
             self._key_to_idx[self._row_key(mode, s)] = len(self.rows) - 1
             return row
 
     def fill_trade(self, mode, tr):
-        """回测成交时回填对应信号行的成交状态；找不到则追加一行已成交记录。"""
+        """回测成交时回填对应信号行的成交状态（持仓中）；找不到则追加一行记录。"""
         key = (mode, tr.get("signalTime"), tr.get("periodX"),
                tr.get("direction"), tr.get("strategyKey"))
         with self.lock:
@@ -133,16 +141,58 @@ class SignalLog:
                     "markRes": tr.get("markRes"),
                     "price": tr.get("signalPrice"),
                     "nearSr": tr.get("nearSr"),
-                    "status": "已成交",
+                    "status": "持仓中",
                     "entryTime": tr.get("entryTime"),
                     "entryPrice": tr.get("entryPrice"),
+                    "fillMode": tr.get("fillMode"),
+                    "stopRef": tr.get("stopRef"),
+                    "state": tr.get("state", "open"),
+                    "exitTime": None,
+                    "exitPrice": None,
+                    "exitType": None,
+                    "exits": list(tr.get("exits") or []),
+                    "pnl": tr.get("pnl"),
                 }
                 self.rows.append(row)
                 return row
             row = self.rows[idx]
-            row["status"] = "已成交"
+            row["status"] = "持仓中"
             row["entryTime"] = tr.get("entryTime")
             row["entryPrice"] = tr.get("entryPrice")
+            row["fillMode"] = tr.get("fillMode")
+            row["stopRef"] = tr.get("stopRef")
+            row["state"] = tr.get("state", "open")
+            row["exits"] = list(tr.get("exits") or [])
+            row["pnl"] = tr.get("pnl")
+            return row
+
+    def fill_exit(self, mode, tr):
+        """持仓终局（止损/保本止损/全平）时回填出场信息（状态→已平仓）。"""
+        key = (mode, tr.get("signalTime"), tr.get("periodX"),
+               tr.get("direction"), tr.get("strategyKey"))
+        with self.lock:
+            idx = self._key_to_idx.get(key)
+            if idx is None:
+                return None
+            row = self.rows[idx]
+            row["status"] = "已平仓"
+            row["state"] = "closed"
+            row["exitTime"] = tr.get("exitTime")
+            row["exitPrice"] = tr.get("exitPrice")
+            row["exitType"] = tr.get("exitType")
+            row["exits"] = list(tr.get("exits") or [])
+            row["pnl"] = tr.get("pnl")
+            return row
+
+    def fill_suppressed(self, mode, s):
+        """同向持仓互斥过滤的信号：状态→同向过滤（保留行，不画箭头）。"""
+        key = self._row_key(mode, s)
+        with self.lock:
+            idx = self._key_to_idx.get(key)
+            if idx is None:
+                return None
+            row = self.rows[idx]
+            row["status"] = "同向过滤"
             return row
 
     def list(self, limit=None):
@@ -245,6 +295,22 @@ class ModeWorker:
         row = self.signals.fill_trade(self.MODE, tr)
         self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
 
+    def _on_exit(self, tr):
+        """持仓终局（止损/保本止损/全平）：行状态→已平仓并推送。"""
+        row = self.signals.fill_exit(self.MODE, tr)
+        if row is not None:
+            self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
+            name = {"stopSr": "支阻位止损", "stopBe": "保本止损", "close": "全平"}.get(
+                tr.get("exitType"), tr.get("exitType"))
+            self.log(f"出场：{name} {fmtT(tr.get('exitTime'))} "
+                     f"@ {tr.get('exitPrice')}（盈亏 {tr.get('pnl', 0):.2f}）")
+
+    def _on_suppressed(self, s):
+        """同向持仓互斥过滤的信号：行状态→同向过滤。"""
+        row = self.signals.fill_suppressed(self.MODE, s)
+        if row is not None:
+            self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
+
     # ---- 控制 ----
     def start(self, cfg):
         if self.thread and self.thread.is_alive():
@@ -320,13 +386,18 @@ class BacktestWorker(ModeWorker):
                 self.log(f"  {res:>4}: {n} 根（{fmtT(bars[res][-1]['time'])} 止）")
         engine = BacktestEngine(bars, periods=periods,
                                 warmup_bars=cfg.get("warmup", 60),
-                                with_marks=cfg.get("with_marks", False))
-        self.log(f"回测开始（最小周期 {engine.fine_res}）...")
+                                with_marks=cfg.get("with_marks", False),
+                                fill_mode=cfg.get("fill_mode", "anchor"),
+                                signal_mode=cfg.get("signal_mode", "realtime"))
+        self.log(f"回测开始（最小周期 {engine.fine_res}，成交口径 {engine.fill_mode}，"
+                 f"信号模式 {'当下背驰' if engine.signal_mode == 'realtime' else '确认制'}）...")
         result = engine.run(
             log=self.log,
             on_progress=self._on_progress,
             on_signal=self._on_signal,
             on_trade=self._on_trade,
+            on_exit=self._on_exit,
+            on_suppressed=self._on_suppressed,
             paused=self._pause_evt,
             stopped=self._stop_evt,
         )
@@ -334,8 +405,16 @@ class BacktestWorker(ModeWorker):
             self.set_state("stopped")
         else:
             self.set_state("done")
+        # 回测结束后回推「持仓中」行：浮动盈亏只在 _finish（循环后）算出，
+        # 逐单 fill_trade + 广播把 pnl 推到表格（已平仓行终局时已带 pnl，不动）
+        for tr in result["trades"]:
+            if tr.get("state") == "closed":
+                continue
+            row = self.signals.fill_trade(self.MODE, tr)
+            self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
         st = result["stats"]
-        self.log(f"回测完成：{st['steps']} 步，信号 {st['signals']}，成交 {st['executed']}")
+        self.log(f"回测完成：{st['steps']} 步，信号 {st['signals']}，成交 {st['executed']}，"
+                 f"同向过滤 {st.get('suppressed', 0)}，已平仓 {st.get('closed', 0)}")
 
     def _on_progress(self, i, total):
         if i % max(1, total // 100) == 0 or i == total:
@@ -366,6 +445,13 @@ class LiveWorker(ModeWorker):
             except Exception as e:
                 self.log(f"本轮异常（忽略）：{e}")
                 sigs = []
+            step = getattr(m, "last_step", None) or {}
+            for tr in step.get("fills") or []:
+                self._on_trade(tr)
+            for tr in step.get("exits") or []:
+                self._on_exit(tr)
+            for s in step.get("suppressed") or []:
+                self._on_suppressed(s)
             for s in sigs:
                 self._on_signal(s)
                 m._announce(s)
@@ -410,6 +496,13 @@ class ReplayWorker(ModeWorker):
             except Exception as e:
                 self.log(f"本轮异常（忽略）：{e}")
                 sigs = []
+            step = getattr(m, "last_step", None) or {}
+            for tr in step.get("fills") or []:
+                self._on_trade(tr)
+            for tr in step.get("exits") or []:
+                self._on_exit(tr)
+            for s in step.get("suppressed") or []:
+                self._on_suppressed(s)
             for s in sigs:
                 self._on_signal(s)
                 m._announce(s)
@@ -575,12 +668,19 @@ def make_handler(app):
                 def _job():
                     def log(msg):
                         app.broadcaster.emit("log", {"mode": "mark", "msg": str(msg)})
+                    err = None
                     try:
                         draw_signal_marks(rows, cfg=CDPConfig(),
                                           clear_first=True, colors=colors, log=log)
+                    except Exception as e:  # 含 CDPError（读超时/页面无响应）——错误透出给前端
+                        err = str(e)
+                        try:
+                            log(f"标记失败：{e}")
+                        except Exception:
+                            pass
                     finally:
                         _marks_lock.release()
-                        app.broadcaster.emit("mark_done", {"op": "draw"})
+                        app.broadcaster.emit("mark_done", {"op": "draw", "error": err})
 
                 threading.Thread(target=_job, daemon=True, name="marks-draw").start()
                 self._send_json({"ok": True, "started": True})
@@ -597,11 +697,18 @@ def make_handler(app):
                 def _job():
                     def log(msg):
                         app.broadcaster.emit("log", {"mode": "mark", "msg": str(msg)})
+                    err = None
                     try:
                         clear_signal_marks(cfg=CDPConfig(), log=log)
+                    except Exception as e:  # 含 CDPError（读超时/页面无响应）——错误透出给前端
+                        err = str(e)
+                        try:
+                            log(f"清除失败：{e}")
+                        except Exception:
+                            pass
                     finally:
                         _marks_lock.release()
-                        app.broadcaster.emit("mark_done", {"op": "clear"})
+                        app.broadcaster.emit("mark_done", {"op": "clear", "error": err})
 
                 threading.Thread(target=_job, daemon=True, name="marks-clear").start()
                 self._send_json({"ok": True, "started": True})

@@ -334,8 +334,12 @@ function intervalVisibility(res) {
      * 校准步骤（切到低一级周期加载基准K线后切回本周期）会让图表只加载最近N根K线，
      * 此时若直接绘制较早的笔，时间戳超出数据范围会被 TradingView 吸附到数据边缘
      * （端点 index:0 / 错误时间），产生「无效的笔」。
-     * 因此绘制前检查图表第一根K线是否 <= 最早笔时间，若未覆盖则 scrollToFirstBar 加载完整历史，
-     * 等待覆盖（或数据不再增长即已到最早），再滚回实时。
+     * 因此绘制前检查图表第一根K线是否 <= 最早笔时间，若未覆盖则 scrollToFirstBar 加载完整历史。
+     * 数据分批推进可能在批次之间停顿数秒，单轮「len+first 连续不变」的稳定判据会提前退出
+     * （曾致 60分钟笔在 15分钟图上创建时大面积吸附成无效笔），因此最多进行 3 轮
+     * 「scrollToFirstBar + 等待」，每轮稳定后重触发滚动继续加载。
+     * 返回 { covered, first }：covered=false 时调用方必须裁剪超范围笔（drawClipped），
+     * 绝不能在未覆盖的图上创建 shape。
      */
     const ensureBarsCover = async (res, minTs) => {
       const readFirst = async () => {
@@ -351,10 +355,7 @@ function intervalVisibility(res) {
         });
         return r.result.value;
       };
-      let cur = await readFirst();
-      if (cur.first !== null && cur.first <= minTs) return; // 已覆盖
-      if (DEBUG) console.log(`[数据覆盖] ${res} 首根K线 ${toT(cur.first)} 晚于最早笔 ${toT(minTs)}，加载完整历史...`);
-      await client.Runtime.evaluate({
+      const scrollToFirstBar = () => client.Runtime.evaluate({
         expression: `(function() {
           const chart = TradingViewApi.activeChart();
           const widget = chart._chartWidget || (chart.chartModel && chart.chartModel()._chartWidget);
@@ -364,25 +365,31 @@ function intervalVisibility(res) {
         })()`,
         returnByValue: true, awaitPromise: true, timeout: 10000,
       });
-      let prevLen = cur.len;
-      let prevFirst = cur.first;
-      let stableCnt = 0;
-      for (let i = 0; i < 200; i++) {
-        await sleep(1200);
-        cur = await readFirst();
-        if (cur.first !== null && cur.first <= minTs) break; // 已覆盖
-        // 数据长度稳定（不再增长）说明已加载到最早，接受现状；
-        // 但必须「首根K线时间也连续多次不变」才算真正加载完——
-        // scrollToFirstBar 触发加载后数据会分批推进，若只在 len 短暂稳定时
-        // 就退出，加载可能只进行到中途，早期笔端点会被吸附到已加载数据边缘
-        if (cur.len === prevLen && cur.len > 0 && i >= 3 && cur.first === prevFirst) {
-          stableCnt++;
-          if (stableCnt >= 3) break;
-        } else {
-          stableCnt = 0;
+      let cur = await readFirst();
+      if (cur.first !== null && cur.first <= minTs) return { covered: true, first: cur.first }; // 已覆盖
+      if (DEBUG) console.log(`[数据覆盖] ${res} 首根K线 ${toT(cur.first)} 晚于最早笔 ${toT(minTs)}，加载完整历史...`);
+      let covered = false;
+      for (let round = 0; round < 3 && !covered; round++) {
+        if (round > 0 && DEBUG) console.log(`[数据覆盖] ${res} 第 ${round + 1} 轮重试加载（当前首根 ${toT(cur.first)}）...`);
+        await scrollToFirstBar();
+        let prevLen = cur.len;
+        let prevFirst = cur.first;
+        let stableCnt = 0;
+        // 每轮最多 60×1.2s：覆盖即停；「len+first 连续 3 次不变」只结束本轮（数据停顿
+        // 不代表加载完成），由外层再触发滚动重试，总计约 3.5 分钟上限
+        for (let i = 0; i < 60; i++) {
+          await sleep(1200);
+          cur = await readFirst();
+          if (cur.first !== null && cur.first <= minTs) { covered = true; break; }
+          if (cur.len === prevLen && cur.len > 0 && i >= 3 && cur.first === prevFirst) {
+            stableCnt++;
+            if (stableCnt >= 3) break;
+          } else {
+            stableCnt = 0;
+          }
+          prevLen = cur.len;
+          prevFirst = cur.first;
         }
-        prevLen = cur.len;
-        prevFirst = cur.first;
       }
       // 恢复可视范围到实时
       await client.Runtime.evaluate({
@@ -395,6 +402,7 @@ function intervalVisibility(res) {
         })()`,
         returnByValue: true, awaitPromise: true, timeout: 10000,
       });
+      return { covered, first: cur.first };
     };
 
     // ============================================================
@@ -512,6 +520,47 @@ function intervalVisibility(res) {
     };
 
     // ============================================================
+    // 创建后回读校验辅助：按 id 读回已创建笔的端点 / 按 id 批量删除
+    // （创建成功 ≠ 端点正确：TradingView 会把超出数据范围的时间静默吸附到数据边缘）
+    // ============================================================
+    const readStrokesByIds = async (ids) => {
+      const r = await client.Runtime.evaluate({
+        expression: `(function() {
+          const chart = TradingViewApi.activeChart();
+          const IDS = ${JSON.stringify(ids)};
+          return IDS.map(id => {
+            try {
+              const sh = chart.getShapeById(id);
+              const pts = sh && sh._source && sh._source._points;
+              if (!pts || pts.length < 2) return null;
+              return [{ time: pts[0].time, price: pts[0].price }, { time: pts[1].time, price: pts[1].price }];
+            } catch (e) { return null; }
+          });
+        })()`,
+        returnByValue: true, awaitPromise: true, timeout: 20000,
+      });
+      return (r.result && r.result.value) || [];
+    };
+
+    const removeShapesByIds = async (ids) => {
+      if (!ids || ids.length === 0) return;
+      await client.Runtime.evaluate({
+        expression: `(function() {
+          const chart = TradingViewApi.activeChart();
+          for (const id of ${JSON.stringify(ids)}) { try { chart.removeEntity(id); } catch (e) {} }
+          return 'ok';
+        })()`,
+        returnByValue: true, awaitPromise: true, timeout: 20000,
+      });
+    };
+
+    // 周期字符串归一化（chart.resolution() 对日线可能返回 "1D"，与我们的 "D" 等价）
+    const normRes = (r) => {
+      const s = String(r).toUpperCase();
+      return s === "1D" ? "D" : s === "1W" ? "W" : s;
+    };
+
+    // ============================================================
     // 多周期嵌套画笔：从大到小依次进行
     //   第 1 层（日线）：默认取最近 N 根K线；
     //                   若指定了日线起点日期 --from，则从该日期开始画日线笔
@@ -594,14 +643,28 @@ function intervalVisibility(res) {
       // 区间套强制对齐：把上一层（更高级别）笔的端点作为锁定端点传入 buildBi，
       // 保证本级别笔端点与上级笔的极值端点严格重合（优先级最高）。
       const lockedPivots = lockedPivotsOf(prevBis);
-      let bis = buildBi(fractals, merged, atr, macdArr, lockedPivots);
+      // 近等双顶/双底平台取后顶/后底：仅 ≥1h（60/240/D）周期开启（15m/3m 平台尾噪声多，
+      // 全周期实施曾实测 61 次触发致微观结构大面积重排——影响评估后用户决策限 ≥1h）
+      let bis = buildBi(fractals, merged, atr, macdArr, lockedPivots, intervalSecOf(res) >= 3600);
 
       // 端点极值修正：包含合并可能吞掉更极端的插针低点/高点（如 60分钟 7-29 09:00 的 4010.41 被
       // 08:00/09:00 的向上合并吞掉），把笔终点平移到区间内被掩盖的真实极值，使笔终点落在真实极值K线上
       bis = fixBiExtremes(bis, merged);
 
-      // ATR 过滤
-      const threshold = atr * ATR_FILTER;
+      // ATR 过滤（用全窗口稳定 ATR，不用 calcATR 的尾部 14 根——9-4 行情急涨使 15m
+      // 尾部 ATR 从 ~17.4 涨到 21+，把 9-3 06:06→07:36 的结构性下跌笔（幅度 10.59）
+      // 误判为噪音剔除，06:06 顶 4391.835 随之消失。结构与行情无关，阈值不应随行情漂移；
+      // 与 chan-core markWickBars 的稳定基准同理（SPEC §2.0））
+      let stableAtr = 0;
+      if (rawBars.length > 1) {
+        let trSum = 0;
+        for (let i = 1; i < rawBars.length; i++) {
+          const h = rawBars[i].high, l = rawBars[i].low, pc = rawBars[i - 1].close;
+          trSum += Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc));
+        }
+        stableAtr = trSum / (rawBars.length - 1);
+      }
+      const threshold = stableAtr * ATR_FILTER;
       const beforeFilter = bis.length;
       bis = bis.filter(b => b.span >= threshold);
       const filteredOut = beforeFilter - bis.length;
@@ -647,6 +710,37 @@ function intervalVisibility(res) {
       // 会让上级极值被误判为"本级存在"而错误对齐）
       if (pi > 0 && prevBis && prevBis.length > 0) {
         drawBis = alignBiToUpper(drawBis, prevBis, intervalSecOf(PERIODS[pi - 1]), trimmedBars);
+        // 对齐重建后的断口治理：alignBiToUpper 由「bis[i].start 覆盖 bis[i-1].end」重建端点，
+        // 假设列表连续；若 ATR 过滤已删掉中间小笔，重建会把断口两端的笔「缝合」——
+        // 前一笔终点被改写到后一笔起点（越过区间内真实极值，如 15m 9-3 连续两根上涨笔
+        // 4364.52→4381.25→4440.355，4381.25 并非区间最高点）或产生低于阈值的
+        // 「桥接小笔」（3m 8-21 4516.835→4517.98 幅度仅 1.14）。
+        // ① 断口合并：相邻同向笔只可能来自被过滤中间笔的断口，合并为一笔
+        //   （start=第一笔起点、end=第二笔终点），循环直到无连续同向；
+        // ② 补幅度过滤：清除仍低于阈值的桥接残余。
+        for (let i = drawBis.length - 2; i >= 0; i--) {
+          if (drawBis[i].type === drawBis[i + 1].type) {
+            const a = drawBis[i], b = drawBis[i + 1];
+            drawBis[i] = {
+              ...a,
+              endTime: b.endTime,
+              endPrice: b.endPrice,
+              endIdx: b.endIdx,
+              span: Math.abs(b.endPrice - a.startPrice),
+              rawCount: a.rawCount + b.rawCount,
+              gapLocked: a.gapLocked || b.gapLocked,
+              macdCross: a.macdCross && b.macdCross,
+            };
+            drawBis.splice(i + 1, 1);
+            if (DEBUG) console.log(`[断口合并] ${res} 合并连续同向笔 @${toT(a.startTime)}（对齐缝合断口）`);
+            i++; // 合并后同位置再查一次（可能连续多段需合并）
+          }
+        }
+        const reBefore = drawBis.length;
+        drawBis = drawBis.filter(b => b.span >= threshold);
+        if (DEBUG && reBefore !== drawBis.length) {
+          console.log(`[对齐后补过滤] ${res} 清除 ${reBefore - drawBis.length} 根对齐缝合产生的桥接小笔`);
+        }
       }
 
       // 小周期绘制窗口：只保留最近 N 天内结束的笔（窗口起点 = 最新K线时间往前推 N 天），
@@ -702,6 +796,17 @@ function intervalVisibility(res) {
         await ensureResolution(drawRes);
         currentRes = drawRes;
       }
+      // 防抢占断言：运行期间用户可能手动切换图表周期，创建前确认图表仍在绘制周期，
+      // 不一致则重新切换（否则 shape 会创建在错误周期的K线集合/数据范围上）
+      const resNow = await client.Runtime.evaluate({
+        expression: `String(TradingViewApi.activeChart().resolution())`,
+        returnByValue: true, awaitPromise: true, timeout: 10000,
+      });
+      if (resNow.result && normRes(resNow.result.value) !== normRes(drawRes)) {
+        console.log(`[周期 ${res}] 检测到图表被切到 ${resNow.result.value}，切回 ${drawRes} 再绘制`);
+        await ensureResolution(drawRes);
+        currentRes = drawRes;
+      }
       // 绘制前确保图表数据覆盖最早笔的时间（切换周期后图表可能只加载最近K线，
       // 会导致较早笔的端点超出数据范围而被 TradingView 吸附到数据边缘，形成无效笔）
       if (drawBis.length > 0) {
@@ -710,13 +815,65 @@ function intervalVisibility(res) {
           Infinity
         );
         if (minBiTime !== Infinity) {
-          await ensureBarsCover(drawRes, minBiTime);
+          const cover = await ensureBarsCover(drawRes, minBiTime);
+          // 未覆盖则裁剪：只绘制两端点都落在已加载数据范围内的笔——超范围端点必然
+          // 被吸附成无效笔，宁可跳过并警告。落盘数据不受影响（allBis 已保存完整列表）
+          if (!cover.covered && cover.first !== null) {
+            const before = drawBis.length;
+            drawBis = drawBis.filter(b => b.startTime >= cover.first && b.endTime >= cover.first);
+            console.log(`[周期 ${res}] 警告: ${drawRes} 周期数据仅加载到 ${toT(cover.first)}，跳过 ${before - drawBis.length} 根更早的笔（避免吸附成无效笔；落盘数据完整）`);
+            if (drawBis.length === 0) {
+              console.log(`[周期 ${res}] 全部笔超出已加载数据范围，本轮跳过绘制`);
+              continue;
+            }
+          }
         }
       }
 
       const createResult = await createPeriod(res, drawBis);
+
+      // 创建后回读校验：创建成功（bi_ok）≠ 端点正确——TradingView 会把超出数据范围的
+      // 时间静默吸附到数据边缘。读回每根笔的端点与请求值比对，不符者删除并重走
+      // 「覆盖加载 → 重建」一轮，仍失败则删除并计入 bi_bad 如实报告（避免全绿假象）
+      let finalResult = { ...clearedResult, ...createResult };
+      const createdIds = createResult.created_ids || [];
+      if (createdIds.length > 0 && drawBis.length > 0) {
+        const verifyOnce = async (ids, bis) => {
+          const ptsArr = await readStrokesByIds(ids);
+          const tol = intervalSecOf(drawRes) || 1; // 容差 1 根K线（端点在校准基准周期 bar 边界上）
+          const bad = [];
+          for (let i = 0; i < ids.length; i++) {
+            const p = ptsArr[i];
+            if (!p || !p[0] || !p[1]) continue; // 端点读不到（shape 隐藏等）→ 未校验，不误判
+            const b = bis[i];
+            const timeBad = Math.abs(p[0].time - b.startTime) > tol || Math.abs(p[1].time - b.endTime) > tol;
+            const priceBad = Math.abs(p[0].price - b.startPrice) > 0.01 || Math.abs(p[1].price - b.endPrice) > 0.01;
+            if (timeBad || priceBad) bad.push({ id: ids[i], bi: b });
+          }
+          return bad;
+        };
+        const bad = await verifyOnce(createdIds, drawBis);
+        if (bad.length > 0) {
+          console.log(`[周期 ${res}] 回读校验: ${bad.length}/${createdIds.length} 根端点被吸附，删除后重试...`);
+          await removeShapesByIds(bad.map(x => x.id));
+          const minT = bad.reduce((m, x) => Math.min(m, x.bi.startTime, x.bi.endTime), Infinity);
+          if (minT !== Infinity) await ensureBarsCover(drawRes, minT);
+          const retryBis = bad.map(x => x.bi);
+          const retry = await createPeriod(res, retryBis);
+          const bad2 = await verifyOnce(retry.created_ids || [], retryBis);
+          if (bad2.length > 0) {
+            await removeShapesByIds(bad2.map(x => x.id)); // 重建仍坏 → 删除，宁缺毋滥
+            console.log(`[周期 ${res}] 警告: 重试后仍有 ${bad2.length} 根无法正确创建（数据未覆盖），已移除，可稍后重跑`);
+          }
+          finalResult = {
+            ...finalResult,
+            bi_ok: (createResult.bi_ok || 0) - bad.length + (retry.bi_ok || 0) - bad2.length,
+            bi_bad: bad2.length,
+          };
+        }
+      }
       console.log("\n=== 绘制结果 [周期 " + res + "] ===");
-      console.log(JSON.stringify({ ...clearedResult, ...createResult }, null, 2));
+      console.log(JSON.stringify(finalResult, null, 2));
     }
 
     // 最后切回原周期

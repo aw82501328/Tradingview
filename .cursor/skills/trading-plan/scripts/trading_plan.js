@@ -136,12 +136,13 @@ function isRangeBound(bis, bars, atr, cfg) {
 
 /**
  * 依据买卖点类型生成交易策略（用户规则）。
- *   1卖 → 空头，等待反弹后做2卖；
- *   1买 → 多头，等待回调后做2买；
- *   2买/类2买/3买 → 买点后过左高不背驰：多头，等待回调后的新买点；
- *                    其他分类：多头（逆势），等待高点附近的一卖；
- *   2卖/类2卖/3卖 → 卖点后过左低不背驰：空头，等待反弹后的新卖点；
- *                    其他分类：空头（逆势），等待低点附近的一买。
+ * 方向命名「X头Y」：X = 结构方向，Y = 操作方向。
+ *   1卖 → 空头空（结构空、操作做空），等待反弹后做2卖；
+ *   1买 → 多头多（结构多、操作做多），等待回调后做2买；
+ *   2买/类2买/3买 → 买点后过左高不背驰：多头多，等待回调后的新买点；
+ *                    其他分类：多头空（结构多、逆势等一卖），等待高点附近的一卖；
+ *   2卖/类2卖/3卖 → 卖点后过左低不背驰：空头空，等待反弹后的新卖点；
+ *                    其他分类：空头多（结构空、逆势等一买），等待低点附近的一买。
  * @param {string} res       周期名
  * @param {string} type      买卖点类型（如 "1卖"、"2买"）
  * @param {string} reason    原因描述
@@ -150,15 +151,15 @@ function isRangeBound(bis, bars, atr, cfg) {
  */
 function strategyOf(res, type, reason, label, cls) {
   const base = { res, reason, label };
-  if (type === "1卖") return { ...base, direction: "空头", strategy: "等待反弹后做2卖" };
-  if (type === "1买") return { ...base, direction: "多头", strategy: "等待回调后做2买" };
+  if (type === "1卖") return { ...base, direction: "空头空", strategy: "等待反弹后做2卖" };
+  if (type === "1买") return { ...base, direction: "多头多", strategy: "等待回调后做2买" };
   if (type === "2买" || type === "类2买" || type === "3买") {
-    if (cls === "过左高不背驰") return { ...base, direction: "多头", strategy: "等待回调后的新买点" };
-    return { ...base, direction: "多头（逆势）", strategy: "等待高点附近的一卖" };
+    if (cls === "过左高不背驰") return { ...base, direction: "多头多", strategy: "等待回调后的新买点" };
+    return { ...base, direction: "多头空", strategy: "等待高点附近的一卖" };
   }
   if (type === "2卖" || type === "类2卖" || type === "3卖") {
-    if (cls === "过左低不背驰") return { ...base, direction: "空头", strategy: "等待反弹后的新卖点" };
-    return { ...base, direction: "空头（逆势）", strategy: "等待低点附近的一买" };
+    if (cls === "过左低不背驰") return { ...base, direction: "空头空", strategy: "等待反弹后的新卖点" };
+    return { ...base, direction: "空头多", strategy: "等待低点附近的一买" };
   }
   return { ...base, direction: "观望", strategy: "趋势中" };
 }
@@ -166,13 +167,16 @@ function strategyOf(res, type, reason, label, cls) {
 /**
  * 2/3 类买卖点的后续分类判定（用户规则）：
  *   买点（2买/类2买/3买）：买点后第一笔上涨是否「过左高」且「不背驰」。
- *     左高 = 买点之前最近顶端点（上涨笔终点 / 下跌笔起点，取最高）；
+ *     左高 = 买点之前时间最近的前顶（上涨笔终点 / 下跌笔起点；同一时刻多端点取最高）；
  *     过左高 = after（买点后第一笔上涨）终点价 > 左高价；
- *     不背驰 = after 相对前一同向上涨参照笔 isBiDiverge=false（MACD 动能未减弱）。
+ *     不背驰 = after 相对紧邻的前一同向上涨参照笔 isBiDiverge=false（MACD 动能未减弱）。
  *   卖点（2卖/类2卖/3卖）：对称判定。
- *     左低 = 卖点之前最近底端点（下跌笔终点 / 上涨笔起点，取最低）；
+ *     左低 = 卖点之前时间最近的前底（下跌笔终点 / 上涨笔起点；同一时刻多端点取最低）；
  *     过左低 = after（卖点后第一笔下跌）终点价 < 左低价；
- *     不背驰 = after 相对前一同向下跌参照笔 isBiDiverge=false。
+ *     不背驰 = after 相对紧邻的前一同向下跌参照笔 isBiDiverge=false。
+ *   注：左高/左低取「时间最近」而非全史价格极值（全史极值可追溯到久远顶底，
+ *   使 2卖 后须跌破数周前低点才算过左低，与「前高/前低」语义不符）；
+ *   参照笔取紧邻前一同向笔（中间隔一次级反向运动即反弹/回调段），不按幅度过滤。
  * @param {Array} bis      本周期笔列表
  * @param {Array} macdArr  MACD 数组（可为空，为空时 isBiDiverge 视为不背驰）
  * @param {object} p       买卖点 { type, time, price }
@@ -180,7 +184,7 @@ function strategyOf(res, type, reason, label, cls) {
  */
 function classifySecond(bis, macdArr, p) {
   const wantUp = /买$/.test(p.type);
-  // 买卖点之前最近顶/底端点
+  // 买卖点之前时间最近的顶/底端点（同一时刻多端点取价格更极端者）
   const extreme = { time: -1, price: wantUp ? -Infinity : Infinity };
   for (const b of bis) {
     const cands = [];
@@ -193,9 +197,11 @@ function classifySecond(bis, macdArr, p) {
     }
     for (const c of cands) {
       if (c.time >= p.time) continue;
-      if (wantUp ? c.price > extreme.price : c.price < extreme.price) {
+      if (c.time > extreme.time) {
         extreme.time = c.time;
         extreme.price = c.price;
+      } else if (c.time === extreme.time) {
+        extreme.price = wantUp ? Math.max(extreme.price, c.price) : Math.min(extreme.price, c.price);
       }
     }
   }
@@ -206,12 +212,11 @@ function classifySecond(bis, macdArr, p) {
   // 过左高 / 过左低
   const passed = wantUp ? after.endPrice > extreme.price : after.endPrice < extreme.price;
   if (!passed) return "其他";
-  // 不背驰：after 相对前一同向参照笔（span >= after.span*0.5）isBiDiverge=false
+  // 不背驰：after 相对紧邻的前一同向参照笔 isBiDiverge=false
   let refer = null;
   for (let i = bis.indexOf(after) - 1; i >= 0; i--) {
     if (bis[i].type !== after.type) continue;
-    if (bis[i].span < after.span * 0.5) continue;
-    refer = bis[i];
+    refer = bis[i]; // 紧邻前一同向笔（中间隔一次级反向运动，即同级别对照段）
     break;
   }
   const diverge = refer ? isBiDiverge(after, refer, macdArr) : false;

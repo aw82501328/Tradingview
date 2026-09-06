@@ -98,31 +98,36 @@ def isRangeBound(bis, bars, atr, cfg=None):
 
 
 def strategyOf(res, type_, reason, label, cls):
-    """依据买卖点类型生成交易策略（用户规则）。与 JS 版 strategyOf 对齐。"""
+    """依据买卖点类型生成交易策略（用户规则）。与 JS 版 strategyOf 对齐。
+    方向命名「X头Y」：X = 结构方向，Y = 操作方向。"""
     base = {"res": res, "reason": reason, "label": label}
     if type_ == "1卖":
-        return dict(base, direction="空头", strategy="等待反弹后做2卖")
+        return dict(base, direction="空头空", strategy="等待反弹后做2卖")
     if type_ == "1买":
-        return dict(base, direction="多头", strategy="等待回调后做2买")
+        return dict(base, direction="多头多", strategy="等待回调后做2买")
     if type_ in ("2买", "类2买", "3买"):
         if cls == "过左高不背驰":
-            return dict(base, direction="多头", strategy="等待回调后的新买点")
-        return dict(base, direction="多头（逆势）", strategy="等待高点附近的一卖")
+            return dict(base, direction="多头多", strategy="等待回调后的新买点")
+        return dict(base, direction="多头空", strategy="等待高点附近的一卖")
     if type_ in ("2卖", "类2卖", "3卖"):
         if cls == "过左低不背驰":
-            return dict(base, direction="空头", strategy="等待反弹后的新卖点")
-        return dict(base, direction="空头（逆势）", strategy="等待低点附近的一买")
+            return dict(base, direction="空头空", strategy="等待反弹后的新卖点")
+        return dict(base, direction="空头多", strategy="等待低点附近的一买")
     return dict(base, direction="观望", strategy="趋势中")
 
 
 def classifySecond(bis, macdArr, p):
-    """2/3 类买卖点的后续分类判定（用户规则）：
-      买点（2买/类2买/3买）：买点后第一笔上涨是否「过左高」且「不背驰」；
-      卖点（2卖/类2卖/3卖）：对称判定。
+    """2/3 类买卖点的后续分类判定（用户规则，与 JS 版对齐）：
+      买点（2买/类2买/3买）：买点后第一笔上涨是否「过左高」且「不背驰」。
+        左高 = 买点之前时间最近的前顶（同一时刻多端点取最高）；
+        过左高 = after（买点后第一笔上涨）终点价 > 左高价；
+        不背驰 = after 相对紧邻的前一同向上涨参照笔 isBiDiverge=false。
+      卖点（2卖/类2卖/3卖）：对称判定（左低取时间最近前底、参照取紧邻前一同向笔）。
+      注：左高/左低取「时间最近」而非全史价格极值；参照笔不按幅度过滤。
     @returns "过左高不背驰" | "过左低不背驰" | "其他"
     """
     wantUp = p["type"].endswith("买")
-    # 买卖点之前最近顶/底端点
+    # 买卖点之前时间最近的顶/底端点（同一时刻多端点取价格更极端者）
     extreme = {"time": -1, "price": float("-inf") if wantUp else float("inf")}
     for b in bis:
         cands = []
@@ -139,9 +144,14 @@ def classifySecond(bis, macdArr, p):
         for c in cands:
             if c["time"] >= p["time"]:
                 continue
-            if (c["price"] > extreme["price"]) if wantUp else (c["price"] < extreme["price"]):
+            if c["time"] > extreme["time"]:
                 extreme["time"] = c["time"]
                 extreme["price"] = c["price"]
+            elif c["time"] == extreme["time"]:
+                if wantUp:
+                    extreme["price"] = max(extreme["price"], c["price"])
+                else:
+                    extreme["price"] = min(extreme["price"], c["price"])
     if extreme["time"] == -1:
         return "其他"
     # 买卖点后第一笔同向笔（买点后上涨 / 卖点后下跌），起点在买卖点之后
@@ -152,14 +162,12 @@ def classifySecond(bis, macdArr, p):
     passed = after["endPrice"] > extreme["price"] if wantUp else after["endPrice"] < extreme["price"]
     if not passed:
         return "其他"
-    # 不背驰：after 相对前一同向参照笔（span >= after.span*0.5）isBiDiverge=false
+    # 不背驰：after 相对紧邻的前一同向参照笔 isBiDiverge=false
     refer = None
     for i in range(bis.index(after) - 1, -1, -1):
         if bis[i]["type"] != after["type"]:
             continue
-        if bis[i]["span"] < after["span"] * 0.5:
-            continue
-        refer = bis[i]
+        refer = bis[i]  # 紧邻前一同向笔（中间隔一次级反向运动，即同级别对照段）
         break
     diverge = isBiDiverge(after, refer, macdArr) if refer is not None else False
     if diverge:

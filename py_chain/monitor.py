@@ -369,6 +369,7 @@ class LiveMonitor:
         # 上次全周期刷新时 3m 最新已收盘 bar 的时间；None 表示首轮强制全周期刷新。
         # 已收盘 bar 判定：3m 尾部倒数第二根（图表最新一根始终是进行中的未收盘 bar）。
         self._last_closed = None
+        self.last_step = {"signals": [], "fills": [], "exits": []}   # step_to(execute=True) 本轮成交/出场
         self.log(f"实时监控就绪：轮询间隔 {self.interval}s，每周期读取末尾 {self.tail} 根")
 
     def _full_refresh(self, c):
@@ -435,8 +436,12 @@ class LiveMonitor:
             except Exception as e:
                 self.log(f"  [{tr:>4}] 读取失败（忽略）：{e}")
         if not last_ts:
+            self.last_step = {"signals": [], "fills": [], "exits": []}
             return []
-        return self.engine.step_to(last_ts)
+        # execute=True：与回测同口径推进「收盘判定→下一开盘成交」的进场/出场
+        r = self.engine.step_to(last_ts, execute=True)
+        self.last_step = r
+        return r.get("signals") or []
 
     def _announce(self, s):
         """控制台醒目提醒 + 系统提示音。"""
@@ -664,10 +669,12 @@ class ReplayMonitor(LiveMonitor):
         step = intervalSecOf(self._tick_res) or 180    # 步进粒度（秒），默认 3m、含 30S 时 30
         max_steps = 500
         sigs = []
+        agg = {"signals": [], "fills": [], "exits": []}
         if self._last_pos is None:
-            # 首次：只推进到当前回放位置（起始时刻不重复触发历史信号）
+            # 首次：只推进到当前回放位置（起始时刻不重复触发历史信号，不成交）
             self._last_pos = pos
             self.engine.step_to(pos)
+            self.last_step = agg
             return []
         gap = pos - self._last_pos
         if gap > max_steps * step:
@@ -679,15 +686,18 @@ class ReplayMonitor(LiveMonitor):
             t = self._last_pos + step
         n = 0
         while t < pos and n < max_steps:
-            s = self.engine.step_to(t)
-            if s:
-                sigs.extend(s)
+            r = self.engine.step_to(t, execute=True)
+            sigs.extend(r.get("signals") or [])
+            for k in ("signals", "fills", "exits"):
+                agg[k] += r.get(k) or []
             t += step
             n += 1
-        s = self.engine.step_to(pos)
-        if s:
-            sigs.extend(s)
+        r = self.engine.step_to(pos, execute=True)
+        sigs.extend(r.get("signals") or [])
+        for k in ("signals", "fills", "exits"):
+            agg[k] += r.get(k) or []
         self._last_pos = pos
+        self.last_step = agg
         return sigs
 
     def _handle_signal_pause(self, c, sigs):

@@ -17,7 +17,18 @@ import subprocess
 import time
 import urllib.request
 
+import websocket  # 模块级绑定（connect() 内仍有延迟导入以保冷启动；evaluate 读超时分支需要引用）
+
 from .chan_core import intervalSecOf
+
+
+def _ts_str(ts):
+    """时间戳 → 'MM-DD HH:MM'（本地时区，日志用）；异常时间戳原样返回字符串。"""
+    import datetime as _dt
+    try:
+        return _dt.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+    except (OSError, OverflowError, TypeError, ValueError):
+        return str(ts)
 
 DEFAULT_PERIODS = ["D", "240", "60", "15", "3"]
 DEFAULT_CDP_PORT = 9222
@@ -30,6 +41,9 @@ OPEN_TV_SCRIPT = os.path.join(
 # 自动拉起后等待端口就绪的轮询参数
 CDP_PORT_TIMEOUT = 90
 CDP_PORT_POLL = 1.0
+# Runtime.evaluate 读侧超时（秒）：页面 Promise 永不 settle 时防止 recv 永久阻塞
+# （须大于 evaluate 的 JS timeout 30s，留响应余量）
+EVALUATE_READ_TIMEOUT = 45
 
 
 class CDPConfig:
@@ -200,7 +214,14 @@ class CDPClient:
     # ---------------- 执行 JS ----------------
 
     def evaluate(self, expression, await_promise=True, timeout=30000):
-        """Runtime.evaluate 执行 JS，返回 result.value（value 类型 object 时自动转为 dict）。"""
+        """Runtime.evaluate 执行 JS，返回 result.value（value 类型 object 时自动转为 dict）。
+
+        读侧超时兜底：Runtime.evaluate 的 awaitPromise + timeout 在页面主线程繁忙/卡死时可能
+        永不返回（DevTools 不保证超时中止 await 中的 Promise），此前 recv() 无读超时会永久阻塞
+        ——Web 控制台「清除标记/标记」后台线程即因此死等、前端永久显示「清除中…」。
+        这里对 recv 施加 EVALUATE_READ_TIMEOUT 读超时：超时抛 CDPError 并关闭连接置空
+        （迟到的响应会污染后续 id 匹配，下次调用自动重连），保证调用方线程必然退出。
+        """
         if self._ws is None:
             self.connect()
         self._msg_id += 1
@@ -215,21 +236,33 @@ class CDPClient:
                 "timeout": timeout,
             },
         }))
-        while True:
-            msg = json.loads(self._ws.recv())
-            if msg.get("id") != mid:
-                continue
-            if "error" in msg:
-                raise CDPError(f"CDP 执行出错：{msg['error']}")
-            result = msg.get("result", {})
-            if result.get("exceptionDetails"):
-                ex = result["exceptionDetails"]
-                text = ex.get("exception", {}).get("description") or ex.get("text")
-                raise CDPError(f"JS 异常：{text}")
-            value = result.get("result", {}).get("value")
-            if isinstance(value, (dict, list)) or value is None:
+        try:
+            self._ws.settimeout(EVALUATE_READ_TIMEOUT)
+            while True:
+                msg = json.loads(self._ws.recv())
+                if msg.get("id") != mid:
+                    continue
+                if "error" in msg:
+                    raise CDPError(f"CDP 执行出错：{msg['error']}")
+                result = msg.get("result", {})
+                if result.get("exceptionDetails"):
+                    ex = result["exceptionDetails"]
+                    text = ex.get("exception", {}).get("description") or ex.get("text")
+                    raise CDPError(f"JS 异常：{text}")
+                value = result.get("result", {}).get("value")
+                if isinstance(value, (dict, list)) or value is None:
+                    return value
                 return value
-            return value
+        except websocket.WebSocketTimeoutException:
+            # 读超时：页面无响应（或晚于阈值返回）。连接状态未知，关闭置空让下次调用重连，
+            # 避免迟到的旧响应与后续请求的 id 错配。
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+            raise CDPError(
+                f"CDP 执行响应超时（{EVALUATE_READ_TIMEOUT}s 无响应，页面可能繁忙/卡死），已断开重连") from None
 
 
 # ============================================================
@@ -307,20 +340,57 @@ def fetch_bars(cfg=None, from_ts=0, cache=True, cache_file=CACHE_FILE, symbol=No
             sec = intervalSecOf(res) or 0
             if 0 < sec < 60:
                 # 秒级周期（如 30S）：密度是分钟级的数十倍且 TV 历史深度有限，
-                # 不做 scrollToFirstBar（为覆盖起始日期加载数万根必超时），
-                # 直接读当前已加载K线，只保留最近 3 天（与 JS 端 chan-bi --with-30s 窗口一致）
+                # 不为覆盖起始日期全量滚动（数万根必超时），但默认缓冲只有几百根
+                # （实测 ~800 根 ≈ 7 小时，致 30S 背驰级别几乎无效）——
+                # 有界滚动扩充到「近一周」：最多 3 轮 scrollToFirstBar（每轮等
+                # scroll_wait 让 TV 分批推进），覆盖满 1 周或首根不再推进（数据源
+                # 到头）即停；窗口取最近 7 天，实际深度如实打印。
+                SEC_WINDOW_SEC = 7 * 86400
+                want = SEC_WINDOW_SEC
+                first_t = None
+                for _round in range(3):
+                    d0 = _read_bars(c)
+                    if not d0 or not d0.get("bars"):
+                        break
+                    first_t = d0["bars"][0]["time"]
+                    latest_t = d0["bars"][-1]["time"]
+                    if latest_t - first_t >= want:
+                        break  # 已覆盖目标窗口
+                    _scroll_to_first_bar(c)
+                    time.sleep(cfg.scroll_wait)
+                    d1 = _read_bars(c)
+                    new_first = d1["bars"][0]["time"] if (d1 and d1.get("bars")) else first_t
+                    if new_first == first_t:
+                        break  # 首根不再推进：数据源到头
+                    first_t = new_first
                 d = _read_bars(c)
                 if not d or not d.get("bars"):
                     log(f"警告：周期 {res} 未读到K线")
                     continue
-                latest = d["bars"][-1]["time"]
-                cutoff = max(from_ts, latest - 3 * 86400)
-                bars = [b for b in d["bars"] if b["time"] >= cutoff]
+                bars_all = d["bars"]
+                latest = bars_all[-1]["time"]
+                first = bars_all[0]["time"]
+                cutoff = max(from_ts, latest - SEC_WINDOW_SEC)
+                bars = [b for b in bars_all if b["time"] >= cutoff]
                 data[res] = _dedup_sorted(bars)
-                log(f"已加载 {res}：共 {d['total']} 根，秒级窗口保留 {len(data[res])} 根（最近3天）")
+                span_days = (latest - bars_all[0]["time"]) / 86400.0
+                log(f"已加载 {res}：共 {d['total']} 根（{_ts_str(bars_all[0]['time'])} -> "
+                    f"{_ts_str(latest)}，数据源跨度 {span_days:.1f} 天），秒级窗口保留 {len(data[res])} 根（最近7天）")
+                if latest - first < SEC_WINDOW_SEC:
+                    log(f"警告：{res} 数据源深度仅 {span_days:.1f} 天（不足一周），背驰检测仅在此窗口有效")
                 continue
+            # 分钟级及以上：全量加载。单次滚动后首根仍晚于 from_ts（TV 分批推进
+            # 中途停在半路，实测短 1~4 天）时补滚 1~2 轮，保证「全量」名副其实。
             _scroll_to_first_bar(c)
             time.sleep(cfg.scroll_wait)
+            for _extra in range(2):
+                d = _read_bars(c)
+                if not d or not d.get("bars"):
+                    break
+                if d["bars"][0]["time"] <= from_ts:
+                    break  # 已覆盖起始日期
+                _scroll_to_first_bar(c)
+                time.sleep(cfg.scroll_wait)
             d = _read_bars(c)
             if not d or not d.get("bars"):
                 log(f"警告：周期 {res} 未读到K线")
@@ -328,7 +398,8 @@ def fetch_bars(cfg=None, from_ts=0, cache=True, cache_file=CACHE_FILE, symbol=No
             bars = [b for b in d["bars"] if b["time"] >= from_ts]
             # 去重 + 时间升序
             data[res] = _dedup_sorted(bars)
-            log(f"已加载 {res}：共 {d['total']} 根，保留 {len(data[res])} 根")
+            log(f"已加载 {res}：共 {d['total']} 根，保留 {len(data[res])} 根"
+                f"（{_ts_str(d['bars'][0]['time'])} -> {_ts_str(d['bars'][-1]['time'])}）")
     if cache:
         with open(cache_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)

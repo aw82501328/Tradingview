@@ -84,10 +84,11 @@
 2. `calcATR(rawBars, 14)`（供跳空判定）→ `calcMACD(rawBars)`（供 MACD 变色成笔）；
 3. `lockedPivotsOf(prevBis)` 取上级笔端点作为锁定端点 → `buildBi(fractals, merged, atr, macdArr, lockedPivots)`（区间套强制对齐）；
 4. `fixBiExtremes(bis, merged)`（端点极值修正）；
-5. **ATR 过滤**：`span < atr×ATR_FILTER` 的笔剔除（`ATR_FILTER` 默认 0.5）；
+5. **ATR 过滤**：`span < 稳定ATR×ATR_FILTER` 的笔剔除（`ATR_FILTER` 默认 0.5）。**阈值基准用全窗口 TR 均值（稳定ATR），不用 `calcATR` 的尾部 14 根**——9-4 行情急涨使 15m 尾部 ATR 从 ~17.4 涨到 21+，把 9-3 06:06→07:36 的结构性下跌笔（幅度 10.59）误判为噪音剔除、06:06 顶 4391.835 随之消失（连续同向坏笔的源头）。笔结构与行情无关，阈值不应随局部行情漂移；与 chan-core `markWickBars` 的稳定基准同理（见 chan-core SPEC §2.0）。
 6. `extendLastBi`（未完成笔延伸）；
 7. **逐级端点时间校准**：用「低一级」周期K线校准本周期笔端点时间（`calibrateBiTimes`）——15分钟←3分钟、1小时←15分钟、4小时←1小时、日线←4小时；
 8. **区间套强制对齐**：`alignBiToUpper(drawBis, prevBis, 上级间隔, rawBars)` 把本级别笔拐点对齐到紧邻上级笔拐点；第4参 `rawBars` 为本级原始K线，用于幽灵端点防御——上级极值在本级K线中不存在（跨周期数据源聚合差异）时跳过对齐，保留本级别真实极值。
+   对齐后**断口治理**：`alignBiToUpper` 由「bis[i].start 覆盖 bis[i-1].end」重建端点、假设列表连续；若第 5 步已删掉中间小笔，重建会把断口两端的笔「缝合」——前一笔终点被改写到后一笔起点（越过区间内真实极值，如 15m 9-3 连续两根上涨笔 4364.52→4381.25→4440.355、4381.25 并非区间最高点）或产生低于阈值的「桥接小笔」（3m 8-21 4516.835→4517.98 幅度仅 1.14）。治理两步：① **断口合并**——相邻同向笔只可能来自被过滤中间笔的断口，合并为一笔（start=第一笔起点、end=第二笔终点），循环直到无连续同向；② **补幅度过滤**——清除仍低于阈值的桥接残余；
 9. **小周期绘制窗口过滤**：3分钟只绘制最近 15 天、15分钟只绘制最近 30 天（`DRAW_WINDOW_DAYS`），
    按 `最新K线时间 - 窗口天数×86400` 过滤掉更早的笔，避免小周期从起始日期到最新的全部笔堆叠导致图上过密；
    过滤同样作用于 `allBis` 落盘数据，`mark-buy-sell` 等只标记窗口内的笔。
@@ -96,8 +97,11 @@
 
 - **清除**：切回源周期，按 title `CHAN_BI_<周期>` 只清除该周期自己画的笔（其他周期保留）；
 - **创建周期选择**：有校准基准的周期（15/60/240/D）在**基准周期**（低一级）创建 shape——TradingView 的 polyline 只支持把点精确放在当前图表周期的 bar 边界上，校准后的端点时间（基准周期 bar 边界）若在源周期创建会被吸附到源周期 bar 边界导致校准失效；
-- **数据覆盖检查**：绘制前 `ensureBarsCover` 确保图表数据覆盖最早笔的时间（否则早期笔端点被吸附到数据边缘形成无效笔）；
-- 创建 `polyline`：起点 `{time: startTime, price: startPrice}`、终点 `{time: endTime, price: endPrice}`，`linecolor=resolutionColor(res)`、`linewidth=1`、`title=CHAN_BI_<周期>`，并 `applyIV` 设置可见范围。
+- **防抢占断言**：创建前读 `chart.resolution()` 与 `drawRes` 比对（`1D`/`D` 归一化），不一致（运行中被用户手动切换周期）则重新 `ensureResolution` 再画；
+- **数据覆盖检查（多轮）**：绘制前 `ensureBarsCover(drawRes, 最早笔时间)` 确保图表数据覆盖最早笔的时间，最多 3 轮「scrollToFirstBar + 等待」（单轮 `len+first` 连续 3 次不变只结束该轮、由外层重触发——数据分批停顿≠加载完成，单轮判据曾致 60分钟笔在 15分钟图上大面积吸附成无效笔）；返回 `{covered, first}`；
+- **未覆盖裁剪**：最终仍未覆盖时只创建两端点均 ≥ 图表首根K线的笔，跳过数打印警告（落盘数据保持完整，`allBis` 保存的是未裁剪列表）；
+- 创建 `polyline`：起点 `{time: startTime, price: startPrice}`、终点 `{time: endTime, price: endPrice}`，`linecolor=resolutionColor(res)`、`linewidth=1`、`title=CHAN_BI_<周期>`，并 `applyIV` 设置可见范围；
+- **创建后回读校验**：`readStrokesByIds` 读回每根已创建笔的端点，与请求值比对（时间容差 1 根K线、价格容差 0.01）——`bi_ok`（CDP 调用成功）≠ 端点正确，TradingView 会把超出数据范围的时间静默吸附到数据边缘。不符者删除（`removeShapesByIds`）→ 重走「覆盖加载 → 重建」一轮 → 仍失败则删除并计入 `bi_bad` 如实报告（宁缺毋滥，不留坏笔在图上）。
 
 ### 3.5 落盘
 

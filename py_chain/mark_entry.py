@@ -7,10 +7,14 @@
   - 买点（多头）= 红色向上箭头（arrow_up）
   - 卖点（空头）= 向下绿色箭头（arrow_down）
 
-信号画在「背驰级别」（更低周期）。暂未实现出场策略，故无出场信号。
+信号画在「背驰级别」（更低周期）。出场规则（止损 + 三档止盈）的状态机由
+backtest.BacktestEngine 增量推进；本模块提供方向感知止损参考位（stop_ref_of）
+与笔事件查找（find_bi_event），与 mark_entry.js 的 stopRefOf/findBiEvent 对齐。
 
 不连接 CDP、不绘图；回测链路通过 compute_entries 直接调用。
 """
+
+import bisect
 
 from .chan_core import (
     calcATR, calcMACD, isBiDiverge, lowerResOf, buildZSByUpper, intervalSecOf,
@@ -198,11 +202,15 @@ def zsExitWeak(bis, upperBis, macdArr, barSec, ratio=1.0, wantDir="short"):
 
 
 def lowerDiverge(periodData, X, wantDir):
-    """以下级别出现背驰：在所有更低周期（intervalSecOf 更小）中找方向匹配的最新背驰点。
-    @returns None 或 { res, point:{time,price,direction} }
+    """以下级别出现背驰：收集所有更低周期（intervalSecOf 更小）中方向匹配的背驰点，
+    按时间**降序**返回候选列表（最新的在前）。
+    调用方（evaluateEntry）依次尝试候选并做支阻位校验，失败回退次新——
+    避免「--with-30s 后高频 30S 背驰点抢占原级别点、而 30S 微观点又远离支阻位
+    导致信号彻底消失」的问题（如 2026-09-04 13:39 的 3分钟背驰级别信号）。
+    @returns [ { res, point:{time,price,direction} }, ... ] 按 point.time 降序
     """
     xSec = intervalSecOf(X) or float("inf")
-    best = None
+    cands = []
     for res, pd in periodData.items():
         sec = intervalSecOf(res) or 0
         if sec >= xSec:
@@ -216,9 +224,9 @@ def lowerDiverge(periodData, X, wantDir):
         for p in pts:
             if p["direction"] != wantDir:
                 continue
-            if best is None or p["time"] > best["point"]["time"]:
-                best = {"res": res, "point": p}
-    return best
+            cands.append({"res": res, "point": p})
+    cands.sort(key=lambda c: c["point"]["time"], reverse=True)  # 最新在前
+    return cands
 
 
 def nearSr(price, srLevels, nearTol):
@@ -233,6 +241,33 @@ def nearSr(price, srLevels, nearTol):
         if d <= nearTol and (best is None or d < best["dist"]):
             best = {"sr": sr, "dist": d}
     return best
+
+
+def strategyExtraOk(key, bis, upperBis, macdArr, barSec):
+    """各策略专属条件（原 evaluateEntry 第 2 步抽取为独立函数，确认制/当下制共用）。
+    @returns None（全部通过）或 失败原因字符串"""
+    if key == "wait2Sell":
+        if not brokePrevLow(bis):
+            return "下跌段未破前底"
+        if not macdBelowZero(macdArr):
+            return "MACD 未下0轴或反弹过0轴"
+    elif key == "wait2Buy":
+        if not brokePrevHigh(bis):
+            return "上涨段未过前高"
+        if not macdAboveZero(macdArr):
+            return "MACD 未上0轴或回调破0轴"
+    elif key == "wait1Sell":
+        if not brokePrevHigh(bis):
+            return "未够笔且过高点"
+        if not zsExitWeak(bis, upperBis, macdArr, barSec, 1.0, "short"):
+            return "出中枢力度未变弱"
+    elif key == "wait1Buy":
+        if not brokePrevLow(bis):
+            return "未够笔且过低点"
+        if not zsExitWeak(bis, upperBis, macdArr, barSec, 1.0, "long"):
+            return "出中枢力度未变弱"
+    # waitBuy / waitSell：仅需够笔 + 以下级别背驰 + 支阻位附近
+    return None
 
 
 def evaluateEntry(ctx, strategy):
@@ -260,41 +295,214 @@ def evaluateEntry(ctx, strategy):
         return {"ok": False,
                 "reason": f"最后一笔为 {bis[-1]['type'] if bis else '?'}，需 {wantType}（反弹/回调不够笔）"}
 
-    # 2. 各策略专属条件
-    if key == "wait2Sell":
-        if not brokePrevLow(bis):
-            return {"ok": False, "reason": "下跌段未破前底"}
-        if not macdBelowZero(macdArr):
-            return {"ok": False, "reason": "MACD 未下0轴或反弹过0轴"}
-    elif key == "wait2Buy":
-        if not brokePrevHigh(bis):
-            return {"ok": False, "reason": "上涨段未过前高"}
-        if not macdAboveZero(macdArr):
-            return {"ok": False, "reason": "MACD 未上0轴或回调破0轴"}
-    elif key == "wait1Sell":
-        if not brokePrevHigh(bis):
-            return {"ok": False, "reason": "未够笔且过高点"}
-        if not zsExitWeak(bis, upperBis, macdArr, barSec, 1.0, "short"):
-            return {"ok": False, "reason": "出中枢力度未变弱"}
-    elif key == "wait1Buy":
-        if not brokePrevLow(bis):
-            return {"ok": False, "reason": "未够笔且过低点"}
-        if not zsExitWeak(bis, upperBis, macdArr, barSec, 1.0, "long"):
-            return {"ok": False, "reason": "出中枢力度未变弱"}
-    # waitBuy / waitSell：仅需够笔 + 以下级别背驰 + 支阻位附近
+    # 2. 各策略专属条件（与当下制共用 strategyExtraOk）
+    extraReason = strategyExtraOk(key, bis, upperBis, macdArr, barSec)
+    if extraReason is not None:
+        return {"ok": False, "reason": extraReason}
 
-    # 3. 以下级别出现背驰（定位背驰级别与背驰点，箭头画在此级别）
-    ld = lowerDiverge(periodData, res, divergeDir)
-    if ld is None:
+    # 3+4. 以下级别背驰候选（按时间降序）依次做支阻位校验，失败回退次新点：
+    #      策略专属条件不依赖背驰点（第2步已过），只需重试「支阻位附近」。
+    #      （--with-30s 后 30S 高频背驰点常抢占原级别点，且其微观极值价常远离支阻位——
+    #       无回退时信号彻底消失：旧点被抢占丢弃、新点校验被拒，两边都不出箭头。）
+    cands = lowerDiverge(periodData, res, divergeDir)
+    if not cands:
         return {"ok": False, "reason": "以下级别无匹配方向背驰"}
 
-    # 4. 在支阻位附近（用背驰点价 vs 检测周期 ATR）
-    nearTol = nearAtr * atr
-    near = nearSr(ld["point"]["price"], srLevels, nearTol)
-    if near is None:
-        return {"ok": False, "reason": "背驰点远离支阻位"}
+    nearTol = nearAtr * atr  # 用背驰点价 vs 检测周期 ATR
+    for c in cands:
+        near = nearSr(c["point"]["price"], srLevels, nearTol)
+        if near is not None:
+            return {"ok": True, "markRes": c["res"], "point": c["point"], "nearSr": near["sr"]["price"]}
+    return {"ok": False, "reason": "以下级别背驰点均远离支阻位"}
 
-    return {"ok": True, "markRes": ld["res"], "point": ld["point"], "nearSr": near["sr"]["price"]}
+
+# ============================================================
+# 当下背驰（实时判断）：形成中段创新低/新高 + MACD 当拍对比，无需反向笔确认
+# ============================================================
+
+# 形成中段最小K线数（够笔门槛）：isValid 要求合并K线 ≥5 根，这里用原始K线数 ≥5 作
+# 宽松代理——避免 1-2 根K线的微回调/微反弹触发，同时不引入合并结构重算
+REALTIME_MIN_BARS = 5
+
+
+def _barsSince(times, t0, tCut):
+    """times（升序）中 (t0, tCut] 覆盖的K线数，供形成中段长度门槛。"""
+    if not times:
+        return 0
+    i0 = bisect.bisect_left(times, t0)
+    i1 = bisect.bisect_right(times, tCut)
+    return i1 - i0
+
+
+def realtimeLowerDiverge(periodData, X, wantDir, tCut,
+                          periodTimes=None, minBars=REALTIME_MIN_BARS):
+    """当下背驰：低级别「形成中段」实时对比参照笔（每根 fine 收盘调用）。
+
+    形成中段 = 低级别笔列表最后一笔——回测引擎的增量状态已用 extendLastBiFrom
+    把它延伸到最新极值（endTime/endPrice = 当下极值），天然就是"正在走的这段"。
+
+    条件（与确认制 findDivergePoints 同一套背驰标准，只是对象换成形成中段）：
+      - 段方向匹配（做多→形成中下跌段 / 做空→形成中上涨段）；
+      - 段长 ≥ minBars（够笔门槛，见 REALTIME_MIN_BARS）；
+      - 创新低/新高：段当前极值 < refer.endPrice（多）/ > refer.endPrice（空）；
+      - isBiDiverge（当下对比）：绿柱面积变小 或 DIF低点抬高 或 绿柱最大高度变小（OR）。
+    参照笔 = 向前最近同向**已完成**笔（跳过幅度 < 当前段 50% 的次级别回调，同确认制）。
+
+    @param periodTimes   各周期K线时间数组（升序，二分用）；缺省时从 periodData[res].bars 现建
+    @returns 候选列表 [ { res, point:{time,price,direction}, segStart } ]，
+             级别从大到小排序（次级别优先于次次级别），每级别最多 1 个（形成中段）
+    """
+    xSec = intervalSecOf(X) or float("inf")
+    wantType = "down" if wantDir == "long" else "up"
+    cands = []
+    lowers = []
+    for res, pd in periodData.items():
+        sec = intervalSecOf(res) or 0
+        if sec < xSec and pd and pd.get("bis") and len(pd["bis"]) >= 3:
+            lowers.append((sec, res, pd))
+    lowers.sort(key=lambda x: -x[0])  # 次级别（更大的低级别）在前
+    for _sec, res, pd in lowers:
+        bis = pd["bis"]
+        F = bis[-1]  # 形成中段（引擎增量状态已延伸到当前极值）
+        if F["type"] != wantType:
+            continue
+        times = (periodTimes or {}).get(res)
+        if not times:
+            times = [b["time"] for b in (pd.get("bars") or [])]
+        if _barsSince(times, F["startTime"], tCut) < minBars:
+            continue  # 段太短（微回调/微反弹），不算够笔
+        # 参照笔：向前最近同向已完成笔（不含形成中段），跳过幅度不足的次级别回调
+        refer = None
+        for j in range(len(bis) - 2, -1, -1):
+            cand = bis[j]
+            if cand["type"] != F["type"]:
+                continue
+            if cand["span"] < F["span"] * 0.5:
+                continue
+            refer = cand
+            break
+        if refer is None:
+            continue
+        madeNew = F["endPrice"] < refer["endPrice"] if wantDir == "long" \
+            else F["endPrice"] > refer["endPrice"]
+        if not madeNew:
+            continue
+        # 当下对比 MACD：窗口取 [refer.startTime, F.endTime] 的切片（避免全量数组线性扫）
+        macdArr = pd.get("macdArr") or []
+        macdT = pd.get("macdTimes") or [m["time"] for m in macdArr]
+        if not macdT:
+            continue
+        lo = bisect.bisect_left(macdT, refer["startTime"])
+        hi = bisect.bisect_right(macdT, F["endTime"])
+        if not isBiDiverge(F, refer, macdArr[lo:hi]):
+            continue
+        cands.append({"res": res,
+                      "point": {"time": F["endTime"], "price": F["endPrice"],
+                                "direction": wantDir},
+                      "segStart": F["startTime"]})
+    return cands
+
+
+def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLevels,
+                            detectPeriods, nearAtr=NEAR_ATR, tCut=None, fired=None,
+                            periodTimes=None, periodMacdTimes=None):
+    """当下模式进场评估（每根 fine 收盘调用，信号无需等反向笔确认）。
+
+    三条件与确认制同构，差异只在"何时评"与"②用什么评"：
+      ① 够笔：检测周期最后一笔（引擎中=延伸中的形成段）方向匹配且段长 ≥ REALTIME_MIN_BARS；
+      ② 当下背驰：realtimeLowerDiverge（形成中段创新低/新高 + 当拍 MACD 对比）；
+      ③ 支阻位附近：形成中段当前极值价 vs srLevels（价差 ≤ nearAtr × 检测周期ATR）。
+    策略专属条件与确认制共用（strategyExtraOk）。
+
+    去重：fired 集合按 (periodX, strategyKey, markRes, 段起点时间)——每个形成段只发一次，
+    段延伸（继续创新低）不重发；新段（新起点）重新评估。
+
+    @param tCut              当前时刻（fine 收盘时间）；None 时取各周期数据末尾
+    @param fired             去重集合（调用方跨拍持有，原地更新）
+    @param periodTimes       各周期K线时间数组 { res: [times] }（二分用，可选）
+    @param periodMacdTimes   各周期MACD时间数组 { res: [times] }（切片用，可选；
+                             缺省时 realtimeLowerDiverge 内部现建）
+    @returns 新信号列表（flat），每项含 { periodX, markRes, time, price, direction,
+             strategyKey, nearSr, realtime:True, segStart }
+    """
+    fired = fired if fired is not None else set()
+    if tCut is None:
+        tCut = max((ts[-1] for ts in (periodTimes or {}).values() if ts), default=0)
+    # 组装 periodData（bis/macdArr/atr/macdTimes）
+    periodData = {}
+    for res, bis in (periodBis or {}).items():
+        if not bis:
+            continue
+        periodData[res] = {"bis": bis,
+                           "macdArr": (periodMacd or {}).get(res) or [],
+                           "macdTimes": (periodMacdTimes or {}).get(res),
+                           "atr": (periodAtr or {}).get(res) or 0,
+                           "bars": []}
+    if not periodData:
+        return []
+
+    def upperResOf(res):
+        sec = intervalSecOf(res) or 0
+        best = None
+        for r in periodData:
+            s = intervalSecOf(r) or 0
+            if s > sec and (best is None or s < intervalSecOf(best)):
+                best = r
+        return best
+
+    out = []
+    for X in (detectPeriods or []):
+        pd = periodData.get(X)
+        if pd is None:
+            continue
+        plan = (planPeriods or {}).get(X)
+        planStrategy = plan.get("strategy") if plan else None
+        if not planStrategy or plan.get("direction") == "观望":
+            continue
+        strategy = entryStrategyOf(planStrategy)
+        if strategy is None:
+            continue
+        key = strategy["key"]
+        direction = strategy["direction"]
+        wantType = "up" if direction == "short" else "down"  # 空头等反弹(up)，多头等回调(down)
+        bis = pd["bis"]
+        # ① 够笔（当下制）：最后一笔=形成中段，方向匹配 + 段长门槛
+        if not bis or bis[-1]["type"] != wantType:
+            continue
+        times = (periodTimes or {}).get(X) or [b["time"] for b in (pd.get("bars") or [])]
+        if _barsSince(times, bis[-1]["startTime"], tCut) < REALTIME_MIN_BARS:
+            continue
+        # 策略专属条件（与确认制共用）
+        upRes = upperResOf(X)
+        upperBis = periodData[upRes]["bis"] if (upRes and upRes in periodData) else None
+        extraReason = strategyExtraOk(key, bis, upperBis, pd["macdArr"], intervalSecOf(X))
+        if extraReason is not None:
+            continue
+        # ② 当下背驰 + ③ 支阻位附近（候选级别从大到小，命中即出）
+        nearTol = nearAtr * (pd["atr"] or 0)
+        if nearTol <= 0:
+            continue
+        for c in realtimeLowerDiverge(periodData, X, direction, tCut,
+                                      periodTimes=periodTimes or {}):
+            fkey = (X, key, c["res"], c["segStart"])
+            if fkey in fired:
+                continue  # 该形成段已发过，段延伸不重发
+            near = nearSr(c["point"]["price"], srLevels, nearTol)
+            if near is None:
+                continue
+            fired.add(fkey)
+            out.append({
+                "periodX": X,
+                "markRes": c["res"],
+                "time": c["point"]["time"],
+                "price": c["point"]["price"],
+                "direction": direction,
+                "strategyKey": key,
+                "nearSr": near["sr"]["price"],
+                "realtime": True,
+                "segStart": c["segStart"],
+            })
+    return out
 
 
 # ============================================================
@@ -397,3 +605,69 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
         }
         allEntries.setdefault(evalRes["markRes"], []).append(sig)
     return allEntries
+
+
+# ============================================================
+# 出场规则（与 mark_entry.js 对齐：stopRefOf / findBiEvent）
+# ============================================================
+
+
+def stop_ref_of(direction, entry_price, near_sr, sr_levels):
+    """方向感知的止损参考位：short 取进场价上方最近支阻位（阻力）、long 取下方最近（支撑）。
+
+    near_sr（进场校验按绝对价差最近命中的支阻位价，不分上下方）已在正确侧直接沿用；
+    否则从 sr_levels 重选正确侧最近位（进场判定逻辑不变，仅供出场止损参考）。
+    无正确侧位 → None（该仓不设止损，仅三档止盈出场）。
+    @param direction   "long" | "short"
+    @param entry_price 进场价
+    @param near_sr     信号自带的近支阻位价格（可为 None）
+    @param sr_levels   支阻位列表（dict 含 "price"，或直接为价格数值）
+    """
+    is_short = direction == "short"
+    if near_sr is not None and (near_sr > entry_price if is_short else near_sr < entry_price):
+        return near_sr
+    best = None
+    for sr in (sr_levels or []):
+        p = sr.get("price") if isinstance(sr, dict) else sr
+        if p is None:
+            continue
+        if (p > entry_price) if is_short else (p < entry_price):
+            d = abs(p - entry_price)
+            if best is None or d < best[1]:
+                best = (p, d)
+    return best[0] if best else None
+
+
+def find_bi_event(bis, from_t, bi_type, require_post_start=False, break_prev=False):
+    """找 from_t 之后首个完成的指定 type 笔（够笔/破高低点事件源）。
+
+    @param bis               笔列表（按时间升序）
+    @param from_t            起始时间（秒，不含等于）
+    @param bi_type           "up" | "down"
+    @param require_post_start True 时要求 startTime >= from_t（TP3 用：必须是进场后
+                             开始的新反向笔，排除进场前已存在的同向笔——进场背驰点
+                             本身常是「创新高/新低」笔）
+    @param break_prev        True 时再要求端点破前一同向笔端点（up 过前高 / down 破前底）
+    @returns None | {time, price}（笔完成时间 endTime 与端点价）
+    """
+    if not bis:
+        return None
+    for i, b in enumerate(bis):
+        if b["type"] != bi_type:
+            continue
+        if not (b["endTime"] > from_t):
+            continue
+        if require_post_start and b["startTime"] < from_t:
+            continue
+        if break_prev:
+            j = i - 1
+            while j >= 0 and bis[j]["type"] != bi_type:
+                j -= 1
+            if j < 0:
+                continue
+            broke = (b["endPrice"] > bis[j]["endPrice"]) if bi_type == "up" \
+                else (b["endPrice"] < bis[j]["endPrice"])
+            if not broke:
+                continue
+        return {"time": b["endTime"], "price": b["endPrice"]}
+    return None

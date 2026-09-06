@@ -1,6 +1,6 @@
 ---
 name: mark-entry
-description: Mark entry signals (进出场) on the TradingView Desktop chart via CDP. Reads the trading-plan result (plan_<symbol>.json) to determine each timeframe's current entry state, maps it to one of 6 entry strategies, validates that strategy's entry conditions (enough strokes / breaking previous low-high / MACD zero axis / weaker momentum leaving ZhongShu / lower-timeframe divergence / near S/R level), and marks buy/sell arrows on the divergence timeframe. Long = up red arrow, short = down green arrow.
+description: Mark entry signals (进出场) on the TradingView Desktop chart via CDP. Reads the trading-plan result (plan_<symbol>.json) to determine each timeframe's current entry state, maps it to one of 6 entry strategies, validates that strategy's entry conditions (enough strokes / breaking previous low-high / MACD zero axis / weaker momentum leaving ZhongShu / lower-timeframe divergence / near S/R level), and marks buy/sell arrows on the divergence timeframe. Long = up red arrow, short = down green arrow. Also simulates exits per position (stop = intrabar break of the direction-aware S/R reference; TP1 breakeven after divergence-TF stroke completes; TP2 half-close after detection-TF stroke completes; TP3 full close on detection-TF breaking prior low/high) with same-direction mutual exclusion (no new same-direction entry while one is open; long/short independent), marking exits as yellow arrows (down = close long, up = close short, title EXIT_<divergence TF>).
 disable-model-invocation: true
 ---
 
@@ -10,6 +10,11 @@ disable-model-invocation: true
 
 - **买点（多头）** → 向上**红色**箭头（`arrow_up`）
 - **卖点（空头）** → 向下**绿色**箭头（`arrow_down`）
+
+并对每个进场模拟**出场**（止损 + 三档止盈），在图上以**统一黄色箭头**标记出场点（多头出场 ↓ / 空头出场 ↑，与 Web 控制台一致）：
+
+- **终局出场**（支阻位止损 / 保本止损 / 全平）→ 黄 `↓/↑`
+- **平一半** → 黄 `↓/↑`（保本/仍持仓仅落盘，不画图）
 
 > **算法来源**：背驰判定复用 `chan-core` 的 `isBiDiverge`，中枢复用 `buildZSByUpper`（唯一算法源）；**进场状态判定不自行实现**，直接读取 `trading-plan` 落盘的 `.cursor/cache/plan_<品种>.json`（各周期 `direction/strategy`）。
 >
@@ -107,17 +112,35 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=1.
 - **MACD 0轴**：`calcMACD` 返回的 `dif`，当前值 <0（下0轴）/>0（上0轴）。
 - **以下级别**：所有 `intervalSecOf` 更小的周期；多个更低周期同时背驰时取时间最新者。
 
+## 出场规则与同向持仓互斥
+
+每个进场信号从进场时刻起按时间顺序模拟出场（`simulatePosition`，纯函数）：
+
+| 事件 | 触发条件 | 动作 |
+|------|----------|------|
+| **止损** | 背驰级别K线盘中破坏止损参考位（short `high>` 位 / long `low<` 位） | 全平终局，黄 `↓/↑` |
+| **止盈1 保本** | 背驰周期**够笔**：进场后首笔有利方向笔（short→down / long→up）完成 | 止损位上移至**进场价**（仅落盘，不画图） |
+| **止盈2 平一半** | 检测周期**够笔**：进场后首笔有利方向笔完成（需保本已触发） | 平一半，黄 `↓/↑` |
+| **止盈3 全平** | 检测周期**破前底/过前高**：进场后开始的不利方向笔端点破前一同向笔端点 | 全平终局，黄 `↓/↑` |
+
+- **止损参考位**（`stopRefOf`，方向感知）：short 取进场价**上方**最近支阻位、long 取**下方**最近；信号自带 `nearSr` 已在正确侧则直接沿用，否则从支阻位列表重选。无正确侧位 → 该仓不设止损，仅三档止盈出场。
+- **同向持仓互斥**：同方向持仓未终局（未止损/未全平）时，新的同方向信号**被过滤**（落盘保留 `suppressed` 标记，不画箭头）；**多空双向互不影响**（各自独立状态机，可同时持有多、空仓）。平仓后（信号时间晚于终局时间）可再进场。
+- **同时刻同向共振信号**（多个检测周期命中同一背驰点）：按检测周期**从大到小**取一条（D>240>60>15>3>30S），其余标 `suppressedBy`。
+- 已知口径：笔数据最后一笔为延伸中的形成笔（chan-bi 落盘口径），其完成事件按延伸端点时间计。
+
 ## 标记位置（背驰级别）
 
 - 箭头**画在背驰点所在周期**（「背驰级别」，如 60 周期状态命中、背驰出现在 15 周期 → 箭头标记在 15 周期）；
 - title 打上背驰级别标签 `ENTRY_<背驰级别>`，再次标记时按标签只清除该级别旧箭头；
-- **只在该周期显示**：箭头通过 `intervalsVisibilities` 只在本周期显示（切到其他周期自动隐藏）；
+- 出场标记 title 为 `EXIT_<背驰级别>`（同一标记级别），清除时同样按标签清理；
+- **只在该周期显示**：箭头与出场标记通过 `intervalsVisibilities` 只在本周期显示（切到其他周期自动隐藏）；
 - 箭头创建在「低一级」周期上精确定位（与买卖点一致，3 分钟最稳定）；默认 3 分钟为最小周期，无更低级别背驰可供检测，因此其状态**不会**产生进场信号。`--with-30s` 启用后 30 秒为最小周期：3 分钟状态可检测 **30S 背驰**并产生进场信号（箭头画在 30S 级别）；30S 自身无更低级别，不作为检测周期。
 
 ## 落盘
 
 每次标记（含 `--dry`）都会把各周期信号写入 **`.cursor/cache/entry_<品种>.json`**：
-`periods` 按**背驰级别**聚合，字段：`periodX` 状态所在周期、`time` 背驰时间、`price` 背驰点价格、`direction`（`long` 做多 / `short` 做空）、`strategyKey`（策略标识）、`nearSr` 靠近的支阻位价格、`color` 箭头颜色。
+`periods` 按**背驰级别**聚合，字段：`periodX` 状态所在周期、`time` 背驰时间、`price` 背驰点价格、`direction`（`long` 做多 / `short` 做空）、`strategyKey`（策略标识）、`nearSr` 靠近的支阻位价格、`color` 箭头颜色；
+出场相关新增字段：`stopRef` 止损参考位（方向感知选位，可为 null）、`state`（`closed` 已终局 / `open` 仍持仓）、`exits` 出场事件列表 `[{type, time, price}]`（type：`breakeven` 保本 / `half` 平一半 / `close` 全平 / `stopSr` 支阻位止损 / `stopBe` 保本止损 / `stillOpen` 仍持仓）、互斥过滤的信号带 `suppressed: true` + `suppressedBy`（占用仓位的信号时间）。
 
 ## 常见问题排查
 

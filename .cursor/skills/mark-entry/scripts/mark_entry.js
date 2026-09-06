@@ -5,6 +5,13 @@
  *   - 买点（多头）= 向上红色箭头（arrow_up）
  *   - 卖点（空头）= 向下绿色箭头（arrow_down）
  *
+ * 出场规则（同向持仓互斥：同方向持仓未终局不再开新仓，多空互不影响）：
+ *   - 止损：盘中破坏进场参考的支阻位（方向感知选位：short 上方最近 / long 下方最近）
+ *   - 止盈1：背驰周期够笔（有利方向笔完成）→ 保本（止损位上移至进场价）
+ *   - 止盈2：检测周期够笔 → 平一半
+ *   - 止盈3：检测周期破前底/过前高（进场后反向笔端点破前一同向笔端点）→ 全平
+ *   出场标记统一黄色箭头（EXIT_COLOR #FFEB3B）：方向=平仓方向（多头出场 ↓ / 空头出场 ↑），title = EXIT_<背驰级别>
+ *
  * 用法：
  *   node mark_entry.js --from=2026-06-30            计算并绘制（默认 240,60,15,3）
  *   node mark_entry.js --dry --from=2026-06-30      只计算打印，不绘图
@@ -64,6 +71,8 @@ const PERIODS = getStrArg("periods", "240,60,15,3")
 // 箭头颜色：买点（多头）红色、卖点（空头）绿色
 const BUY_COLOR = "#F23645";
 const SELL_COLOR = "#089981";
+// 出场标记颜色：黄色（与 Web 控制台出场箭头一致；方向=平仓方向：多头出场 ↓ / 空头出场 ↑）
+const EXIT_COLOR = "#FFEB3B";
 // 读取K线时，起始日期前额外取的缓冲根数
 const BAR_BUFFER = 30;
 
@@ -293,15 +302,19 @@ function zsExitWeak(bis, upperBis, macdArr, barSec, ratio, wantDir) {
 }
 
 /**
- * 以下级别出现背驰：在所有更低周期（intervalSecOf 更小）中找方向匹配的最新背驰点。
+ * 以下级别出现背驰：收集所有更低周期（intervalSecOf 更小）中方向匹配的背驰点，
+ * 按时间**降序**返回候选列表（最新的在前）。
+ * 调用方（evaluateEntry）依次尝试候选并做支阻位校验，失败回退次新——
+ * 避免「--with-30s 后高频 30S 背驰点抢占原级别点、而 30S 微观点又远离支阻位
+ * 导致信号彻底消失」的问题（如 2026-09-04 13:39 的 3分钟背驰级别信号）。
  * @param {object} periodData {res: {bis, macdArr, ...}} 全部周期的预取数据
  * @param {string} X         当前检测周期
  * @param {string} wantDir   期望背驰方向 "long"（底背驰）| "short"（顶背驰）
- * @returns {null|{res:string, point:{time,price,direction}}} 背驰点所在更低周期与背驰点
+ * @returns {{res:string, point:{time,price,direction}}[]} 候选列表，按 point.time 降序
  */
 function lowerDiverge(periodData, X, wantDir) {
   const xSec = intervalSecOf(X) || Infinity;
-  let best = null;
+  const cands = [];
   for (const res of Object.keys(periodData)) {
     const sec = intervalSecOf(res) || 0;
     if (sec >= xSec) continue; // 只取更低级别
@@ -311,10 +324,11 @@ function lowerDiverge(periodData, X, wantDir) {
     try { pts = findDivergePoints(pd.bis, pd.macdArr); } catch (e) { continue; }
     for (const p of pts) {
       if (p.direction !== wantDir) continue;
-      if (!best || p.time > best.point.time) best = { res, point: p };
+      cands.push({ res, point: p });
     }
   }
-  return best;
+  cands.sort((a, b) => b.point.time - a.point.time); // 最新在前
+  return cands;
 }
 
 /**
@@ -376,16 +390,154 @@ function evaluateEntry(ctx, strategy) {
       break; // 仅需够笔 + 以下级别背驰 + 支阻位附近
   }
 
-  // 3. 以下级别出现背驰（定位背驰级别与背驰点，箭头画在此级别）
-  const ld = lowerDiverge(periodData, res, divergeDir);
-  if (!ld) return { ok: false, reason: "以下级别无匹配方向背驰" };
+  // 3+4. 以下级别背驰候选（按时间降序）依次做支阻位校验，失败回退次新点：
+  //      策略专属条件不依赖背驰点（第2步已过），只需重试「支阻位附近」。
+  //      （--with-30s 后 30S 高频背驰点常抢占原级别点，且其微观极值价常远离支阻位——
+  //       无回退时信号彻底消失：旧点被抢占丢弃、新点校验被拒，两边都不出箭头。）
+  const cands = lowerDiverge(periodData, res, divergeDir);
+  if (cands.length === 0) return { ok: false, reason: "以下级别无匹配方向背驰" };
 
-  // 4. 在支阻位附近（用背驰点价 vs 检测周期 ATR）
-  const nearTol = nearAtr * atr;
-  const near = nearSr(ld.point.price, srLevels, nearTol);
-  if (!near) return { ok: false, reason: "背驰点远离支阻位" };
+  const nearTol = nearAtr * atr; // 用背驰点价 vs 检测周期 ATR
+  for (const c of cands) {
+    const near = nearSr(c.point.price, srLevels, nearTol);
+    if (near) return { ok: true, markRes: c.res, point: c.point, nearSr: near.sr.price };
+  }
+  return { ok: false, reason: "以下级别背驰点均远离支阻位" };
+}
 
-  return { ok: true, markRes: ld.res, point: ld.point, nearSr: near.sr.price };
+// ============================================================
+// 出场条件（止损 + 三档止盈）与同向持仓互斥（纯函数，可单测）
+// ============================================================
+
+/**
+ * 方向感知的止损参考位：short 取进场价上方最近的支阻位（阻力）、long 取下方最近（支撑）。
+ * 信号自带的 nearSr（进场校验时按绝对价差最近命中，不分上下方）若已在正确侧直接沿用；
+ * 否则从 srLevels 重选正确侧最近位（进场判定逻辑不变，此处仅供出场止损参考）。
+ * 无正确侧支阻位 → null（该仓不设止损，仅三档止盈出场）。
+ * @param {object} sig 进场信号（用 direction/price/nearSr）
+ * @param {Array} srLevels 支阻位列表（每项含 price）
+ * @returns {null|number} 止损参考位价格
+ */
+function stopRefOf(sig, srLevels) {
+  const isShort = sig.direction === "short";
+  const entryP = sig.price;
+  if (sig.nearSr != null && (isShort ? sig.nearSr > entryP : sig.nearSr < entryP)) {
+    return sig.nearSr;
+  }
+  let best = null;
+  for (const sr of (srLevels || [])) {
+    const p = sr.price;
+    if (isShort ? p > entryP : p < entryP) {
+      const d = Math.abs(p - entryP);
+      if (!best || d < best.d) best = { p, d };
+    }
+  }
+  return best ? best.p : null;
+}
+
+/**
+ * 找 fromT 之后首个完成的指定 type 笔（够笔/破高低点事件源）。
+ * @param {Array} bis 笔列表
+ * @param {number} fromT 起始时间（秒，不含等于）
+ * @param {string} type "up"|"down"
+ * @param {boolean} requirePostStart true 时要求 startTime >= fromT（TP3 用：
+ *   必须是进场后开始的新笔，排除进场前已存在的同向笔——进场背驰点本身常是「创新高/新低」笔）
+ * @param {boolean} breakPrev true 时再要求端点破前一同向笔端点
+ *   （up 笔 endPrice > 前一 up 笔 endPrice = 过前高；down 笔 = 破前底）
+ * @returns {null|{time:number, price:number}} 笔完成时间（endTime）与端点价
+ */
+function findBiEvent(bis, fromT, type, requirePostStart, breakPrev) {
+  if (!bis) return null;
+  for (let i = 0; i < bis.length; i++) {
+    const b = bis[i];
+    if (b.type !== type) continue;
+    if (!(b.endTime > fromT)) continue; // 完成于 fromT 之后
+    if (requirePostStart && b.startTime < fromT) continue;
+    if (breakPrev) {
+      let j = i - 1;
+      while (j >= 0 && bis[j].type !== type) j--;
+      if (j < 0) continue;
+      const broke = type === "up" ? b.endPrice > bis[j].endPrice : b.endPrice < bis[j].endPrice;
+      if (!broke) continue;
+    }
+    return { time: b.endTime, price: b.endPrice };
+  }
+  return null;
+}
+
+/**
+ * 出场状态机：对单个进场信号从进场时刻起按时间顺序模拟出场事件。
+ *   止损：markRes K线逐根盘中检查（short high>止损位 / long low<止损位），跳空按开盘价成交；
+ *         止损位初始 = stopRef，TP1 后 = 进场价（保本）
+ *   TP1 保本：markRes 首个进场后完成的有利方向笔（short→down / long→up）
+ *   TP2 平一半：periodX 首个进场后完成的有利方向笔（需 TP1 已触发，渐进式）
+ *   TP3 全平：periodX 首个进场后开始的不利方向笔、端点破前一同向笔端点（破前底/过前高）
+ * 已知口径：bis 最后一笔为延伸中的形成笔（chan-bi 落盘口径），其完成事件按延伸端点时间计。
+ * @param {object} sig 进场信号
+ * @param {null|number} stopRef stopRefOf 的输出
+ * @param {object} markResData 背驰级别周期数据 {bis, bars}
+ * @param {object} periodXData 检测周期数据 {bis, bars}
+ * @returns {{events:Array<{type:string,time:number,price:number|null}>, closed:boolean}}
+ *   type: breakeven | half | close | stopSr（支阻位止损）| stopBe（保本止损）| stillOpen
+ */
+function simulatePosition(sig, stopRef, markResData, periodXData) {
+  const isShort = sig.direction === "short";
+  const entryT = sig.time;
+  const entryP = sig.price;
+  const fav = isShort ? "down" : "up"; // 有利方向笔（short 持仓盼下跌笔）
+  const adv = isShort ? "up" : "down"; // 不利方向笔（TP3 破高低点用）
+  const tp1 = findBiEvent(markResData && markResData.bis, entryT, fav);
+  const tp2 = findBiEvent(periodXData && periodXData.bis, entryT, fav);
+  const tp3 = findBiEvent(periodXData && periodXData.bis, entryT, adv, true, true);
+
+  const events = [];
+  let stop = stopRef;
+  let be = false, half = false;
+  // 应用 upto 时刻之前（含）的止盈事件；返回 true 表示已终局（TP3 全平）
+  const applyTps = (upto) => {
+    for (const [k, e] of [["breakeven", tp1], ["half", tp2], ["close", tp3]]) {
+      if (!e || e.time > upto) continue;
+      if (k === "breakeven" && !be) {
+        be = true;
+        stop = entryP; // 保本：止损位上移至进场价
+        events.push({ type: "breakeven", time: e.time, price: e.price });
+      }
+      if (k === "half" && !half && be) {
+        half = true;
+        events.push({ type: "half", time: e.time, price: e.price });
+      }
+      if (k === "close") {
+        events.push({ type: "close", time: e.time, price: e.price });
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const bars = (markResData && markResData.bars) || [];
+  let closed = false;
+  for (const bar of bars) {
+    if (bar.time <= entryT) continue; // 进场当根不计（进场K线自身的高低点）
+    if (applyTps(bar.time)) { closed = true; break; }
+    if (stop != null) {
+      const hit = isShort ? bar.high > stop : bar.low < stop;
+      if (hit) {
+        // 跳空穿越止损位时按开盘价成交（更差价格）
+        const fill = isShort ? Math.max(stop, bar.open) : Math.min(stop, bar.open);
+        events.push({ type: be ? "stopBe" : "stopSr", time: bar.time, price: fill });
+        closed = true;
+        break;
+      }
+    }
+  }
+  if (!closed) {
+    applyTps(Infinity); // 数据末尾仍持仓：补记已触发的止盈事件
+    if (!events.some(e => e.type === "close" || e.type === "stopSr" || e.type === "stopBe")) {
+      events.push({ type: "stillOpen", time: bars.length ? bars[bars.length - 1].time : entryT, price: null });
+    }
+  }
+  events.sort((a, b) => a.time - b.time);
+  return { events, closed };
 }
 
 // ============================================================
@@ -681,7 +833,7 @@ function evaluateEntry(ctx, strategy) {
     // 逐周期判定进场状态（依赖交易计划 plan 结果）→ 生成进场信号
     // ============================================================
     // allEntries 按「背驰级别（标记级别）」聚合：periods[markRes] = [信号...]
-    const allEntries = {};
+    let allEntries = {};
     for (const res of PERIODS) {
       const pd = periodData[res];
       if (!pd) {
@@ -731,13 +883,63 @@ function evaluateEntry(ctx, strategy) {
       const colorName = sig.direction === "long" ? "红" : "绿";
       console.log(`\n[周期 ${res}] 策略「${strategy.label}」命中：背驰级别 ${evalRes.markRes}，${toT(sig.time)} @ ${sig.price.toFixed(2)} [${dirName} ${colorName}] 靠近支阻位 ${sig.nearSr.toFixed(2)}`);
     }
-    console.log("\n=== 进出场信号汇总 ===");
-    let totalSignals = 0;
+    // ============================================================
+    // 同向持仓互斥 + 出场模拟（多空各自独立状态机，互不影响）
+    // ============================================================
+    // 规则：同方向持仓未终局（未止损/未全平）不再开新仓；同时刻同向共振信号
+    // 按检测周期从大到小取一条（D>240>60>15>3>30S），其余标记 suppressed（落盘保留、不画箭头）。
+    const flatSigs = [];
     for (const mr of Object.keys(allEntries)) {
-      totalSignals += allEntries[mr].length;
-      console.log(`  标记级别 ${mr}: ${allEntries[mr].length} 个信号`);
+      for (const s of allEntries[mr]) flatSigs.push(Object.assign({ markRes: mr }, s));
     }
-    console.log(`  共 ${totalSignals} 个信号`);
+    const prioOf = (res) => intervalSecOf(res) || 0;
+    flatSigs.sort((a, b) => (a.time - b.time) || (prioOf(b.periodX) - prioOf(a.periodX)));
+    // openPos[dir] = { sig, endTime }：endTime = 该仓终局时间（仍持仓 = Infinity）。
+    // 信号时间早于终局时间的同向新信号被过滤；晚于终局时间（平仓后）可再进场。
+    const openPos = { long: null, short: null };
+    const EXIT_NAMES = {
+      breakeven: "保本", half: "平一半", close: "全平",
+      stopSr: "支阻位止损", stopBe: "保本止损", stillOpen: "仍持仓",
+    };
+    for (const s of flatSigs) {
+      const held = openPos[s.direction];
+      if (held && held.endTime > s.time) {
+        s.suppressed = true;
+        s.suppressedBy = held.sig.time;
+        console.log(`[互斥] ${toT(s.time)} ${s.direction === "long" ? "做多" : "做空"}（检测周期 ${s.periodX}）被过滤：同向仓 ${toT(held.sig.time)}（${held.sig.periodX}）持仓中`);
+        continue;
+      }
+      s.stopRef = stopRefOf(s, srLevels);
+      const sim = simulatePosition(
+        s, s.stopRef,
+        periodData[s.markRes] || null,
+        periodData[s.periodX] || null,
+      );
+      s.exits = sim.events;
+      s.state = sim.closed ? "closed" : "open";
+      const terminal = [...sim.events].reverse().find(e => e.type === "close" || e.type === "stopSr" || e.type === "stopBe");
+      openPos[s.direction] = { sig: s, endTime: terminal ? terminal.time : Infinity };
+      const evDesc = sim.events.map(e => `${EXIT_NAMES[e.type] || e.type} ${toT(e.time)}${e.price != null ? " @" + e.price.toFixed(2) : ""}`).join(" → ");
+      console.log(`[持仓] ${toT(s.time)} ${s.direction === "long" ? "做多" : "做空"}（检测周期 ${s.periodX}，止损参考 ${s.stopRef != null ? s.stopRef.toFixed(2) : "无"}）: ${evDesc || "无出场事件"}`);
+    }
+    // 重新按背驰级别聚合（flatSigs 为带互斥/出场信息的信号副本，落盘与绘制都用它）
+    allEntries = {};
+    for (const s of flatSigs) {
+      (allEntries[s.markRes] = allEntries[s.markRes] || []).push(s);
+    }
+
+    console.log("\n=== 进出场信号汇总 ===");
+    let totalSignals = 0, suppressedCnt = 0, openCnt = 0;
+    for (const mr of Object.keys(allEntries)) {
+      const arr = allEntries[mr];
+      for (const s of arr) {
+        if (s.suppressed) suppressedCnt++;
+        else if (s.state === "open") openCnt++;
+      }
+      totalSignals += arr.length;
+      console.log(`  标记级别 ${mr}: ${arr.length} 个信号（互斥过滤 ${arr.filter(s => s.suppressed).length}）`);
+    }
+    console.log(`  共 ${totalSignals} 个信号，互斥过滤 ${suppressedCnt} 个，仍持仓 ${openCnt} 个`);
 
     // 进出场数据落盘
     try {
@@ -769,10 +971,10 @@ function evaluateEntry(ctx, strategy) {
     // ============================================================
 
     /**
-     * 清除某周期的旧进出场箭头（title = ENTRY_<周期>）。
+     * 清除某周期的旧进出场标记（title = <prefix><周期>，ENTRY_ 箭头 / EXIT_ 出场）。
      */
-    const clearEntry = async (res) => {
-      const TITLE = "ENTRY_" + res;
+    const clearEntry = async (res, prefix) => {
+      const TITLE = (prefix || "ENTRY_") + res;
       const r = await client.Runtime.evaluate({
         expression: `(function() {
           const chart = TradingViewApi.activeChart();
@@ -871,6 +1073,70 @@ function evaluateEntry(ctx, strategy) {
       return r.result.value;
     };
 
+    /**
+     * 在某周期绘制出场标记（统一黄色箭头 #FFEB3B，title = EXIT_<标记级别>）：
+     *   方向=平仓方向（多头出场 ↓ / 空头出场 ↑）；保本/仍持仓不画图（仅落盘）。
+     */
+    const createExitMarks = async (res, marks) => {
+      const TITLE = "EXIT_" + res;
+      const IV_CFG = onlyThisInterval(res);
+      const r = await client.Runtime.evaluate({
+        expression: `(async function() {
+          const chart = TradingViewApi.activeChart();
+          const MARKS = ${JSON.stringify(marks)};
+          const TITLE = "${TITLE}";
+          const IV_CFG = ${JSON.stringify(IV_CFG)};
+          const COLOR = "${EXIT_COLOR}";
+          const out = { ok: 0, err: [] };
+
+          const applyIV = (id) => {
+            if (!IV_CFG) return;
+            try {
+              const iv = chart.getShapeById(id)._source._properties.intervalsVisibilities;
+              iv.ticks.setValue(IV_CFG.ticks);
+              iv.seconds.setValue(IV_CFG.seconds);
+              iv.secondsFrom.setValue(IV_CFG.secondsFrom);
+              iv.secondsTo.setValue(IV_CFG.secondsTo);
+              iv.minutes.setValue(IV_CFG.minutes);
+              iv.minutesFrom.setValue(IV_CFG.minutesFrom);
+              iv.minutesTo.setValue(IV_CFG.minutesTo);
+              iv.hours.setValue(IV_CFG.hours);
+              iv.hoursFrom.setValue(IV_CFG.hoursFrom);
+              iv.hoursTo.setValue(IV_CFG.hoursTo);
+              iv.days.setValue(IV_CFG.days);
+              iv.daysFrom.setValue(IV_CFG.daysFrom);
+              iv.daysTo.setValue(IV_CFG.daysTo);
+              iv.weeks.setValue(IV_CFG.weeks);
+              iv.weeksFrom.setValue(IV_CFG.weeksFrom);
+              iv.weeksTo.setValue(IV_CFG.weeksTo);
+              iv.months.setValue(IV_CFG.months);
+              iv.monthsFrom.setValue(IV_CFG.monthsFrom);
+              iv.monthsTo.setValue(IV_CFG.monthsTo);
+              iv.ranges.setValue(false);
+            } catch(e) {}
+          };
+
+          for (const m of MARKS) {
+            try {
+              // 出场 = 单点箭头（arrow_down 平多 / arrow_up 平空），颜色黄色：
+              // 箭头图标颜色为独立字段 arrowColor（不走顶层 color/textColor）
+              const PTS = [{ time: m.time, price: m.price }];
+              const OPTS = { shape: m.shape, lock: false,
+                             text: m.text || "",
+                             color: COLOR, textColor: COLOR,
+                             overrides: { arrowColor: COLOR, color: COLOR, textColor: COLOR, title: TITLE } };
+              const id = await chart.createMultipointShape(PTS, OPTS);
+              applyIV(id);
+              out.ok++;
+            } catch(err) { out.err.push(err.message); }
+          }
+          return out;
+        })()`,
+        returnByValue: true, awaitPromise: true, timeout: 30000,
+      });
+      return r.result.value;
+    };
+
     // 逐周期清除旧箭头并绘制新箭头
     let drawCurrentRes = originalRes;
     // 清除阶段：遍历所有检测周期与标记级别，无论本次是否识别出信号，都先清除该周期的旧箭头，
@@ -881,14 +1147,30 @@ function evaluateEntry(ctx, strategy) {
         await ensureResolution(res);
         drawCurrentRes = res;
       }
-      const cleared = await clearEntry(res);
-      console.log(`\n[周期 ${res}] 已清除旧进出场箭头: ${cleared.cleared} 个`);
+      const clearedEntry = await clearEntry(res, "ENTRY_");
+      const clearedExit = await clearEntry(res, "EXIT_");
+      console.log(`\n[周期 ${res}] 已清除旧进场箭头: ${clearedEntry.cleared} 个，旧出场标记: ${clearedExit.cleared} 个`);
     }
-    console.log("\n=== 绘制阶段（买点红箭头 / 卖点绿箭头）===");
+    console.log("\n=== 绘制阶段（买点红箭头 / 卖点绿箭头 / 出场灰色标记）===");
     // 信号已按「背驰级别（标记级别）」聚合，按标记级别绘制。
     for (const res of Object.keys(allEntries)) {
-      const entries = allEntries[res];
+      // 互斥过滤的信号不画箭头（仅落盘）
+      const entries = (allEntries[res] || []).filter(e => !e.suppressed);
       if (!entries || entries.length === 0) continue;
+      // 出场标记：与进场同款箭头（统一黄 #FFEB3B），方向 = 平仓方向（多头出场 ↓ /
+      // 空头出场 ↑，与 Web 控制台 ML· 出场一致）；文本 = 事件名；保本/仍持仓仅落盘。
+      const EXIT_NM = { stopSr: "止损", stopBe: "保损", close: "全平", half: "半平" };
+      const exitMarks = [];
+      for (const e of entries) {
+        const shape = e.direction === "long" ? "arrow_down" : "arrow_up";
+        for (const ev of (e.exits || [])) {
+          if (ev.type === "stopSr" || ev.type === "stopBe" || ev.type === "close"
+              || ev.type === "half") {
+            exitMarks.push({ shape, text: `${EXIT_NM[ev.type] || ev.type} ${ev.price != null ? ev.price.toFixed(2) : ""}`,
+                             time: ev.time, price: ev.price });
+          }
+        }
+      }
       // 箭头创建在「低一级」周期：低一级周期 bar 边界更细，锚点时间（笔端点已校准到
       // 低一级边界）在其上精确定位；最小周期（默认 3 分钟、--with-30s 时为 30 秒）
       // 无更低级别、锚点在其自身读取始终返回原始时间（即使数据未覆盖），是天然稳定锚定周期。
@@ -897,12 +1179,20 @@ function evaluateEntry(ctx, strategy) {
         await ensureResolution(drawRes);
         drawCurrentRes = drawRes;
       }
-      // 绘制前确保图表数据覆盖最早信号时间（避免箭头被吸附到数据边缘）
-      const minTs = entries.reduce((m, e) => Math.min(m, e.time), Infinity);
+      // 绘制前确保图表数据覆盖最早信号/出场时间（避免标记被吸附到数据边缘）
+      const minTs = exitMarks.reduce(
+        (m, k) => Math.min(m, k.time),
+        entries.reduce((m, e) => Math.min(m, e.time), Infinity),
+      );
       if (minTs !== Infinity) await ensureBarsCover(drawRes, minTs);
       const result = await createEntry(res, entries);
       console.log(`\n=== 绘制结果 [标记级别 ${res}]（创建于 ${drawRes}）===`);
       console.log(JSON.stringify(result, null, 2));
+      if (exitMarks.length > 0) {
+        const exitResult = await createExitMarks(res, exitMarks);
+        console.log(`=== 出场标记 [标记级别 ${res}]: ${exitMarks.length} 个（黄箭头：平多 ↓ / 平空 ↑）===`);
+        if (DEBUG) console.log(JSON.stringify(exitResult, null, 2));
+      }
     }
 
     // 最后切回原周期并恢复完整历史：切周期会让当前周期数据重置为「默认加载」
@@ -914,7 +1204,10 @@ function evaluateEntry(ctx, strategy) {
     }
     const origEntries = allEntries[originalRes];
     if (origEntries && origEntries.length > 0) {
-      const minTs = origEntries.reduce((m, e) => Math.min(m, e.time), Infinity);
+      const minTs = origEntries.reduce(
+        (m, e) => (e.exits || []).reduce((mm, ev) => Math.min(mm, ev.time), Math.min(m, e.time)),
+        Infinity,
+      );
       if (minTs !== Infinity) await ensureBarsCover(originalRes, minTs);
     }
     console.log("\n已切回原周期:", originalRes);
