@@ -30,7 +30,7 @@ from .backtest import BacktestEngine
 from .main import parse_from
 from .chan_core import fmtT
 from .monitor import LiveMonitor, ReplayMonitor, clear_rt_markers
-from .marks import draw_signal_marks, clear_signal_marks
+from .marks import draw_signal_marks, draw_sr_marks, clear_signal_marks, clear_all_marks
 
 # ============================================================
 # 全局互斥：三种模式同一时间最多运行一种
@@ -685,6 +685,45 @@ def make_handler(app):
                 threading.Thread(target=_job, daemon=True, name="marks-draw").start()
                 self._send_json({"ok": True, "started": True})
                 return
+            if path == "/api/marks/sr_draw":
+                # 「标记支阻位」：近支阻价位画 11 根K线宽横线（中心=进场点K线，只在背驰周期显示）
+                ok, err = ensure_idle()
+                if not ok:
+                    self._send_json({"ok": False, "error": err}, 409)
+                    return
+                body = self._read_body()
+                colors = body.get("colors") or {}
+                rows = app.signals.list(None)
+                if not rows:
+                    self._send_json({"ok": False, "error": "信号列表为空，无可标记的支阻位"}, 409)
+                    return
+                if not any(r.get("nearSr") is not None for r in rows):
+                    self._send_json({"ok": False, "error": "信号列表没有「近支阻」非空的行"}, 409)
+                    return
+                if not _marks_lock.acquire(blocking=False):
+                    self._send_json({"ok": False, "error": "已有标记操作进行中，请稍候"}, 409)
+                    return
+
+                def _job():
+                    def log(msg):
+                        app.broadcaster.emit("log", {"mode": "mark", "msg": str(msg)})
+                    err = None
+                    try:
+                        draw_sr_marks(rows, cfg=CDPConfig(),
+                                      clear_first=True, colors=colors, log=log)
+                    except Exception as e:  # 含 CDPError（读超时/页面无响应）——错误透出给前端
+                        err = str(e)
+                        try:
+                            log(f"支阻位标记失败：{e}")
+                        except Exception:
+                            pass
+                    finally:
+                        _marks_lock.release()
+                        app.broadcaster.emit("mark_done", {"op": "sr_draw", "error": err})
+
+                threading.Thread(target=_job, daemon=True, name="marks-sr-draw").start()
+                self._send_json({"ok": True, "started": True})
+                return
             if path == "/api/marks/clear":
                 ok, err = ensure_idle()
                 if not ok:
@@ -698,8 +737,10 @@ def make_handler(app):
                     def log(msg):
                         app.broadcaster.emit("log", {"mode": "mark", "msg": str(msg)})
                     err = None
+                    removed = None
                     try:
-                        clear_signal_marks(cfg=CDPConfig(), log=log)
+                        # 清全部系统标记：ML·（箭头+支阻横线）/ BT·（回测）/ RT·（实时）
+                        removed = clear_all_marks(cfg=CDPConfig(), log=log)
                     except Exception as e:  # 含 CDPError（读超时/页面无响应）——错误透出给前端
                         err = str(e)
                         try:
@@ -708,7 +749,8 @@ def make_handler(app):
                             pass
                     finally:
                         _marks_lock.release()
-                        app.broadcaster.emit("mark_done", {"op": "clear", "error": err})
+                        app.broadcaster.emit("mark_done",
+                                             {"op": "clear", "error": err, "removed": removed})
 
                 threading.Thread(target=_job, daemon=True, name="marks-clear").start()
                 self._send_json({"ok": True, "started": True})

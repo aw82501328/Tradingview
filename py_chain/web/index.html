@@ -130,8 +130,11 @@
       <input type="color" id="mark-color-sell" value="#089981" title="做空箭头颜色">
       <span style="color:var(--muted);font-size:12px;">出场</span>
       <input type="color" id="mark-color-exit" value="#FFEB3B" title="出场箭头颜色（黄：平多 ↓ / 平空 ↑，可调）">
+      <span style="color:var(--muted);font-size:12px;">支阻</span>
+      <input type="color" id="mark-color-sr" value="#787B86" title="支阻横线颜色（灰：近支阻价位 11 根K线宽，可调）">
       <button id="btn-mark-draw">标记进出场</button>
-      <button id="btn-mark-clear">删除标记</button>
+      <button id="btn-sr-draw" class="mark">标记支阻位</button>
+      <button id="btn-mark-clear" title="清除图上所有系统标记（进出场箭头 + 支阻横线）">删除标记</button>
       <span id="mark-status" style="color:var(--muted);font-size:12px;"></span>
       <button id="btn-clear" class="danger">清空表格</button>
     </div>
@@ -188,6 +191,7 @@ function stopMarkWatchdog() { clearTimeout(markWatchdog); markWatchdog = null; }
 function updateMarkButtons() {
   const busy = markBusy;
   el('btn-mark-draw').disabled = busy || isAnyModeRunning();
+  el('btn-sr-draw').disabled = busy || isAnyModeRunning();
   el('btn-mark-clear').disabled = busy || isAnyModeRunning();
 }
 function isAnyModeRunning() {
@@ -450,8 +454,11 @@ function connectSSE() {
     markBusy = false;
     stopMarkWatchdog();
     updateMarkButtons();
-    const doneTxt = d.op === 'draw' ? '标记完成' : '已清除标记';
-    setMarkStatus(d.error ? (d.op === 'draw' ? '标记失败：' : '清除失败：') + d.error : doneTxt, !!d.error);
+    const doneTxt = d.op === 'draw' ? '标记完成'
+                  : d.op === 'sr_draw' ? '支阻位标记完成'
+                  : '已清除标记' + (d.removed != null ? `（${d.removed} 个）` : '');
+    const errTag = d.op === 'draw' ? '标记失败：' : d.op === 'sr_draw' ? '支阻标记失败：' : '清除失败：';
+    setMarkStatus(d.error ? errTag + d.error : doneTxt, !!d.error);
   });
   es.addEventListener('signal', e => {
     const d = JSON.parse(e.data);
@@ -490,6 +497,15 @@ async function init() {
                      exit: el('mark-color-exit').value };
     const r = await api('/api/marks/draw', { colors });
     if (!r) { markBusy = false; stopMarkWatchdog(); updateMarkButtons(); setMarkStatus('标记请求失败', true); }
+  };
+  el('btn-sr-draw').onclick = async () => {
+    if (markBusy || isAnyModeRunning()) return;
+    markBusy = true;
+    updateMarkButtons();
+    setMarkStatus('支阻标记中...');
+    startMarkWatchdog();
+    const r = await api('/api/marks/sr_draw', { colors: { sr: el('mark-color-sr').value } });
+    if (!r) { markBusy = false; stopMarkWatchdog(); updateMarkButtons(); setMarkStatus('支阻标记请求失败', true); }
   };
   el('btn-mark-clear').onclick = async () => {
     if (markBusy || isAnyModeRunning()) return;
