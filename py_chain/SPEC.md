@@ -30,6 +30,29 @@
   - `"confirm"`（确认制）：仅在笔结构变化时收集，回头找已完成低级别背驰笔（原行为）。
     实测含**混合时点评估**信号：旧背驰点（如 8-13 06:27）+ 当下条件（08:15 MACD 已收回
     0 轴）组合入场——当下制按一致性原则跳过这类信号。
+- **笔结构对齐 JS 图表算法 + 区间套下沉判定（2026-09-08，实现 SPEC_divergence_chanset.md）**：
+  - **块1 笔对齐**：`chan_core.py` 回填 JS chan-core 近几轮迭代规则——`markWickBars`
+    （长上/下影压平 + `_topCand`/`_origLow` 旁路）、`_mergeStep` 旁路字段传播、`fractalAt`
+    顶分型端点用 `_topCand` 影线价、`buildBi.fractalRangeClear` 双向版（起点侧按方向 2 根 +
+    终点侧 3 根防反向吞没——曾致 15m 三段被吞成一笔、案例 A 的 15m 背驰永不成立）、
+    `buildBi` 最小间隔脆弱笔例外（fragileMinimal）、`fixBiExtremes` 底端点含分型中心 +
+    `_origLow` 恢复通道。引擎增量路径接入长影预处理（`_wick_process`：压平立即生效、
+    `_topCand` 延后一根回标——与图表批量版「末根无 next」同口径）并补 `nearDouble`（≥60m）。
+  - **对拍工具**：`python -m py_chain.align_check`（JS 侧 `.cursor/skills/chan-core/scripts/rebuild_bis.js`
+    复用图表算法源重建）——bars_all_tf.json 6 周期（含 30S）逐笔 diff **0 差异**。
+  - **增量=batch 一致性**：`python -m py_chain.engine_consistency`——引擎逐根推进状态在
+    重同步点上严格等于 batch(前缀)；增量 wick 运行均值与全量均值的早期边界漂移由
+    `_resync_bis`（每 `RESYNC_EVERY=1000` 根 fine bar 全量重同步）消除，`run()` 收尾
+    最终重同步使末端状态严格等于 batch(全前缀)。
+  - **块2 下沉判定**（`mark_entry.py`）：`sinkChainRealtime`/`sinkChainConfirm` 按规则 1
+    逐级下沉（次级别 ≥3 笔且末段终点即 P 才下沉，链连续不可跳级，上限=检测周期 X）；
+    `realtimeLowerDiverge`/`lowerDiverge` 只在停止级产候选；规则 2 参照 containment
+    （参照跨所属上级笔 → 候选无效）。效果：案例 A（09-01 08:12）markRes=3 → 15；
+    案例 B（09-04 15:48 同笔）不再出信号；markRes 分布从 3 一家独大回归多级别。
+  - **残余差异（文档化）**：图表管线专属步骤（lockedPivots 上级锁定 / alignBiToUpper /
+    ATR 幅度过滤 / calibrateBiTimes / 绘制窗口）未移植进引擎——引擎 vs 图表落盘
+    端点吻合率 D 75%（4 笔小样本）/240 93%/60 93%/15 97%/3 90%，案例窗口的 15m/60m
+    结构一致；如需 100% 对齐图表再做二期管线移植。
 - **已收盘 bar 切片（2026-09-05 修复，两种模式共同生效）**：`_advance_cut` 只让
   「收盘时刻 ≤ 决策时刻」的 bar 进入切片（`bar.time + intervalSec(res) <= t`）。旧规则
   `bar.time <= t` 让 15m/60m/240/D 的 bar 在开盘时刻即以完整 OHLC 进入，对决策构成
@@ -87,19 +110,54 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 - **与 JS 的口径差**：JS（mark_entry.js `simulatePosition`）用最终笔快照全 hindsight 模拟、保本价=信号价（背驰点价）；引擎用当前快照（笔确认有时延、无未来窥视）、保本价=实际成交价——同一信号出场时序在笔重构处可能略有差异，属研究口径差。
 - **Web 控制台**：信号行状态流转 `信号→持仓中→已平仓`（或 `同向过滤`），新增出场时间/出场价/出场类型/盈亏列；「标记进出场」按钮画箭头 + 灰色出场标记（`marks.py`：终局 xcross / 平一半 circle，默认 `#787B86`）。
 
+## 2.2 支阻位三类来源（2026-09-08 新增 BOLL 并统一合并管线，与 mark_sr_flip.js 对齐）
+
+支阻位（`sr_flip.py` `compute_srflip`）分三大类，`srTypes` 参数分别开关（默认 `cluster,boll`，fib 默认关）：
+
+- **密集区（cluster）**：强支阻互换位 + 近期极值位（原逻辑不变），走评分截断/跨周期合并/选取管线；
+- **黄金分割（fib，默认关）**：对每周期每方向**最新的非一类买卖点**（2买/类2买/3买、2卖/类2卖/3卖，
+  现算 `findBuyPoints`/`findSellPoints`），取其回调笔**紧邻前方的顺势笔**为参照笔画经典回撤
+  分割位（买 `H-r×(H-L)` 支撑 / 卖 `L+r×(H-L)` 阻力，`fibLevels` 默认 0.382/0.5/0.618）；
+  **预期回退（pending）**：该方向无已形成点时，用「形成中回调笔 + 其前方
+  顺势笔」生成预期位（等待2卖/2买 的预期形成区；卖向需形成笔现高点 < 前方下跌笔起点，
+  买向对称；次高点结构被否定自动失效），带 `pending:True` 同样进 merged
+  （实盘口径：预期位置 + 够笔/小级别背驰确认；增量重放中随结构演变消失/重生，无未来函数）；
+- **BOLL 布林带（boll，默认开）**：每周期取**最后一根已收盘K线**的布林带上/中/下轨
+  （剔除取数末根形成中K线后，末 `bollLength`（默认 26）根收盘价的 SMA ± `bollMult`（默认 2）×
+  **总体标准差（÷N）**，与 TradingView 同口径）：上轨=阻力 `RES`、下轨=支撑 `SUP`、
+  中轨按现价侧（现价 ≥ 中轨 → 支撑，否则阻力）；bars < 26 的周期无布林位（正常降级）。
+
+**统一合并管线（2026-09-08）**：三类候选（密集区截断后 + fib + boll）进**同一个**
+`mergeFlipsAcrossPeriods` 池（不再有 fib「并行双轨」）。合并时维护每条 `srcType` 集合：
+多来源混合线置 `srcType="mixed"` 并**删除** `fib/pending/ratio/fromPoint/referBi/boll` 标记
+（统一按「位置线」口径）；纯单来源 fib/boll 独立线保留标记。显示模型改为「每周期图 ≤
+2×`sideCount`（默认上下各 2 → ≤4 条）、高级别线继承到低周期图、仅该周期可见」，
+`pickNearestForDisplay` 按与现价的价差就近选取（距离上限 ≤ `maxDistAtr` × 线自身级别 ATR），
+输出 `drawnByPeriod`（替代旧的 `drawn`/`drawnFib`）。
+
+- 透传链路：`BacktestEngine`/`run_backtest` 新增 `sr_types`/`fib_levels`/`boll_length`/`boll_mult` 参数
+  （`_rebuild_chain` 同时传 `periodMacdIn` 复用增量 MACD 缓存）；`main.py` 新增
+  `--sr-types`/`--fib-levels`/`--boll-length`/`--boll-mult` CLI 参数（全链路摘要与回测两段同口径透传）。
+- **回测口径影响**：三类候选进入 `merged` 后 `nearSr`/`stop_ref_of` 命中集变大，部分信号的
+  近支阻/止损参考位会落在 fib/boll 位上（预期行为）；`--sr-types=cluster` 可复现纯密集区旧结果，
+  `--sr-types=cluster,fib` 可复现旧黄金分割行为。
+- py 侧不做 fromTs 过滤（窗口由调用方决定，与 JS「买卖点在 from 过滤笔上算」的最终
+  最新点结果一致）。
+
 ## 3. 文件清单与状态（截至 2026-09-01）
 
 | 文件 | 状态 | 说明 |
 |------|------|------|
 | `py_chain/chan_core.py` | ✅ 已完成 | 以 `vnpy/chan_core.py` 为基线补齐 `fixBiExtremes`/`buildZS`/`buildZSByUpper`；另**新增增量原语**：`_mergeStep`、`fractalAt`、`updateFractalsTail`、`MacdAccumulator`、`AtrAccumulator`（供增量回测）。 |
 | `py_chain/mark_buy_sell.py` | ✅ 已完成 | 移植 JS `mark_buy_sell.js`；`compute_all_marks` 支持可选 `periodMacd`/`periodAtr` 预计算参数。 |
-| `py_chain/sr_flip.py` | ✅ 已完成 | 移植 JS `mark_sr_flip.js`；`compute_srflip` 支持可选 `periodAtrsIn`。 |
+| `py_chain/sr_flip.py` | ✅ 已完成 | 移植 JS `mark_sr_flip.js`；`compute_srflip` 支持可选 `periodAtrsIn`/`periodMacdIn`；**2026-09-08 支持三类来源统一管线**：密集区（cluster）+ 黄金分割（fib，非一类买卖点参照笔回撤）+ BOLL（boll，末根已收盘K线 ±2σ），`srTypes`/`fibLevels`/`bollLength`/`bollMult` 参数，见 §2.2。 |
 | `py_chain/trading_plan.py` | ✅ 已完成 | 移植 JS `trading_plan.js`（含复制自 chan-status 的 `isRangeBound`）；`compute_plan` 支持 `periodMacd`/`periodAtr`。 |
 | `py_chain/mark_entry.py` | ✅ 已完成 | 移植 JS `mark_entry.js`（6 种策略 + `findDivergePoints`/`evaluateEntry`）；`compute_entries` 支持 `periodMacd`/`periodAtr`；**出场纯函数** `stop_ref_of`（方向感知止损参考位）/`find_bi_event`（够笔/破高低点事件源，与 JS `stopRefOf`/`findBiEvent` 对齐）。 |
 | `py_chain/data_loader.py` | ✅ 已完成 | `CDPClient`（HTTP 找 target + websocket `Runtime.evaluate`）、`fetch_bars`/`load_bars`/`load_cached`、`align_periods`；与 `load_all_tf.js` 对齐。 |
 | `py_chain/backtest.py` | ✅ 已完成 | 增量点状回测引擎 `BacktestEngine` + `run_backtest` + `build_bis` + `summarize`；`_append_bars` 用 `extendLastBiFrom` 增量延伸 + 笔结构变化才重算链路（短路）；**出场状态机**（`_advance_exit`/`_close_pos`：止损+三档止盈+同向互斥，见 §2.1）。 |
 | `py_chain/tv_draw.py` | ✅ 已完成 | `draw_trades` 通过 CDP `createShape` 回画进场箭头（多红空绿、文本 `BT·BUY/SELL + 价`），画前清除旧 `BT·` 标记。 |
-| `py_chain/main.py` | ✅ 已完成 | CLI：`--symbol/--periods/--from/--port/--use-cache/--warmup/--no-draw/--no-marks`；串起取数→全链路→回测→回画→统计。 |
+| `py_chain/main.py` | ✅ 已完成 | CLI：`--symbol/--periods/--from/--port/--use-cache/--warmup/--no-draw/--no-marks/--sr-types/--fib-levels/--boll-length/--boll-mult`；串起取数→全链路→回测→回画→统计。 |
+| `py_chain/test_sr_flip.py` | ✅ 已完成 | sr_flip 三类来源（密集区/黄金分割/BOLL）纯函数 + `compute_srflip` 集成单测（unittest，`python -m unittest py_chain.test_sr_flip -v`）。 |
 | `py_chain/__init__.py` | ✅ 已完成 | 包初始化。 |
 
 ## 4. 已验证情况（截至 2026-09-01）
@@ -137,6 +195,34 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 
 剩余注意：全量 16265 根预计仍需数分钟（链路重算频率较高），若后续需要进一步提速，可对链路函数内部做增量（当前仅跳过未变化步骤）。
 
+### 5.1 链路函数内部热点优化（2026-09-07，输出逐位不变）
+
+长窗口实测缩放超线性（每步成本随历史长度增长，2 个月 20,756 根 3m ≈ 20.7 分钟），35 天窗口
+cProfile 归因后做四项「逐位等价」优化（每项均有新旧直接对照 + 全链路 A/B 验证，结果完全一致）：
+
+1. `chan_core.biMacdMetrics` / `hasMacdCrossBetween`：MACD 数组按时间升序，bisect 定位 `[t0,t1]`
+   闭区间窗口后只扫窗口（替代从头线性扫描）；时间列表按数组对象缓存（append-only，长度校验失效），
+   消除 bisect key 回调的百万级开销。
+2. `sr_flip.countBarsPassing`：numpy 可用时向量化比较（`low <= hiP & high >= loP` 计数，语义与
+   逐根循环一致），lows/highs 数组按 bars 对象字典缓存（多周期交替必须按对象各自缓存）；
+   无 numpy 回退纯循环。numpy 为可选依赖。
+3. `chan_core.findBuyPoints` / `findSellPoints` 内部：2买/2卖 区间套的「上级笔 × 全部笔」双层
+   循环改为 down/up 笔端点数组 + bisect 时间取窗（集合与顺序不变）；`_findIndex` 等值线性查找
+   改 endTime→首次下标字典；`isSameAsUpperBi` 上级笔按类型分组传入（函数本就跳过异类型）。
+4. 实测（XAUUSD，anchor/realtime，无 marks）：
+   - 7 天（2295 根）：12.4s → 5.9s；21 天（6885 根）：283s → 88.4s（含 1+2）
+   - 35 天（11475 根）：256.3s → 163.2s（1+2+3，累计 1.57×）
+   - 2 个月全量（20756 根）：1242.9s → **718.2s（12.0 分钟，约 1.7×）**，每步 60.1ms → 34.7ms；
+     信号 90 / 成交 65 与优化前全量完全一致
+   - 仍有余量（见 §5.2）
+
+### 5.2 尚未做的进一步提速项（按预期收益排序，风险递增）
+
+- `_rebuild_chain` 每次 `bars[res][:_cut]` 整体切片拷贝（~3.5 万元素 × 近逐根重算）→ 传视图/复用切片；
+- `buildBi` 分型一变即全量重建（O(n²) 主项）→ 确认笔前缀冻结、仅尾部重建（与 JS 一致性风险最高，需单独严格 A/B）；
+- `detectFlip` 从头扫 bars 找突破 → bisect 定位 `lastTouch` 后再扫；
+- realtime 模式 `strategyExtraOk` 的 `buildZSByUpper` 每根 O(B_l×B_u) → 按周期缓存、笔变失效。
+
 ## 6. 下一步任务清单（待办）
 
 - [x] **P0 修复增量延伸性能**：`extendLastBiFrom` 增量入口 + bisect 定位 + 链路短路（已解决，见上）。
@@ -153,6 +239,10 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 cd E:\AI_Projects\TRADINGVIEW
 python -m py_chain.main --use-cache --no-draw --no-marks --from 2026-07-02 --warmup 60
 python -m py_chain.main --symbol OANDA:XAUUSD --periods D,240,60,15,3 --from 2026-07-02
+python -m py_chain.main --use-cache --no-draw --sr-types=cluster ...    # 复现纯密集区旧回测
+python -m py_chain.main --use-cache --no-draw --sr-types=cluster,fib ... # 复现旧黄金分割行为
+python -m py_chain.main --use-cache --no-draw --sr-types=boll --boll-length=20 --boll-mult=2  # 只标 BOLL
+python -m unittest py_chain.test_sr_flip -v                           # sr_flip 单测
 ```
 
 ## 8. 注意事项

@@ -12,6 +12,7 @@
  *   --dry               只计算不绘图
  *   --debug             打印锚定过程、标记列表等调试信息
  *   --nearp=0.3         1买与2买（1卖与2卖）价差阈值（ATR 倍数），价差不超过该值视为很近并合并标注「真1买/真1卖」
+ *   --keep=10           每周期保留的标记总数（不分类，买+卖合并后按时间取最近 N 个）
  */
 const fs = require("fs");
 const path = require("path");
@@ -24,7 +25,7 @@ const {
   extendLastBi, lowerResOf, calibrateBiTimes, intervalSecOf,
   fmtT, biMacdMetrics, isBiDiverge,
   findBuyPoints, findSellPoints, anchorFirstBuy, anchorFirstSell,
-  isSameAsUpperBi, snapToOwnBar, keepRecentEach,
+  isSameAsUpperBi, snapToOwnBar, keepRecentAll,
 } = core;
 
 // 笔数据缓存目录：由 chan-bi 画笔 SKILL 落盘，本脚本强制读取（画笔 → 标记 数据依赖）
@@ -65,8 +66,8 @@ if (m) {
 }
 const PERIODS = getStrArg("periods", "D,240,60,15,3")
   .split(",").map(s => s.trim()).filter(Boolean);
-// 每类买卖点保留的个数（默认 1，即每类只保留时间上最近的一个，减少图上标记数量）
-const KEEP = Math.max(1, parseInt(getStrArg("keep", "1"), 10) || 1);
+// 每周期保留的标记总数（默认 10，不分类：买+卖合并后只保留时间上最近 N 个，减少图上标记数量）
+const KEEP = Math.max(1, parseInt(getStrArg("keep", "10"), 10) || 10);
 
 const ANCHOR_BUFFER = 30;
 
@@ -512,7 +513,7 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
       let buyPts = findBuyPoints(curBis, upperBis, macdArr, intervalSecOf(res));
       let sellPts = findSellPoints(curBis, upperBis, macdArr, intervalSecOf(res));
 
-      // 保留区间套下识别出的全部买卖点，再做邻近合并后，按 --keep 每类只保留最近 N 个（默认 1，减少图上标记数量）
+      // 保留区间套下识别出的全部买卖点，再做邻近合并，最后每周期不分类只保留最近 N 个（默认 10，减少图上标记数量）
 
       // 一买锚定：除日线外，每个一买都锚定到上一级某笔的底部端点
       // 注意：2买/类2买 基于结构底，不依赖一买锚定，予以保留
@@ -546,9 +547,10 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
       anchoredBuyPts = mergeNearFirstSecond(anchoredBuyPts, "1买", "2买", "真1买", nearPrice);
       sellPts = mergeNearFirstSecond(sellPts, "1卖", "2卖", "真1卖", nearPrice);
 
-      // 每类买卖点只保留时间上最近 KEEP 个（--keep=N，默认 1），避免图上标记过多
-      anchoredBuyPts = keepRecentEach(anchoredBuyPts, KEEP);
-      sellPts = keepRecentEach(sellPts, KEEP);
+      // 每周期不分类：买卖点合并后只保留时间上最近 KEEP 个（--keep=N，默认 10），避免图上标记过多
+      const keptPts = keepRecentAll([...anchoredBuyPts, ...sellPts], KEEP);
+      anchoredBuyPts = keptPts.filter(p => p.type.endsWith("买"));
+      sellPts = keptPts.filter(p => p.type.endsWith("卖"));
 
       // 汇总标记：把时间吸附到本周期bar边界
       // rawTime/rawPrice 保存未吸附的原始点位，用于跨周期共振判定

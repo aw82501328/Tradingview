@@ -11,8 +11,10 @@
   - 所有时间均为 Unix 秒（UTC），与 TradingView K线时间一致
 
 本文件以 vnpy/chan_core.py 为基线（保留原有全部逻辑），补齐相对 chan_core.js 缺失的：
-  - mergeBars 增加 rawHighTime/rawLowTime 字段（端点极值修正 fixBiExtremes 用）
-  - fixBiExtremes（端点极值修正）
+  - markWickBars（长影压平 + _topCand/_origLow 旁路，与 JS 对齐）
+  - mergeBars 增加 rawHighTime/rawLowTime 字段（端点极值修正 fixBiExtremes 用），
+    并传播 _topCand/_origLow 旁路字段
+  - fixBiExtremes（端点极值修正；底端点含分型中心、_origLow 恢复通道）
   - buildZS / buildZSByUpper（中枢构建，交易计划与进出场判定用）
   - keepRecentEach 增加 keep 参数（与 JS 一致）
 
@@ -35,12 +37,75 @@ from datetime import datetime
 
 CHAN_CFG = {
     "gapFilter": 1.0,  # 跳空独立成笔阈值：相邻K线缺口 >= gapFilter*ATR 时强制独立成笔
+    "wickRatio": 0.70,  # 长影剔除：影线占整根K线振幅的比例阈值（>= 时视为冲高/探底插针）
+    "wickAtrK": 0.5,    # 长影剔除：影线绝对长度下限 = wickAtrK * ATR（窄幅小K线免疫）
     "divergeDurRatio": 3,  # 背驰面积判据的时长可比上限：面积Σ=柱高×K线根数、与区间时长线性相关，
                            # 两段时长比 > 该值时不具可比性，面积项不计入背驰（只用 DIF/柱高判据）
     "nearDoubleAtrK": 0.3,  # 近等双顶/双底平台取后顶/后底：价差与回调深度的 ATR 系数
     "nearDoublePct": 0.001,  # 近等双顶/双底平台取后顶/后底：价差下限（价格比例，与 ATR 项取 max）
     "debug": False,    # 调试打印（buildBi / 买卖点识别过程）
 }
+
+# ============================================================
+# 0. 长影线标记（冲高/探底插针：影线可成端点、不参与区间竞争）
+# ============================================================
+
+
+def markWickBars(rawBars):
+    """长影线处理（冲高插针，压平 + 端点候选价），与 JS markWickBars 逐行为对齐：
+
+    影线占比 >= wickRatio 且 >= wickAtrK*稳定ATR 的长上影K线一律压平 high 至实体顶
+    （保持历史验收的合并/笔结构——避免影线价参与合并改变结构或污染笔区间），但：
+    若该 bar 的 low 不低于左右相邻原始K线低点（压平会消灭一个本可成立的顶分型中心），
+    记 `_topCand = 原 high`——findFractals 在该 bar（或其合并 bar）成为顶分型中心时
+    用影线价作端点价，结构本身保持压平版。
+    反之（low 条件不满足）→ 纯压平：插针本就不成顶分型，影线价不出现。
+    长下影（探底插针）：low 压平至实体底（结构/区间竞争保持压平语义），压平前把原低
+    记入 `_origLow`/`_origLowTime`，经 mergeBars 传播，由 fixBiExtremes 恢复为更低的
+    真实笔底端点（只进端点恢复通道，不进 rawLow/rawHigh——跳空检测保持压平语义）。
+    ATR 用全窗口 TR 均值（而非 calcATR 的尾部 14 根——局部行情急涨会使 ATR 数倍放大，
+    长影下限随之漂移，剔除结果随行情抖动）。
+    不原地修改，返回处理后的新数组。
+    """
+    ratio = CHAN_CFG["wickRatio"]
+    n = len(rawBars)
+    avg_atr = 0.0
+    if n > 1:
+        s = 0.0
+        for i in range(1, n):
+            h = rawBars[i]["high"]
+            l = rawBars[i]["low"]
+            pc = rawBars[i - 1]["close"]
+            s += max(h - l, abs(h - pc), abs(l - pc))
+        avg_atr = s / (n - 1)
+    min_wick = avg_atr * CHAN_CFG["wickAtrK"]
+    out = []
+    for idx in range(n):
+        bar = rawBars[idx]
+        b = dict(bar)
+        amp = b["high"] - b["low"]
+        if amp > 0:
+            body_top = max(b["open"], b["close"])
+            body_bottom = min(b["open"], b["close"])
+            upper = b["high"] - body_top
+            lower = body_bottom - b["low"]
+            if upper >= ratio * amp and upper >= min_wick:
+                # 长上影（冲高插针）：high 压平至实体顶；low 不低于左右相邻原始K线低点时
+                # 记 _topCand = 原 high（影线可成端点，仅在该 bar 成为顶分型中心时生效）
+                prev_ = rawBars[idx - 1] if idx - 1 >= 0 else None
+                next_ = rawBars[idx + 1] if idx + 1 < n else None
+                if prev_ is not None and next_ is not None and \
+                        b["low"] >= prev_["low"] and b["low"] >= next_["low"]:
+                    b["_topCand"] = b["high"]
+                b["high"] = body_top
+            elif lower >= ratio * amp and lower >= min_wick:
+                # 长下影（探底插针）：low 压平至实体底；原低记入 _origLow（端点恢复通道）
+                b["_origLow"] = b["low"]
+                b["_origLowTime"] = b["time"]
+                b["low"] = body_bottom
+        out.append(b)
+    return out
+
 
 # ============================================================
 # 1. 包含关系处理（合并K线）
@@ -96,6 +161,21 @@ def _mergeStep(merged, direction, bar):
         if bar["low"] < last["rawLow"]:
             last["rawLow"] = bar["low"]
             last["rawLowTime"] = bar["time"]
+        # 端点候选价（_topCand）随覆盖范围传播：覆盖范围内「可成顶分型中心」的长影 bar
+        # （markWickBars 记 _topCand）的影线价，作为合并 bar 成为顶分型中心时的端点价，
+        # 同时记录影线价所在原始K线时间（端点时间用——合并 bar 的 highTime 可能被
+        # 抬高的普通 bar 占据，需用 _topCandTime 定位真实冲高 bar）
+        tc = bar.get("_topCand")
+        if tc is not None and tc > last.get("_topCand", 0):
+            last["_topCand"] = tc
+            last["_topCandTime"] = bar["time"]
+        # 探底插针真低（_origLow）随覆盖范围传播：markWickBars 压平长下影时保留的原低
+        # （及所在原始K线时间），供 fixBiExtremes 在笔终点后恢复为更低的真实端点。
+        # 只进端点恢复通道，不写入 rawLow/rawHigh——跳空检测与分型结构保持压平语义
+        ol = bar.get("_origLow")
+        if ol is not None and (last.get("_origLow") is None or ol < last["_origLow"]):
+            last["_origLow"] = ol
+            last["_origLowTime"] = bar.get("_origLowTime", bar["time"])
         last["_rawCount"] += 1
         last["time"] = bar["time"]
         direction = d
@@ -128,14 +208,24 @@ def mergeBars(rawBars):
 
 
 def fractalAt(merged, i):
-    """判定第 i 根合并K线是否为分型（顶/底分型）。与 findFractals 单点判定一致。"""
+    """判定第 i 根合并K线是否为分型（顶/底分型）。与 findFractals 单点判定一致。
+
+    顶分型端点价：覆盖范围内若含「可成顶分型的长影 bar」（markWickBars _topCand），
+    顶分型价用其影线价——结构保持压平版，影线价只在该 bar 成为分型中心端点时生效；
+    端点时间用影线价所在原始K线时间（_topCandTime，缺省回落 highTime）。"""
     if i < 1 or i >= len(merged) - 1:
         return None
     prev = merged[i - 1]
     cur = merged[i]
     nxt = merged[i + 1]
     if cur["high"] > prev["high"] and cur["high"] > nxt["high"] and cur["low"] > prev["low"] and cur["low"] > nxt["low"]:
-        return {"mergedIdx": i, "type": "top", "high": cur["high"], "low": cur["low"], "time": cur["highTime"]}
+        use_cand = cur.get("_topCand") is not None and cur["_topCand"] > cur["high"]
+        return {
+            "mergedIdx": i, "type": "top",
+            "high": cur["_topCand"] if use_cand else cur["high"],
+            "low": cur["low"],
+            "time": cur["_topCandTime"] if (use_cand and cur.get("_topCandTime") is not None) else cur["highTime"],
+        }
     if cur["low"] < prev["low"] and cur["low"] < nxt["low"] and cur["high"] < prev["high"] and cur["high"] < nxt["high"]:
         return {"mergedIdx": i, "type": "bottom", "high": cur["high"], "low": cur["low"], "time": cur["lowTime"]}
     return None
@@ -251,13 +341,27 @@ def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False)
         return True
 
     def fractalRangeClear(a, b):
+        # 分型范围脱离检查（双向，与 JS chan-core 对齐）：一笔的两端分型不能互相"包含"。
+        # 起点侧：与段同侧的两根（下跌笔顶起点取 [中心, 右] 的最低——不用左 bar，否则
+        #   主升前夜/起涨点的旧低点会错误抬高"必须跌破"的阈值，误杀后续健康反弹；
+        #   上涨笔底起点对称取 [左, 中心] 的最高）。
+        # 终点侧：分型自身三根范围（防反向吞没）：下跌笔的底分型三根K线最高价不得涨回
+        #   起点顶价之上（顶后崩盘 bar 跌回起点之下 = 中继弱反弹，不成笔；中心 bar 的
+        #   崩盘低点可能被包含合并抬高，须依赖三根中的右 bar 提供证据）；上涨笔对称。
         i = a["mergedIdx"]
-        rangeLow = min(merged[i - 1]["low"], merged[i]["low"], merged[i + 1]["low"])
-        rangeHigh = max(merged[i - 1]["high"], merged[i]["high"], merged[i + 1]["high"])
+        j = b["mergedIdx"]
+        if a["type"] == "top":
+            range_low = min(merged[i]["low"], merged[i + 1]["low"])
+            range_high = max(merged[i]["high"], merged[i + 1]["high"])
+        else:
+            range_low = min(merged[i - 1]["low"], merged[i]["low"])
+            range_high = max(merged[i - 1]["high"], merged[i]["high"])
+        end_low = min(merged[j - 1]["low"], merged[j]["low"], merged[j + 1]["low"])
+        end_high = max(merged[j - 1]["high"], merged[j]["high"], merged[j + 1]["high"])
         if a["type"] == "top" and b["type"] == "bottom":
-            return b["low"] < rangeLow
+            return b["low"] < range_low and end_high < a["high"]
         if a["type"] == "bottom" and b["type"] == "top":
-            return b["high"] > rangeHigh
+            return b["high"] > range_high and end_low > a["low"]
         return True
 
     if CHAN_CFG["debug"]:
@@ -415,7 +519,24 @@ def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False)
                     # 仅当 prev→last 不构成有效笔时，更极端的 k 才能顶替 prev。
                     prev_last_valid_bi = gapPrevLast >= 4 and \
                         noMoreExtremeInside(prev, last) and fractalRangeClear(prev, last)
-                    if moreExtreme and not prev_last_valid_bi:
+                    # 最小间隔脆弱笔例外：prev→last 虽构成有效笔，但间隔恰为最小值（4，
+                    # 即刚够 5 根合并K线）且回调/反弹浅（< 前段涨跌幅的 50%）时，该笔
+                    # 尚未被确认——随后 k 即创更高顶/更低底说明整段仍是同一笔的延伸
+                    # （缠论：顶被更高顶突破即作废，上涨笔延伸到新极值），prev 应被 k 顶替。
+                    fragile_minimal = False
+                    if prev_last_valid_bi and gapPrevLast == 4 and len(result) >= 3:
+                        p3 = result[-3]
+                        if prev["type"] == "top":
+                            rise = prev["high"] - p3["low"]
+                            fragile_minimal = rise > 0 and (prev["high"] - last["low"]) < rise * 0.5
+                        else:
+                            drop = p3["high"] - prev["low"]
+                            fragile_minimal = drop > 0 and (last["high"] - prev["low"]) < drop * 0.5
+                        if CHAN_CFG["debug"] and fragile_minimal:
+                            print(f"[阶段二] 最小间隔脆弱笔: {'顶' if prev['type']=='top' else '底'}@{prev['mergedIdx']}→"
+                                  f"{'顶' if last['type']=='top' else '底'}@{last['mergedIdx']} 间隔恰4且回调浅，"
+                                  f"允许被 {'顶' if k['type']=='top' else '底'}@{k['mergedIdx']} 顶替")
+                    if moreExtreme and (not prev_last_valid_bi or fragile_minimal):
                         # 回溯替换保护（区间套一致性）：当 last 比更早的同类型分型 result[-3] 更极端时，
                         # last 是笔内真实转折点（如插针低点/插针高点），不能无条件 pop 掉——吞掉会导致
                         # 该笔内部藏着更极值（违反笔内极值原则），且本级别笔端点与上级周期（区间套）不重合。
@@ -490,22 +611,40 @@ def fixBiExtremes(bis, merged):
         if i + 1 >= len(bis):
             continue  # 最后一笔由 extendLastBi 负责延伸
         next_ = bis[i + 1]
-        fromIdx = b["endIdx"] + 1
         toIdx = next_["endIdx"] - 1  # 不含下一笔终点分型，避免笔退化
-        if fromIdx > toIdx:
-            continue
         extreme = None
         if b["type"] == "down":
-            # 终点是底：找被合并掩盖的更低的真实低点
-            for k in range(fromIdx, toIdx + 1):
+            # 终点是底：从 b.endIdx 起扫（含分型中心）——中心合并K线可能因包含合并/长下影
+            # 压平把更低的真低藏在自身 low 之下，仅扫 endIdx 之后会漏掉。
+            # 若真低恰在分型中心上（k === endIdx），只改价/时间、idx 不动，笔结构无损。
+            # 候选真低 = _origLow（markWickBars 压平的长下影原低）或 rawLow 原值；
+            # 分型中心 bar 只认 _origLow（中心可能因向上合并把早于本笔结构的老蜡烛吞入链内，
+            # 其 rawLow 未必属于笔底区间，恢复 rawLow 会过度下移）；中心之后两者都认。
+            k0 = b["endIdx"]
+            if k0 > toIdx:
+                continue
+            for k in range(k0, toIdx + 1):
                 mk = merged[k]
-                if mk.get("rawLow") is None or mk["rawLow"] >= mk["low"]:
-                    continue  # 未被掩盖
-                if mk["rawLow"] < b["endPrice"] - eps and (extreme is None or mk["rawLow"] < extreme["price"]):
-                    extreme = {"price": mk["rawLow"], "time": mk["rawLowTime"], "idx": k}
+                is_center = k == b["endIdx"]
+                cand_low = None
+                if is_center:
+                    cand_low = mk.get("_origLow")
+                elif mk.get("_origLow") is not None:
+                    cand_low = mk["_origLow"]
+                else:
+                    cand_low = mk.get("rawLow")
+                if cand_low is None or cand_low >= mk["low"]:
+                    continue  # 未被合并/压平掩盖
+                if cand_low < b["endPrice"] - eps and (extreme is None or cand_low < extreme["price"]):
+                    t = mk["_origLowTime"] if mk.get("_origLowTime") is not None else mk.get("rawLowTime")
+                    extreme = {"price": cand_low, "time": t, "idx": k}
         else:
-            # 终点是顶：找被合并掩盖的更高的真实高点
-            for k in range(fromIdx, toIdx + 1):
+            # 终点是顶：保持 endIdx+1 起扫（上影压平不产生 _origHigh，分型中心自身即端点
+            # 价；被包含合并掩盖的更高真实高点走 rawHigh 原值，不会把端点平移回已压平的插针价）
+            k0 = b["endIdx"] + 1
+            if k0 > toIdx:
+                continue
+            for k in range(k0, toIdx + 1):
                 mk = merged[k]
                 if mk.get("rawHigh") is None or mk["rawHigh"] <= mk["high"]:
                     continue  # 未被掩盖
@@ -808,23 +947,45 @@ def fmtT(ts):
     return f"{dt.month}-{dt.day} {dt.hour:02d}:{dt.minute:02d}"
 
 
+def _macdTime(m):
+    """macdArr 条目的时间键（数组按时间升序，供 bisect 二分定位窗口）。"""
+    return m["time"]
+
+
+# macdArr → 平行时间列表缓存：同一 macdArr（回测引擎中为累加器内部列表，append-only）
+# 反复进入 biMacdMetrics/hasMacdCrossBetween，缓存其时间列表可避免 bisect 的 key 回调
+# （百万级调用下 key 回调本身即成热点）。缓存持强引用并以长度校验失效（追加会使长度变化）。
+_macdTimesCache = (None, 0, None)
+
+
+def _macdTimesOf(macdArr):
+    global _macdTimesCache
+    ref, n, times = _macdTimesCache
+    if ref is macdArr and n == len(macdArr):
+        return times
+    times = [m["time"] for m in macdArr]
+    _macdTimesCache = (macdArr, len(macdArr), times)
+    return times
+
+
 def biMacdMetrics(bi, macdArr):
     """计算一笔区间内的 MACD 动能指标
     { redArea, greenArea, difHigh, difLow, redMax, greenMax }。
-    与 JS 版一致：redMax=单根红柱最大高度、greenMax=单根绿柱最大绝对值。"""
+    与 JS 版一致：redMax=单根红柱最大高度、greenMax=单根绿柱最大绝对值。
+    性能：macdArr 按时间升序，用 bisect 定位 [t0,t1] 窗口（闭区间）后再累加，
+    替代从头线性扫描——回测链路每次重算会调用本函数上万次，长窗口下线性扫是主要热点。"""
     metrics = {"redArea": 0.0, "greenArea": 0.0, "difHigh": float("-inf"),
                "difLow": float("inf"), "redMax": 0.0, "greenMax": 0.0}
     if not macdArr or len(macdArr) == 0:
         return None
     t0 = bi["startTime"]
     t1 = bi["endTime"]
-    found = False
-    for m in macdArr:
-        if m["time"] < t0:
-            continue
-        if m["time"] > t1:
-            break
-        found = True
+    times = _macdTimesOf(macdArr)
+    lo = bisect.bisect_left(times, t0)
+    hi = bisect.bisect_right(times, t1)
+    if lo >= hi:
+        return None
+    for m in macdArr[lo:hi]:
         if m["macd"] > 0:
             metrics["redArea"] += m["macd"]
             if m["macd"] > metrics["redMax"]:
@@ -837,8 +998,6 @@ def biMacdMetrics(bi, macdArr):
             metrics["difHigh"] = m["dif"]
         if m["dif"] < metrics["difLow"]:
             metrics["difLow"] = m["dif"]
-    if not found:
-        return None
     return metrics
 
 
@@ -880,17 +1039,17 @@ def hasMacdCrossBetween(macdArr, merged, aIdx, bIdx, aTime, bTime, direction=Non
     """检测两个分型之间是否发生方向性 MACD 红绿转换（用分型极值时间作边界）。
     direction="up"   ：底到顶（上涨），柱状体由绿变红（<=0 转 >0）
     direction="down" ：顶到底（下跌），柱状体由红变绿（>0 转 <=0）
-    其余（None）：任意红绿转换（历史兼容）。"""
+    其余（None）：任意红绿转换（历史兼容）。
+    性能：同 biMacdMetrics，bisect 定位 [t0,t1] 窗口（闭区间）后仅扫窗口内条目。"""
     if not macdArr or len(macdArr) == 0:
         return False
     t0 = aTime if aTime is not None else merged[aIdx]["time"]
     t1 = bTime if bTime is not None else merged[bIdx]["time"]
+    times = _macdTimesOf(macdArr)
+    lo = bisect.bisect_left(times, t0)
+    hi = bisect.bisect_right(times, t1)
     prev = None
-    for mm in macdArr:
-        if mm["time"] < t0:
-            continue
-        if mm["time"] > t1:
-            break
+    for mm in macdArr[lo:hi]:
         if prev is not None:
             if direction == "up":
                 crossed = prev["macd"] <= 0 and mm["macd"] > 0
@@ -1126,12 +1285,27 @@ def findBuyPoints(bis, upperBis, macdArr, barSec):
     if len(bis) < 3:
         return []
     downIdx = [i for i, b in enumerate(bis) if b["type"] == "down"]
+    # 性能预计算（回测链路每次重算都会调用本函数，逐根全量扫描是长窗口热点）：
+    #   downLows/downTimes：down 笔端点按时间升序（bis 有序），2买 区间套按上级笔时间段
+    #     bisect 取窗，替代对全部笔的逐根扫描（选出的集合与顺序和原逐根过滤完全一致）；
+    #   idxByEndTime：endTime → 首次出现下标（与 _findIndex 等值查找的首个匹配语义一致）；
+    #   upperByType：上级笔按类型分组（isSameAsUpperBi 内部本来就跳过异类型笔）。
+    downLows = [(i, bis[i]["endTime"], bis[i]["endPrice"]) for i in downIdx]
+    downTimes = [t for _, t, _ in downLows]
+    idxByEndTime = {}
+    for i, b in enumerate(bis):
+        if b["endTime"] not in idxByEndTime:
+            idxByEndTime[b["endTime"]] = i
+    upperByType = None
+    if upperBis:
+        upperByType = {"up": [u for u in upperBis if u["type"] == "up"],
+                       "down": [u for u in upperBis if u["type"] == "down"]}
 
     # 候选一买：创新低 + MACD 背驰
     firstBuys = []
     for k in range(1, len(downIdx)):
         cur = bis[downIdx[k]]
-        if isSameAsUpperBi(cur, upperBis, barSec):
+        if upperByType is not None and isSameAsUpperBi(cur, upperByType.get(cur["type"]) or [], barSec):
             if CHAN_CFG["debug"]:
                 print(f"[一买跳过-与上级笔重合] {fmtT(cur['endTime'])}({cur['endPrice']}) 整笔与上一级别完全重合，本周期不标记")
             continue
@@ -1164,15 +1338,12 @@ def findBuyPoints(bis, upperBis, macdArr, barSec):
         for up in upperBis:
             if up["type"] != "up":
                 continue
-            lows = []
-            for i, b in enumerate(bis):
-                if b["type"] != "down":
-                    continue
-                if b["endTime"] >= up["startTime"] and b["endTime"] <= up["endTime"] + 1:
-                    lows.append({"biIdx": i, "time": b["endTime"], "price": b["endPrice"]})
-            if len(lows) == 0:
+            lo = bisect.bisect_left(downTimes, up["startTime"])
+            hi = bisect.bisect_right(downTimes, up["endTime"] + 1)
+            if lo >= hi:
                 continue
-            lows.sort(key=lambda x: x["time"])
+            lows = [{"biIdx": i, "time": t, "price": p} for i, t, p in downLows[lo:hi]]
+            lows.sort(key=lambda x: x["time"])  # 已升序，保留与原实现一致的显式排序
             firstLow = next((l for l in lows if l["price"] > up["startPrice"]), None)
             if firstLow is not None:
                 points.append({"type": "2买", "time": firstLow["time"], "price": firstLow["price"]})
@@ -1226,11 +1397,11 @@ def findBuyPoints(bis, upperBis, macdArr, barSec):
     thirdBuys = []
     for k in range(len(twoBuys)):
         tb = twoBuys[k]
-        twoIdx = _findIndex(bis, lambda b: b["endTime"] == tb["time"])
+        twoIdx = idxByEndTime.get(tb["time"], -1)
         if twoIdx < 0:
             continue
         if k + 1 < len(twoBuys):
-            endScan = _findIndex(bis, lambda b: b["endTime"] == twoBuys[k + 1]["time"])
+            endScan = idxByEndTime.get(twoBuys[k + 1]["time"], -1)
         else:
             endScan = len(bis)
         prevTop = None
@@ -1280,12 +1451,24 @@ def findSellPoints(bis, upperBis, macdArr, barSec):
     if len(bis) < 3:
         return []
     upIdx = [i for i, b in enumerate(bis) if b["type"] == "up"]
+    # 性能预计算（与 findBuyPoints 对称）：up 笔端点按时间升序供 2卖 区间套 bisect 取窗、
+    # endTime 首次出现下标字典、上级笔按类型分组。
+    upHighs = [(i, bis[i]["endTime"], bis[i]["endPrice"]) for i in upIdx]
+    upTimes = [t for _, t, _ in upHighs]
+    idxByEndTime = {}
+    for i, b in enumerate(bis):
+        if b["endTime"] not in idxByEndTime:
+            idxByEndTime[b["endTime"]] = i
+    upperByType = None
+    if upperBis:
+        upperByType = {"up": [u for u in upperBis if u["type"] == "up"],
+                       "down": [u for u in upperBis if u["type"] == "down"]}
 
     # 候选一卖：创新高 + MACD 背驰
     firstSells = []
     for k in range(1, len(upIdx)):
         cur = bis[upIdx[k]]
-        if isSameAsUpperBi(cur, upperBis, barSec):
+        if upperByType is not None and isSameAsUpperBi(cur, upperByType.get(cur["type"]) or [], barSec):
             if CHAN_CFG["debug"]:
                 print(f"[一卖跳过-与上级笔重合] {fmtT(cur['endTime'])}({cur['endPrice']}) 整笔与上一级别完全重合，本周期不标记")
             continue
@@ -1345,15 +1528,12 @@ def findSellPoints(bis, upperBis, macdArr, barSec):
         for dn in upperBis:
             if dn["type"] != "down":
                 continue
-            highs = []
-            for i, b in enumerate(bis):
-                if b["type"] != "up":
-                    continue
-                if b["endTime"] >= dn["startTime"] and b["endTime"] <= dn["endTime"] + 1:
-                    highs.append({"biIdx": i, "time": b["endTime"], "price": b["endPrice"]})
-            if len(highs) == 0:
+            lo = bisect.bisect_left(upTimes, dn["startTime"])
+            hi = bisect.bisect_right(upTimes, dn["endTime"] + 1)
+            if lo >= hi:
                 continue
-            highs.sort(key=lambda x: x["time"])
+            highs = [{"biIdx": i, "time": t, "price": p} for i, t, p in upHighs[lo:hi]]
+            highs.sort(key=lambda x: x["time"])  # 已升序，保留与原实现一致的显式排序
             firstHigh = next((h for h in highs if h["price"] < dn["startPrice"]), None)
             if firstHigh is not None:
                 points.append({"type": "2卖", "time": firstHigh["time"], "price": firstHigh["price"]})
@@ -1407,11 +1587,11 @@ def findSellPoints(bis, upperBis, macdArr, barSec):
     thirdSells = []
     for k in range(len(twoSells)):
         ts = twoSells[k]
-        twoIdx = _findIndex(bis, lambda b: b["endTime"] == ts["time"])
+        twoIdx = idxByEndTime.get(ts["time"], -1)
         if twoIdx < 0:
             continue
         if k + 1 < len(twoSells):
-            endScan = _findIndex(bis, lambda b: b["endTime"] == twoSells[k + 1]["time"])
+            endScan = idxByEndTime.get(twoSells[k + 1]["time"], -1)
         else:
             endScan = len(bis)
         prevLow = None
@@ -1474,3 +1654,10 @@ def keepRecentEach(points, keep=1):
         groups[key].sort(key=lambda x: x["time"], reverse=True)
         out.extend(groups[key][:n])
     return sorted(out, key=lambda x: x["time"])
+
+
+def keepRecentAll(points, keep=10):
+    """每周期买卖点不分类（买+卖合并），只保留时间上最近 keep 个（与 JS 版 keepRecentAll 对齐）。"""
+    n = max(1, int(keep) or 1)
+    pts = sorted(points, key=lambda p: p["time"], reverse=True)[:n]
+    return sorted(pts, key=lambda p: p["time"])

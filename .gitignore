@@ -30,3 +30,7 @@ Thumbs.db
 
 # 生成的趋势报告（每次运行 full_report.js 重新生成）
 .cursor/skills/**/report.html
+
+# dump_baseline 生成的对拍数据快照（可再生成，不入库）
+py_chain/.after/
+py_chain/.baseline/

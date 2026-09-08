@@ -1,17 +1,26 @@
 /**
  * 支阻互换位标记脚本（独立 SKILL：mark-sr-flip）
  * 读取 chan-bi（画笔）SKILL 落盘的笔数据 .cursor/cache/bis_<品种>.json，
- * 识别各周期重要的「支阻互换位」（支撑↔阻力角色互换的关键价位），
+ * 识别各周期重要的「支阻位」（支撑/阻力关键价位），
  * 并用水平线（horizontal_line）在 TradingView Desktop 图上标记。
  *
- * 支阻互换位两类来源：
- *   1. 强支阻互换位：某价位被价格反复测试（触及次数 >= minTouch），
- *      之后价格突破该价位，该价位角色互换：
- *        - 阻力转支撑（R2S）：曾是阻力，向上突破后变为支撑
- *        - 支撑转阻力（S2R）：曾是支撑，向下跌破后变为阻力
- *   2. 近期极值位：最近若干根笔的 swing 端点（高低点），是当前最直接的
- *      支撑/阻力参考，弥补强支阻互换位在最新价格行为上的滞后
- *      （如 3分钟 8-29 在 4467 一线形成的阻力）。
+ * 支阻位三类来源（--sr-types 可分别开关，默认 cluster,boll）：
+ *   1. 密集区（cluster）——基于价格聚类（原逻辑不变）：
+ *      a. 强支阻互换位：某价位被价格反复测试（触及次数 >= minTouch），
+ *         之后价格突破该价位，该价位角色互换（R2S 阻力转支撑 / S2R 支撑转阻力）；
+ *      b. 近期极值位：最近若干根笔的 swing 端点（高低点），是当前最直接的
+ *         支撑/阻力参考（RES 阻力 / SUP 支撑，无触及要求）。
+ *   2. 黄金分割（fib，默认关）——对每方向「最新的非一类买卖点」（2买/类2买/3买、
+ *      2卖/类2卖/3卖，现算 findBuyPoints/findSellPoints），取其回调笔紧邻前方的
+ *      顺势笔为参照笔，画经典回撤分割位；某方向无已形成点时走「预期回退」（pending）：
+ *      形成中回调笔 + 其前方顺势笔生成预期位（次高点结构破坏自动失效）。
+ *   3. BOLL 布林带（boll，默认开）——每周期最后一根已收盘K线的布林带上/中/下轨
+ *      （26 周期 SMA ± 2σ，--boll-length/--boll-mult 可调，总体标准差 ÷N），
+ *      上轨=阻力 RES、下轨=支撑 SUP、中轨按现价侧；不区分买卖点、无 pending。
+ *
+ * 三类同池合并：三类候选全部进 mergeFlipsAcrossPeriods（同一规则），价差 ≤ 0.5×最小周期ATR
+ * 并成一条「位置线」；多来源混合线删掉 fib/pending/boll 标记，纯单来源 fib/boll 独立线保留标记。
+ * 密集区按评分截断（--max-per-period），fib/boll 豁免（评分语义不适用）。
  *
  * 用法：
  *   node mark_sr_flip.js --from=2026-06-30            计算并绘制（默认 D,240,60,15,3）
@@ -20,30 +29,35 @@
  * 参数：
  *   --from=YYYY-MM-DD   起始日期（应与画笔 chan-bi 一致）
  *   --periods=...       要标记的周期（逗号分隔，默认 D,240,60,15,3）
+ *   --sr-types=...      支阻位类型开关（逗号分隔，默认 cluster,boll；可选 cluster/fib/boll）
+ *   --fib-levels=...    黄金分割比率（逗号分隔，默认 0.382,0.5,0.618，须在 (0,1) 内）
+ *   --boll-length=N     BOLL SMA 周期（默认 26，已收盘K线口径）
+ *   --boll-mult=K       BOLL 标准差倍数（默认 2）
+ *   --side-count=N      每周期图每侧条数（默认 2 → 每图最多 4 条）
  *   --cluster=K         价位聚类阈值（×ATR，默认 0.5）
  *   --merge=K           跨周期合并阈值（×最小周期ATR，默认 0.5）
  *   --recent-cluster=K  近期极值位聚类阈值（×ATR，默认 1.0）
  *   --min-touch=N       最少触及次数（可选；不传则按级别：D/240/60=4，15=3，3=8）
- *   --max-dist=K        选取时距离上限（×本级别ATR，默认 3.0）
- *   --max-per-period=N  每周期候选数量上限（默认 50，超出按强度评分降序截断）
+ *   --max-dist=K        选取时距离上限（×线自身级别ATR，默认 3.0）
+ *   --max-per-period=N  每周期候选数量上限（默认 50，仅密集区，超出按强度评分降序截断）
  *   --dry               只计算不绘图
  *   --debug             打印调试信息
  *
- * 显示规则：
- *   某级别找到的支阻位只显示在该级别及以下级别（4小时位显示在 4h/1h/15m/3m，
- *   15分钟位显示在 15m/3m），颜色与该级别笔一致（复用 chan-bi 的 resolutionColor），
- *   每个级别只画「当前价格上方最近的 1 个 + 下方最近的 1 个」（最多 2 条），
- *   同一侧存在多个候选时按强度评分取最高
- *   （score = 0.6×触及次数 + 0.4×经过K线数，同级别内 min-max 归一化，
- *   且只取距当前价 ≤ 3×本级别ATR 的候选）。
- *   数据层：每周期识别结果最多保留 50 个（--max-per-period），供落盘/标记使用。
+ * 显示规则（全新模型）：
+ *   每个周期图最多 2×side-count 条线；候选池 = 该级别及以上级别的合并线（高级别线继承到
+ *   低周期图），取「距现价最近的上方 N + 下方 N」；每条线受 ≤ 3×线自身级别ATR 距离上限；
+ *   所有线统一灰色 #787B86 实线，来源用 title/text 标注（如 BOLL上轨+4小时 / 密集区+15分钟）；
+ *   每条线只在其显示周期可见（高级别线继承到低周期时为各周期生成独立实例）；清线前缀统一 SR_。
+ *   数据层：periods = 各周期原始候选（密集区截断后 + fib + boll）；
+ *   merged = 三类统一合并结果（下游 mark-entry 仍只读 price）；drawnByPeriod = 各显示周期选中的 ≤2×side-count 条（含来源标注）。
  */
 const fs = require("fs");
 const path = require("path");
 const CDP = require("../../../../server-cdp/node_modules/chrome-remote-interface");
-// 缠论算法核心（复用 calcATR 等工具函数，支阻互换本身不属于缠论算法）
+// 缠论算法核心（复用 calcATR 等工具函数，支阻互换本身不属于缠论算法；
+// 黄金分割支阻位需现算买卖点，复用 findBuyPoints/findSellPoints/calcMACD）
 const core = require("../../chan-core/scripts/chan_core.js");
-const { calcATR, fmtT } = core;
+const { calcATR, calcMACD, intervalSecOf, findBuyPoints, findSellPoints, fmtT } = core;
 
 // 缓存目录（chan-bi 画笔落盘笔数据、本脚本落盘支阻互换位数据）
 const CACHE_DIR = path.join(__dirname, "..", "..", "..", "..", ".cursor", "cache");
@@ -78,8 +92,9 @@ let FROM_TS = null;
 const PERIODS = getStrArg("periods", "D,240,60,15,3")
   .split(",").map(s => s.trim()).filter(Boolean);
 
-// 每个级别绘制规则：当前价「上方最近的 1 个 + 下方最近的 1 个」（最多 2 条）
-const SIDE_COUNT = 1;
+// 每个周期图绘制规则：当前价「上方最近的 sideCount 个 + 下方最近的 sideCount 个」
+// （--side-count 可配，默认 2 → 每图最多 4 条，允许上下不对称）
+const SIDE_COUNT = Math.max(parseInt(getStrArg("side-count", "2"), 10) || 2, 1);
 // 近期极值位：取最近 N 根笔的 swing 端点作为「当前最直接的支撑/阻力参考」
 const RECENT_BI_COUNT = 20;
 // 近期极值位的聚类容差（×ATR）：比强支阻位聚类更宽，把同一天密集的高低点
@@ -95,6 +110,49 @@ const MAX_DIST_ATR = Math.max(parseFloat(getArg("max-dist", 3.0)) || 3.0, 0.5);
 // 每周期候选数量上限：识别结果每周期最多保留 maxPerPeriod 个（超出按强度评分降序截断）。
 // 上限只约束「标记/落盘」的数据层；图上默认仍按每级别上下各 1 个绘制（显示层不受影响）。
 const MAX_PER_PERIOD = Math.max(parseInt(getStrArg("max-per-period", "50"), 10) || 50, 1);
+
+// 支阻位类型开关（--sr-types，逗号分隔）：cluster=密集区（强支阻互换位+近期极值位）、
+// fib=黄金分割（非一类买卖点参照笔的回撤分割位）、boll=布林带（末根已收盘K线的上/中/下轨）。
+// 三类可分别开关（默认 cluster,boll），全部关闭则报错。
+const SR_TYPES = new Set(
+  getStrArg("sr-types", "cluster,boll")
+    .split(",").map(s => s.trim().toLowerCase()).filter(Boolean)
+    .filter(t => {
+      if (t === "cluster" || t === "fib" || t === "boll") return true;
+      console.log(`警告: 未知支阻位类型 "${t}"（可选 cluster/fib/boll），已忽略`);
+      return false;
+    })
+);
+if (SR_TYPES.size === 0) {
+  console.log("错误: --sr-types 解析后为空（可选 cluster/fib/boll）");
+  process.exit(1);
+}
+
+// 黄金分割比率（--fib-levels 可配，须在 (0,1) 内，去重升序）
+const FIB_LEVELS = (() => {
+  const raw = getStrArg("fib-levels", "0.382,0.5,0.618")
+    .split(",").map(s => parseFloat(s.trim())).filter(r => r > 0 && r < 1);
+  const uniq = [...new Set(raw)].sort((a, b) => a - b);
+  if (uniq.length === 0) {
+    console.log("警告: --fib-levels 全部非法（须为 (0,1) 内数字），回退默认 0.382/0.5/0.618");
+    return [0.382, 0.5, 0.618];
+  }
+  return uniq;
+})();
+
+// 黄金分割只取「非一类买卖点」（2买/类2买/3买、2卖/类2卖/3卖）。
+// 真1买/真1卖是 mark-buy-sell 层 mergeNearFirstSecond 的合并标注，
+// findBuyPoints/findSellPoints 原始输出不存在，白名单过滤即天然排除一类。
+const FIB_BUY_TYPES = ["2买", "类2买", "3买"];
+const FIB_SELL_TYPES = ["2卖", "类2卖", "3卖"];
+// 上级周期映射（现算买卖点的区间套用；D 及未收录周期无上级，走结构底分支）。
+// 用固定映射而非 PERIODS 前一元素：--periods 可传子集，而 bis 文件含全部周期。
+const UPPER_OF = { "240": "D", "60": "240", "15": "60", "3": "15" };
+// BOLL 布林带参数（已收盘K线口径：剔除末根形成中K线后取末 BOLL_LENGTH 根收盘价）
+const BOLL_LENGTH = Math.max(parseInt(getStrArg("boll-length", "26"), 10) || 26, 1);
+const BOLL_MULT = Math.max(parseFloat(getArg("boll-mult", 2)) || 2, 0.01);
+// 所有支阻位线统一灰色实线（来源用 title/text 标注区分）
+const SR_GRAY = "#787B86";
 
 // 读取K线时，起始日期前额外取的缓冲根数（保证覆盖最早笔端点）
 const BAR_BUFFER = 30;
@@ -177,6 +235,45 @@ function srVisibilityFor(res) {
 }
 
 /**
+ * 单周期可见性（新显示模型）：某条线只在指定周期图可见。
+ * 每个显示周期各画自己的 ≤4 条线；高级别线继承到低周期图时为各周期生成
+ * 各自独立的线实例，可见性 = 仅该周期（互不重叠）。
+ */
+function srVisibilitySingle(res) {
+  const NONE = {
+    ticks: false,
+    seconds: false, secondsFrom: 1, secondsTo: 59,
+    minutes: false, minutesFrom: 1, minutesTo: 59,
+    hours: false, hoursFrom: 1, hoursTo: 24,
+    days: false, daysFrom: 1, daysTo: 366,
+    weeks: false, weeksFrom: 1, weeksTo: 52,
+    months: false, monthsFrom: 1, monthsTo: 12,
+  };
+  const r = String(res).toUpperCase();
+  switch (r) {
+    case "1D":
+    case "D":
+      return { ...NONE, days: true, daysFrom: 1, daysTo: 1 };
+    case "240":
+    case "4H":
+      return { ...NONE, hours: true, hoursFrom: 4, hoursTo: 4 };
+    case "60":
+    case "1H":
+      return { ...NONE, hours: true, hoursFrom: 1, hoursTo: 1 };
+    case "15":
+      return { ...NONE, minutes: true, minutesFrom: 15, minutesTo: 15 };
+    case "3":
+      return { ...NONE, minutes: true, minutesFrom: 3, minutesTo: 3 };
+    case "1W":
+    case "W":
+      return { ...NONE, weeks: true, weeksFrom: 1, weeksTo: 1 };
+    default:
+      // 未知周期：全可见兜底
+      return { ...NONE, minutes: true, minutesFrom: 1, minutesTo: 59, hours: true, hoursFrom: 1, hoursTo: 24, days: true, daysFrom: 1, daysTo: 366 };
+  }
+}
+
+/**
  * 最少触及次数（按级别）：
  * 大级别（日线/4小时/1小时）走势缓慢、同一价位易被反复测试 → 阈值适中；
  * 小级别（15/3分钟）波动大、笔极多，若阈值过低会识别出海量噪音位
@@ -198,6 +295,69 @@ function minTouchFor(res) {
     default:
       return 4;
   }
+}
+
+/**
+ * 支阻位类型的中文标签（打印用）：
+ * mixed → 位置线；boll → BOLL上轨/中轨/下轨；fib → 黄金分割支撑/阻力
+ * （pending 预期位加「预期」前缀）；其余为密集区四类（R2S/S2R/RES/SUP）。
+ */
+function typeNameOf(f) {
+  if (f.srcType === "mixed") return "位置线";
+  if (f.boll) {
+    return f.boll === "upper" ? "BOLL上轨" : f.boll === "mid" ? "BOLL中轨" : "BOLL下轨";
+  }
+  if (f.fib) {
+    const name = f.type === "SUP" ? "支撑" : "阻力";
+    return f.pending ? `预期黄金分割${name}` : `黄金分割${name}`;
+  }
+  return f.type === "R2S" ? "阻力转支撑" :
+    f.type === "S2R" ? "支撑转阻力" :
+    f.type === "RES" ? "阻力(近期极值)" : "支撑(近期极值)";
+}
+
+/**
+ * 周期中文名（标注与打印用）：240→4小时、60→1小时、15→15分钟、3→3分钟、D→日线。
+ */
+function periodNameOf(res) {
+  const r = String(res).toUpperCase();
+  switch (r) {
+    case "3": return "3分钟";
+    case "15": return "15分钟";
+    case "60":
+    case "1H": return "1小时";
+    case "240":
+    case "4H": return "4小时";
+    case "1D":
+    case "D": return "日线";
+    case "1W":
+    case "W": return "周线";
+    case "30S": return "30秒";
+    default: return String(res);
+  }
+}
+
+/**
+ * 支阻位来源类型的中文标注（绘制 title/text 与落盘 label 用）。
+ * 混合合并线（srcType=mixed）→ 位置线；boll → BOLL上轨/中轨/下轨；
+ * fib → 预期<N>（pending）/ 黄金分割<ratio>（已形成）；cluster → 密集区。
+ */
+function sourceLabelOf(f) {
+  if (f.srcType === "mixed") return "位置线";
+  if (f.boll) {
+    return f.boll === "upper" ? "BOLL上轨" : f.boll === "mid" ? "BOLL中轨" : "BOLL下轨";
+  }
+  if (f.fib) {
+    return f.pending ? (f.fromPoint ? f.fromPoint.type : "预期") : `黄金分割${f.ratio}`;
+  }
+  return "密集区";
+}
+
+/**
+ * 完整标注：`<来源类型>+<周期中文名>`（写入 title/text 与落盘 drawnByPeriod 的 label 字段）。
+ */
+function labelOf(f) {
+  return `${sourceLabelOf(f)}+${periodNameOf(f.level)}`;
 }
 
 // ============================================================
@@ -332,6 +492,211 @@ function detectRecentFlip(cluster) {
   return { ...base, type: highCount >= lowCount ? "RES" : "SUP", breakTime: last.time };
 }
 
+// ============================================================
+// 黄金分割支阻位（fib）
+// 对每方向「最新的非一类买卖点」，取其回调笔紧邻前方的顺势笔为参照笔，
+// 画经典回撤分割位。fib 走「并行双轨」：不进 capPerPeriod（评分对结构派生位
+// 无意义且每周期上界 2×比率数）/ mergeFlipsAcrossPeriods（并簇均价会破坏
+// 比例位几何语义）/ pickByLevel（三条比率位是成组结构，上下各1会拆散）。
+// ============================================================
+
+/**
+ * 从买卖点列表中取「最新的非一类点」。
+ * @param {Array} points findBuyPoints/findSellPoints 原始输出 [{type,time,price}]
+ * @param {Array} types 白名单（FIB_BUY_TYPES / FIB_SELL_TYPES）
+ * @returns {Object|null} 白名单内 time 最大的点（同 time 取数组靠后者）；无 → null
+ */
+function pickLatestFibPoint(points, types) {
+  let best = null;
+  for (const p of points) {
+    if (!types.includes(p.type)) continue;
+    if (!best || p.time >= best.time) best = p;
+  }
+  return best;
+}
+
+/**
+ * 定位买卖点的回调笔与参照笔。
+ * 回调笔 = 终点即该点的笔（买点是 down 笔、卖点是 up 笔）；
+ * 参照笔 = 紧邻回调笔前方的反向顺势笔（买点取前方上涨笔、卖点取前方下跌笔）。
+ * @param {Array} bis 本周期笔列表（应传未过滤 FROM_TS 的全量，最新点的回调笔
+ *                   可能横跨窗口边界，其前方笔会被过滤掉导致误判「首笔」）
+ * @param {number} pointTime 买卖点时间（= 笔 endTime）
+ * @param {string} pullbackType 回调笔方向：买点 "down"、卖点 "up"
+ * @returns {Object|null} { pullback, refer }；匹配不到 / 首笔无前方笔 /
+ *                        前一笔同向（笔应交替，同向为脏数据）→ null
+ */
+function referBiOfPoint(bis, pointTime, pullbackType) {
+  const idx = bis.findIndex(b => b.endTime === pointTime && b.type === pullbackType);
+  if (idx < 0 || idx === 0) return null;
+  const refer = bis[idx - 1];
+  if (!refer || refer.type === pullbackType) return null;
+  return { pullback: bis[idx], refer };
+}
+
+/**
+ * 参照笔的黄金分割回撤位。
+ *   buy（参照笔为上涨笔 L→H）：分割位 = H - r×(H-L)，即上涨走势的回撤支撑；
+ *   sell（参照笔为下跌笔 H→L）：分割位 = L + r×(H-L)，即下跌走势的反弹阻力。
+ * @param {Object} refer 参照笔
+ * @param {string} side "buy" | "sell"
+ * @param {Array} fibLevels 比率列表
+ * @returns {Array} [{ ratio, price }]；span=0（退化笔）→ []
+ */
+function fibLevelsOf(refer, side, fibLevels) {
+  const H = side === "buy" ? refer.endPrice : refer.startPrice;
+  const L = side === "buy" ? refer.startPrice : refer.endPrice;
+  if (!(H > L)) return [];
+  return fibLevels.map(ratio => ({
+    ratio,
+    price: side === "buy" ? H - ratio * (H - L) : L + ratio * (H - L),
+  }));
+}
+
+/**
+ * 预期回退（pending）：某方向无已形成非一类点时，用「形成中的回调笔 + 其前方顺势笔」
+ * 生成预期黄金分割位（等待2卖/2买 状态下的预期形成区——实盘即「预期位置 + 够笔/背驰确认」）。
+ * - 卖向：末笔为形成中上涨笔（bis 落盘口径：末笔延伸至最新极值）且其现高点 < 前方
+ *   下跌笔起点（次高点结构未破坏）→ 参照笔 = 该下跌笔；
+ * - 买向对称：末笔为形成中下跌笔且其现低点 > 前方上涨笔起点；
+ * - 形成笔突破前方笔起点（结构被否定）→ 条件失效，该方向无预期位（下次重算自动消失）。
+ * @param {Array} bis 本周期全量笔
+ * @param {string} side "buy" | "sell"
+ * @returns {Object|null} { forming, refer }；末笔是首笔/方向不符/前方笔同向（脏数据）/
+ *                        次高点结构破坏 → null
+ */
+function pendingReferOf(bis, side) {
+  if (bis.length < 2) return null;
+  const forming = bis[bis.length - 1];
+  const pullbackType = side === "buy" ? "down" : "up";  // 形成中的回调笔方向
+  if (forming.type !== pullbackType) return null;
+  const refer = bis[bis.length - 2];
+  if (!refer || refer.type === pullbackType) return null;
+  // 次高点/次低点结构未破坏：形成笔现极值未超越前方顺势笔起点
+  if (side === "sell" ? !(forming.endPrice < refer.startPrice)
+                      : !(forming.endPrice > refer.startPrice)) return null;
+  return { forming, refer };
+}
+
+/**
+ * 组装黄金分割支阻位候选：每方向优先取「最新非一类点」× 全部比率（不回退更早点）；
+ * 该方向无已形成点时走**预期回退**（pendingReferOf），生成 pending 预期位补位。
+ * @param {Array} fullBis 本周期全量笔（供参照笔定位，见 referBiOfPoint）
+ * @param {Array} buyPts findBuyPoints 原始输出
+ * @param {Array} sellPts findSellPoints 原始输出
+ * @param {Array} fibLevels 比率列表
+ * @param {Array} bars 本周期K线（算 barsPassed，与密集区候选数据形状对齐）
+ * @param {number} tol 价格容差
+ * @returns {Array} fib 候选列表（买点组在前；预期位带 pending: true）
+ */
+function buildFibCandidates(fullBis, buyPts, sellPts, fibLevels, bars, tol) {
+  const out = [];
+  const sides = [
+    { side: "buy", points: buyPts, types: FIB_BUY_TYPES, pullbackType: "down", type: "SUP" },
+    { side: "sell", points: sellPts, types: FIB_SELL_TYPES, pullbackType: "up", type: "RES" },
+  ];
+  for (const cfg of sides) {
+    const pt = pickLatestFibPoint(cfg.points, cfg.types);
+    let found = null;
+    let srcPoint = null;   // 派生源：已形成点 or 预期（形成笔极值）
+    let pending = false;
+    if (pt) {
+      // 有已形成点：只用它（预期位只补位，不抢占已形成点语义）；定位不到参照笔则跳过
+      const f = referBiOfPoint(fullBis, pt.time, cfg.pullbackType);
+      if (f) {
+        found = f;
+        srcPoint = { type: pt.type, time: pt.time, price: pt.price };
+      }
+    } else {
+      // 无已形成点：预期回退（等待2卖/2买 的预期形成区）
+      const p = pendingReferOf(fullBis, cfg.side);
+      if (p) {
+        found = p;
+        srcPoint = {
+          type: cfg.side === "buy" ? "预期2买" : "预期2卖",
+          time: p.forming.endTime, price: p.forming.endPrice,
+        };
+        pending = true;
+      }
+    }
+    if (!found) continue;
+    for (const { ratio, price } of fibLevelsOf(found.refer, cfg.side, fibLevels)) {
+      const cand = {
+        price,
+        type: cfg.type,
+        fib: true,
+        ratio,
+        fromPoint: srcPoint,
+        referBi: {
+          startTime: found.refer.startTime, endTime: found.refer.endTime,
+          startPrice: found.refer.startPrice, endPrice: found.refer.endPrice,
+        },
+        touchCount: 1,
+        firstTouch: found.refer.startTime,
+        lastTouch: srcPoint.time,
+        breakTime: srcPoint.time,  // 信号点/形成笔极值时间 = fib 位生效/绘线锚点时间
+        barsPassed: countBarsPassing(price, bars, tol),
+      };
+      if (pending) cand.pending = true;
+      out.push(cand);
+    }
+  }
+  return out;
+}
+
+// ============================================================
+// BOLL 布林带支阻位（boll）
+// 每周期取「最后一根已收盘K线」的布林带上/中/下轨（BOLL_LENGTH 周期 SMA ± BOLL_MULT×σ，
+// 总体标准差 ÷N，与 TradingView 同口径），上轨=阻力 RES、下轨=支撑 SUP、中轨按现价侧。
+// boll 同 fib 一样豁免截断与评分（评分语义不适用），但**参与**跨周期合并（三类同池）。
+// ============================================================
+
+/**
+ * 计算布林带（已收盘口径）：剔除末根形成中K线，取末 len 根收盘价的 SMA 与总体标准差。
+ * @param {Array} bars K线列表 [{time,open,high,low,close,...}]
+ * @param {number} len SMA 周期
+ * @param {number} mult 标准差倍数
+ * @returns {Object|null} { upper, mid, lower }；已收盘不足 len 根 → null
+ */
+function calcBOLL(bars, len, mult) {
+  if (!bars || bars.length === 0) return null;
+  // 剔除末根（形成中）K线，只取已收盘
+  const closed = bars.slice(0, bars.length - 1);
+  if (closed.length < len) return null;
+  const closes = closed.slice(-len).map(b => b.close);
+  const n = closes.length;
+  const mid = closes.reduce((s, c) => s + c, 0) / n;
+  const variance = closes.reduce((s, c) => s + (c - mid) * (c - mid), 0) / n;  // 总体方差（÷N）
+  const sigma = Math.sqrt(variance);
+  return { upper: mid + mult * sigma, mid, lower: mid - mult * sigma };
+}
+
+/**
+ * 组装 BOLL 候选：三轨各一条。上轨 RES、下轨 SUP、中轨按现价侧（现价 ≥ 中轨 → 支撑）。
+ * @param {Array} bars K线列表
+ * @param {number} len SMA 周期
+ * @param {number} mult 标准差倍数
+ * @param {number} currentPrice 当前价（中轨角色判定）
+ * @returns {Array} 3 个候选（无布林位时为空数组）
+ */
+function buildBollCandidates(bars, len, mult, currentPrice) {
+  const band = calcBOLL(bars, len, mult);
+  if (!band) return [];
+  const closed = bars.slice(0, bars.length - 1);
+  const anchorTime = closed[closed.length - 1].time;
+  const midType = (currentPrice !== null && currentPrice !== undefined && currentPrice >= band.mid) ? "SUP" : "RES";
+  const make = (price, type, tag) => ({
+    price, type, boll: tag,
+    touchCount: 1, barsPassed: 0,
+    firstTouch: anchorTime, lastTouch: anchorTime, breakTime: anchorTime,
+  });
+  return [
+    make(band.upper, "RES", "upper"),
+    make(band.mid, midType, "mid"),
+    make(band.lower, "SUP", "lower"),
+  ];
+}
+
 /**
  * 统计某价位带（price ± tol）被多少根 K 线覆盖/穿越（含影线）。
  * K线高低价覆盖价位带：low <= price + tol 且 high >= price - tol，
@@ -377,6 +742,8 @@ function flipScore(f, group) {
  * @returns {Array} [{ price, type, touchCount, firstTouch, breakTime, sources:[...], level }]
  */
 function mergeFlipsAcrossPeriods(allFlips, tol) {
+  // 每条候选的来源类型（cluster/fib/boll，由标记反推；混合类型合并后统一按「位置线」口径）
+  const kindOf = (f) => (f.boll ? "boll" : f.fib ? "fib" : "cluster");
   const all = [];
   for (const res of Object.keys(allFlips)) {
     for (const f of allFlips[res]) {
@@ -400,14 +767,24 @@ function mergeFlipsAcrossPeriods(allFlips, tol) {
       last.breakTime = Math.max(last.breakTime, f.breakTime);
       // 类型冲突（罕见）：以触及次数更多者为准
       if (f.touchCount > prevTouch) last.type = f.type;
+      if (!last._kinds.includes(kindOf(f))) last._kinds.push(kindOf(f));
     } else {
-      merged.push({ ...f, sources: [f.source] });
+      merged.push({ ...f, sources: [f.source], _kinds: [kindOf(f)] });
     }
   }
   // 确定每个合并项的主要来源级别 = 来源中最大的级别（大级别优先）
   for (const m of merged) {
     m.level = dominantLevel(m.sources);
     delete m.source;
+    // 多来源混合线：删除 fib/pending/boll 等具体来源标记，统一按「位置线」口径
+    if (m._kinds.length > 1) {
+      m.srcType = "mixed";
+      delete m.fib; delete m.pending; delete m.ratio;
+      delete m.fromPoint; delete m.referBi; delete m.boll;
+    } else if (m._kinds.length === 1) {
+      m.srcType = m._kinds[0];
+    }
+    delete m._kinds;
   }
   return merged;
 }
@@ -469,6 +846,44 @@ function pickByLevel(merged, currentPrice, sideCount, maxDistAtr, periodAtrs) {
     result.push(...above, ...below);
   }
   return result;
+}
+
+/**
+ * 按显示周期选取（新显示模型）：每个显示周期图最多 2×sideCount 条线。
+ * 候选池 = 该级别及以上级别的合并线（高级别线继承到低周期图，如 3m 图候选池含 3/15/60/240/D 全部位置线），
+ * 取「距现价最近的上方 sideCount 条 + 下方 sideCount 条」，每条仍受 ≤ maxDistAtr×线自身级别ATR
+ * 距离上限（periodAtrs[line.level] 缺失时 Infinity），允许上下不对称。
+ * @param {Array} merged 合并后的支阻位列表（含 level 字段）
+ * @param {Array} displayPeriods 显示周期列表（从大到小）
+ * @param {number} currentPrice 当前价格
+ * @param {number} sideCount 每侧条数（默认 2）
+ * @param {number} maxDistAtr 距离上限（×线自身级别ATR）
+ * @param {Object} periodAtrs 各周期 ATR 表
+ * @returns {Object} { 周期: [line,...] }
+ */
+function pickNearestForDisplay(merged, displayPeriods, currentPrice, sideCount, maxDistAtr, periodAtrs) {
+  const out = {};
+  for (const L of displayPeriods) {
+    const li = LEVEL_ORDER.indexOf(L);
+    // 候选池 = 该级别及以上（level 在 LEVEL_ORDER 中更靠前或相同）
+    const pool = merged.filter(f => LEVEL_ORDER.indexOf(f.level) <= li);
+    const maxDistOf = (f) => {
+      const levelAtr = periodAtrs[f.level];
+      return levelAtr ? maxDistAtr * levelAtr : Infinity;
+    };
+    // 上方：>= 当前价 且在距离范围内，按价差升序（就近）取前 sideCount
+    const above = pool
+      .filter(f => f.price >= currentPrice && f.price - currentPrice <= maxDistOf(f))
+      .sort((a, b) => a.price - b.price)
+      .slice(0, sideCount);
+    // 下方：< 当前价 且在距离范围内，按价差升序（就近）取前 sideCount
+    const below = pool
+      .filter(f => f.price < currentPrice && currentPrice - f.price <= maxDistOf(f))
+      .sort((a, b) => b.price - a.price)
+      .slice(0, sideCount);
+    out[L] = [...above, ...below];
+  }
+  return out;
 }
 
 // ============================================================
@@ -632,7 +1047,10 @@ async function main() {
     // ============================================================
     // 逐周期计算支阻互换位
     // ============================================================
-    const allFlips = {};
+    const allFlips = {};  // 密集区候选（强互换位+近期极值位，走评分/截断/合并/选取管线）
+    const allFibs = {};   // 黄金分割候选（同池合并，不进评分/截断管线）
+    const allBolls = {};  // BOLL 布林带候选（同池合并，豁免评分/截断）
+    const barsByRes = {}; // 各周期原始K线（BOLL 生成需在 currentPrice 已知后，故先存起）
     const periodAtrs = {};
     const lastCloseByRes = {};
     let currentRes = originalRes;
@@ -653,6 +1071,7 @@ async function main() {
         continue;
       }
       const bars = d.bars;
+      barsByRes[res] = bars;
       lastCloseByRes[res] = bars[bars.length - 1].close;
       const atr = calcATR(bars, 14);
       periodAtrs[res] = atr;
@@ -684,32 +1103,52 @@ async function main() {
           recentFlips.push(r);
         }
       }
-      allFlips[res] = flips.concat(recentFlips);
-      console.log(`\n=== 支阻互换位 [周期 ${res}]（聚类阈值 ${tol.toFixed(2)}，最少触及 ${minTouch} 次，近期极值位=${recentFlips.length} 个）===`);
-      if (allFlips[res].length === 0) {
+      // 黄金分割支阻位：现算买卖点（买卖点不落盘），每方向只取最新非一类点，
+      // 参照笔=回调前顺势笔。买卖点在 FROM_TS 过滤后的笔上算（与 mark-buy-sell
+      // 图上口径一致），参照笔在未过滤的全量笔上定位（回调笔可能横跨窗口边界）。
+      let fibFlips = [];
+      if (SR_TYPES.has("fib")) {
+        const curBisF = bis.filter(b => b.endTime >= FROM_TS);
+        const upperRes = UPPER_OF[res];
+        const upperBisF = upperRes && (periodBis[upperRes] || []).length > 0
+          ? periodBis[upperRes].filter(b => b.endTime >= FROM_TS)
+          : null;
+        const macdArr = calcMACD(bars);
+        fibFlips = buildFibCandidates(
+          bis,
+          findBuyPoints(curBisF, upperBisF, macdArr, intervalSecOf(res)),
+          findSellPoints(curBisF, upperBisF, macdArr, intervalSecOf(res)),
+          FIB_LEVELS, bars, tol
+        );
+      }
+      allFibs[res] = fibFlips;
+      allFlips[res] = SR_TYPES.has("cluster") ? flips.concat(recentFlips) : [];
+      console.log(`\n=== 支阻互换位 [周期 ${res}]（聚类阈值 ${tol.toFixed(2)}，最少触及 ${minTouch} 次，近期极值位=${recentFlips.length} 个，黄金分割位=${fibFlips.length} 个）===`);
+      if (allFlips[res].length === 0 && fibFlips.length === 0) {
         console.log("无互换位");
       } else {
         allFlips[res].forEach((f, idx) => {
-          const typeName =
-            f.type === "R2S" ? "阻力转支撑" :
-            f.type === "S2R" ? "支撑转阻力" :
-            f.type === "RES" ? "阻力(近期极值)" : "支撑(近期极值)";
           const tag = f.recent ? " [近期极值]" : "";
           console.log(
-            `互换位${idx + 1}: ${f.price.toFixed(2)} [${typeName}${tag}] 触及${f.touchCount}次 首触=${toT(f.firstTouch)} 末触=${toT(f.lastTouch)} 互换于=${toT(f.breakTime)}`
+            `互换位${idx + 1}: ${f.price.toFixed(2)} [${typeNameOf(f)}${tag}] 触及${f.touchCount}次 首触=${toT(f.firstTouch)} 末触=${toT(f.lastTouch)} 互换于=${toT(f.breakTime)}`
+          );
+        });
+        fibFlips.forEach((f, idx) => {
+          console.log(
+            `黄金分割${idx + 1}: ${f.price.toFixed(2)} [${typeNameOf(f)} ${f.fromPoint.type}@${toT(f.fromPoint.time)} 比率${f.ratio} 参照笔${toT(f.referBi.startTime)}~${toT(f.referBi.endTime)}]`
           );
         });
       }
     }
 
     // 每周期候选数量上限（数据层截断）：每周期最多保留 MAX_PER_PERIOD 个，
-    // 超出按强度评分降序截断；只影响落盘/标记，不影响默认绘制（每级别上下各 1 个）。
+    // 超出按强度评分降序截断；只截断密集区（fib/boll 评分语义不适用，豁免）。
     const allFlipsCapped = capPerPeriod(allFlips, MAX_PER_PERIOD);
     const cappedSummary = Object.keys(allFlipsCapped)
       .map(res => `${res}:${allFlips[res].length}→${allFlipsCapped[res].length}`)
       .join("  ");
     if (DEBUG || Object.values(allFlips).some(a => a.length > MAX_PER_PERIOD)) {
-      console.log(`\n每周期候选上限 ${MAX_PER_PERIOD} 个（按强度评分截断）: ${cappedSummary}`);
+      console.log(`\n每周期候选上限 ${MAX_PER_PERIOD} 个（按强度评分截断，仅密集区）: ${cappedSummary}`);
     }
 
     // 当前价格：用最小有数据周期的最后一根K线收盘价（各周期收盘价接近，取最小周期最精确）
@@ -718,48 +1157,68 @@ async function main() {
       lastCloseByRes["240"] || lastCloseByRes["D"] || null;
     console.log(`\n当前价格（最小周期收盘价）: ${currentPrice !== null ? currentPrice.toFixed(2) : "未知"}`);
 
-    // 跨周期合并：价格相近的互换位合并为一条（避免不同级别在同一价位画出近乎重叠的线）。
-    // 合并容差按「最小有数据的周期 ATR」缩放：小级别价位密集，若按最大周期ATR会过度合并，
-    // 把小级别的独立支阻位全部吞进大级别；按最小周期ATR只合并真正的「同一价位」。
-    const atrValues = PERIODS.filter(r => allFlipsCapped[r] && allFlipsCapped[r].length > 0 && periodAtrs[r]).map(r => periodAtrs[r]);
-    const minAtr = atrValues.length ? Math.min(...atrValues) : 0;
-    const mergeTol = MERGE_ATR * minAtr;
-    const mergedFlips = mergeFlipsAcrossPeriods(allFlipsCapped, mergeTol);
-    const totalBefore = Object.values(allFlipsCapped).reduce((s, a) => s + a.length, 0);
-    console.log(`\n=== 跨周期合并（合并阈值 ${mergeTol.toFixed(2)} = ${MERGE_ATR}×最小周期ATR ${minAtr.toFixed(2)}）===`);
-    console.log(`合并前 ${totalBefore} 个 → 合并后 ${mergedFlips.length} 个`);
-    mergedFlips.forEach((f, idx) => {
-      const typeName =
-        f.type === "R2S" ? "阻力转支撑" :
-        f.type === "S2R" ? "支撑转阻力" :
-        f.type === "RES" ? "阻力(近期极值)" : "支撑(近期极值)";
-      console.log(`支阻位${idx + 1}: ${f.price.toFixed(2)} [${typeName}] 触及${f.touchCount}次 经过${f.barsPassed || 0}根K线 主级别=${f.level} 来源=${f.sources.join("+")} 互换于=${toT(f.breakTime)}`);
-    });
-
-    // 每个级别只保留当前价「上方 1 个 + 下方 1 个」
-    // （先限定距当前价 ≤ MAX_DIST_ATR×本级别ATR，同一侧多个候选再按强度评分取最高）
-    const drawnFlips = currentPrice !== null
-      ? pickByLevel(mergedFlips, currentPrice, SIDE_COUNT, MAX_DIST_ATR, periodAtrs)
-      : mergedFlips;
-    console.log(`\n=== 按级别取上下各 ${SIDE_COUNT} 个（距离范围 ≤ ${MAX_DIST_ATR}×本级别ATR，同一侧按强度评分取最高；评分=0.6×触及次数+0.4×经过K线数，当前价 ${currentPrice !== null ? currentPrice.toFixed(2) : "?"}）===`);
-    if (drawnFlips.length === 0) {
-      console.log("无支阻互换位需要绘制");
-    } else {
-      drawnFlips.forEach((f, idx) => {
-        const side = f.price >= currentPrice ? "上方" : "下方";
-        const dist = currentPrice !== null ? Math.abs(f.price - currentPrice).toFixed(2) : "?";
-        const typeName =
-          f.type === "R2S" ? "阻力转支撑" :
-          f.type === "S2R" ? "支撑转阻力" :
-          f.type === "RES" ? "阻力(近期极值)" : "支撑(近期极值)";
-        console.log(`绘制${idx + 1}: ${f.price.toFixed(2)} [${side} ${dist}] [级别 ${f.level}，${srColor(f.level)}] ${typeName} 评分=${(f.score !== undefined ? f.score : 0).toFixed(3)} 触及${f.touchCount}次 经过${f.barsPassed || 0}根K线`);
-      });
+    // BOLL 布林带候选：中轨按现价侧，需 currentPrice 已知后生成（逐周期独立，三轨一组）
+    if (SR_TYPES.has("boll")) {
+      for (const res of PERIODS) {
+        if (!barsByRes[res]) continue;
+        allBolls[res] = buildBollCandidates(barsByRes[res], BOLL_LENGTH, BOLL_MULT, currentPrice);
+      }
     }
 
-    // 支阻互换位数据落盘（保存各周期原始识别结果 + 跨周期合并结果）
+    // 统一合并池：三类候选（密集区截断后 + fib + boll）全部进 mergeFlipsAcrossPeriods（同一池、同一规则）。
+    // 合并容差按「最小有数据的周期 ATR」缩放：小级别价位密集，按最小周期ATR只合并真正的「同一价位」。
+    const combined = {};
+    for (const res of PERIODS) {
+      const arr = (allFlipsCapped[res] || []).concat(allFibs[res] || []).concat(allBolls[res] || []);
+      if (arr.length > 0) combined[res] = arr;
+    }
+    const atrValues = Object.keys(combined).filter(r => periodAtrs[r]).map(r => periodAtrs[r]);
+    const minAtr = atrValues.length ? Math.min(...atrValues) : 0;
+    const mergeTol = MERGE_ATR * minAtr;
+    const mergedOut = mergeFlipsAcrossPeriods(combined, mergeTol);
+    const totalBefore = Object.values(combined).reduce((s, a) => s + a.length, 0);
+    console.log(`\n=== 跨周期合并（统一池，合并阈值 ${mergeTol.toFixed(2)} = ${MERGE_ATR}×最小周期ATR ${minAtr.toFixed(2)}）===`);
+    console.log(`合并前 ${totalBefore} 个 → 合并后 ${mergedOut.length} 个（密集区/fib/BOLL 三类同池合并）`);
+    mergedOut.forEach((f, idx) => {
+      console.log(`支阻位${idx + 1}: ${f.price.toFixed(2)} [${typeNameOf(f)}] 触及${f.touchCount}次 经过${f.barsPassed || 0}根K线 主级别=${f.level} 来源=${f.sources.join("+")} 互换于=${toT(f.breakTime)}`);
+    });
+
+    // 按显示周期选取：每周期图 ≤ 2×sideCount 条（就近上下各 N，高级别线继承到低周期图）。
+    // 显示周期 = 成功处理（有 ATR/K线）的周期，顺序沿 PERIODS（从大到小）。
+    const displayPeriods = PERIODS.filter(r => periodAtrs[r]);
+    const drawnByPeriod = currentPrice !== null
+      ? pickNearestForDisplay(mergedOut, displayPeriods, currentPrice, SIDE_COUNT, MAX_DIST_ATR, periodAtrs)
+      : {};
+    // 每条绘制线附来源标注（title/text 与落盘 label 用）
+    for (const L of Object.keys(drawnByPeriod)) {
+      for (const f of drawnByPeriod[L]) {
+        f.label = labelOf(f);
+      }
+    }
+    const totalDrawn = Object.values(drawnByPeriod).reduce((s, a) => s + a.length, 0);
+    console.log(`\n=== 按周期显示（每图 ≤ ${2 * SIDE_COUNT} 条：就近上下各 ${SIDE_COUNT}，距离上限 ≤ ${MAX_DIST_ATR}×线自身级别ATR，当前价 ${currentPrice !== null ? currentPrice.toFixed(2) : "?"}）===`);
+    if (totalDrawn === 0) {
+      console.log("无支阻位需要绘制");
+    } else {
+      for (const L of Object.keys(drawnByPeriod)) {
+        drawnByPeriod[L].forEach((f, idx) => {
+          const side = f.price >= currentPrice ? "上方" : "下方";
+          const dist = currentPrice !== null ? Math.abs(f.price - currentPrice).toFixed(2) : "?";
+          console.log(`[${periodNameOf(L)}] 绘制${idx + 1}: ${f.price.toFixed(2)} [${side} ${dist}] ${f.label} 触及${f.touchCount}次`);
+        });
+      }
+    }
+
+    // 支阻位数据落盘：periods = 各周期原始候选（密集区截断后 + fib + boll），
+    // merged = 三类统一合并结果（mark-entry 仍只读 price），drawnByPeriod = 各显示周期选中的 ≤2×sideCount 条（含来源标注）。
     try {
       fs.mkdirSync(CACHE_DIR, { recursive: true });
       const srFile = cacheFile("srflip", SYMBOL);
+      const periodsOut = {};
+      for (const res of PERIODS) {
+        if (!periodAtrs[res]) continue;
+        periodsOut[res] = (allFlipsCapped[res] || []).concat(allFibs[res] || []).concat(allBolls[res] || []);
+      }
       const payload = {
         symbol: SYMBOL,
         from: FROM_DATE || null,
@@ -773,15 +1232,18 @@ async function main() {
         scoreWeights: { touch: TOUCH_WEIGHT, bars: BARS_WEIGHT },
         maxDistAtr: MAX_DIST_ATR,
         maxPerPeriod: MAX_PER_PERIOD,
+        srTypes: [...SR_TYPES],
+        fibLevels: FIB_LEVELS,
+        bollCfg: { length: BOLL_LENGTH, mult: BOLL_MULT },
         currentPrice: currentPrice,
-        periods: allFlipsCapped,
-        merged: mergedFlips,
-        drawn: drawnFlips,
+        periods: periodsOut,
+        merged: mergedOut,
+        drawnByPeriod: drawnByPeriod,
       };
       fs.writeFileSync(srFile, JSON.stringify(payload, null, 2), "utf8");
-      console.log(`\n支阻互换位数据已落盘: ${srFile}（${Object.keys(allFlipsCapped).length} 个周期原始 ${totalBefore} 个，合并后 ${mergedFlips.length} 个，绘制 ${drawnFlips.length} 个）`);
+      console.log(`\n支阻位数据已落盘: ${srFile}（${Object.keys(periodsOut).length} 个周期原始 ${totalBefore} 个，merged 共 ${mergedOut.length} 个，绘制 ${totalDrawn} 条）`);
     } catch (e) {
-      console.log("警告: 支阻互换位数据落盘失败:", e.message);
+      console.log("警告: 支阻位数据落盘失败:", e.message);
     }
 
     if (DRY) {
@@ -795,7 +1257,7 @@ async function main() {
     // ============================================================
 
     /**
-     * 清除旧的支阻互换位横线（title 以 SR_FLIP 开头，兼容历史 SR_FLIP_<周期>）。
+     * 清除旧的支阻位横线（title 以 SR_ 开头，兼容历史 SR_FLIP_<周期> / SR_FIB_<...>）。
      * 支阻位全周期可见，无需切换周期即可清除。
      */
     const clearSrFlip = async () => {
@@ -813,7 +1275,7 @@ async function main() {
           try {
             for (const s of chart.getAllShapes()) {
               const t = readTitle(s.id);
-              if (t.indexOf('SR_FLIP') === 0) {
+              if (t.indexOf('SR_') === 0) {
                 try { chart.removeEntity(s.id); out.cleared++; } catch(e) {}
               }
             }
@@ -869,7 +1331,7 @@ async function main() {
             try {
               const id = await chart.createMultipointShape(
                 [{ time: f.time, price: f.price }],
-                { shape: 'horizontal_line', lock: false, overrides: { linecolor: f.color, linewidth: 1, title: f.title } }
+                { shape: 'horizontal_line', lock: false, overrides: { linecolor: f.color, linewidth: 1, linestyle: f.linestyle !== undefined ? f.linestyle : 0, title: f.title, text: f.text } }
               );
               applyIV(id, f.iv);
               created.push(id);
@@ -883,25 +1345,32 @@ async function main() {
       return r.result.value;
     };
 
-    // 清除旧线（title 前缀 SR_FLIP，兼容历史及分级标题）
+    // 清除旧线（title 前缀 SR_，兼容历史 SR_FLIP / SR_FIB）
     const cleared = await clearSrFlip();
-    console.log(`\n已清除旧支阻互换位横线: ${cleared.cleared} 个`);
+    console.log(`\n已清除旧支阻位横线: ${cleared.cleared} 个`);
 
-    // 绘制：按级别颜色/可见范围/标题分别绘制
-    console.log("\n=== 绘制结果（颜色与笔一致，本级及以下可见）===");
-    if (drawnFlips.length > 0) {
-      const drawItems = drawnFlips.map(f => ({
-        time: f.breakTime,
-        price: f.price,
-        level: f.level,
-        color: srColor(f.level),
-        title: "SR_FLIP_" + f.level,
-        iv: srVisibilityFor(f.level),
-      }));
+    // 绘制：所有线统一灰色实线，来源用 title/text 标注；可见性 = 仅其显示周期
+    console.log("\n=== 绘制结果（统一灰线 + 来源标注，每周期图仅该周期可见）===");
+    if (totalDrawn > 0) {
+      const drawItems = [];
+      for (const L of Object.keys(drawnByPeriod)) {
+        for (const f of drawnByPeriod[L]) {
+          const label = f.label || labelOf(f);
+          drawItems.push({
+            time: f.breakTime,
+            price: f.price,
+            color: SR_GRAY,
+            linestyle: 0,  // 实线
+            title: "SR_" + label,
+            text: label,
+            iv: srVisibilitySingle(L),
+          });
+        }
+      }
       const result = await createSrFlip(drawItems);
       console.log(JSON.stringify(result, null, 2));
     } else {
-      console.log("无支阻互换位需要绘制");
+      console.log("无支阻位需要绘制");
     }
 
     // 最后切回原周期
@@ -932,11 +1401,24 @@ module.exports = {
   MAX_PER_PERIOD,
   SIDE_COUNT,
   RECENT_BI_COUNT,
+  SR_TYPES,
+  FIB_LEVELS,
+  FIB_BUY_TYPES,
+  FIB_SELL_TYPES,
+  UPPER_OF,
+  BOLL_LENGTH,
+  BOLL_MULT,
+  SR_GRAY,
   // 工具
   srColor,
   srVisibilityFor,
+  srVisibilitySingle,
   minTouchFor,
-  // 支阻互换位识别
+  typeNameOf,
+  periodNameOf,
+  sourceLabelOf,
+  labelOf,
+  // 支阻互换位识别（密集区）
   extractSwingPoints,
   clusterPoints,
   detectFlip,
@@ -944,11 +1426,21 @@ module.exports = {
   detectRecentFlip,
   countBarsPassing,
   flipScore,
+  // 黄金分割支阻位
+  pickLatestFibPoint,
+  referBiOfPoint,
+  pendingReferOf,
+  fibLevelsOf,
+  buildFibCandidates,
+  // BOLL 布林带支阻位
+  calcBOLL,
+  buildBollCandidates,
   // 合并 / 截断 / 选取
   mergeFlipsAcrossPeriods,
   dominantLevel,
   capPerPeriod,
   pickByLevel,
+  pickNearestForDisplay,
 };
 
 // 直接运行时才连接 CDP 执行主流程（被 require 时仅导出纯函数，供单元测试）

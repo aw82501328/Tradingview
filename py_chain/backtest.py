@@ -40,6 +40,7 @@ import time
 
 from .chan_core import (
     buildBi, fixBiExtremes, calcATR, calcMACD, intervalSecOf, fmtT,
+    CHAN_CFG,
     MacdAccumulator, AtrAccumulator, extendLastBi, extendLastBiFrom,
 )
 from .mark_buy_sell import compute_all_marks
@@ -49,6 +50,11 @@ from .mark_entry import compute_entries, stop_ref_of, find_bi_event
 
 DEFAULT_PERIODS = ["D", "240", "60", "15", "3"]
 DEFAULT_WARMUP_BARS = 60
+# 批量重同步间隔（fine bar 数）：增量 wick 压平用「已收K线运行 TR 均值」，与全量口径的
+# 稳定均值在窗口早期的边界 bar 上可能翻转判定并经包含关系级联放大。每 N 根 fine bar
+# 用当前前缀做一次 markWickBars 全量重建（_resync_bis），重同步点上引擎状态严格等于
+# batch(前缀)；间隔内的漂移窗口 ≤ N 根，且无未来函数（只用已收盘数据）。
+RESYNC_EVERY = 1000
 
 # ============================================================
 # 出场状态机（三模式统一口径：收盘判定 → 下一根开盘成交）
@@ -145,7 +151,8 @@ class BacktestEngine:
     """
 
     def __init__(self, bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
-                 with_marks=False, cfg=None, fill_mode="anchor", signal_mode="realtime"):
+                 with_marks=False, cfg=None, fill_mode="anchor", signal_mode="realtime",
+                 sr_types=None, fib_levels=None, boll_length=None, boll_mult=None):
         self.periods = list(periods or DEFAULT_PERIODS)
         # 各周期按时间升序整理 + 缓存时间数组
         self.bars = {}
@@ -176,6 +183,12 @@ class BacktestEngine:
             raise ValueError(f"最小周期 {self.fine_res} 无K线数据")
         self.warmup_bars = warmup_bars
         self.with_marks = with_marks
+        # 支阻位类型开关（None → compute_srflip 默认 cluster+boll）；
+        # --sr-types=cluster 可复现黄金分割加入前的旧回测结果
+        self.sr_types = tuple(sr_types) if sr_types else None
+        self.fib_levels = fib_levels
+        self.boll_length = boll_length
+        self.boll_mult = boll_mult
         self.cfg = cfg or {}
         # 信号模式：
         #   "confirm"（确认制）：只在笔结构变化时收集信号（等检测周期笔端点确认后
@@ -207,12 +220,20 @@ class BacktestEngine:
         self._macd = {res: MacdAccumulator() for res in self.periods}
         self._macd_times = {res: [] for res in self.periods}  # 与 macd.entries 一一对应（切片二分用）
         self._atr = {res: AtrAccumulator(14) for res in self.periods}
+        # 长影预处理增量状态（markWickBars 的逐根版，见 _wick_process）：
+        # prev/prev2=最近两根原始bar（延迟判 _topCand 的左右邻）、trSum/trCnt/prevClose=
+        # 运行TR均值、pending=上一根压平后的bar
+        self._wick = {res: {"prev": None, "prev2": None, "trSum": 0.0, "trCnt": 0,
+                            "prevClose": None, "pending": None} for res in self.periods}
+        self._trimmed = {res: [] for res in self.periods}  # 压平后K线（merge/延伸用，与原始bar一一对应）
         self._marks = {}
         self._sr = None
         self._plan = {}
         self._entries = {}
         # 当下背驰去重：(periodX, strategyKey, markRes, 形成段起点时间)，每个形成段只发一次
         self._rt_fired = set()
+        # 批量重同步水位（fine 周期 cut 达到 last+RESYNC_EVERY 时全周期重同步）
+        self._last_resync = 0
 
         # 实时监控状态（step_to 使用）：跨轮询保持信号去重与统计
         self._live_st = None          # step_to(execute=True) 持久状态（见 _step_execute）
@@ -224,15 +245,76 @@ class BacktestEngine:
 
     # ---------------- 增量计算 ----------------
 
+    def _wick_process(self, res, bar):
+        """长影预处理（markWickBars 的逐根增量版，与图表批量版逐条对齐）：
+
+        - 压平判定自足（影线占比 ≥ wickRatio 且 ≥ wickAtrK×运行TR均值），新 bar 到达即判、
+          立即生效；长上影 high 压平至实体顶，长下影 low 压平至实体底并记 _origLow。
+        - _topCand 需右邻原始低点，延后一根判（图表批量版同样无法给最后一根判 _topCand——
+          无 next）：下一根到达时若「low 不低于左右相邻原始K线低点」，把 _topCand=原 high
+          回标到 merged 尾巴（带 > 传播守卫，与 _mergeStep 传播规则一致）。
+        - 运行 TR 均值 = 已收K线的全量均值（含当前根 TR），与批量版「全窗口含末根」同构，
+          只随窗口增长渐稳、不随局部行情抖动。
+
+        返回压平后的 bar（喂 _mergeStep 与延伸）；原始 bar 由调用方喂 MACD/ATR 累加器。"""
+        w = self._wick[res]
+        merged = self._merged[res]
+        # 1) 运行 TR 均值（先含当前根 TR，再判当前根——与批量版口径一致）
+        if w["prevClose"] is not None:
+            tr = max(bar["high"] - bar["low"],
+                     abs(bar["high"] - w["prevClose"]),
+                     abs(bar["low"] - w["prevClose"]))
+            w["trSum"] += tr
+            w["trCnt"] += 1
+        w["prevClose"] = bar["close"]
+        min_wick = (w["trSum"] / w["trCnt"]) * CHAN_CFG["wickAtrK"] if w["trCnt"] else 0.0
+        # 2) 上一根的延迟 _topCand 判定：左右邻原始低点现已齐全（pend.low 未被上影压平改动）
+        pend = w["pending"]
+        if pend is not None and pend.get("_wantTopCand"):
+            prev2 = w["prev2"]  # pend 的左邻原始 bar
+            if prev2 is not None and merged and \
+                    pend["low"] >= prev2["low"] and pend["low"] >= bar["low"]:
+                top_cand = pend["_origHigh"]
+                last = merged[-1]
+                if top_cand > last.get("_topCand", 0):
+                    last["_topCand"] = top_cand
+                    last["_topCandTime"] = pend["time"]
+        # 3) 当前 bar 压平判定（自足）
+        b = dict(bar)
+        amp = b["high"] - b["low"]
+        if amp > 0:
+            body_top = max(b["open"], b["close"])
+            body_bottom = min(b["open"], b["close"])
+            upper = b["high"] - body_top
+            lower = body_bottom - b["low"]
+            if upper >= CHAN_CFG["wickRatio"] * amp and upper >= min_wick:
+                # 长上影：先压平 + 记候选（右邻未知），右邻到达时满足 low 条件再回标 _topCand
+                b["_origHigh"] = b["high"]
+                b["_wantTopCand"] = True
+                b["high"] = body_top
+            elif lower >= CHAN_CFG["wickRatio"] * amp and lower >= min_wick:
+                b["_origLow"] = b["low"]
+                b["_origLowTime"] = b["time"]
+                b["low"] = body_bottom
+        w["prev2"] = w["prev"]
+        w["prev"] = bar
+        w["pending"] = b
+        return b
+
     def _append_bars(self, res, new_bars):
-        """把 res 周期新增的K线逐根并入增量状态；返回该周期笔结构是否变化（新分型或延伸推进）。"""
+        """把 res 周期新增的K线逐根并入增量状态；返回该周期笔结构是否变化（新分型或延伸推进）。
+
+        长影预处理先行（_wick_process）：压平后的 bar 才进包含合并与笔延伸；
+        MACD/ATR 累加器始终用原始 bar（与 chan-bi：ATR/MACD 基于未剔除的原始K线一致）。"""
         from .chan_core import _mergeStep, updateFractalsTail, extendLastBiFrom
         merged = self._merged[res]
         direction = self._merge_dir[res]
         macd = self._macd[res]
         atr = self._atr[res]
         for bar in new_bars:
-            merged, direction = _mergeStep(merged, direction, bar)
+            p = self._wick_process(res, bar)
+            merged, direction = _mergeStep(merged, direction, p)
+            self._trimmed[res].append(p)
             macd.append(bar)
             self._macd_times[res].append(bar["time"])
             atr.append(bar)
@@ -244,48 +326,114 @@ class BacktestEngine:
         if len(new_f) != len(old_f) or (new_f and old_f and new_f[-1] != old_f[-1]):
             bis_changed = True
         if bis_changed:
-            self._bis[res] = self._build_bis(merged, new_f, macd.to_list(), atr.value)
-        # 最后一笔始终延伸到最新极端价（与 chan-bi 落盘数据一致）
-        if self._bis[res]:
-            # 用二分定位最后笔起点在时间轴上的索引（O(log n)），只从该位置起增量扫描，
-            # 避免每根K线从 bars 头部全量扫描与整段切片复制导致的 O(n²)
-            last_start = self._bis[res][-1].get("startTime")
-            start_idx = bisect.bisect_left(self._times[res], last_start) if last_start is not None else 0
-            prev_end = (self._bis[res][-1].get("endTime"), self._bis[res][-1].get("endPrice"))
-            self._bis[res] = extendLastBiFrom(self._bis[res], self.bars[res]["_list"],
-                                              start_idx, endIdx=self._cut[res])
-            # 延伸实际推进了最后笔端点也算笔结构变化（供链路短路判断）
-            cur_end = (self._bis[res][-1].get("endTime"), self._bis[res][-1].get("endPrice"))
-            if cur_end != prev_end:
-                bis_changed = True
+            self._bis[res] = self._build_bis(res, merged, new_f, macd.to_list(), atr.value)
+        if self._extend_last(res):
+            bis_changed = True
         return bis_changed
 
-    def _build_bis(self, merged, fractals, macd, atr):
-        """从分型重建笔并做端点极值修正；返回按时间升序的笔列表。"""
+    def _extend_last(self, res):
+        """最后一笔延伸到最新极端价（与 chan-bi 落盘数据一致；用压平后K线，延伸不指向
+        已压平的插针价）。返回延伸是否实际推进了端点（供链路短路判断）。"""
+        if not self._bis[res]:
+            return False
+        # 用二分定位最后笔起点在时间轴上的索引（O(log n)），只从该位置起增量扫描，
+        # 避免每根K线从 bars 头部全量扫描与整段切片复制导致的 O(n²)
+        last_start = self._bis[res][-1].get("startTime")
+        start_idx = bisect.bisect_left(self._times[res], last_start) if last_start is not None else 0
+        prev_end = (self._bis[res][-1].get("endTime"), self._bis[res][-1].get("endPrice"))
+        self._bis[res] = extendLastBiFrom(self._bis[res], self._trimmed[res],
+                                          start_idx, endIdx=self._cut[res])
+        cur_end = (self._bis[res][-1].get("endTime"), self._bis[res][-1].get("endPrice"))
+        return cur_end != prev_end
+
+    def _resync_bis(self, res):
+        """批量重同步该周期增量状态（wick/merge/分型/笔全量口径重建，无未来函数）。
+
+        用当前前缀 bars[:cut] 走 markWickBars → mergeBars（_mergeStep 回放）→
+        findFractals → buildBi → fixBiExtremes → 延伸，替换全部增量状态——重同步点上
+        引擎状态严格等于 batch(前缀)，消除增量 wick 运行均值在窗口早期的阈值漂移
+        （见 RESYNC_EVERY 注释）。wick 运行状态（TR 均值/邻居/pending _topCand）同步重建，
+        重同步后增量从该前缀无缝继续。"""
+        from .chan_core import _mergeStep, markWickBars, findFractals
+        cut = self._cut[res]
+        raw = self.bars[res]["_list"][:cut]
+        trimmed = markWickBars(raw)
+        merged = []
+        direction = 0
+        for p in trimmed:
+            merged, direction = _mergeStep(merged, direction, p)
+        self._merged[res] = merged
+        self._merge_dir[res] = direction
+        self._trimmed[res] = list(trimmed)
+        self._fractals[res] = findFractals(merged)
+        self._bis[res] = self._build_bis(res, merged, self._fractals[res],
+                                         self._macd[res].to_list(), self._atr[res].value)
+        self._extend_last(res)
+        # wick 运行状态重建（与已收前缀一致）
+        w = self._wick[res]
+        w["trSum"] = 0.0
+        w["trCnt"] = 0
+        prev_close = None
+        for b in raw:
+            if prev_close is not None:
+                tr = max(b["high"] - b["low"], abs(b["high"] - prev_close), abs(b["low"] - prev_close))
+                w["trSum"] += tr
+                w["trCnt"] += 1
+            prev_close = b["close"]
+        w["prevClose"] = prev_close
+        w["prev"] = raw[-1] if len(raw) >= 1 else None
+        w["prev2"] = raw[-2] if len(raw) >= 2 else None
+        # pending 恢复：末根若被上影压平（批量口径），保留 _wantTopCand 语义，
+        # 下一根到达时仍走延迟回标通道（批量版末根无 next 同样不判 _topCand，口径一致）
+        w["pending"] = None
+        if trimmed:
+            last_raw = raw[-1]
+            last_p = trimmed[-1]
+            if last_p["high"] < last_raw["high"]:
+                pend = dict(last_p)
+                pend["_origHigh"] = last_raw["high"]
+                pend["_wantTopCand"] = True
+                w["pending"] = pend
+            else:
+                w["pending"] = dict(last_p)
+
+    def resync_all(self):
+        """全部周期批量重同步（run() 收尾前调用，使最终状态严格等于 batch(全前缀)）。"""
+        for res in self.periods:
+            self._resync_bis(res)
+        self._last_resync = self._cut.get(self.fine_res, 0)
+
+    def _build_bis(self, res, merged, fractals, macd, atr):
+        """从分型重建笔并做端点极值修正；返回按时间升序的笔列表。
+        近等双顶/双底平台取后顶/后底与 chan-bi/build_bis 一致：仅 ≥60m（60/240/D）开启。"""
         from .chan_core import fixBiExtremes
         if len(fractals) < 2:
             return []
-        bis = buildBi(fractals, merged, atr, macd)
+        bis = buildBi(fractals, merged, atr, macd, None, intervalSecOf(res) >= 3600)
         bis = fixBiExtremes(bis, merged) or bis
         return bis
 
     # ---------------- 实时监控 ----------------
 
     def _rewind_res(self, res):
-        """把 res 周期增量状态重置并从 0 重放到当前已加载K线。
+        """把 res 周期增量状态重置并从 0 重放到当前已加载K线（批量重建，wick 全量口径）。
 
         实时bar（未收盘）的 OHLC 每轮更新时，合并/分型/MACD/ATR/笔等增量状态
         需随新数据修正，故整周期重放（保证与全量计算一致）。返回 True 触发链路重算。
         """
-        self._merged[res] = []
-        self._merge_dir[res] = 0
-        self._fractals[res] = []
-        self._bis[res] = []
-        self._macd[res] = MacdAccumulator()
-        self._macd_times[res] = []
-        self._atr[res] = AtrAccumulator(14)
-        self._cut[res] = len(self.bars[res]["_list"])
-        self._append_bars(res, self.bars[res]["_list"])
+        bl = self.bars[res]["_list"]
+        macd = MacdAccumulator()
+        macd_t = []
+        atr = AtrAccumulator(14)
+        for bar in bl:
+            macd.append(bar)
+            macd_t.append(bar["time"])
+            atr.append(bar)
+        self._macd[res] = macd
+        self._macd_times[res] = macd_t
+        self._atr[res] = atr
+        self._cut[res] = len(bl)
+        self._resync_bis(res)
         return True
 
     def append_bars(self, res, new_bars):
@@ -589,6 +737,8 @@ class BacktestEngine:
 
         if log:
             log(f"回测完成：共 {stats['steps']} 步，信号 {stats['signals']}，成交 {stats['executed']}")
+        # 收尾批量重同步：最终笔状态严格等于 batch(全前缀)（增量 wick 漂移归零）
+        self.resync_all()
         return self._finish(allSignals, trades, stats)
 
     def _advance_cut(self, t):
@@ -611,6 +761,12 @@ class BacktestEngine:
                 new_bars = self.bars[res]["_list"][old:k]
                 if self._append_bars(res, new_bars):
                     changed = True
+        # 周期性批量重同步：消除增量 wick 阈值漂移（见 RESYNC_EVERY），重同步点上
+        # 引擎状态严格等于 batch(前缀)。链路重算由调用方按 changed=True 触发。
+        fc = self._cut.get(self.fine_res, 0)
+        if fc - self._last_resync >= RESYNC_EVERY:
+            self.resync_all()
+            changed = True
         return changed
 
     def _rebuild_chain(self):
@@ -635,10 +791,19 @@ class BacktestEngine:
                                                 periodAtr=periodAtr)
             except Exception:
                 self._marks = {}
-        # 2. 支阻位
+        # 2. 支阻位（密集区 + 黄金分割；传 periodMacdIn 复用增量 MACD 缓存）
+        srKw = {}
+        if self.sr_types is not None:
+            srKw["srTypes"] = self.sr_types
+        if self.fib_levels is not None:
+            srKw["fibLevels"] = self.fib_levels
+        if self.boll_length is not None:
+            srKw["bollLength"] = self.boll_length
+        if self.boll_mult is not None:
+            srKw["bollMult"] = self.boll_mult
         try:
             self._sr = compute_srflip(periodBis, barsByPeriod, core,
-                                      periodAtrsIn=periodAtr)
+                                      periodAtrsIn=periodAtr, periodMacdIn=periodMacd, **srKw)
         except Exception:
             self._sr = None
         # 3. 交易计划
@@ -803,17 +968,24 @@ class BacktestEngine:
 
 def run_backtest(bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
                  with_marks=False, to_ts=None, log=None, fill_mode="anchor",
-                 signal_mode="realtime"):
+                 signal_mode="realtime", sr_types=None, fib_levels=None,
+                 boll_length=None, boll_mult=None):
     """便捷入口：构建引擎并运行。fill_mode 见 BacktestEngine（anchor=锚点当拍成交，confirm=确认成交）；
-    signal_mode：realtime=当下背驰（每拍评估形成中段，默认），confirm=确认制（结构变化时收集）。"""
+    signal_mode：realtime=当下背驰（每拍评估形成中段，默认），confirm=确认制（结构变化时收集）；
+    sr_types/fib_levels 透传支阻位类型开关与黄金分割比率（None → compute_srflip 默认）；
+    boll_length/boll_mult 透传 BOLL 布林带周期与标准差倍数（None → compute_srflip 默认 26/2）。"""
     engine = BacktestEngine(bars_by_period, periods=periods, warmup_bars=warmup_bars,
                             with_marks=with_marks, fill_mode=fill_mode,
-                            signal_mode=signal_mode)
+                            signal_mode=signal_mode,
+                            sr_types=sr_types, fib_levels=fib_levels,
+                            boll_length=boll_length, boll_mult=boll_mult)
     return engine.run(to_ts=to_ts, log=log)
 
 
 def build_bis(bars_by_period, periods=None):
     """对整段数据各周期一次性重建笔（全链路/实时态使用），返回 { 周期: [bis] }。
+    与 chan-bi JS 同口径：长影压平（markWickBars）后才做包含合并；ATR/MACD 用原始K线；
+    未完成笔延伸用压平后K线（延伸不指向已压平的插针价）。
     最后一笔会延伸到最新极端价（与 chan-bi JS 落盘数据一致）。"""
     periods = list(periods or DEFAULT_PERIODS)
     out = {}
@@ -821,15 +993,16 @@ def build_bis(bars_by_period, periods=None):
         bl = sorted(bars_by_period.get(res, []) or [], key=lambda x: x["time"])
         if len(bl) < 6:
             continue
-        from .chan_core import mergeBars, findFractals
-        merged = mergeBars(bl)
+        from .chan_core import mergeBars, findFractals, markWickBars
+        trimmed = markWickBars(bl)
+        merged = mergeBars(trimmed)
         fractals = findFractals(merged)
         atr = calcATR(bl, 14)
         macd = calcMACD(bl)
         # 近等双顶/双底平台取后顶/后底：与 chan-bi 一致仅 ≥60m（60/240/D）开启
         bis = buildBi(fractals, merged, atr, macd, None, intervalSecOf(res) >= 3600)
         bis = fixBiExtremes(bis, merged) or bis
-        bis = extendLastBi(bis, bl)
+        bis = extendLastBi(bis, trimmed)
         if bis:
             out[res] = bis
     return out

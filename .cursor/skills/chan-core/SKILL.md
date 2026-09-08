@@ -84,6 +84,7 @@ let bis = core.buildBi(fractals, merged, atr, macdArr); // ③ 笔构建
 | `isSameAsUpperBi(bi, upperBis, barSec)` | 本笔与上级某笔完全重合判断（时间容差=本周期1个bar） |
 | `snapToOwnBar(price, refTime, bars)` | 极值价格/时间映射到本周期bar边界 |
 | `keepRecentEach(points)` | 低级别每类买卖点只保留最近一个（历史策略保留，当前主流程已不调用） |
+| `keepRecentAll(points, keep=10)` | 买卖点不分类（买+卖合并）只保留时间上最近 keep 个（现行主流程保留策略，mark-buy-sell 每周期邻近合并后调用） |
 
 ### 缠论中枢
 
@@ -104,4 +105,4 @@ let bis = core.buildBi(fractals, merged, atr, macdArr); // ③ 笔构建
 - 本模块为纯函数库，**不产生任何外部副作用**（不连 CDP、不写文件、不绘图）；
 - 修改算法规则时（如笔构建、中枢、背驰判定、买卖点定义），**只改本模块**，`chan-bi`、`chan-zs` 与 `mark-buy-sell` 会自动生效；
 - 修改后建议用各 SKILL 的 `--dry` 模式回归验证输出与预期一致；
-- `keepRecentEach` 为历史保留函数，主流程已不再调用（现所有周期全部保留买卖点）。
+- `keepRecentEach` 为历史保留函数，主流程已不再调用；现行保留策略为 `keepRecentAll`（每周期不分类只保留最近 10 个标记，`--keep=N` 可调）。

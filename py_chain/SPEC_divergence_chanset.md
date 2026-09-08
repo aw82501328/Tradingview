@@ -1,6 +1,8 @@
-# SPEC：区间套背驰判定规则（下沉判定）+ py↔JS 笔结构对齐（方案存档，暂未实现）
+# SPEC：区间套背驰判定规则（下沉判定）+ py↔JS 笔结构对齐（已实现，2026-09-08）
 
-> 状态：**规则已与用户确认（2026-09-07），仅方案存档，未执行**。实现前需先建立改动前回归基线（见"验证"节）。
+> 状态：**已实现（2026-09-08）**。规则 2026-09-07 与用户确认；实现与回归结果见文末「实现结果」节。
+> 关键入口：`py_chain/align_check.py`（py↔JS 对拍）、`py_chain/engine_consistency.py`（增量=前缀batch）、
+> `py_chain/test_chan_core_rules.py` / `py_chain/test_mark_entry_sink.py`（单测）、`py_chain/.baseline/` vs `py_chain/.after/`（双模式前后对比）。
 
 ## Context：两个已复现案例暴露的同类错误
 
@@ -60,3 +62,58 @@
 - py_chain/chan_core.py（笔对齐）、.cursor/skills/chan-core/scripts/chan_core.js（算法参照源，只读）
 - py_chain/mark_entry.py（区间套三处改造）、py_chain/backtest.py（去重/次序）
 - 复现与回归用的数据：bars_all_tf.json（缓存，含 09-01/09-04 窗口）
+
+## 实现结果（2026-09-08）
+
+### 块1：笔结构对齐
+- chan_core.py 回填 7 条 JS 规则：markWickBars（长影压平 + _topCand/_origLow 旁路）、
+  _mergeStep 旁路传播、fractalAt 顶分型端点用影线价、fractalRangeClear 双向版
+  （起点侧按方向 2 根 + 终点侧 3 根防反向吞没）、fragileMinimal 最小间隔脆弱笔例外、
+  fixBiExtremes 底端点含中心 + _origLow 通道、引擎 _build_bis 补 nearDouble（≥60m）。
+- **对拍（align_check，JS 侧 rebuild_bis.js 复用 chan_core.js）**：bars_all_tf.json
+  6 周期（D/240/60/15/3/30S）逐笔 diff **0 差异**。
+- **增量一致性（engine_consistency）**：引擎逐根推进状态 == batch(前缀) 全检查点通过——
+  增量 wick 运行均值的早期漂移由 `_resync_bis`（每 RESYNC_EVERY=1000 根 fine bar 批量
+  重同步，`run()` 收尾最终重同步）消除；`_rewind_res` 同步改为批量重建。
+- **残余差异（文档化，不阻塞）**：图表管线专属步骤（lockedPivots/alignBiToUpper/ATR
+  幅度过滤/calibrateBiTimes/绘制窗口）未移植——引擎 vs 图表落盘（bis_OANDA_XAUUSD.json）
+  端点吻合率 240 93% / 60 93% / 15 97% / 3 90%（D 75%，仅 4 笔小样本）；案例窗口的
+  15m 结构与图表逐笔一致（21:45→04:00@4455.93 / 07:15→08:15@4461.7 全对上）。
+
+### 块2：区间套下沉判定
+- `sinkChainRealtime` / `sinkChainConfirm`（mark_entry.py）：逐级下沉（levelsBelow 连续
+  链不可跳级）、≥3 笔展开 + 末段终点即 P、**虚拟形成笔**桥接（X 末段端点已过、后续
+  反向结构未确认——案例 A 的 60m 平台顶 4464.23 后近等后顶场景，与图表「近等双顶
+  取后顶」最终结构结果等价）、规则 2 参照 containment（跨所属上级笔 → 候选无效）。
+- realtimeLowerDiverge / lowerDiverge 只在停止级产候选；停止级可为 X 自身（新增
+  S=X 信号类，realtime 实测出现 60 级 3 个）；去重键语义不变（验证通过）。
+- **JS 图表侧同步移植（2026-09-08）**：`mark_entry.js` 移植确认制路径（`sinkChainConfirm`
+  + `lowerDiverge` 下沉过滤 + `findDivergePoints` referStart，含虚拟形成笔），图表箭头
+  归属口径与回测引擎一致；脚本重构为 `main()` + `module.exports` + `require.main`
+  guard（与 mark_sr_flip.js 同模式，供 `mark_entry.test.js` 单测）；当下背驰模式仍为
+  py 侧专属（SPEC §2.2 注明）。
+
+### 规则用例回归（SPEC「验证」节逐条）
+- **案例 A（09-01 08:12）**：✓ 基线的 markRes=3 行（00:27/00:30/03:24/08:12/08:21）全部
+  消失；markRes=15 候选经探针验证成立——sink=15、候选 (15, 9-1 08:15, 4461.7) 自
+  **08:45 起**有效（与 SPEC「15m 候选于 08:45 后成立」吻合），参照=#3@4455.93。最终
+  未成行：结构对齐后 60m 计划在同时刻已翻为 wait2Buy（多）、15m wait2Sell 的「破前底」
+  不满足（04:00→07:15 @4441.85 未破 21:45 底 4415.75）——旧 SPEC 预期基于旧结构的
+  计划态，归属规则本身已按预期工作。
+- **案例 B（09-04 15:48）**：✓ 基线的 15:45 `15 short @4490.895`（未过前高 4510.93 的
+  错误信号）消失；改后 9-4 15:00–17:00 无任何信号。
+- **13:39 历史案例（with-30s）**：✓ 消失且规则性成立——3m 末段 12:00→13:39@4477.69
+  未超过同 15m 笔内前一同向段高点（上午 ~4485），madeNew 不成立；with-30s 定向回放
+  信号分布 3:10 / 15:4 / 30S:3（多级别归位）。
+- **全量 stats vs 基线**（.baseline/ vs .after/）：
+  | 模式 | 基线 | 改后 | 变化解释 |
+  |------|------|------|----------|
+  | realtime | 90 信号（3:83/15:7）盈亏 -65.07 | 133（3:104/15:26/60:3）盈亏 -142.45 | 15/60 级显著扩容（下沉归位 + 新增 S=X 类）；3 级数量上升是结构对齐后 3m 笔结构变化 + 3 级作为合法停止级的组合；盈亏随信号集变化 |
+  | confirm | 308 信号（3:296/15:12）盈亏 -95.82 | 152（3:141/15:10/60:1）盈亏 +126.62 | 跨级 3m 候选被下沉过滤后约减半；盈亏转正 |
+- **与图表对账**：案例窗口内引擎 markRes/信号时间与 chan-bi 结构不再出现「图上 15 级
+  能看到、引擎报更低级别」矛盾（15m/60m 结构与图表落盘一致）。
+
+### 测试
+- py 单测 53/53（test_chan_core_rules 12 + test_mark_entry_sink 16 + test_sr_flip 25）；
+  JS 79/79（chan_core 69 + mark_entry 下沉判定 10——顺带修复 chan_core.test.js 三个既有
+  夹具问题：分型落在 idx 0 / 缺右邻 bar，与双向 fractalRangeClear 冲突——非算法改动）。

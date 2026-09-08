@@ -167,18 +167,21 @@ describe("hasGapBetween 跳空检测", () => {
 // ============================================================
 
 describe("buildBi 笔构建", () => {
-  // 13 根合并K线：底(0)→顶(4)→底(8)→顶(12)，相邻分型间隔 4
+  // 15 根合并K线：首尾各 1 根缓冲 bar（分型只落 1..13，真实管线 findFractals 从 i=1 起、
+  // 终点分型需右邻 bar——双向 fractalRangeClear 读 [i-1,i]/[j-1,j+1]）：底(1)→顶(5)→底(9)→顶(13)
   const merged = [
+    mk(0, 98, 89),
     mk(1, 100, 90), mk(2, 102, 92), mk(3, 104, 93), mk(4, 106, 95),
     mk(5, 108, 96), mk(6, 106, 95), mk(7, 104, 94), mk(8, 102, 92),
     mk(9, 100, 90), mk(10, 102, 91), mk(11, 104, 93), mk(12, 106, 95),
     mk(13, 108, 96),
+    mk(14, 106, 95),
   ];
   const fractals = [
-    { mergedIdx: 0, type: "bottom", high: 100, low: 90, time: 1 },
-    { mergedIdx: 4, type: "top", high: 108, low: 96, time: 5 },
-    { mergedIdx: 8, type: "bottom", high: 100, low: 90, time: 9 },
-    { mergedIdx: 12, type: "top", high: 108, low: 96, time: 13 },
+    { mergedIdx: 1, type: "bottom", high: 100, low: 90, time: 2 },
+    { mergedIdx: 5, type: "top", high: 108, low: 96, time: 6 },
+    { mergedIdx: 9, type: "bottom", high: 100, low: 90, time: 10 },
+    { mergedIdx: 13, type: "top", high: 108, low: 96, time: 14 },
   ];
 
   test("相邻分型间隔≥4 时两两连笔，类型交替、价格/rawCount/span 正确", () => {
@@ -212,17 +215,19 @@ describe("buildBi 笔构建", () => {
 
   test("locked 端点（区间套锁定）不可被更高同类型分型替换", () => {
     const m3 = [
+      mk(0, 98, 89),
       mk(1, 100, 90), mk(2, 102, 92), mk(3, 104, 93), mk(4, 106, 95),
       mk(5, 108, 96), mk(6, 106, 95), mk(7, 104, 94), mk(8, 102, 92),
       mk(9, 100, 90), mk(10, 102, 91), mk(11, 104, 93), mk(12, 110, 97),
+      mk(13, 106, 95),
     ];
     const f3 = [
-      { mergedIdx: 0, type: "bottom", high: 100, low: 90, time: 1 },
-      { mergedIdx: 4, type: "top", high: 108, low: 96, time: 5 },
-      { mergedIdx: 8, type: "bottom", high: 100, low: 90, time: 9 },
-      { mergedIdx: 11, type: "top", high: 110, low: 97, time: 12 },
+      { mergedIdx: 1, type: "bottom", high: 100, low: 90, time: 2 },
+      { mergedIdx: 5, type: "top", high: 108, low: 96, time: 6 },
+      { mergedIdx: 9, type: "bottom", high: 100, low: 90, time: 10 },
+      { mergedIdx: 12, type: "top", high: 110, low: 97, time: 13 },
     ];
-    // 上级锁定 top@108；11 处更高顶 110 间隔 3<4，回溯替换会被 locked 保护拦截
+    // 上级锁定 top@108；12 处更高顶 110 间隔 3<4，回溯替换会被 locked 保护拦截
     const locked = [{ dir: "top", price: 108 }];
     const bis = core.buildBi(f3, m3, 1, [], locked);
     assert.equal(bis.length, 2);
@@ -236,18 +241,22 @@ describe("buildBi 笔构建", () => {
   });
 
   test("间隔不足但有跳空缺口时强制独立成笔（gapLocked）", () => {
+    // 底 low=70（低于跳空目标 78）——终点侧防反向吞没检查（三根最低 > 起点底）才能通过；
+    // 末分型补右邻 bar（双向 fractalRangeClear 读 [j-1,j+1]）
     const m4 = [
-      mk(1, 100, 90, { rawHigh: 100, rawLow: 90 }),
+      mk(0, 98, 89, { rawHigh: 98, rawLow: 89 }),
+      mk(1, 100, 70, { rawHigh: 100, rawLow: 70 }),
       mk(2, 102, 92, { rawHigh: 102, rawLow: 92 }),
       mk(3, 104, 93, { rawHigh: 104, rawLow: 93 }),
       mk(4, 106, 95, { rawHigh: 106, rawLow: 95 }),
       mk(5, 108, 96, { rawHigh: 108, rawLow: 96 }), // 顶（先有效接入）
       mk(6, 85, 78, { rawHigh: 85, rawLow: 78 }),   // 底：向下跳空 96-85=11 >= atr10
+      mk(7, 87, 80, { rawHigh: 87, rawLow: 80 }),
     ];
     const f4 = [
-      { mergedIdx: 0, type: "bottom", high: 100, low: 90, time: 1 },
-      { mergedIdx: 4, type: "top", high: 108, low: 96, time: 5 },
-      { mergedIdx: 5, type: "bottom", high: 85, low: 78, time: 6 },
+      { mergedIdx: 1, type: "bottom", high: 100, low: 70, time: 2 },
+      { mergedIdx: 5, type: "top", high: 108, low: 96, time: 6 },
+      { mergedIdx: 6, type: "bottom", high: 85, low: 78, time: 7 },
     ];
     const bis = core.buildBi(f4, m4, 10, [], null);
     assert.equal(bis.length, 2);
@@ -851,5 +860,34 @@ describe("keepRecentEach 每类保留最近一个（SPEC 2.9）", () => {
       { type: "2买", time: 1500 },
       { type: "1买", time: 2000 },
     ]);
+  });
+});
+
+describe("keepRecentAll 不分类保留最近 keep 个（现行主流程保留策略）", () => {
+  test("买+卖合并计数，按时间取最近 N 个，返回时间升序", () => {
+    const points = [
+      { type: "1买", time: 1000 },
+      { type: "1卖", time: 1200 },
+      { type: "2买", time: 1500 },
+      { type: "3卖", time: 1700 },
+      { type: "1买", time: 2000 },
+      { type: "2卖", time: 2300 },
+    ];
+    // keep=3 → 只留时间最近的 3 个（2300/2000/1700），与类型无关
+    const kept = core.keepRecentAll(points, 3);
+    assert.deepEqual(kept.map(p => `${p.type}@${p.time}`), [
+      "3卖@1700",
+      "1买@2000",
+      "2卖@2300",
+    ]);
+  });
+
+  test("默认 keep=10；数量不足全保留", () => {
+    const points = [
+      { type: "2买", time: 1500 },
+      { type: "1买", time: 1000 },
+    ];
+    const kept = core.keepRecentAll(points);
+    assert.deepEqual(kept.map(p => p.time), [1000, 1500]);
   });
 });

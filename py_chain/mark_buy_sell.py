@@ -6,7 +6,7 @@
 计算每周期 1/2/3 类买卖点标记，含：
   - 一买锚定（anchorFirstBuy + snapToOwnBar 映射到本周期 bar 边界）
   - 邻近合并（mergeNearFirstSecond：1买与2买价格很近 → 合并为「真1买」，1卖/2卖对称）
-  - 每类保留最近 keep 个（keepRecentEach）
+  - 每类保留最近 keep 个（keepRecentAll：每周期不分类，买+卖合并后只保留时间最近 keep 个）
   - 跨周期共振（本级别 1买/1卖 与紧邻上级 1/2/3 类买卖点同点位 → 标绿）
 
 不连接 CDP、不绘图；回测链路只调用纯函数，绘图由 tv_draw 统一完成。
@@ -17,7 +17,7 @@ import re
 from .chan_core import (
     calcATR, calcMACD, intervalSecOf, fmtT,
     findBuyPoints, findSellPoints, anchorFirstBuy, anchorFirstSell,
-    snapToOwnBar, keepRecentEach,
+    snapToOwnBar, keepRecentAll,
 )
 
 # 买卖点标记颜色（与 JS 一致）
@@ -26,8 +26,8 @@ GREEN = "#089981"
 
 # 邻近合并阈值（×ATR）：1买/1卖 与 2买/2卖 的「K线最低/最高价差」不超过该值视为「很近」
 NEAR_ATR_RATIO = 0.3
-# 每类买卖点保留的个数（每类只保留时间上最近 keep 个，减少图上标记数量）
-KEEP = 1
+# 每周期保留的标记总数（不分类：买+卖合并后只保留时间上最近 keep 个，减少图上标记数量）
+KEEP = 10
 
 # 跨周期共振匹配的正则：上级 1/2/3 类与类2 买卖点
 _CLASS_RE = re.compile(r"^([123]买|[123]卖|类2买|类2卖)$")
@@ -111,9 +111,10 @@ def compute_period_marks(res, bis, upperBis, rawBars, atr, macdArr, pi, periodMa
     anchoredBuyPts = mergeNearFirstSecond(anchoredBuyPts, "1买", "2买", "真1买", nearPrice)
     sellPts = mergeNearFirstSecond(sellPts, "1卖", "2卖", "真1卖", nearPrice)
 
-    # 每类只保留时间上最近 keep 个
-    anchoredBuyPts = keepRecentEach(anchoredBuyPts, keep)
-    sellPts = keepRecentEach(sellPts, keep)
+    # 每周期不分类：买卖点合并后只保留时间上最近 keep 个，再按 type 末字拆回买/卖
+    keptPts = keepRecentAll(anchoredBuyPts + sellPts, keep)
+    anchoredBuyPts = [p for p in keptPts if p["type"].endswith("买")]
+    sellPts = [p for p in keptPts if p["type"].endswith("卖")]
 
     # 汇总标记：时间吸附到本周期 bar 边界；rawTime/rawPrice 保存原始点位（共振判定用）
     marks = []

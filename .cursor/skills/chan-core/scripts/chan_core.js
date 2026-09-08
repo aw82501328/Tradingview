@@ -1560,6 +1560,12 @@ function keepRecentEach(points, keep = 1) {
   return out.sort((a, b) => a.time - b.time);
 }
 
+/** 每周期买卖点不分类（买+卖合并），只保留时间上最近 keep 个（现行主流程保留策略） */
+function keepRecentAll(points, keep = 10) {
+  const n = Math.max(1, Math.floor(keep) || 1);
+  return [...points].sort((a, b) => b.time - a.time).slice(0, n).sort((a, b) => a.time - b.time);
+}
+
 // ============================================================
 // 导出
 // ============================================================
@@ -1725,4 +1731,5 @@ module.exports = {
   isSameAsUpperBi,
   snapToOwnBar,
   keepRecentEach,
+  keepRecentAll,
 };

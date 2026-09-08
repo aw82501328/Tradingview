@@ -34,19 +34,31 @@ def parse_from(s):
     return calendar.timegm(datetime.datetime(y, m, d).timetuple())
 
 
-def build_full_chain(bars_by_period, periods, with_marks=True):
+def build_full_chain(bars_by_period, periods, with_marks=True, sr_types=None, fib_levels=None,
+                     boll_length=None, boll_mult=None):
     """全链路（对整段数据一次性计算），返回各阶段结果。
 
     30S（--with-30s 追加）只参与 bis 计算与进出场（compute_entries），
     不进 marks/sr/plan——与 JS 端语义一致（mark-buy-sell/mark-sr-flip/trading-plan
     的周期不含 30S，sr_flip 的 LEVEL_ORDER 也未收录 30S）。
+    sr_types/fib_levels 透传给 compute_srflip（None 用其默认 cluster+boll / 0.382,0.5,0.618）；
+    boll_length/boll_mult 透传 BOLL 周期与标准差倍数（None 用默认 26/2）。
     """
     core = [p for p in periods if str(p).upper() != "30S"]
     bis = build_bis(bars_by_period, periods)
     marks = {}
     if with_marks:
         marks = compute_all_marks(bis, bars_by_period, core, fromTs=None)
-    sr = compute_srflip(bis, bars_by_period, core)
+    srKw = {}
+    if sr_types is not None:
+        srKw["srTypes"] = tuple(sr_types)
+    if fib_levels is not None:
+        srKw["fibLevels"] = fib_levels
+    if boll_length is not None:
+        srKw["bollLength"] = boll_length
+    if boll_mult is not None:
+        srKw["bollMult"] = boll_mult
+    sr = compute_srflip(bis, bars_by_period, core, **srKw)
     plan = compute_plan(bis, bars_by_period, core)
     srLevels = (sr or {}).get("merged") or []
     entries = compute_entries(bis, bars_by_period, plan, srLevels,
@@ -118,6 +130,14 @@ def main(argv=None):
     ap.add_argument("--warmup", type=int, default=60, help="预热K线数，默认 60")
     ap.add_argument("--no-draw", action="store_true", help="不把成交箭头回画到图表")
     ap.add_argument("--no-marks", action="store_true", help="回测时跳过买卖点标记计算（更快）")
+    ap.add_argument("--sr-types", default=None,
+                    help="支阻位类型开关，逗号分隔 cluster,boll（可选 cluster/fib/boll，默认 cluster,boll，与 JS --sr-types 一致）")
+    ap.add_argument("--fib-levels", default=None,
+                    help="黄金分割比率，逗号分隔（默认 0.382,0.5,0.618）")
+    ap.add_argument("--boll-length", type=int, default=None,
+                    help="BOLL SMA 周期（默认 26，已收盘K线口径）")
+    ap.add_argument("--boll-mult", type=float, default=None,
+                    help="BOLL 标准差倍数（默认 2）")
     args = ap.parse_args(argv)
 
     periods = [p.strip() for p in args.periods.split(",") if p.strip()]
@@ -140,13 +160,20 @@ def main(argv=None):
             print(f"  {res:>4}: 无数据")
 
     # 2. 全链路（实时态摘要）
-    chain = build_full_chain(bars_by_period, periods, with_marks=not args.no_marks)
+    sr_types = [t.strip().lower() for t in args.sr_types.split(",") if t.strip()] if args.sr_types else None
+    fib_levels = ([float(x.strip()) for x in args.fib_levels.split(",") if x.strip()]
+                  if args.fib_levels else None)
+    chain = build_full_chain(bars_by_period, periods, with_marks=not args.no_marks,
+                             sr_types=sr_types, fib_levels=fib_levels,
+                             boll_length=args.boll_length, boll_mult=args.boll_mult)
     print_chain(chain, periods)
 
     # 3. 点状回测
     print("\n回测中（逐根K线重放整条链路）...")
     result = run_backtest(bars_by_period, periods=periods,
                           warmup_bars=args.warmup, with_marks=not args.no_marks,
+                          sr_types=sr_types, fib_levels=fib_levels,
+                          boll_length=args.boll_length, boll_mult=args.boll_mult,
                           log=lambda *a: print(*a) if a and a[0].startswith("回测") else None)
 
     # 4. 打印统计

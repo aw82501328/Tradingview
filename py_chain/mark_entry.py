@@ -57,7 +57,8 @@ def findDivergePoints(bis, macdArr):
             refer = cand
             break
         if refer is not None and cur["endPrice"] < refer["endPrice"] and isBiDiverge(cur, refer, macdArr):
-            points.append({"time": cur["endTime"], "price": cur["endPrice"], "direction": "long"})
+            points.append({"time": cur["endTime"], "price": cur["endPrice"],
+                           "direction": "long", "referStart": refer["startTime"]})
 
     # 做空（顶背驰）：上涨笔创新高 + 背驰
     upIdx = [i for i, b in enumerate(bis) if b["type"] == "up"]
@@ -71,9 +72,176 @@ def findDivergePoints(bis, macdArr):
             refer = cand
             break
         if refer is not None and cur["endPrice"] > refer["endPrice"] and isBiDiverge(cur, refer, macdArr):
-            points.append({"time": cur["endTime"], "price": cur["endPrice"], "direction": "short"})
+            points.append({"time": cur["endTime"], "price": cur["endPrice"],
+                           "direction": "short", "referStart": refer["startTime"]})
 
     return points
+
+
+# ============================================================
+# 区间套下沉判定（SPEC_divergence_chanset.md 规则 1/2/3）
+# ============================================================
+#
+# 规则 1（展开下沉）：候选顶/底 P，从检测周期 X 的「以 P 为终点的笔」开始——该级笔内部，
+#   若次一级别存在 ≥3 笔结构（段间不跨该级上级笔边界，含形成中延伸段计 1 笔）且末段
+#   终点即 P → 下沉到次级别，重复；次级别展开不足 3 笔 → 停止下沉，在本级判定。
+# 规则 2（跨级禁止）：候选背驰段的参照笔必须与候选段同处于其所属上级笔内部；
+#   参照属更早的上级笔（跨级比较）→ 候选无效。
+# 规则 3（归属）：markRes = 下沉停止的那一级。下沉上限 = 检测周期 X（不越过 X 向上归属）。
+
+
+def _upperResOf(periodData, res):
+    """periodData 中 res 的最近上级（sec 更大的最小者，须有笔数据）；无则 None。"""
+    sec = intervalSecOf(res) or 0
+    up = None
+    for r, pd in periodData.items():
+        s = intervalSecOf(r) or 0
+        if s > sec and (up is None or s < intervalSecOf(up)) and pd and pd.get("bis"):
+            up = r
+    return up
+
+
+def levelsBelow(periodData, X):
+    """检测周期 X 之下的**连续**低级别链（逐级映射 lowerResOf：60→15→3；3 之下挂 30S）。
+    某级无笔数据（<3 笔）则链在该级截断——区间套逐级下沉、不可跳级
+    （60 与 3 之间缺 15 时链止于 60，不得由 60 直接下到 3）。"""
+    chain = []
+    cur = X
+    while True:
+        nxt = lowerResOf(cur)
+        if nxt is None and str(cur) == "3":
+            nxt = "30S"  # 3 分钟之下挂 30 秒（--with-30s 时加载）
+        if nxt is None:
+            break
+        pd = periodData.get(nxt)
+        if not pd or not pd.get("bis") or len(pd["bis"]) < 3:
+            break
+        chain.append(nxt)
+        cur = nxt
+    return chain
+
+
+def biEndingAt(bis, pTime, tol, wantType):
+    """找「以 pTime 为终点」的笔：从尾部向前找第一根 endTime 与 pTime 相差 ≤ tol
+    且方向匹配的笔（不同级别端点时间有不超过 1 根本级 bar 的偏移，区间套同一结构点）。"""
+    for i in range(len(bis) - 1, -1, -1):
+        b = bis[i]
+        if wantType is not None and b["type"] != wantType:
+            continue
+        if abs(b["endTime"] - pTime) <= tol:
+            return b
+    return None
+
+
+def _upperContainingBi(periodData, res, bi):
+    """找 res 最近上级中包含笔 bi 的上级笔（bi 区间落在上级笔区间内，容差 1 根上级 bar；
+    末笔视为开放段 +∞——形成中的上级笔，与 buildZSByUpper open_last 口径一致）。"""
+    up = _upperResOf(periodData, res)
+    if up is None:
+        return None
+    tol = intervalSecOf(up) or 0
+    ub = periodData[up]["bis"]
+    for i, u in enumerate(ub):
+        last_open = (i == len(ub) - 1)
+        if u["startTime"] - tol <= bi["startTime"] and (u["endTime"] + tol >= bi["endTime"] or last_open):
+            return u
+    return None
+
+
+def _expansionCount(bisL, parentBi, endT, tolStart, tolEnd):
+    """数 lower 级笔在上级笔 parentBi 内部的展开笔数：startTime ≥ parentBi.startTime - tolStart
+    且 endTime ≤ endT + tolEnd（段间不跨上级笔边界；含形成中延伸段计 1 笔）。"""
+    cnt = 0
+    for b in bisL:
+        if b["startTime"] > endT + tolEnd:
+            break
+        if b["startTime"] >= parentBi["startTime"] - tolStart:
+            cnt += 1
+    return cnt
+
+
+def _virtualBi(afterBi, pTime):
+    """虚拟形成笔：X 末段端点已过（如 60m 平台顶 4464.23 后的近等后顶 4461.7，
+    图表最终结构经「近等双顶取后顶」并入同一笔；当下时刻该替换尚未确认）——
+    以「末段端点 → P」的开放段作为容器参与展开计数（SPEC v1 口径：上级笔未闭合，
+    用延伸中的上级笔 + 已闭合段计数）。"""
+    return {"startTime": afterBi["endTime"], "endTime": pTime,
+            "type": "down" if afterBi["type"] == "up" else "up",
+            "startPrice": afterBi["endPrice"], "endPrice": None}
+
+
+def sinkChainRealtime(periodData, X, wantDir):
+    """当下制下沉链：P = 候选顶/底（随下沉逐级发现的各级末段当下极值）。
+    X 级承载笔 B_X 两种形态：
+      ① 末段终点 ≈ P（通常：X 末段与下级末段共享当下极值）→ B_X = X 末段；
+      ② 下级末段越过 X 末段端点（X 端点已过、后续反向结构未确认为笔，案例 A）→
+         B_X = 虚拟形成笔（X 末段端点 → P 开放段），段内展开 ≥3 同样下沉。
+    @returns (stopRes, parentBi)：stopRes=下沉停止级（可为 X 自身）；parentBi=停止级段
+    的所属上级笔（规则2 参照 containment 窗口）；链不通返回 (None, None)。"""
+    wantType = "down" if wantDir == "long" else "up"
+    bisX = (periodData.get(X) or {}).get("bis") or []
+    if not bisX or bisX[-1]["type"] != wantType:
+        return None, None  # X 末段与候选方向不符（确认中的反向笔内）→ 无链
+    C, B_C = X, bisX[-1]
+    parentBi = None
+    for L in levelsBelow(periodData, X):
+        secC = intervalSecOf(C) or 0
+        secL = intervalSecOf(L) or 0
+        bisL = periodData[L]["bis"]
+        F_L = bisL[-1]  # L 的形成中段（已延伸到当下极值）
+        if F_L["type"] != wantType or F_L["endTime"] <= B_C["startTime"]:
+            break  # L 末段非候选段（方向不符/早于容器起点）
+        if abs(F_L["endTime"] - B_C["endTime"]) <= secC:
+            container = B_C                       # ① 两级共享当下极值
+        elif F_L["endTime"] > B_C["endTime"] + secC:
+            container = _virtualBi(B_C, F_L["endTime"])  # ② X 端点已过 → 虚拟开放段
+        else:
+            break
+        cnt = _expansionCount(bisL, container, F_L["endTime"], secC, secL)
+        if cnt >= 3:
+            parentBi, C, B_C = container, L, F_L
+        else:
+            break
+    if parentBi is None:
+        # 从未下沉（停止级 = X）：参照 containment 用 X 的上级包含笔（开放末笔）
+        parentBi = _upperContainingBi(periodData, X, bisX[-1])
+    return C, parentBi
+
+
+def sinkChainConfirm(periodData, X, pTime, pDir):
+    """确认制下沉链：P = 已完成背驰笔端点。X 级承载笔 B_X：
+      ① X 级存在「以 P 为终点」的笔（任意位置，含末段延伸笔）→ 该笔；
+      ② P 晚于 X 末段端点（X 端点已过、后续反向结构未确认，案例 A 同型）→ 虚拟形成笔；
+      其余（P 早于末段端点且无精确匹配）→ 无链（候选无效）。
+    @returns (stopRes, parentBi)，语义同 sinkChainRealtime；stopRes=None 表示无链。"""
+    wantType = "up" if pDir == "short" else "down"
+    bisX = (periodData.get(X) or {}).get("bis") or []
+    if not bisX:
+        return None, None
+    secX = intervalSecOf(X) or 0
+    B_C = biEndingAt(bisX, pTime, secX, wantType)
+    if B_C is None:
+        if pTime > bisX[-1]["endTime"] + secX:
+            B_C = _virtualBi(bisX[-1], pTime)  # ② 虚拟形成笔（开放段）
+        else:
+            return None, None
+    C = X
+    parentBi = None
+    for L in levelsBelow(periodData, X):
+        secC = intervalSecOf(C) or 0
+        secL = intervalSecOf(L) or 0
+        bisL = periodData[L]["bis"]
+        F_L = biEndingAt(bisL, pTime, secL, wantType)
+        if F_L is None:
+            break
+        cnt = _expansionCount(bisL, B_C, F_L["endTime"], secC, secL)
+        if cnt >= 3:
+            parentBi, C, B_C = B_C, L, F_L
+        else:
+            break
+    if parentBi is None and C == X:
+        parentBi = _upperContainingBi(periodData, X, B_C)
+    return C, parentBi
 
 
 # ============================================================
@@ -202,12 +370,13 @@ def zsExitWeak(bis, upperBis, macdArr, barSec, ratio=1.0, wantDir="short"):
 
 
 def lowerDiverge(periodData, X, wantDir):
-    """以下级别出现背驰：收集所有更低周期（intervalSecOf 更小）中方向匹配的背驰点，
-    按时间**降序**返回候选列表（最新的在前）。
-    调用方（evaluateEntry）依次尝试候选并做支阻位校验，失败回退次新——
-    避免「--with-30s 后高频 30S 背驰点抢占原级别点、而 30S 微观点又远离支阻位
-    导致信号彻底消失」的问题（如 2026-09-04 13:39 的 3分钟背驰级别信号）。
-    @returns [ { res, point:{time,price,direction} }, ... ] 按 point.time 降序
+    """以下级别出现背驰（区间套下沉版，SPEC_divergence_chanset 规则 1/2/3）：
+    收集所有更低周期中方向匹配的背驰点后逐个做下沉链校验，仅保留
+    「候选级别 == 该点下沉停止级」且「参照笔与候选段同处其所属上级笔内部」的候选；
+    按时间**降序**返回（最新的在前）。
+    调用方（evaluateEntry）依次尝试候选并做支阻位校验，失败回退次新——过滤后所见
+    候选已全部下沉合法，天然不会把高级别候选替换成跨级 3m/30S 微点。
+    @returns [ { res, point:{time,price,direction,referStart} }, ... ] 按 point.time 降序
     """
     xSec = intervalSecOf(X) or float("inf")
     cands = []
@@ -225,8 +394,18 @@ def lowerDiverge(periodData, X, wantDir):
             if p["direction"] != wantDir:
                 continue
             cands.append({"res": res, "point": p})
-    cands.sort(key=lambda c: c["point"]["time"], reverse=True)  # 最新在前
-    return cands
+    filtered = []
+    for c in cands:
+        stopRes, parentBi = sinkChainConfirm(periodData, X, c["point"]["time"], c["point"]["direction"])
+        if stopRes != c["res"]:
+            continue  # 规则 1/3：该点的下沉停止级不是候选级别（其结构已在停止级或更高级判定）
+        if parentBi is not None:
+            tol = intervalSecOf(c["res"]) or 0
+            if (c["point"].get("referStart") or 0) < parentBi["startTime"] - tol:
+                continue  # 规则 2：参照跨出候选段所属上级笔 → 候选无效
+        filtered.append(c)
+    filtered.sort(key=lambda c: c["point"]["time"], reverse=True)  # 最新在前
+    return filtered
 
 
 def nearSr(price, srLevels, nearTol):
@@ -336,71 +515,76 @@ def _barsSince(times, t0, tCut):
 
 def realtimeLowerDiverge(periodData, X, wantDir, tCut,
                           periodTimes=None, minBars=REALTIME_MIN_BARS):
-    """当下背驰：低级别「形成中段」实时对比参照笔（每根 fine 收盘调用）。
+    """当下背驰（区间套下沉版，每根 fine 收盘调用）。
 
-    形成中段 = 低级别笔列表最后一笔——回测引擎的增量状态已用 extendLastBiFrom
+    形成中段 = 笔列表最后一笔——回测引擎的增量状态已用 extendLastBiFrom
     把它延伸到最新极值（endTime/endPrice = 当下极值），天然就是"正在走的这段"。
 
-    条件（与确认制 findDivergePoints 同一套背驰标准，只是对象换成形成中段）：
+    下沉判定（SPEC_divergence_chanset 规则 1/2/3）：对 (X, wantDir) 先走下沉链
+    sinkChainRealtime（P = X 末段当前极值），只在「下沉停止级 S」产候选——
+    S 级展开不足 3 笔的更低级别（如与其上级 15m 笔同笔的 3m 末段）不再产候选；
+    S 可为 X 自身（次级别展开不足时在本级判定）。
+
+    候选条件（与确认制 findDivergePoints 同一套背驰标准，对象换成 S 级形成中段）：
       - 段方向匹配（做多→形成中下跌段 / 做空→形成中上涨段）；
       - 段长 ≥ minBars（够笔门槛，见 REALTIME_MIN_BARS）；
       - 创新低/新高：段当前极值 < refer.endPrice（多）/ > refer.endPrice（空）；
       - isBiDiverge（当下对比）：绿柱面积变小 或 DIF低点抬高 或 绿柱最大高度变小（OR）。
-    参照笔 = 向前最近同向**已完成**笔（跳过幅度 < 当前段 50% 的次级别回调，同确认制）。
+    参照笔 = 向前最近同向**已完成**笔（跳过幅度 < 当前段 50% 的次级别回调），
+    且必须与候选段同处其所属上级笔内部（规则 2）——参照跨上级笔边界则候选无效。
 
     @param periodTimes   各周期K线时间数组（升序，二分用）；缺省时从 periodData[res].bars 现建
-    @returns 候选列表 [ { res, point:{time,price,direction}, segStart } ]，
-             级别从大到小排序（次级别优先于次次级别），每级别最多 1 个（形成中段）
+    @returns 候选列表（≤1 条）[ { res, point:{time,price,direction}, segStart } ]
     """
-    xSec = intervalSecOf(X) or float("inf")
+    S, parentBi = sinkChainRealtime(periodData, X, wantDir)
+    if S is None:
+        return []
+    pd = periodData.get(S) or {}
+    bis = pd.get("bis") or []
+    if len(bis) < 2:
+        return []  # 需有参照笔
     wantType = "down" if wantDir == "long" else "up"
-    cands = []
-    lowers = []
-    for res, pd in periodData.items():
-        sec = intervalSecOf(res) or 0
-        if sec < xSec and pd and pd.get("bis") and len(pd["bis"]) >= 3:
-            lowers.append((sec, res, pd))
-    lowers.sort(key=lambda x: -x[0])  # 次级别（更大的低级别）在前
-    for _sec, res, pd in lowers:
-        bis = pd["bis"]
-        F = bis[-1]  # 形成中段（引擎增量状态已延伸到当前极值）
-        if F["type"] != wantType:
+    F = bis[-1]  # S 级形成中段（引擎增量状态已延伸到当前极值）
+    if F["type"] != wantType:
+        return []
+    times = (periodTimes or {}).get(S)
+    if not times:
+        times = [b["time"] for b in (pd.get("bars") or [])]
+    if _barsSince(times, F["startTime"], tCut) < minBars:
+        return []  # 段太短（微回调/微反弹），不算够笔
+    # 参照笔：向前最近同向已完成笔（不含形成中段），跳过幅度不足的次级别回调；
+    # 规则 2：参照须与 F 同处上级笔内部（更早的参照只会更靠外，直接无效）
+    refer = None
+    secS = intervalSecOf(S) or 0
+    for j in range(len(bis) - 2, -1, -1):
+        cand = bis[j]
+        if cand["type"] != F["type"]:
             continue
-        times = (periodTimes or {}).get(res)
-        if not times:
-            times = [b["time"] for b in (pd.get("bars") or [])]
-        if _barsSince(times, F["startTime"], tCut) < minBars:
-            continue  # 段太短（微回调/微反弹），不算够笔
-        # 参照笔：向前最近同向已完成笔（不含形成中段），跳过幅度不足的次级别回调
-        refer = None
-        for j in range(len(bis) - 2, -1, -1):
-            cand = bis[j]
-            if cand["type"] != F["type"]:
-                continue
-            if cand["span"] < F["span"] * 0.5:
-                continue
-            refer = cand
-            break
-        if refer is None:
+        if cand["span"] < F["span"] * 0.5:
             continue
-        madeNew = F["endPrice"] < refer["endPrice"] if wantDir == "long" \
-            else F["endPrice"] > refer["endPrice"]
-        if not madeNew:
-            continue
-        # 当下对比 MACD：窗口取 [refer.startTime, F.endTime] 的切片（避免全量数组线性扫）
-        macdArr = pd.get("macdArr") or []
-        macdT = pd.get("macdTimes") or [m["time"] for m in macdArr]
-        if not macdT:
-            continue
-        lo = bisect.bisect_left(macdT, refer["startTime"])
-        hi = bisect.bisect_right(macdT, F["endTime"])
-        if not isBiDiverge(F, refer, macdArr[lo:hi]):
-            continue
-        cands.append({"res": res,
-                      "point": {"time": F["endTime"], "price": F["endPrice"],
-                                "direction": wantDir},
-                      "segStart": F["startTime"]})
-    return cands
+        if parentBi is not None and cand["startTime"] < parentBi["startTime"] - secS:
+            break  # 参照跨出所属上级笔 → 候选无效（不回退更早）
+        refer = cand
+        break
+    if refer is None:
+        return []
+    madeNew = F["endPrice"] < refer["endPrice"] if wantDir == "long" \
+        else F["endPrice"] > refer["endPrice"]
+    if not madeNew:
+        return []
+    # 当下对比 MACD：窗口取 [refer.startTime, F.endTime] 的切片（避免全量数组线性扫）
+    macdArr = pd.get("macdArr") or []
+    macdT = pd.get("macdTimes") or [m["time"] for m in macdArr]
+    if not macdT:
+        return []
+    lo = bisect.bisect_left(macdT, refer["startTime"])
+    hi = bisect.bisect_right(macdT, F["endTime"])
+    if not isBiDiverge(F, refer, macdArr[lo:hi]):
+        return []
+    return [{"res": S,
+             "point": {"time": F["endTime"], "price": F["endPrice"],
+                       "direction": wantDir},
+             "segStart": F["startTime"]}]
 
 
 def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLevels,
@@ -410,7 +594,8 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
 
     三条件与确认制同构，差异只在"何时评"与"②用什么评"：
       ① 够笔：检测周期最后一笔（引擎中=延伸中的形成段）方向匹配且段长 ≥ REALTIME_MIN_BARS；
-      ② 当下背驰：realtimeLowerDiverge（形成中段创新低/新高 + 当拍 MACD 对比）；
+      ② 当下背驰：realtimeLowerDiverge（区间套下沉到停止级，仅在该级的形成中段上
+         判创新低/新高 + 当拍 MACD 对比，SPEC_divergence_chanset 规则 1/2/3）；
       ③ 支阻位附近：形成中段当前极值价 vs srLevels（价差 ≤ nearAtr × 检测周期ATR）。
     策略专属条件与确认制共用（strategyExtraOk）。
 

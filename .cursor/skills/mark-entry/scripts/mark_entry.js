@@ -5,6 +5,10 @@
  *   - 买点（多头）= 向上红色箭头（arrow_up）
  *   - 卖点（空头）= 向下绿色箭头（arrow_down）
  *
+ * 「以下级别背驰」采用区间套下沉判定（SPEC_divergence_chanset.md 规则 1/2/3，
+ * 与 py_chain/mark_entry.py 对齐）：候选点先走下沉链（sinkChainConfirm），
+ * 只在「下沉停止级」产生候选；参照笔必须与候选段同处其所属上级笔内部。
+ *
  * 出场规则（同向持仓互斥：同方向持仓未终局不再开新仓，多空互不影响）：
  *   - 止损：盘中破坏进场参考的支阻位（方向感知选位：short 上方最近 / long 下方最近）
  *   - 止盈1：背驰周期够笔（有利方向笔完成）→ 保本（止损位上移至进场价）
@@ -51,15 +55,11 @@ const getStrArg = (name, def) => {
 // 靠近支阻位阈值（×当前周期ATR）
 const NEAR_ATR = Math.max(parseFloat(getArg("near", 1.0)) || 1.0, 0.01);
 const FROM_DATE = getStrArg("from", "");
-if (!FROM_DATE) {
-  console.log("错误: 必须指定起始日期 --from=YYYY-MM-DD");
-  process.exit(1);
-}
 let FROM_TS = null;
 {
-  const m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(FROM_DATE.trim());
+  const m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec((FROM_DATE || "").trim());
   if (m) FROM_TS = Math.floor(Date.UTC(+m[1], +m[2] - 1, +m[3]) / 1000);
-  else console.log("警告: --from 日期格式应为 YYYY-MM-DD，忽略该参数");
+  else if (FROM_DATE) console.log("警告: --from 日期格式应为 YYYY-MM-DD，忽略该参数");
 }
 // 检测周期列表（默认 4小时/1小时/15分钟/3分钟，从大到小）
 // --with-30s：启用 30 秒级别（ALL_RES 追加 30S，3分钟状态可用 30S 背驰产生进场信号，
@@ -118,9 +118,10 @@ function onlyThisInterval(res) {
  *   - 底背驰：下跌笔创新低 + MACD 背驰（绿柱面积变小 或 DIF低点抬高）
  *   - 顶背驰：上涨笔创新高 + MACD 背驰（红柱面积变小 或 DIF高点变低）
  * 参照笔 = 向前最近同向笔（跳过幅度 < 当前 50% 的次级别回调）。
+ * 候选点含 referStart（参照笔起点时间，供区间套下沉判定的规则 2 参照 containment）。
  * @param {Array} bis 某周期笔列表
  * @param {Array} macdArr 该周期 MACD 数组
- * @returns {Array} [{ time, price, direction }] direction='long'（做多）|'short'（做空）
+ * @returns {Array} [{ time, price, direction, referStart }] direction='long'（做多）|'short'（做空）
  */
 function findDivergePoints(bis, macdArr) {
   if (!bis || bis.length < 3) return [];
@@ -139,7 +140,7 @@ function findDivergePoints(bis, macdArr) {
       break;
     }
     if (refer && cur.endPrice < refer.endPrice && isBiDiverge(cur, refer, macdArr)) {
-      points.push({ time: cur.endTime, price: cur.endPrice, direction: "long" });
+      points.push({ time: cur.endTime, price: cur.endPrice, direction: "long", referStart: refer.startTime });
     }
   }
 
@@ -156,11 +157,155 @@ function findDivergePoints(bis, macdArr) {
       break;
     }
     if (refer && cur.endPrice > refer.endPrice && isBiDiverge(cur, refer, macdArr)) {
-      points.push({ time: cur.endTime, price: cur.endPrice, direction: "short" });
+      points.push({ time: cur.endTime, price: cur.endPrice, direction: "short", referStart: refer.startTime });
     }
   }
 
   return points;
+}
+
+// ============================================================
+// 区间套下沉判定（SPEC_divergence_chanset.md 规则 1/2/3，与 py_chain/mark_entry.py 对齐）
+// ============================================================
+//
+// 规则 1（展开下沉）：候选顶/底 P，从检测周期 X 的「以 P 为终点的笔」开始——该级笔内部，
+//   若次一级别存在 ≥3 笔结构（段间不跨该级上级笔边界，含形成中延伸段计 1 笔）且末段
+//   终点即 P → 下沉到次级别，重复；次级别展开不足 3 笔 → 停止下沉，在本级判定。
+// 规则 2（跨级禁止）：候选背驰段的参照笔必须与候选段同处于其所属上级笔内部；
+//   参照属更早的上级笔（跨级比较）→ 候选无效。
+// 规则 3（归属）：markRes = 下沉停止的那一级。下沉上限 = 检测周期 X（不越过 X 向上归属）。
+
+/**
+ * 检测周期 X 之下的**连续**低级别链（逐级映射 lowerResOf：60→15→3；3 之下挂 30S）。
+ * 某级无笔数据（<3 笔）则链在该级截断——区间套逐级下沉、不可跳级
+ * （60 与 3 之间缺 15 时链止于 60，不得由 60 直接下到 3）。
+ */
+function levelsBelow(periodData, X) {
+  const chain = [];
+  let cur = X;
+  for (;;) {
+    let nxt = lowerResOf(cur);
+    if (nxt === null && String(cur) === "3") nxt = "30S"; // 3 分钟之下挂 30 秒（--with-30s 时加载）
+    if (nxt === null) break;
+    const pd = periodData[nxt];
+    if (!pd || !pd.bis || pd.bis.length < 3) break;
+    chain.push(nxt);
+    cur = nxt;
+  }
+  return chain;
+}
+
+/**
+ * 找「以 pTime 为终点」的笔：从尾部向前找第一根 endTime 与 pTime 相差 ≤ tol
+ * 且方向匹配的笔（不同级别端点时间有不超过 1 根本级 bar 的偏移，区间套同一结构点）。
+ */
+function biEndingAt(bis, pTime, tol, wantType) {
+  for (let i = bis.length - 1; i >= 0; i--) {
+    const b = bis[i];
+    if (wantType !== null && b.type !== wantType) continue;
+    if (Math.abs(b.endTime - pTime) <= tol) return b;
+  }
+  return null;
+}
+
+/** periodData 中 res 的最近上级（sec 更大的最小者，须有笔数据）；无则 null。 */
+function upperResOfIn(periodData, res) {
+  const sec = intervalSecOf(res) || 0;
+  let up = null;
+  for (const r of Object.keys(periodData)) {
+    const s = intervalSecOf(r) || 0;
+    if (s > sec && (!up || s < intervalSecOf(up)) && periodData[r] && periodData[r].bis) up = r;
+  }
+  return up;
+}
+
+/**
+ * 找 res 最近上级中包含笔 bi 的上级笔（bi 区间落在上级笔区间内，容差 1 根上级 bar；
+ * 末笔视为开放段 +∞——形成中的上级笔）。
+ */
+function upperContainingBi(periodData, res, bi) {
+  const up = upperResOfIn(periodData, res);
+  if (up === null) return null;
+  const tol = intervalSecOf(up) || 0;
+  const ub = periodData[up].bis;
+  for (let i = 0; i < ub.length; i++) {
+    const u = ub[i];
+    const lastOpen = i === ub.length - 1;
+    if (u.startTime - tol <= bi.startTime && (u.endTime + tol >= bi.endTime || lastOpen)) return u;
+  }
+  return null;
+}
+
+/**
+ * 数 lower 级笔在上级笔 parentBi 内部的展开笔数：startTime ≥ parentBi.startTime - tolStart
+ * 且 endTime ≤ endT + tolEnd（段间不跨上级笔边界；含形成中延伸段计 1 笔）。
+ */
+function expansionCount(bisL, parentBi, endT, tolStart, tolEnd) {
+  let cnt = 0;
+  for (const b of bisL) {
+    if (b.startTime > endT + tolEnd) break;
+    if (b.startTime >= parentBi.startTime - tolStart) cnt++;
+  }
+  return cnt;
+}
+
+/**
+ * 虚拟形成笔：X 末段端点已过（如 60m 平台顶 4464.23 后的近等后顶 4461.7，
+ * 图表最终结构经「近等双顶取后顶」并入同一笔；当下时刻该替换尚未确认）——
+ * 以「末段端点 → P」的开放段作为容器参与展开计数（SPEC v1 口径：上级笔未闭合，
+ * 用延伸中的上级笔 + 已闭合段计数）。
+ */
+function virtualBiOf(afterBi, pTime) {
+  return {
+    startTime: afterBi.endTime,
+    endTime: pTime,
+    type: afterBi.type === "up" ? "down" : "up",
+    startPrice: afterBi.endPrice,
+    endPrice: null,
+  };
+}
+
+/**
+ * 确认制下沉链：P = 已完成背驰笔端点。X 级承载笔 B_X：
+ *   ① X 级存在「以 P 为终点」的笔（任意位置，含末段延伸笔）→ 该笔；
+ *   ② P 晚于 X 末段端点（X 端点已过、后续反向结构未确认，如近等双顶平台）→ 虚拟形成笔；
+ *   其余（P 早于末段端点且无精确匹配）→ 无链（候选无效）。
+ * @returns {[null|null, null|object]} [stopRes, parentBi]——stopRes=下沉停止级
+ *   （可为 X 自身，此时无更低级别候选）；parentBi=停止级段的所属上级笔（规则2 参照
+ *   containment 窗口）。stopRes=null 表示无链。
+ */
+function sinkChainConfirm(periodData, X, pTime, pDir) {
+  const wantType = pDir === "short" ? "up" : "down";
+  const bisX = (periodData[X] || {}).bis || [];
+  if (bisX.length === 0) return [null, null];
+  const secX = intervalSecOf(X) || 0;
+  let B_C = biEndingAt(bisX, pTime, secX, wantType);
+  if (B_C === null) {
+    if (pTime > bisX[bisX.length - 1].endTime + secX) {
+      B_C = virtualBiOf(bisX[bisX.length - 1], pTime); // ② 虚拟形成笔（开放段）
+    } else {
+      return [null, null];
+    }
+  }
+  let C = X;
+  let parentBi = null;
+  for (const L of levelsBelow(periodData, X)) {
+    const secC = intervalSecOf(C) || 0;
+    const secL = intervalSecOf(L) || 0;
+    const bisL = periodData[L].bis;
+    const F_L = biEndingAt(bisL, pTime, secL, wantType);
+    if (F_L === null) break;
+    const cnt = expansionCount(bisL, B_C, F_L.endTime, secC, secL);
+    if (cnt >= 3) {
+      parentBi = B_C; C = L; B_C = F_L;
+    } else {
+      break;
+    }
+  }
+  if (parentBi === null && C === X) {
+    parentBi = upperContainingBi(periodData, X, B_C);
+  }
+  return [C, parentBi];
 }
 
 // ============================================================
@@ -302,15 +447,16 @@ function zsExitWeak(bis, upperBis, macdArr, barSec, ratio, wantDir) {
 }
 
 /**
- * 以下级别出现背驰：收集所有更低周期（intervalSecOf 更小）中方向匹配的背驰点，
- * 按时间**降序**返回候选列表（最新的在前）。
- * 调用方（evaluateEntry）依次尝试候选并做支阻位校验，失败回退次新——
- * 避免「--with-30s 后高频 30S 背驰点抢占原级别点、而 30S 微观点又远离支阻位
- * 导致信号彻底消失」的问题（如 2026-09-04 13:39 的 3分钟背驰级别信号）。
+ * 以下级别出现背驰（区间套下沉版，SPEC_divergence_chanset 规则 1/2/3，与
+ * py_chain/mark_entry.py lowerDiverge 对齐）：收集所有更低周期中方向匹配的背驰点后
+ * 逐个做下沉链校验，仅保留「候选级别 == 该点下沉停止级」且「参照笔与候选段同处其
+ * 所属上级笔内部」的候选；按时间**降序**返回（最新的在前）。
+ * 调用方（evaluateEntry）依次尝试候选并做支阻位校验，失败回退次新——过滤后所见
+ * 候选已全部下沉合法，天然不会把高级别候选替换成跨级 3m/30S 微点。
  * @param {object} periodData {res: {bis, macdArr, ...}} 全部周期的预取数据
  * @param {string} X         当前检测周期
  * @param {string} wantDir   期望背驰方向 "long"（底背驰）| "short"（顶背驰）
- * @returns {{res:string, point:{time,price,direction}}[]} 候选列表，按 point.time 降序
+ * @returns {{res:string, point:{time,price,direction,referStart}}[]} 候选列表，按 point.time 降序
  */
 function lowerDiverge(periodData, X, wantDir) {
   const xSec = intervalSecOf(X) || Infinity;
@@ -327,8 +473,18 @@ function lowerDiverge(periodData, X, wantDir) {
       cands.push({ res, point: p });
     }
   }
-  cands.sort((a, b) => b.point.time - a.point.time); // 最新在前
-  return cands;
+  const filtered = [];
+  for (const c of cands) {
+    const [stopRes, parentBi] = sinkChainConfirm(periodData, X, c.point.time, c.point.direction);
+    if (stopRes !== c.res) continue; // 规则 1/3：该点的下沉停止级不是候选级别
+    if (parentBi) {
+      const tol = intervalSecOf(c.res) || 0;
+      if ((c.point.referStart || 0) < parentBi.startTime - tol) continue; // 规则 2：参照跨所属上级笔
+    }
+    filtered.push(c);
+  }
+  filtered.sort((a, b) => b.point.time - a.point.time); // 最新在前
+  return filtered;
 }
 
 /**
@@ -544,7 +700,11 @@ function simulatePosition(sig, stopRef, markResData, periodXData) {
 // 主流程
 // ============================================================
 
-(async () => {
+async function main() {
+  if (!FROM_DATE) {
+    console.log("错误: 必须指定起始日期 --from=YYYY-MM-DD");
+    process.exit(1);
+  }
   let client;
   try {
     const targets = await CDP.List({ port: 9222 });
@@ -1217,4 +1377,40 @@ function simulatePosition(sig, stopRef, markResData, periodXData) {
     console.log("Error:", e.message);
     if (client) await client.close();
   }
-})();
+}
+
+// ============================================================
+// 导出（供单元测试复用；与 mark_sr_flip.js 同模式）
+// ============================================================
+
+module.exports = {
+  // 背驰识别（含区间套下沉判定）
+  findDivergePoints,
+  levelsBelow,
+  biEndingAt,
+  upperResOfIn,
+  upperContainingBi,
+  expansionCount,
+  virtualBiOf,
+  sinkChainConfirm,
+  lowerDiverge,
+  // 策略映射与条件判定
+  entryStrategyOf,
+  lastBiOk,
+  brokePrevLow,
+  brokePrevHigh,
+  macdBelowZero,
+  macdAboveZero,
+  zsExitWeak,
+  nearSr,
+  evaluateEntry,
+  // 出场
+  stopRefOf,
+  findBiEvent,
+  simulatePosition,
+};
+
+// 直接运行时才连接 CDP 执行主流程（被 require 时仅导出纯函数，供单元测试）
+if (require.main === module) {
+  main();
+}
