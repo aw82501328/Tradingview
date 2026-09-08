@@ -34,3 +34,14 @@ Thumbs.db
 # dump_baseline 生成的对拍数据快照（可再生成，不入库）
 py_chain/.after/
 py_chain/.baseline/
+
+# 调试残留：probe/shot/截屏/中间 dump（一次性脚本与产物，不入库）
+_probe*.py
+_shot*.py
+_shot*.png
+_clear_marks.py
+_draw3m_*.js
+_dbg*.txt
+_redraw*.txt
+_*.png
+bis_front*.json

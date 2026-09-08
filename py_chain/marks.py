@@ -875,10 +875,12 @@ def draw_sr_marks(rows, cfg=None, clear_first=True, colors=None, log=None):
     return {"drawn": drawn, "cleared": cleared, "errors": errors, "skipped": skipped}
 
 
-# 「删除标记」按钮：清除全部系统标记的三前缀与四 localStorage 键
-# （Web 控制台 ML·/ML·SR、回测 BT·、实时 RT·；与各模块自身前缀/键定义保持一致）
-CLEAR_PREFIXES = ["ML·", "BT·", "RT·"]
-CLEAR_IDS_KEYS = ["mark_list_ids", "mark_sr_ids", "bt_arrow_ids", "rt_arrow_ids"]
+# 「删除标记」按钮：清除全部系统标记的前缀与 localStorage 键
+# （Web 控制台 ML·/ML·SR、回测 BT·、实时 RT·、支阻调试页 SRT·/RAW·；与各模块
+# 自身前缀/键定义保持一致——sr_draw.py 的 SRT_PREFIX/SRT_IDS_KEY/RAW_IDS_KEY 相同值）
+CLEAR_PREFIXES = ["ML·", "BT·", "RT·", "SRT·", "RAW·"]
+CLEAR_IDS_KEYS = ["mark_list_ids", "mark_sr_ids", "bt_arrow_ids",
+                  "rt_arrow_ids", "sr_test_ids", "sr_raw_ids"]
 
 
 def clear_all_marks(cfg=None, log=None):
@@ -939,5 +941,5 @@ def clear_all_marks(cfg=None, log=None):
     )
     with CDPClient(cfg, log=log) as c:
         removed = int(c.evaluate(expr) or 0)
-    log(f"已清除全部系统标记（ML·/BT·/RT· 箭头与支阻横线）{removed} 个")
+    log(f"已清除全部系统标记（ML·/BT·/RT·/SRT·/RAW·）{removed} 个")
     return removed

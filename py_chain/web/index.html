@@ -107,7 +107,7 @@
 </style>
 </head>
 <body>
-<h1>三模式控制台</h1>
+<h1>三模式控制台 <a href="/sr.html" style="float:right;font-size:14px;color:var(--accent);text-decoration:none;">支阻位参数调试 →</a></h1>
 <div class="sub">全量回测（纯后台） · K线回放 · 实时监控 — 同一时间最多运行一种；进场信号实时记录到下方表格</div>
 
 <div class="grid" id="cards"></div>
@@ -445,9 +445,11 @@ function connectSSE() {
     const d = JSON.parse(e.data);
     if (d.mode === 'mark') {
       setMarkStatus(d.msg);
-    } else {
-      addLog(d.mode, d.msg);
+      return;
     }
+    // 守卫：支阻调试页（mode=sr）的日志/进度不发到三模式控制台页
+    if (d.mode !== 'backtest' && d.mode !== 'replay' && d.mode !== 'live') return;
+    addLog(d.mode, d.msg);
   });
   es.addEventListener('mark_done', e => {
     const d = JSON.parse(e.data);
@@ -469,6 +471,7 @@ function connectSSE() {
   });
   es.addEventListener('progress', e => {
     const d = JSON.parse(e.data);
+    if (!MODES.some(x => x.id === d.mode)) return;  // 守卫：非本页模式的进度忽略
     if (!state.modes[d.mode]) state.modes[d.mode] = {};
     state.modes[d.mode].progress = { current: d.current, total: d.total, pct: d.pct };
     const bar = el(`bar-${d.mode}`);

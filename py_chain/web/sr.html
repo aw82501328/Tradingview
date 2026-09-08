@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>支阻位参数调试控制台</title>
+<style>
+:root{
+  --bg:#0f1115; --card:#1a1d24; --border:#2c313c; --text:#d5d9e0; --muted:#8b93a1;
+  --accent:#3b82f6; --buy:#f23645; --sell:#089981; --ok:#089981; --warn:#f0b90b;
+  --chip:#2a2f3a;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:13px/1.5 "Segoe UI",system-ui,sans-serif;padding:14px 18px}
+h1{font-size:19px;color:#fff}
+a{color:var(--accent);text-decoration:none}
+h2{font-size:13px;color:#fff;font-weight:600;margin-bottom:6px;border-bottom:1px solid var(--border);padding-bottom:5px}
+h2 .hint{color:var(--muted);font-weight:400;font-size:11px;margin-left:8px}
+.grid{display:grid;grid-template-columns:372px 1fr;gap:12px;margin-top:12px;align-items:start}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:12px}
+.card.sec{border-color:#2a4a8a}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:5px 0}
+.row label{color:var(--muted);font-size:12px;white-space:nowrap}
+label.chk{color:var(--text);font-size:12.5px}
+input[type=text],input[type=number],select,input[type=color]{background:#0f1219;border:1px solid var(--border);color:var(--text);border-radius:4px;padding:3px 6px;font-size:12px}
+input[type=text]{width:150px}
+input[type=number]{width:64px}
+input[type=color]{width:40px;height:24px;padding:1px;background:#0f1219}
+input[type=checkbox]{accent-color:var(--accent)}
+button{background:#2f3748;color:#fff;border:1px solid #3d4658;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:12px}
+button:hover:not(:disabled){background:#3d4658}
+button.primary{background:#1f4aa8;border-color:#2f6ad6}
+button.primary:hover:not(:disabled){background:#2f6ad6}
+button.danger{background:#5a1d1d;border-color:#8a2b2b}
+button.danger:hover:not(:disabled){background:#8a2b2b}
+button.sm{padding:2px 8px;font-size:11px}
+button:disabled{opacity:.45;cursor:not-allowed}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{border-bottom:1px solid var(--border);padding:2px 6px;text-align:left;white-space:nowrap}
+th{color:var(--muted);font-weight:400;position:sticky;top:0;background:var(--card)}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+tr.group td{background:#161a23;color:#fff;font-weight:600;padding-top:5px}
+tr.member td{background:#10141d;color:var(--muted);border-bottom:1px dashed #232936}
+tr.line:hover td{background:#1d222e}
+.pos{color:var(--sell)} .neg{color:var(--buy)}
+.muted{color:var(--muted)} .small{font-size:11px}
+.badge{display:inline-block;padding:1px 10px;border-radius:10px;font-size:11px;background:var(--chip);border:1px solid var(--border);margin-left:6px}
+.badge.idle{color:var(--accent)} .badge.busy{background:#0d3b31;color:var(--ok)}
+.badge.red{background:#3a1d1d;color:var(--buy)}
+.badge.gold{background:#3d3208;color:var(--warn)}
+.progress{height:8px;background:#0f1219;border-radius:4px;margin:6px 0 2px;overflow:hidden}
+.progress>div{height:100%;width:0;background:linear-gradient(90deg,#2f6ad6,#4f8df9);transition:width .3s}
+.plabel{color:var(--muted);font-size:11px;min-height:15px}
+.logbox{background:#0d1017;border:1px solid var(--border);border-radius:4px;padding:6px 8px;font:11px/1.6 Consolas,Menlo,monospace;height:110px;overflow:auto;color:#9aa3b2}
+.logbox .err{color:var(--buy)}
+fieldset{border:1px solid var(--border);border-radius:6px;padding:6px 9px;margin:6px 0}
+fieldset.wide{grid-column:1/-1}
+legend{font-size:12px;color:#fff;padding:0 5px}
+legend.warn{color:var(--warn);font-weight:600}
+legend .hl{color:var(--warn)}
+.merge-tip{color:var(--muted);font-size:11px;margin:2px 0}
+.banner{display:none;background:#3a2a05;border:1px solid #7a5c10;color:#e8c877;font-size:12px;padding:3px 10px;border-radius:4px;margin:6px 0}
+.banner.show{display:block}
+.tabs{display:flex;gap:4px;margin:6px 0}
+.tabs button{border-radius:4px 4px 0 0}
+.tabs button.on{background:#2f6ad6;border-color:#2f6ad6}
+.details{background:#171b25;border:1px solid var(--border);border-radius:6px;padding:6px 10px;margin-top:8px;font-size:12px}
+.details summary{cursor:pointer;color:var(--accent)}
+.details ul{margin:5px 0 2px 18px;color:var(--muted);font-size:11.5px}
+#stale-note{display:none}
+.dim{opacity:.55}
+.statusline{font-size:12px;color:var(--muted);margin:2px 0 8px}
+.statusline b{color:var(--text)}
+.scrollbox{max-height:460px;overflow:auto;border:1px solid var(--border);border-radius:4px}
+.filterbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px;font-size:12px}
+.filterbar label{color:var(--muted)}
+#cnt{color:var(--muted);font-size:11px}
+</style>
+</head>
+<body>
+<h1>支阻位参数调试控制台 <span class="badge idle" id="badge-busy">idle</span>
+  <a href="/" style="float:right;font-size:13px;">← 三模式控制台</a>
+</h1>
+<div class="statusline">密集区 / 黄金分割 / BOLL 三类同池合并 · 每周期图 ≤2×每侧条数 · 灰线+来源标注 ·
+  <b id="occupy"></b></div>
+
+<div class="grid">
+<!-- ============ 左列 ============ -->
+<div>
+  <!-- ① 数据 -->
+  <div class="card">
+    <h2>① 数据</h2>
+    <div class="row"><label>品种</label><input type="text" id="cfg-symbol" value="OANDA:XAUUSD">
+      <label>起始</label><input type="text" id="cfg-from" value="2026-07-02"></div>
+    <div class="row">
+      <button class="primary" id="btn-compute">计算（缓存优先）</button>
+      <button class="danger" id="btn-refresh" title="从 TradingView 全量重拉所选周期并计算（W 首拉可能数分钟）">刷新数据并计算</button>
+    </div>
+    <div class="merge-tip" id="cache-note"></div>
+  </div>
+
+  <!-- ② 级别矩阵 -->
+  <div class="card">
+    <h2>② 级别矩阵 <span class="hint">勾选=参与计算并作为显示周期</span></h2>
+    <table id="tbl-levels">
+      <thead><tr><th></th><th>级别</th><th>minTouch(触及≥)</th><th>ATR</th></tr></thead>
+      <tbody>
+        <tr data-res="W"><td><input type="checkbox" class="chk-res"></td><td>W 周线</td>
+          <td><input type="number" class="mt" min="1" max="99" value="4"></td><td class="num atr">—</td></tr>
+        <tr data-res="D"><td><input type="checkbox" class="chk-res" checked></td><td>D 日线</td>
+          <td><input type="number" class="mt" min="1" max="99" value="4"></td><td class="num atr">—</td></tr>
+        <tr data-res="240"><td><input type="checkbox" class="chk-res" checked></td><td>240 4小时</td>
+          <td><input type="number" class="mt" min="1" max="99" value="4"></td><td class="num atr">—</td></tr>
+        <tr data-res="60"><td><input type="checkbox" class="chk-res" checked></td><td>60 1小时</td>
+          <td><input type="number" class="mt" min="1" max="99" value="3"></td><td class="num atr">—</td></tr>
+        <tr data-res="15"><td><input type="checkbox" class="chk-res" checked></td><td>15 15分钟</td>
+          <td><input type="number" class="mt" min="1" max="99" value="3"></td><td class="num atr">—</td></tr>
+        <tr data-res="3"><td><input type="checkbox" class="chk-res" checked></td><td>3 3分钟 <span class="muted small">(minTouch 默认8)</span></td>
+          <td><input type="number" class="mt" min="1" max="99" value="8"></td><td class="num atr">—</td></tr>
+      </tbody>
+    </table>
+    <div class="merge-tip">显示周期 L 的候选池 = 级别 ≥ L 的全部合并线（高级别继承到低周期图）。1W/1D 别名与 30S 不入引擎（UI 已归一化为 W/D）。</div>
+  </div>
+
+  <!-- ③ 类型开关 -->
+  <div class="card">
+    <h2>③ 类型开关</h2>
+    <label class="chk"><input type="checkbox" id="t-cluster" checked> 密集区 cluster</label>
+    <div style="margin:3px 0 3px 24px;">
+      <label class="chk small"><input type="checkbox" id="t-flip" checked> 强互换 flip（R2S / S2R）</label><br>
+      <label class="chk small"><input type="checkbox" id="t-recent" checked> 近期极值 recent（RES / SUP）</label>
+    </div>
+    <label class="chk"><input type="checkbox" id="t-fib"> 黄金分割 fib <span class="muted small">（默认关）</span></label><br>
+    <label class="chk"><input type="checkbox" id="t-boll" checked> BOLL boll</label>
+  </div>
+
+  <!-- ⑤ 显示/绘图 + 预设 -->
+  <div class="card">
+    <h2>⑤ 显示 / 绘图</h2>
+    <div class="row">
+      <label>线色</label><input type="color" id="d-color" value="#787b86">
+      <label class="chk small"><input type="checkbox" id="d-text" checked> 文本标注</label>
+      <label class="chk small"><input type="checkbox" id="d-raw"> 调试:叠合并前原始线</label>
+    </div>
+    <div class="row">
+      <button class="primary" id="btn-draw">画图</button>
+      <button class="danger" id="btn-clear">清除本模块线</button>
+    </div>
+    <div class="merge-tip" id="raw-note" style="display:none;">叠加 RAW· 合并前原始候选线：每张图显示 级别 ≥ 本图 的全部来源候选（密集区黄 / 黄金分割蓝 / BOLL 青），与合并后灰线同框对照；只画距现价 ≤ 距离上限×级别ATR 的候选。</div>
+    <div class="row" style="border-top:1px solid var(--border);margin-top:8px;padding-top:7px">
+      <span style="color:#fff;font-size:12px">预设</span>
+      <input type="text" id="preset-name" placeholder="预设名称" maxlength="40">
+      <button class="sm primary" id="btn-preset-save">保存</button>
+      <select id="preset-list" style="width:140px"></select>
+      <button class="sm" id="btn-preset-load">载入</button>
+      <button class="sm danger" id="btn-preset-del">删除</button>
+    </div>
+    <div class="merge-tip" id="loaded-badge"></div>
+  </div>
+</div>
+
+<!-- ============ 右列 ============ -->
+<div>
+  <div class="card">
+    <div class="progress"><div id="prog-bar"></div></div>
+    <div class="plabel" id="prog-label"></div>
+    <div class="logbox" id="logbox"></div>
+    <div class="banner" id="banner">⚠ 参数已改动，<b>结果表与图上仍为上次参数</b> —— 请「重算」后再画图。</div>
+  </div>
+
+  <!-- ④ 分组参数 -->
+  <div class="card sec">
+    <h2>④ 识别与合并参数 <span class="hint">全部为引擎可配置项；改后重算生效</span></h2>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0 12px">
+      <fieldset><legend>密集区识别</legend>
+        <div class="row"><label style="width:158px">聚类容差(×ATR)</label><input type="number" data-k="clusterAtr" value="0.5" min="0.01" step="0.1"></div>
+        <div class="row"><label style="width:158px">每周期候选上限</label><input type="number" data-k="maxPerPeriod" value="50" min="1" step="1"></div>
+      </fieldset>
+      <fieldset><legend>近期极值</legend>
+        <div class="row"><label style="width:158px">聚类容差(×ATR)</label><input type="number" data-k="recentClusterAtr" value="1.0" min="0.1" step="0.1"></div>
+        <div class="row"><label style="width:158px">取最近笔数</label><input type="number" data-k="recentBiCount" value="20" min="1" step="1"></div>
+      </fieldset>
+      <fieldset><legend>强度评分 <span class="muted small" style="font-weight:400">(仅截断与score)</span></legend>
+        <div class="row"><label style="width:158px">触及次数权重</label><input type="number" data-k="touchWeight" value="0.6" min="0" max="1" step="0.05"></div>
+        <div class="row"><label style="width:158px">经过K线权重</label><input type="number" data-k="barsWeight" value="0.4" min="0" max="1" step="0.05"></div>
+      </fieldset>
+      <fieldset><legend>选取 / 显示</legend>
+        <div class="row"><label style="width:158px">距离上限(×线级别ATR)</label><input type="number" data-k="maxDistAtr" value="3.0" min="0.1" step="0.1"></div>
+        <div class="row"><label style="width:158px">每侧条数 sideCount</label><input type="number" data-k="sideCount" value="2" min="1" max="10" step="1"></div>
+      </fieldset>
+    </div>
+
+    <fieldset class="wide"><legend class="warn">══ 跨周期合并 ══ 合并容差 = 值 × 最小周期ATR（看哪些候选被并成一条位置线）</legend>
+      <div class="row">
+        <label>合并容差(×最小周期ATR)</label><input type="number" data-k="mergeAtr" value="0.5" min="0.01" step="0.1" style="width:70px">
+        <span class="merge-tip" id="merge-preview"></span>
+        <button class="sm primary" id="btn-remerge" style="margin-left:auto" title="用当前全部参数重算（含合并容差改动）">改参 → 一键重算</button>
+      </div>
+      <div class="merge-tip">并条后：价按触及次数加权平均 · level=最大来源周期 · 类型冲突按触及多者 · 多来源混合线丢 fib/pending/boll 标记。调大 → 并条更多；调小 → 更少。用「合并池」tab 展开成员与 RAW 叠加核对。</div>
+    </fieldset>
+
+    <fieldset class="wide"><legend>黄金分割 / BOLL</legend>
+      <div class="row"><label style="width:158px">黄金分割比率</label>
+        <input type="text" data-k="fibLevels" value="0.382,0.5,0.618" style="width:150px">
+        <span class="merge-tip">fib 关时忽略；0&lt;r&lt;1 至多 6 项</span></div>
+      <div class="row"><label style="width:158px">BOLL 周期</label><input type="number" data-k="bollLength" value="26" min="2" step="1">
+        <label style="margin-left:10px">σ 倍数</label><input type="number" data-k="bollMult" value="2.0" min="0.5" step="0.1"></div>
+    </fieldset>
+  </div>
+
+  <!-- ⑥ 结果明细表 -->
+  <div class="card">
+    <h2>⑥ 结果明细表
+      <span style="float:right;font-weight:400;font-size:12px">
+        <span class="muted">过滤:</span>
+        <select id="f-family" style="width:92px"><option value="">全部来源</option><option value="cluster">密集区</option><option value="fib">黄金分割</option><option value="boll">BOLL</option><option value="mixed">位置线(混合)</option></select>
+        <select id="f-type" style="width:100px"><option value="">全部子类型</option><option>R2S</option><option>S2R</option><option>RES</option><option>SUP</option><option>上轨</option><option>中轨</option><option>下轨</option></select>
+        <select id="f-level" style="width:72px"><option value="">全部级别</option></select>
+        <label class="chk small"><input type="checkbox" id="f-drawnonly" checked> 仅图上选中</label>
+        <span id="cnt" style="margin-left:6px"></span>
+      </span>
+    </h2>
+    <div class="tabs">
+      <button class="on" data-tab="drawn">图上结果 drawnByPeriod</button>
+      <button data-tab="merged">合并池 merged</button>
+      <button data-tab="periods">原始候选 periods</button>
+    </div>
+    <div class="merge-tip" id="merge-semantics"></div>
+    <div class="filterbar" id="filter-row"></div>
+    <div class="scrollbox"><table id="result-tbl">
+      <thead id="result-thead"></thead>
+      <tbody id="result-body"></tbody>
+    </table></div>
+  </div>
+
+  <details class="details">
+    <summary>语义速查（生成 / 合并 / 显示规则）</summary>
+    <ul>
+      <li>密集区 = 强互换(R2S/S2R：触及≥minTouch 且角色反转或突破) + 近期极值(RES/SUP：最近 N 笔端点、宽容差、无触及要求)；评分 = 触及权重×触及 + 经过K线权重×经K线（候选集内 min-max 归一）</li>
+      <li>黄金分割 = 每方向最新非一类买卖点（引擎内现算）参照笔 × 比率；无已形成点走 pending 预期位</li>
+      <li>BOLL = 每周期最后 <b>一根已收盘K线</b>的 SMA±σ×倍数 三轨；中轨按现价侧定支撑/阻力；不足 length 根无位</li>
+      <li>合并 = 三类同池；价差 ≤ 合并容差×最小周期ATR 并条（价触及加权、level=最大来源周期、混合线去 fib/pending/boll 标记）</li>
+      <li>显示 = 每显示周期池 = 级别 ≥ L 的合并线，距现价最近上/下各 sideCount 条，每条 ≤ 距离上限×线级别ATR</li>
+    </ul>
+  </details>
+</div>
+</div>
+
+<script>
+const LEVELS = ['W', 'D', '240', '60', '15', '3'];
+const LEVEL_NAME = { W: 'W 周线', D: 'D 日线', 240: '240 4H', 60: '60 1H', 15: '15 15m', 3: '3 3m' };
+const FAMILY = { cluster: '密集区', fib: '黄金分割', boll: 'BOLL', mixed: '位置线(混合)' };
+
+const state = { busy: null, active: null, hasResult: false, computedAt: null,
+                cfg: null, meta: null, periods: {}, merged: [], drawn: {}, current: null,
+                tab: 'drawn', expanded: {}, watchdogs: {},
+                sessionComputed: false };   // 本页面会话内是否真实计算成功（画图解锁的唯一依据）
+let logs = [];
+
+function el(id) { return document.getElementById(id); }
+function q(sel) { return document.querySelector(sel); }
+function qa(sel) { return [...document.querySelectorAll(sel)]; }
+
+function fmtTime(t) {
+  if (!t) return '-';
+  const d = new Date((t + 8 * 3600) * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+}
+function num(v) { return (v == null || isNaN(v)) ? '—' : v; }
+function fmt(v, d = 2) { return (v == null || isNaN(v)) ? '—' : Number(v).toFixed(d); }
+
+async function api(path, body, method = 'POST') {
+  try {
+    const opt = { method, headers: {} };
+    if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+    const r = await fetch(path, opt);
+    let data = null;
+    try { data = await r.json(); } catch (e) {}
+    if (!r.ok && data && data.error) throw new Error(data.error);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return data;
+  } catch (e) {
+    log('请求失败：' + e.message, true);
+    return null;
+  }
+}
+
+// ---------- 日志 / 进度 / 忙状态 ----------
+function log(msg, isErr) {
+  const box = el('logbox');
+  const div = document.createElement('div');
+  div.className = isErr ? 'err' : '';
+  div.textContent = '[sr] ' + msg;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+  logs.push(msg);
+  if (logs.length > 300) logs.shift();
+}
+function setBusy(name, timeoutMs) {
+  state.busy = name || null;
+  updateButtons();
+  const badge = el('badge-busy');
+  if (state.busy) {
+    badge.textContent = state.busy === 'compute' ? '计算中' : state.busy === 'refresh' ? '刷新中' :
+                        state.busy === 'draw' ? '画图中' : state.busy === 'clear' ? '清除中' : state.busy;
+    badge.className = 'badge busy';
+    if (timeoutMs) startWatchdog(name, timeoutMs);
+  } else {
+    badge.textContent = 'idle'; badge.className = 'badge idle';
+  }
+}
+function startWatchdog(name, ms) {
+  clearTimeout(state.watchdogs[name]);
+  state.watchdogs[name] = setTimeout(() => {
+    if (state.busy === name) {
+      setBusy(null);
+      log('操作超时未收到完成事件，请重试或刷新页面', true);
+    }
+  }, ms);
+}
+function busyNow() { return state.busy; }
+function anyModeRunning() {
+  return state.active != null;
+}
+function updateButtons() {
+  const busy = state.busy;
+  const occupied = busy || anyModeRunning();
+  // 画图解锁条件（三条件全满足）：
+  //   1) 本页面会话内真实点过「计算」且成功（页面刷新即失效——服务端残留结果不算）
+  //   2) 参数未改动（与最近一次成功计算一致）
+  //   3) 无其它操作/三模式占用
+  const stale = lastComputedSnap != null && cfgSnapshot() !== lastComputedSnap;
+  const drawForbidden = !state.sessionComputed ? '请先「计算」'
+                       : stale ? '参数已改动，需先重新计算'
+                       : '';
+  el('btn-compute').disabled = occupied;
+  el('btn-refresh').disabled = occupied;
+  el('btn-remerge').disabled = occupied;
+  el('btn-draw').disabled = occupied || !!drawForbidden;
+  el('btn-draw').title = drawForbidden || '把当前计算结果画到 TradingView';
+  el('btn-clear').disabled = occupied;
+  el('occupy').textContent = state.active ? `三模式：${state.active} 运行中 —— 支阻操作已禁用` : '';
+  // 全类型关闭时禁算
+  const types = collectCfg().srTypes;
+  if (!types.length && !busy) {
+    el('btn-compute').disabled = true; el('btn-refresh').disabled = true;
+    el('btn-remerge').disabled = true;
+  }
+}
+
+// ---------- 配置收集 / 应用 ----------
+function collectCfg() {
+  const cfg = { symbol: el('cfg-symbol').value.trim() || 'OANDA:XAUUSD',
+                from: el('cfg-from').value.trim() };
+  cfg.periods = qa('.chk-res:checked').map(c => c.closest('tr').dataset.res);
+  const minTouchs = {};
+  qa('#tbl-levels tbody tr').forEach(tr => {
+    if (tr.querySelector('.chk-res').checked)
+      minTouchs[tr.dataset.res] = tr.querySelector('.mt').value;
+  });
+  cfg.minTouchs = minTouchs;
+  cfg.srTypes = [];
+  if (el('t-cluster').checked) cfg.srTypes.push('cluster');
+  if (el('t-fib').checked) cfg.srTypes.push('fib');
+  if (el('t-boll').checked) cfg.srTypes.push('boll');
+  cfg.clusterParts = [];
+  if (el('t-flip').checked) cfg.clusterParts.push('flip');
+  if (el('t-recent').checked) cfg.clusterParts.push('recent');
+  qa('[data-k]').forEach(inp => { cfg[inp.dataset.k] = inp.value; });
+  cfg.color = el('d-color').value;
+  cfg.draw_text = el('d-text').checked;
+  cfg.draw_raw = el('d-raw').checked;
+  return cfg;
+}
+// 仅比对「计算相关」参数：线色/文本标注/调试叠加是画图时才生效的显示选项，
+// 改动不应触发画图按钮变灰（否则换个颜色还得重算一遍）
+function cfgSnapshot() {
+  const c = collectCfg();
+  return JSON.stringify({ symbol: c.symbol, from: c.from, periods: c.periods,
+    minTouchs: c.minTouchs, srTypes: c.srTypes, clusterParts: c.clusterParts,
+    clusterAtr: c.clusterAtr, mergeAtr: c.mergeAtr, recentClusterAtr: c.recentClusterAtr,
+    maxDistAtr: c.maxDistAtr, maxPerPeriod: c.maxPerPeriod, sideCount: c.sideCount,
+    recentBiCount: c.recentBiCount, touchWeight: c.touchWeight, barsWeight: c.barsWeight,
+    fibLevels: c.fibLevels, bollLength: c.bollLength, bollMult: c.bollMult });
+}
+let lastComputedSnap = null;
+function applyCfgToUI(cfg) {
+  el('cfg-symbol').value = cfg.symbol || 'OANDA:XAUUSD';
+  if (cfg.from) el('cfg-from').value = cfg.from;
+  const want = new Set(cfg.periods || []);
+  qa('.chk-res').forEach(c => { c.checked = want.has(c.closest('tr').dataset.res); });
+  (cfg.minTouchs || {});
+  qa('#tbl-levels tbody tr').forEach(tr => {
+    const v = (cfg.minTouchs || {})[tr.dataset.res];
+    if (v != null) tr.querySelector('.mt').value = v;
+  });
+  el('t-cluster').checked = (cfg.srTypes || []).includes('cluster');
+  el('t-fib').checked = (cfg.srTypes || []).includes('fib');
+  el('t-boll').checked = (cfg.srTypes || []).includes('boll');
+  el('t-flip').checked = (cfg.clusterParts || []).includes('flip');
+  el('t-recent').checked = (cfg.clusterParts || []).includes('recent');
+  qa('[data-k]').forEach(inp => {
+    if (inp.dataset.k === 'fibLevels' && Array.isArray(cfg.fibLevels))
+      inp.value = cfg.fibLevels.join(',');
+    else if (cfg[inp.dataset.k] != null) inp.value = cfg[inp.dataset.k];
+  });
+  if (cfg.color) el('d-color').value = cfg.color;
+  el('d-text').checked = cfg.draw_text !== false;
+  el('d-raw').checked = !!cfg.draw_raw;
+  checkStale();
+  updateButtons();   // 程序赋值不触发 input 事件，手动刷新按钮态
+}
+function checkStale() {
+  const stale = lastComputedSnap != null && cfgSnapshot() !== lastComputedSnap;
+  el('banner').classList.toggle('show', stale && state.hasResult);
+  return stale;
+}
+function noteRawToggle() {
+  el('raw-note').style.display = el('d-raw').checked ? 'block' : 'none';
+}
+
+// ---------- 预设 ----------
+async function refreshPresetList() {
+  const r = await api('/api/sr/presets', undefined, 'GET');
+  const sel = el('preset-list');
+  if (!r) return;
+  sel.innerHTML = '';
+  (r.presets || []).forEach(p => {
+    const o = document.createElement('option');
+    o.value = p.name; o.textContent = p.name;
+    sel.appendChild(o);
+  });
+}
+async function savePreset() {
+  const name = el('preset-name').value.trim();
+  if (!name) { log('请输入预设名', true); return; }
+  const r = await api('/api/sr/presets', { name, cfg: collectCfg() });
+  if (r) { log(`预设已保存：${name}` + (r.overwritten ? '（覆盖同名）' : '')); refreshPresetList(); }
+}
+async function loadPreset() {
+  const name = el('preset-list').value;
+  if (!name) return;
+  const r = await api('/api/sr/presets', undefined, 'GET');
+  if (!r) return;
+  const p = (r.presets || []).find(x => x.name === name);
+  if (!p) return;
+  applyCfgToUI(p.cfg);
+  el('loaded-badge').textContent = '已载入: ' + name;
+  el('loaded-badge').style.color = 'var(--warn)';
+  log(`已载入预设：${name}`);
+}
+async function delPreset() {
+  const name = el('preset-list').value;
+  if (!name) return;
+  const r = await api('/api/sr/presets?name=' + encodeURIComponent(name), undefined, 'DELETE');
+  if (r) { log(`已删除预设：${name}`); el('loaded-badge').textContent = ''; refreshPresetList(); }
+}
+
+// ---------- 结果渲染 ----------
+function kindOf(f) {
+  if (f.srcType === 'mixed' || (f.srcType && !FAMILY[f.srcType])) return f.srcType || '';
+  if (f.boll) return 'boll';
+  if (f.fib || f.pending) return 'fib';
+  return 'cluster';
+}
+function lineMemberHtml(m, linePrice) {
+  const kind = m.kind && m.kind !== 'cluster' ? m.kind : (m.recent ? 'recent' : 'cluster');
+  const fam = FAMILY[kind] || kind;
+  const diff = m.price - linePrice;
+  const extra = [];
+  if (m.ratio != null) extra.push('fib ' + m.ratio);
+  if (m.boll) extra.push(m.boll);
+  if (m.pending) extra.push('pending');
+  return `成员: ${fam}·${m.source} ${m.type || ''} 原价 ${fmt(m.price)}` +
+         `（与合并价 ${diff >= 0 ? '+' : ''}${fmt(diff)}）触及 ${m.touchCount}` +
+         (extra.length ? ' [' + extra.join(' / ') + ']' : '');
+}
+function lineDiff(other) { return other; }
+function famName(f) {
+  const k = kindOf(f);
+  return FAMILY[k] || (k === 'cluster' ? '密集区' : k || '—');
+}
+function typeText(f) { return f.type || (f.boll || (f.pending ? '预期' : '—')); }
+
+function buildCols(tab) {
+  if (tab === 'drawn')
+    return [['L', 'level'], ['来源', 'fam'], ['类型', 'type'], ['价', 'price'], ['距现价', 'dist'],
+            ['ATR倍', 'atrX'], ['触及', 'tc'], ['经K线', 'bp'], ['成员', 'mem'], ['锚点', 'bt'], ['标注', 'label']];
+  if (tab === 'merged')
+    return [['级别', 'level'], ['来源', 'fam'], ['类型', 'type'], ['价', 'price'], ['距现价', 'dist'],
+            ['触及', 'tc'], ['成员', 'mem'], ['与上行价差', 'gap'], ['锚点', 'bt'], ['标注', 'label']];
+  return [['周期', 'res'], ['来源', 'fam'], ['类型', 'type'], ['价', 'price'], ['触及', 'tc'], ['经K线', 'bp'], ['锚点', 'bt']];
+}
+function drawnSet() {
+  const s = new Set();
+  for (const L of Object.keys(state.drawn))
+    for (const f of state.drawn[L]) s.add(f.level + '|' + Number(f.price).toFixed(4));
+  return s;
+}
+function drawnMemberSet() {
+  // 图上选中线的合并成员原价（供「原始候选」tab 的仅图上过滤）
+  const s = new Set();
+  for (const L of Object.keys(state.drawn))
+    for (const f of state.drawn[L])
+      for (const m of (f.members || [])) s.add(Number(m.price).toFixed(4));
+  return s;
+}
+function rowPass(f, drawnOnly, L) {
+  const fam = el('f-family').value;
+  const typ = el('f-type').value;
+  const lv = el('f-level').value;
+  if (fam && fam !== kindOf(f)) return false;
+  if (typ && typeText(f) !== typ) return false;
+  if (lv && f.level !== lv) return false;
+  if (!drawnOnly) return true;
+  // 「仅图上选中」：按 tab 语义过滤
+  if (L == null) {
+    // 合并池：只列「图上选中过的合并线」（drawnByPeriod 全部键的并集）
+    return drawnSet().has(f.level + '|' + Number(f.price).toFixed(4));
+  }
+  // 原始候选：只列「被选中线合并掉的候选」（按成员原价命中）
+  return drawnMemberSet().has(Number(f.price).toFixed(4));
+}
+function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function renderTable() {
+  const tab = state.tab;
+  const drawnOnly = el('f-drawnonly').checked;
+  const thead = el('result-thead'), body = el('result-body');
+  const cols = buildCols(tab);
+  thead.innerHTML = '<tr>' + cols.map(c => `<th>${c[0]}</th>`).join('') + '<th></th></tr>';
+  const cur = state.current;
+  const atrs = state.meta && state.meta.per_level_atr || {};
+  let html = '', n = 0;
+  const keyOf = (g, i) => `${tab}-${g}-${i}`;
+
+  const cells = (f, L) => cols.map(c => {
+    const k = c[1];
+    if (k === 'level') return `<td class="num">${f.level ?? '—'}</td>`;
+    if (k === 'res') return `<td>${L ?? '—'}</td>`;
+    if (k === 'fam') return `<td>${esc(famName(f))}</td>`;
+    if (k === 'label') return `<td>${esc(f.label || '—')}</td>`;
+    if (k === 'type') return `<td>${esc(typeText(f))}</td>`;
+    if (k === 'price') return `<td class="num">${fmt(f.price)}</td>`;
+    if (k === 'dist') {
+      const d = cur == null ? null : f.price - cur;
+      if (d == null) return '<td class="num">—</td>';
+      const cls = d >= 0 ? 'pos' : 'neg';
+      return `<td class="num ${cls}">${d >= 0 ? '+' : ''}${fmt(d)}</td>`;
+    }
+    if (k === 'atrX') {
+      const a = atrs[f.level];
+      const d = cur == null || !a ? null : Math.abs(f.price - cur) / a;
+      return `<td class="num">${d == null ? '—' : fmt(d, 1)}×</td>`;
+    }
+    if (k === 'tc') return `<td class="num">${num(f.touchCount)}</td>`;
+    if (k === 'bp') return `<td class="num">${num(f.barsPassed)}</td>`;
+    if (k === 'bt') return `<td>${fmtTime(f.breakTime)}</td>`;
+    if (k === 'mem') return `<td class="num">${(f.members || []).length || '—'}</td>`;
+    if (k === 'gap') return `<td class="num">—</td>`;
+    return '<td></td>';
+  });
+
+  if (tab === 'drawn') {
+    for (const L of Object.keys(state.drawn)) {
+      const lines = state.drawn[L].filter(f => rowPass(f, false, L));
+      html += `<tr class="group"><td colspan="${cols.length + 1}">显示周期 ${LEVEL_NAME[L] || L} · ${lines.length}/${state.drawn[L].length} 条（候选池=级别≥${L} 合并线）</td></tr>`;
+      lines.forEach((f, i) => {
+        n++;
+        const key = keyOf(L, i);
+        const mem = f.members || [];
+        html += `<tr class="line" data-key="${key}">` + cells(f, L).join('') +
+          `<td>${mem.length ? `<button class="sm exp" data-key="${key}">${state.expanded[key] ? '▾收起' : `▸成员${mem.length}`}</button>` : ''}</td></tr>`;
+        if (state.expanded[key])
+          html += `<tr class="member"><td colspan="${cols.length + 1}">${mem.map(m => esc(lineMemberHtml(m, f.price))).join('<br>')}</td></tr>`;
+      });
+    }
+  } else if (tab === 'merged') {
+    const lines = [...state.merged].sort((a, b) => a.price - b.price);
+    let prev = null;
+    lines.forEach((f, i) => {
+      if (!rowPass(f, drawnOnly, null)) return;
+      n++;
+      const key = keyOf('m', i);
+      const mem = f.members || [];
+      const gap = prev == null ? null : f.price - prev.price;
+      prev = f.price;
+      html += `<tr class="line" data-key="${key}">` + cols.map(c => {
+        if (c[1] === 'gap') return `<td class="num">${gap == null ? '—' : fmt(gap)}</td>`;
+        const tds = cells(f, null);
+        const idx = cols.indexOf(c);
+        return tds[idx] || '<td></td>';
+      }).join('') + `<td>${mem.length ? `<button class="sm exp" data-key="${key}">${state.expanded[key] ? '▾收起' : `▸成员${mem.length}`}</button>` : ''}</td></tr>`;
+      if (state.expanded[key])
+        html += `<tr class="member"><td colspan="${cols.length + 1}">${mem.map(m => esc(lineMemberHtml(m, f.price))).join('<br>')}</td></tr>`;
+    });
+  } else {
+    for (const L of Object.keys(state.periods)) {
+      const list = state.periods[L].filter(f => rowPass(f, drawnOnly, L));
+      if (!list.length) continue;
+      html += `<tr class="group"><td colspan="${cols.length + 1}">周期 ${LEVEL_NAME[L] || L} · ${list.length} 条</td></tr>`;
+      list.forEach((f, i) => {
+        n++;
+        html += `<tr class="line">` + cells(f, L).join('') + '<td></td></tr>';
+      });
+    }
+  }
+  body.innerHTML = html || '<tr><td colspan="9" class="muted">（无符合筛选的结果）</td></tr>';
+  el('cnt').textContent = `共 ${n} 行`;
+  updateLevelFilter();
+}
+function updateLevelFilter() {
+  const sel = el('f-level');
+  const keep = sel.value;
+  const lvs = new Set();
+  (state.tab === 'drawn' ? Object.keys(state.drawn)
+    : state.tab === 'merged' ? state.merged.map(f => f.level)
+    : Object.keys(state.periods)).forEach(x => lvs.add(x));
+  sel.innerHTML = '<option value="">全部级别</option>' +
+    LEVELS.filter(l => lvs.has(l)).map(l => `<option ${l === keep ? 'selected' : ''}>${l}</option>`).join('');
+}
+
+function refreshMergeTip() {
+  const m = state.meta;
+  const a = m ? m.merge_tol : null;
+  const atr = m ? m.min_atr : null;
+  const val = el('[data-k="mergeAtr"]').value;
+  el('merge-preview').textContent = m
+    ? `上次计算: ${fmt(val)} × ${fmt(atr)} = ${a != null ? fmt(a) : '—'}；当前控件值 ${val}`
+    : '计算后显示：合并容差 × 最小周期ATR';
+}
+
+async function fetchResult() {
+  const r = await api('/api/sr/result', undefined, 'GET');
+  if (!r || !r.has_result) return;
+  state.cfg = r.cfg; state.meta = r.meta; state.current = r.current_price;
+  state.periods = r.periods || {}; state.merged = r.merged || [];
+  state.drawn = r.drawn_by_period || {};
+  state.hasResult = true; state.computedAt = r.computed_at;
+  lastComputedSnap = cfgSnapshot();
+  // 级别 ATR 回填 + minTouch 显示已就位
+  qa('#tbl-levels tbody tr').forEach(tr => {
+    const a = (state.meta.per_level_atr || {})[tr.dataset.res];
+    tr.querySelector('.atr').textContent = a != null ? fmt(a) : '—';
+  });
+  refreshMergeTip();
+  // 覆盖提示
+  const cov = state.meta.coverage || {};
+  const partial = LEVELS.filter(l => cov[l] === 'partial');
+  el('cache-note').textContent = partial.length
+    ? `⚠ 数据源深度有限，${partial.join('/')} 早于所填起始日期的历史不可得（按可得全量计算）`
+    : '缓存已覆盖所选起始日期';
+  el('cache-note').style.color = partial.length ? 'var(--warn)' : 'var(--ok)';
+  checkStale();
+  renderTable();
+  updateButtons();
+  const d = new Date((state.computedAt + 8 * 3600) * 1000);
+  log(`已载入结果：merged ${state.merged.length} · 图上 ${Object.values(state.drawn).reduce((s, v) => s + v.length, 0)}（${fmtTime(state.computedAt)} 算）`);
+}
+
+// ---------- 操作 ----------
+async function doCompute(mode) {
+  if (busyNow() || anyModeRunning()) return;
+  setBusy(mode === 'refresh' ? 'refresh' : 'compute', 600000); // 拉取大周期可能数分钟
+  el('prog-bar').style.width = '2%';
+  el('prog-label').textContent = '取数检查…';
+  const r = await api('/api/sr/compute', { cfg: collectCfg(), mode });
+  if (!r) setBusy(null);
+}
+async function doDraw() {
+  if (busyNow() || anyModeRunning()) return;
+  if (!state.sessionComputed) { log('请先点「计算」得到结果后再画图', true); return; }
+  setBusy('draw', 180000);
+  const cfg = collectCfg();
+  const r = await api('/api/sr/draw', { color: cfg.color, draw_text: cfg.draw_text,
+                                        draw_raw: cfg.draw_raw, clear_first: true });
+  if (!r) setBusy(null);
+}
+async function doClear() {
+  if (busyNow() || anyModeRunning()) return;
+  setBusy('clear', 90000);
+  const r = await api('/api/sr/clear');
+  if (!r) setBusy(null);
+}
+
+// ---------- 状态自愈 ----------
+// SSE 的 sr_done/log 事件偶发丢失（断线重连、事件先于监听注册等），busy/hasResult
+// 可能停留在旧值导致按钮长期灰置。定时向 /api/sr/state 取服务端权威状态纠正本地：
+//   - 本地 busy 但服务端空闲 → 复位本地（操作其实已完成）
+//   - 服务端有结果但本地没有 → 补拉结果启用「画图」
+async function refreshState() {
+  const r = await api('/api/sr/state', undefined, 'GET');
+  if (!r) return;
+  state.active = r.active || null;
+  if (!state.busy && r.busy) setBusy(r.busy, 0);
+  if (state.busy && !r.busy) setBusy(null);
+  if (r.has_result && !state.hasResult) {
+    state.hasResult = true;
+    state.computedAt = r.computed_at;
+    updateButtons();
+  }
+}
+
+// ---------- SSE ----------
+function connectSSE() {
+  const es = new EventSource('/api/stream');
+  es.addEventListener('init', e => {
+    const d = JSON.parse(e.data);
+    state.active = d.active || null;
+    if (d.sr) {
+      state.hasResult = d.sr.has_result;
+      if (d.sr.busy) setBusy(d.sr.busy === 'refresh' ? 'refresh' : d.sr.busy, 0);
+    }
+    updateButtons();
+  });
+  es.addEventListener('status', e => {
+    const d = JSON.parse(e.data);
+    if (['backtest', 'replay', 'live'].includes(d.mode)) {
+      state.active = (d.state === 'running' || d.state === 'paused') ? d.mode : null;
+      updateButtons();
+    }
+  });
+  es.addEventListener('log', e => {
+    const d = JSON.parse(e.data);
+    if (d.mode === 'sr') log(d.msg);
+  });
+  es.addEventListener('progress', e => {
+    const d = JSON.parse(e.data);
+    if (d.mode !== 'sr') return;
+    const pct = d.pct != null ? d.pct : 0;
+    el('prog-bar').style.width = pct + '%';
+    const ph = { fetch: '取数', bis: '重建笔', compute: '计算' }[d.phase] || d.phase;
+    el('prog-label').textContent = d.total ? `${ph} ${d.current}/${d.total} (${pct}%)`
+                                            : `${ph}… (${pct}%)`;
+  });
+  es.addEventListener('sr_done', e => {
+    const d = JSON.parse(e.data);
+    const busyName = state.busy;
+    setBusy(null);
+    el('prog-label').textContent = '';
+    if (d.error) { log(`操作失败：${d.error}`, true); return; }
+    if (d.op === 'compute') {
+      // 服务端已确认成功：本会话计算标志置位（画图解锁），不等 GET 直接生效
+      if (!d.error) {
+        state.hasResult = true;
+        state.sessionComputed = true;
+        state.computedAt = Date.now() / 1000 | 0;
+        updateButtons();
+      }
+      fetchResult();
+    } else if (d.op === 'draw') {
+      const c = d.counts || {};
+      log(`画图完成：主线 ${c.drawn} 条${c.raw_drawn ? '，成员线 ' + c.raw_drawn + ' 条' : ''}，清除 ${c.cleared} 条`);
+    } else if (d.op === 'clear') {
+      log(`清除完成：${d.removed} 条`);
+    }
+  });
+}
+
+// ---------- 事件绑定 ----------
+function bindEvents() {
+  el('btn-compute').onclick = () => doCompute('auto');
+  el('btn-refresh').onclick = () => doCompute('refresh');
+  el('btn-remerge').onclick = () => { lastComputedSnap = null; doCompute('auto'); };
+  el('btn-draw').onclick = doDraw;
+  el('btn-clear').onclick = doClear;
+  el('btn-preset-save').onclick = savePreset;
+  el('btn-preset-load').onclick = loadPreset;
+  el('btn-preset-del').onclick = delPreset;
+  el('d-raw').onchange = noteRawToggle;
+  el('d-text').onchange = () => {};
+  qa('.tabs button').forEach(b => b.onclick = () => {
+    qa('.tabs button').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    state.tab = b.dataset.tab;
+    renderTable();
+  });
+  ['f-family', 'f-type', 'f-level'].forEach(id => el(id).onchange = renderTable);
+  el('f-drawnonly').onchange = renderTable;
+  document.addEventListener('click', e => {
+    const btn = e.target.closest('.exp');
+    if (btn) {
+      const key = btn.dataset.key;
+      state.expanded[key] = !state.expanded[key];
+      renderTable();
+    }
+  });
+  // 参数改动 → 横幅提示 + 画图按钮即时变灰（需重算后才能再画）
+  qa('input,select').forEach(inp => inp.addEventListener('input', () => { checkStale(); updateButtons(); }));
+  setInterval(() => { checkStale(); updateButtons(); }, 2000);
+  noteRawToggle();
+}
+
+function init() {
+  bindEvents();
+  connectSSE();
+  refreshPresetList();
+  refreshMergeTip();
+  updateButtons();
+  refreshState();                     // 立即与服务端对齐（历史结果/忙状态）
+  setInterval(refreshState, 4000);    // 轮询自愈：SSE 事件丢失不卡按钮
+  log('支阻位调试页就绪。步骤：选级别/类型/参数 → 计算 → 看明细表/画图 → 调整合并容差一键重算。');
+}
+init();
+</script>
+</body>
+</html>

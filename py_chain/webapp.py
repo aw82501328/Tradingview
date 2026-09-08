@@ -18,6 +18,7 @@
 
 import argparse
 import json
+import os
 import queue
 import sys
 import threading
@@ -31,6 +32,7 @@ from .main import parse_from
 from .chan_core import fmtT
 from .monitor import LiveMonitor, ReplayMonitor, clear_rt_markers
 from .marks import draw_signal_marks, draw_sr_marks, clear_signal_marks, clear_all_marks
+from . import sr_service, sr_draw
 
 # ============================================================
 # 全局互斥：三种模式同一时间最多运行一种
@@ -38,8 +40,19 @@ from .marks import draw_signal_marks, draw_sr_marks, clear_signal_marks, clear_a
 _active_lock = threading.Lock()
 _active_mode = None          # 当前运行中的模式名（backtest/replay/live）或 None
 
-# 标记操作（marks/draw、marks/clear）互斥：后台线程执行期间防止并发
+# 标记操作（marks/draw、marks/sr_draw、marks/clear、sr/*）互斥：
+# 都驱动同一张 TradingView 图表，独立锁会让两路 CDP 任务并行切周期
 _marks_lock = threading.Lock()
+
+# 支阻位调试模块状态：busy 当前操作名（compute/refresh/draw/clear）或 None
+_sr_busy = None
+_sr_busy_lock = threading.Lock()
+# 最近一次计算结果槽（只存结果不存 bars；读多写少，浅拷贝保护）
+_sr_result_lock = threading.Lock()
+
+# 参数预设存储（web/sr_presets.json，UTF-8）
+SR_PRESETS_FILE = os.path.join(os.path.dirname(__file__), "web", "sr_presets.json")
+_presets_lock = threading.Lock()
 
 
 def acquire_active(mode):
@@ -63,6 +76,16 @@ def release_active(mode):
 def active_mode():
     with _active_lock:
         return _active_mode
+
+
+def _sr_busy_snapshot():
+    with _sr_busy_lock:
+        return _sr_busy
+
+
+def _set_sr_busy(v):
+    global _sr_busy
+    _sr_busy = v
 
 
 def ensure_idle():
@@ -544,6 +567,106 @@ class ControlApp:
             "replay": ReplayWorker(self.signals, self.broadcaster),
             "live": LiveWorker(self.signals, self.broadcaster),
         }
+        # 支阻位调试模块：最近一次计算结果槽（cfg 快照 / computed_at / result / meta）
+        self.sr = {"cfg": None, "computed_at": None, "result": None, "meta": None}
+
+    def sr_counts(self):
+        """支阻位结果概要（小载荷，供 /api/sr/state 与 status() 使用）。"""
+        with _sr_result_lock:
+            sr = self.sr or {}
+            result = sr.get("result") or {}
+            computed_at = sr.get("computed_at")
+            periods = (sr.get("cfg") or {}).get("periods") or []
+        drawn = result.get("drawnByPeriod") or {}
+        return {
+            "has_result": bool(result),
+            "computed_at": computed_at,
+            "periods": [str(p) for p in periods],
+            "drawn_total": sum(len(v) for v in drawn.values()),
+            "merged": len(result.get("merged") or []),
+            "by_period": {str(k): len(v) for k, v in drawn.items()},
+        }
+
+    @staticmethod
+    def normalize_sr_cfg(cfg):
+        """把页面字符串配置规范化/校验为引擎类型（数字/周期/类型开关/比率）。
+        @raises ValueError 非法值（前端 400）
+        @returns 规范化后的 cfg（periods/from_ts 已就绪；draw 相关字段原样透传）
+        """
+        cfg = dict(cfg or {})
+        try:
+            periods = sr_service.normalize_periods(
+                cfg.get("periods") or sr_service.DEFAULT_LEVELS)
+        except ValueError as e:
+            raise ValueError(str(e))
+        if not periods:
+            raise ValueError("至少勾选一个级别（W/D/240/60/15/3）")
+        cfg["periods"] = periods
+        symbol = str(cfg.get("symbol") or "OANDA:XAUUSD").strip()
+        cfg["symbol"] = symbol or "OANDA:XAUUSD"
+        from_s = str(cfg.get("from") or sr_service.DEFAULT_FROM)
+        try:
+            cfg["from_ts"] = parse_from(from_s)
+        except Exception:
+            raise ValueError(f"起始日期无法解析：{from_s}")
+        # 类型开关
+        sr_types = [s for s in (cfg.get("srTypes") or []) if s in ("cluster", "fib", "boll")]
+        if not sr_types:
+            raise ValueError("至少开启一种支阻类型（密集区/黄金分割/BOLL）")
+        cfg["srTypes"] = sr_types
+        parts = [s for s in (cfg.get("clusterParts") or ["flip", "recent"])
+                 if s in ("flip", "recent")]
+        cfg["clusterParts"] = parts or ["flip", "recent"]
+        # 数字字段（非法直接 400）
+        floats = {k: float(cfg[k]) for k in
+                  ("clusterAtr", "mergeAtr", "recentClusterAtr", "maxDistAtr",
+                   "touchWeight", "barsWeight", "bollMult")
+                  if k in cfg and cfg[k] not in (None, "")}
+        for k in ("clusterAtr", "recentClusterAtr", "maxDistAtr"):
+            if floats.get(k) is not None and floats.get(k) <= 0:
+                raise ValueError(f"{k} 须 > 0")
+        ints = {k: int(cfg[k]) for k in
+                ("maxPerPeriod", "recentBiCount", "sideCount", "bollLength")
+                if k in cfg and cfg[k] not in (None, "")}
+        for k, lo in (("maxPerPeriod", 1), ("recentBiCount", 1),
+                      ("sideCount", 1), ("bollLength", 2)):
+            if ints.get(k) is not None and ints[k] < lo:
+                raise ValueError(f"{k} 须 >= {lo}")
+        cfg.update(floats)
+        cfg.update(ints)
+        # minTouch 矩阵（级别键 → int >= 1）
+        mt = {}
+        for res, v in (cfg.get("minTouchs") or {}).items():
+            try:
+                iv = int(v)
+            except (TypeError, ValueError):
+                raise ValueError(f"{res} 的 minTouch 非法：{v}")
+            if iv < 1:
+                raise ValueError(f"{res} 的 minTouch 须 >= 1")
+            mt[str(res).upper()] = iv
+        cfg["minTouchs"] = mt
+        # 黄金分割比率：逗号分隔文本或列表，0 < r < 1 且 <= 6 项
+        raw_fib = cfg.get("fibLevels", "0.382,0.5,0.618")
+        if isinstance(raw_fib, str):
+            raw_fib = [x for x in raw_fib.replace("，", ",").split(",") if x.strip()]
+        fibs = []
+        for x in raw_fib:
+            try:
+                v = float(x)
+            except (TypeError, ValueError):
+                raise ValueError(f"黄金分割比率非法：{x}")
+            if not (0 < v < 1):
+                raise ValueError(f"黄金分割比率须在 (0,1)：{x}")
+            fibs.append(round(v, 4))
+        if not fibs or len(fibs) > 6:
+            raise ValueError("黄金分割比率须为 1~6 项")
+        cfg["fibLevels"] = fibs
+        # 透传默认值（draw 相关：color/draw_text/draw_raw/clear_first）
+        cfg.setdefault("color", "#787B86")
+        cfg.setdefault("draw_text", True)
+        cfg.setdefault("draw_raw", False)
+        cfg.setdefault("clear_first", True)
+        return cfg
 
     @staticmethod
     def normalize_cfg(cfg, mode):
@@ -582,10 +705,32 @@ class ControlApp:
         return out
 
     def status(self):
-        return {
+        with _sr_busy_lock:
+            busy = _sr_busy
+        base = {
             "active": active_mode(),
             "modes": {name: w.status() for name, w in self.workers.items()},
         }
+        try:
+            base["sr"] = {"busy": busy, **self.sr_counts()}
+        except Exception:
+            base["sr"] = {"busy": busy, "has_result": False}
+        return base
+
+
+def _presets_load():
+    """读参数预设列表 [{name, saved_at, cfg}]；文件缺失/损坏返回 []。"""
+    try:
+        with open(SR_PRESETS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return list(data) if isinstance(data, list) else []
+    except (OSError, ValueError, json.JSONDecodeError):
+        return []
+
+
+def _presets_save(presets):
+    with open(SR_PRESETS_FILE, "w", encoding="utf-8") as f:
+        json.dump(presets, f, ensure_ascii=False, indent=1)
 
 
 def make_handler(app):
@@ -628,7 +773,10 @@ def make_handler(app):
             parsed = urlparse(self.path)
             path = parsed.path
             if path == "/" or path == "/index.html":
-                self._serve_index()
+                self._serve_file("index.html", "text/html; charset=utf-8")
+                return
+            if path == "/sr" or path == "/sr.html":
+                self._serve_file("sr.html", "text/html; charset=utf-8")
                 return
             if path == "/api/status":
                 self._send_json(app.status())
@@ -640,6 +788,34 @@ def make_handler(app):
                 return
             if path == "/api/stream":
                 self._serve_sse()
+                return
+            if path == "/api/sr/state":
+                self._send_json({"ok": True, "active": active_mode(),
+                                 "busy": _sr_busy_snapshot(), **app.sr_counts()})
+                return
+            if path == "/api/sr/result":
+                with _sr_result_lock:
+                    sr = app.sr or {}
+                    has = sr.get("result") is not None
+                    if not has:
+                        self._send_json({"ok": False, "error": "尚无计算结果，请先计算"})
+                        return
+                    payload = {
+                        "ok": True, "has_result": True,
+                        "computed_at": sr.get("computed_at"),
+                        "cfg": sr.get("cfg"),
+                        "meta": sr.get("meta"),
+                        "periods": sr["result"].get("periods") or {},
+                        "merged": sr["result"].get("merged") or [],
+                        "drawn_by_period": sr["result"].get("drawnByPeriod") or {},
+                        "current_price": sr["result"].get("currentPrice"),
+                        "period_atrs": sr["result"].get("periodAtrs") or {},
+                    }
+                self._send_json(payload)
+                return
+            if path == "/api/sr/presets":
+                with _presets_lock:
+                    self._send_json({"ok": True, "presets": _presets_load()})
                 return
             self._send_json({"ok": False, "error": f"未知路径 {path}"}, 404)
 
@@ -755,6 +931,183 @@ def make_handler(app):
                 threading.Thread(target=_job, daemon=True, name="marks-clear").start()
                 self._send_json({"ok": True, "started": True})
                 return
+            if path == "/api/sr/presets":
+                # POST 保存/覆盖预设（同名覆盖）
+                body = self._read_body()
+                name = str(body.get("name") or "").strip()
+                if not name or len(name) > 40:
+                    self._send_json({"ok": False, "error": "预设名须为 1~40 字符"}, 400)
+                    return
+                pcfg = body.get("cfg")
+                if not isinstance(pcfg, dict):
+                    self._send_json({"ok": False, "error": "缺少预设配置 cfg"}, 400)
+                    return
+                overwritten = False
+                with _presets_lock:
+                    presets = _presets_load()
+                    out = []
+                    for p in presets:
+                        if str(p.get("name") or "") == name:
+                            overwritten = True
+                            continue
+                        out.append(p)
+                    out.append({"name": name, "saved_at": int(time.time()), "cfg": pcfg})
+                    try:
+                        _presets_save(out)
+                    except OSError as e:
+                        self._send_json({"ok": False, "error": f"预设保存失败：{e}"}, 500)
+                        return
+                self._send_json({"ok": True, "overwritten": overwritten})
+                return
+            # ---- 支阻位调试模块（/api/sr/*，复用 _marks_lock 保证与 marks 操作互斥）----
+            if path == "/api/sr/compute":
+                ok, err = ensure_idle()
+                if not ok:
+                    self._send_json({"ok": False, "error": err}, 409)
+                    return
+                if not _marks_lock.acquire(blocking=False):
+                    self._send_json({"ok": False, "error": "已有标记/支阻操作进行中，请稍候"}, 409)
+                    return
+                body = self._read_body()
+                mode = "refresh" if str(body.get("mode")) == "refresh" else "auto"
+                try:
+                    cfg = ControlApp.normalize_sr_cfg(body.get("cfg") or {})
+                except ValueError as e:
+                    _marks_lock.release()
+                    self._send_json({"ok": False, "error": str(e)}, 400)
+                    return
+                with _sr_busy_lock:
+                    _set_sr_busy("refresh" if mode == "refresh" else "compute")
+
+                def _job():
+                    def log(msg):
+                        app.broadcaster.emit("log", {"mode": "sr", "msg": str(msg)})
+
+                    def prog(phase, cur=0, total=0):
+                        pct = {"fetch": int(cur / total * 70) if total else 0,
+                               "bis": 80, "compute": 95}.get(phase, 0)
+                        app.broadcaster.emit("progress", {"mode": "sr", "phase": phase,
+                                                          "current": cur, "total": total,
+                                                          "pct": pct})
+                    err = None
+                    counts = None
+                    try:
+                        prog("fetch", 0, 1)
+                        bars = sr_service.ensure_data(cfg["periods"], cfg["from_ts"],
+                                                      log=log, refresh=(mode == "refresh"),
+                                                      symbol=cfg["symbol"])
+                        prog("bis")
+                        result, meta = sr_service.build_chain_result(bars, cfg, log=log)
+                        with _sr_result_lock:
+                            app.sr["cfg"] = cfg
+                            app.sr["computed_at"] = int(time.time())
+                            app.sr["result"] = result
+                            app.sr["meta"] = meta
+                        counts = app.sr_counts()
+                        prog("compute", 1, 1)
+                        log(f"计算完成：当前价 {result.get('currentPrice')}，"
+                            f"合并线 {len(result.get('merged') or [])} 条，"
+                            f"图上 {sum(len(v) for v in (result.get('drawnByPeriod') or {}).values())} 条")
+                    except Exception as e:  # 含 CDPError——原样透出给前端
+                        err = str(e)
+                        try:
+                            log(f"支阻位计算失败：{e}")
+                        except Exception:
+                            pass
+                    finally:
+                        with _sr_busy_lock:
+                            _set_sr_busy(None)
+                        _marks_lock.release()
+                        app.broadcaster.emit("sr_done", {"op": "compute",
+                                                         "error": err, "counts": counts})
+                threading.Thread(target=_job, daemon=True, name="sr-compute").start()
+                self._send_json({"ok": True, "started": True})
+                return
+            if path == "/api/sr/draw":
+                ok, err = ensure_idle()
+                if not ok:
+                    self._send_json({"ok": False, "error": err}, 409)
+                    return
+                if not _marks_lock.acquire(blocking=False):
+                    self._send_json({"ok": False, "error": "已有标记/支阻操作进行中，请稍候"}, 409)
+                    return
+                body = self._read_body()
+                with _sr_result_lock:
+                    has = (app.sr or {}).get("result") is not None
+                    result = (app.sr or {}).get("result")
+                    cfg = (app.sr or {}).get("cfg") or {}
+                if not has:
+                    _marks_lock.release()
+                    self._send_json({"ok": False, "error": "尚无计算结果，请先计算"}, 409)
+                    return
+                color = str(body.get("color") or cfg.get("color") or "#787B86")
+                clear_first = body.get("clear_first", cfg.get("clear_first", True))
+                draw_text = bool(body.get("draw_text", cfg.get("draw_text", True)))
+                draw_raw = bool(body.get("draw_raw", cfg.get("draw_raw", False)))
+                with _sr_busy_lock:
+                    _set_sr_busy("draw")
+
+                def _job():
+                    def log(msg):
+                        app.broadcaster.emit("log", {"mode": "sr", "msg": str(msg)})
+                    err = None
+                    res = None
+                    try:
+                        main_by_period = sr_service.main_lines(result)
+                        raw_by_period = sr_service.raw_pool_lines(
+                            result, maxDistAtr=float(cfg.get("maxDistAtr") or 3.0)) \
+                            if draw_raw else None
+                        res = sr_draw.draw_sr_lines(
+                            main_by_period=main_by_period, raw_by_period=raw_by_period,
+                            cfg=CDPConfig(), clear_first=bool(clear_first),
+                            color=color, draw_text=draw_text, log=log)
+                    except Exception as e:
+                        err = str(e)
+                        try:
+                            log(f"支阻位画图失败：{e}")
+                        except Exception:
+                            pass
+                    finally:
+                        with _sr_busy_lock:
+                            _set_sr_busy(None)
+                        _marks_lock.release()
+                        app.broadcaster.emit("sr_done", {"op": "draw", "error": err, "counts": res})
+                threading.Thread(target=_job, daemon=True, name="sr-draw").start()
+                self._send_json({"ok": True, "started": True})
+                return
+            if path == "/api/sr/clear":
+                ok, err = ensure_idle()
+                if not ok:
+                    self._send_json({"ok": False, "error": err}, 409)
+                    return
+                if not _marks_lock.acquire(blocking=False):
+                    self._send_json({"ok": False, "error": "已有标记/支阻操作进行中，请稍候"}, 409)
+                    return
+                with _sr_busy_lock:
+                    _set_sr_busy("clear")
+
+                def _job():
+                    def log(msg):
+                        app.broadcaster.emit("log", {"mode": "sr", "msg": str(msg)})
+                    err = None
+                    removed = None
+                    try:
+                        removed = sr_draw.clear_sr_test_marks(cfg=CDPConfig(), log=log)
+                    except Exception as e:
+                        err = str(e)
+                        try:
+                            log(f"支阻线清除失败：{e}")
+                        except Exception:
+                            pass
+                    finally:
+                        with _sr_busy_lock:
+                            _set_sr_busy(None)
+                        _marks_lock.release()
+                        app.broadcaster.emit("sr_done", {"op": "clear", "error": err,
+                                                         "removed": removed})
+                threading.Thread(target=_job, daemon=True, name="sr-clear").start()
+                self._send_json({"ok": True, "started": True})
+                return
             # /api/{mode}/start|pause|resume|stop
             parts = [p for p in path.split("/") if p]
             if len(parts) == 3 and parts[0] == "api" and parts[1] in app.workers:
@@ -778,17 +1131,44 @@ def make_handler(app):
                 return
             self._send_json({"ok": False, "error": f"未知路径 {path}"}, 404)
 
-        def _serve_index(self):
-            import os
-            path = os.path.join(os.path.dirname(__file__), "web", "index.html")
+        def do_DELETE(self):
+            path = urlparse(self.path).path
+            if path == "/api/sr/presets":
+                qs = parse_qs(urlparse(self.path).query)
+                name = str(qs.get("name", [""])[0]).strip()
+                if not name:
+                    self._send_json({"ok": False, "error": "缺少预设名 name"}, 400)
+                    return
+                removed = False
+                with _presets_lock:
+                    presets = _presets_load()
+                    out = [p for p in presets
+                           if str(p.get("name") or "") != name]
+                    if len(out) != len(presets):
+                        removed = True
+                        try:
+                            _presets_save(out)
+                        except OSError as e:
+                            self._send_json({"ok": False, "error": f"预设删除失败：{e}"}, 500)
+                            return
+                if not removed:
+                    self._send_json({"ok": False, "error": f"预设不存在：{name}"}, 404)
+                    return
+                self._send_json({"ok": True, "removed": name})
+                return
+            self._send_json({"ok": False, "error": f"未知路径 {path}"}, 404)
+
+        def _serve_file(self, name, content_type="text/html; charset=utf-8"):
+            """服务 py_chain/web/ 下静态文件（index.html / sr.html）。"""
+            path = os.path.join(os.path.dirname(__file__), "web", name)
             try:
                 with open(path, "rb") as f:
                     body = f.read()
             except OSError:
-                self._send_json({"ok": False, "error": "缺少 web/index.html"}, 500)
+                self._send_json({"ok": False, "error": f"缺少 web/{name}"}, 500)
                 return
             self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

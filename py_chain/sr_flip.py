@@ -452,16 +452,16 @@ def countBarsPassing(price, bars, tol):
     return n
 
 
-def flipScore(f, group):
-    """支阻位强度评分：score = 0.6 × norm(触及次数) + 0.4 × norm(经过K线数量)。
-    同一级别候选集内 min-max 归一化。"""
+def flipScore(f, group, touchWeight=TOUCH_WEIGHT, barsWeight=BARS_WEIGHT):
+    """支阻位强度评分：score = 触及权重 × norm(触及次数) + 经过K线权重 × norm(经过K线数量)。
+    同一级别候选集内 min-max 归一化。权重默认与模块常量一致（0.6/0.4）。"""
     ts = [g["touchCount"] for g in group]
     bs = [g["barsPassed"] for g in group]
     tMin, tMax = min(ts), max(ts)
     bMin, bMax = min(bs), max(bs)
     normTouch = (f["touchCount"] - tMin) / (tMax - tMin) if tMax > tMin else 1
     normBars = (f["barsPassed"] - bMin) / (bMax - bMin) if bMax > bMin else 1
-    return TOUCH_WEIGHT * normTouch + BARS_WEIGHT * normBars
+    return touchWeight * normTouch + barsWeight * normBars
 
 
 def _kindOf(f):
@@ -473,11 +473,28 @@ def _kindOf(f):
     return "cluster"
 
 
-def mergeFlipsAcrossPeriods(allFlips, tol):
+def _memberSnapshot(item):
+    """合并成员快照（mergeDetail 用）：记录并入前的原始价/来源/类型等字段。
+    price 必须在加权平均【之前】取值——成员原价与合并价的差是判断合并是否合理的关键依据。"""
+    m = {"source": item["source"], "kind": item["_kinds"][0], "type": item["type"],
+         "price": item["price"], "touchCount": item["touchCount"],
+         "barsPassed": item.get("barsPassed", 0), "breakTime": item["breakTime"],
+         "recent": bool(item.get("recent"))}
+    if item.get("fib"):
+        m["ratio"] = item.get("ratio")
+    if item.get("boll"):
+        m["boll"] = item.get("boll")
+    if item.get("pending"):
+        m["pending"] = True
+    return m
+
+
+def mergeFlipsAcrossPeriods(allFlips, tol, detail=False):
     """跨周期合并：三类候选（密集区/fib/boll）同一池、同一规则。
     合并后确定「主要来源级别」= 来源中最大的级别；多来源混合线删除 fib/pending/boll
     标记（统一按「位置线」口径），纯单来源独立线保留标记。
-    @returns [{ price, type, touchCount, firstTouch, breakTime, sources:[...], level, srcType }]
+    @param detail  True 时每条合并项附 members 快照（成员原始价/来源/类型，供调试页展示合并前状态）
+    @returns [{ price, type, touchCount, firstTouch, breakTime, sources:[...], level, srcType[, members] }]
     """
     all_ = []
     for res, flips in allFlips.items():
@@ -492,6 +509,8 @@ def mergeFlipsAcrossPeriods(allFlips, tol):
         last = merged[-1] if merged else None
         if last is not None and f["price"] - last["price"] <= tol:
             prevTouch = last["touchCount"]
+            if detail:
+                last["members"].append(_memberSnapshot(f))
             totalTouch = prevTouch + f["touchCount"]
             # 价格按触及次数加权平均
             last["price"] = (last["price"] * prevTouch + f["price"] * f["touchCount"]) / totalTouch
@@ -508,7 +527,10 @@ def mergeFlipsAcrossPeriods(allFlips, tol):
             if f["_kinds"][0] not in last["_kinds"]:
                 last["_kinds"].append(f["_kinds"][0])
         else:
-            merged.append(dict(f, sources=[f["source"]]))
+            item = dict(f, sources=[f["source"]])
+            if detail:
+                item["members"] = [_memberSnapshot(item)]
+            merged.append(item)
     # 确定每个合并项的主要来源级别 = 来源中最大的级别（大级别优先）
     for m in merged:
         m["level"] = dominantLevel(m["sources"])
@@ -533,7 +555,8 @@ def dominantLevel(sources):
     return best
 
 
-def pickByLevel(merged, currentPrice, sideCount, maxDistAtr, periodAtrs):
+def pickByLevel(merged, currentPrice, sideCount, maxDistAtr, periodAtrs,
+                touchWeight=TOUCH_WEIGHT, barsWeight=BARS_WEIGHT):
     """每个级别只保留「当前价格上方最近的 N 个 + 下方最近的 N 个」支阻位。
     先限定距离范围（距当前价 ≤ maxDistAtr×本级别ATR），同一侧仍存在多个候选时，
     选「强度评分最高」的 N 个。"""
@@ -547,7 +570,7 @@ def pickByLevel(merged, currentPrice, sideCount, maxDistAtr, periodAtrs):
         maxDist = maxDistAtr * levelAtr if levelAtr else float("inf")
         # 距离范围内先给同级别候选集计算强度评分（min-max 归一化）
         for f in group:
-            f["score"] = flipScore(f, group)
+            f["score"] = flipScore(f, group, touchWeight, barsWeight)
         # 上方：>= 当前价 且在距离范围内，评分降序取前 sideCount
         above = sorted(
             [f for f in group if f["price"] >= currentPrice and f["price"] - currentPrice <= maxDist],
@@ -587,9 +610,9 @@ def pickNearestForDisplay(merged, displayPeriods, currentPrice, sideCount, maxDi
     return out
 
 
-def capPerPeriod(allFlips, maxPerPeriod):
+def capPerPeriod(allFlips, maxPerPeriod, touchWeight=TOUCH_WEIGHT, barsWeight=BARS_WEIGHT):
     """每周期候选数量上限截断：每周期最多保留 maxPerPeriod 个候选。
-    超出时按「强度评分降序」保留 Top N。"""
+    超出时按「强度评分降序」保留 Top N（评分权重可配，默认与模块常量一致）。"""
     if not allFlips:
         return allFlips
     if not maxPerPeriod or maxPerPeriod <= 0:
@@ -599,7 +622,7 @@ def capPerPeriod(allFlips, maxPerPeriod):
         if not group or len(group) <= maxPerPeriod:
             out[res] = group
             continue
-        scored = [dict(f, score=flipScore(f, group)) for f in group]
+        scored = [dict(f, score=flipScore(f, group, touchWeight, barsWeight)) for f in group]
         scored.sort(key=lambda f: f["score"], reverse=True)
         out[res] = scored[:maxPerPeriod]
     return out
@@ -616,7 +639,11 @@ def compute_srflip(periodBis, barsByPeriod, periods,
                    maxDistAtr=MAX_DIST_ATR, maxPerPeriod=MAX_PER_PERIOD,
                    minTouchOverride=None, periodAtrsIn=None,
                    srTypes=DEFAULT_SR_TYPES, fibLevels=FIB_LEVELS, periodMacdIn=None,
-                   bollLength=BOLL_LENGTH, bollMult=BOLL_MULT):
+                   bollLength=BOLL_LENGTH, bollMult=BOLL_MULT,
+                   clusterParts=("flip", "recent"), minTouchsIn=None,
+                   recentBiCount=RECENT_BI_COUNT,
+                   touchWeight=TOUCH_WEIGHT, barsWeight=BARS_WEIGHT,
+                   sideCount=SIDE_COUNT, mergeDetail=False):
     """逐周期识别支阻位（密集区 + 黄金分割 + BOLL）并跨周期合并、按周期选取。
 
     @param periodBis    各周期笔 { 周期: [bis] }
@@ -628,6 +655,12 @@ def compute_srflip(periodBis, barsByPeriod, periods,
     @param periodMacdIn 可选：各周期预计算 MACD { 周期: macdArr }（增量回测用）
     @param bollLength   BOLL SMA 周期（已收盘K线口径）
     @param bollMult     BOLL 标准差倍数
+    @param clusterParts cluster 子开关（"flip" 强互换 / "recent" 近期极值，任意组合；全空则该周期无 cluster 候选）
+    @param minTouchsIn  按级别最少触及次数 { 周期: int }，命中键优先于 minTouchOverride/默认
+    @param recentBiCount 近期极值位取最近 N 根笔
+    @param touchWeight/barsWeight 强度评分权重（仅 capPerPeriod 截断与 score 字段，显示选取纯按价就近）
+    @param sideCount    每周期图每侧条数（总 ≤ 2×sideCount）
+    @param mergeDetail  True 时 merged 各项附 members 成员快照（默认 False，输出与旧版逐键一致）
     @returns { periods: 各周期候选(密集区截断后+fib+boll), merged: 三类统一合并结果,
                drawnByPeriod: 各显示周期选中的 ≤2×sideCount 条(含来源标注),
                currentPrice: 当前价, periodAtrs: 各周期ATR }
@@ -652,30 +685,32 @@ def compute_srflip(periodBis, barsByPeriod, periods,
             atr = calcATR(bars, 14)
         periodAtrs[res] = atr
         tol = clusterAtr * atr
-        minTouch = minTouchFor(res, minTouchOverride)
+        minTouch = (minTouchsIn or {}).get(str(res).upper()) or minTouchFor(res, minTouchOverride)
 
         flips = []
         recentFlips = []
         if "cluster" in srTypes:
-            # 强支阻互换位
-            swingPoints = extractSwingPoints(bis)
-            clusters = clusterPoints(swingPoints, tol)
-            for c in clusters:
-                if len(c["touches"]) < minTouch:
-                    continue
-                flip = detectFlip(c, bars, tol)
-                if flip:
-                    flip["barsPassed"] = countBarsPassing(flip["price"], bars, tol)
-                    flips.append(flip)
+            # 强支阻互换位（clusterParts 子开关：flip）
+            if "flip" in clusterParts:
+                swingPoints = extractSwingPoints(bis)
+                clusters = clusterPoints(swingPoints, tol)
+                for c in clusters:
+                    if len(c["touches"]) < minTouch:
+                        continue
+                    flip = detectFlip(c, bars, tol)
+                    if flip:
+                        flip["barsPassed"] = countBarsPassing(flip["price"], bars, tol)
+                        flips.append(flip)
 
-            # 近期极值位（更宽的聚类容差，不要求触及次数）
-            recentPoints = extractRecentExtremes(bis, RECENT_BI_COUNT)
-            recentClusters = clusterPoints(recentPoints, recentClusterAtr * atr)
-            for c in recentClusters:
-                r = detectRecentFlip(c)
-                if r:
-                    r["barsPassed"] = countBarsPassing(r["price"], bars, tol)
-                    recentFlips.append(r)
+            # 近期极值位（clusterParts 子开关：recent；更宽的聚类容差，不要求触及次数）
+            if "recent" in clusterParts:
+                recentPoints = extractRecentExtremes(bis, recentBiCount)
+                recentClusters = clusterPoints(recentPoints, recentClusterAtr * atr)
+                for c in recentClusters:
+                    r = detectRecentFlip(c)
+                    if r:
+                        r["barsPassed"] = countBarsPassing(r["price"], bars, tol)
+                        recentFlips.append(r)
         allFlips[res] = flips + recentFlips
 
         # 黄金分割支阻位：现算非一类买卖点（本函数无 fromTs 概念，窗口由调用方决定），
@@ -689,7 +724,7 @@ def compute_srflip(periodBis, barsByPeriod, periods,
             allFibs[res] = buildFibCandidates(bis, buyPts, sellPts, fibLevels, bars, tol)
 
     # 每周期候选数量上限（数据层截断，仅密集区；fib/boll 评分语义不适用，豁免）
-    allFlipsCapped = capPerPeriod(allFlips, maxPerPeriod)
+    allFlipsCapped = capPerPeriod(allFlips, maxPerPeriod, touchWeight, barsWeight)
 
     # 当前价格：用最小有数据周期的最后一根K线收盘价（各周期收盘价接近，取最小周期最精确）
     currentPrice = None
@@ -718,13 +753,13 @@ def compute_srflip(periodBis, barsByPeriod, periods,
                  if r in combined and combined[r] and r in periodAtrs]
     minAtr = min(atrValues) if atrValues else 0
     mergeTol = mergeAtr * minAtr
-    mergedOut = mergeFlipsAcrossPeriods(combined, mergeTol)
+    mergedOut = mergeFlipsAcrossPeriods(combined, mergeTol, detail=mergeDetail)
 
     # 按显示周期选取：每周期图 ≤ 2×sideCount 条（就近上下各 N，高级别线继承到低周期图）。
     # 显示周期 = 成功处理（有 ATR/K线）的周期，顺序沿 periods（从大到小）。
     displayPeriods = [r for r in periods if r in periodAtrs]
     drawnByPeriod = pickNearestForDisplay(mergedOut, displayPeriods, currentPrice,
-                                          SIDE_COUNT, maxDistAtr, periodAtrs) \
+                                          sideCount, maxDistAtr, periodAtrs) \
         if currentPrice is not None else {}
     for L, lines in drawnByPeriod.items():
         for f in lines:

@@ -23,6 +23,7 @@ from py_chain.sr_flip import (
     calcBOLL,
     compute_srflip,
     fibLevelsOf,
+    flipScore,
     labelOf,
     mergeFlipsAcrossPeriods,
     pendingReferOf,
@@ -555,6 +556,150 @@ class TestComputeSrflipBoll(unittest.TestCase):
         # 默认 srTypes 现为 cluster+boll；无上级笔夹具下 cluster 也可能产出候选，boll 必进 merged
         out = compute_srflip(self.periodBis, self.barsByPeriod, ["3"], periodAtrsIn={"3": 0.1})
         self.assertTrue(any(f.get("boll") for f in out["merged"]))
+
+
+class TestSrParamExtension(unittest.TestCase):
+    """调试页引擎扩展：clusterParts / minTouchsIn / recentBiCount / 评分权重 /
+    sideCount / mergeDetail（成员追溯）。默认路径输出与扩展前逐键一致。"""
+
+    # ---- 夹具 ----
+    def _bars_simple(self, last_t, hi=112, lo=88, tail=1):
+        """简单振荡K线 + 收尾两段突破（先上穿后下穿，触发强互换的突破分支）。"""
+        import math
+        bars = []
+        for i in range(last_t + 30):
+            c = 102 + 8 * math.sin(i / 7.0)
+            bars.append(bar(i, c + 3, c - 3, round(c, 2)))
+        if tail:
+            for j in range(1, 22):  # 108 → 96 单调下行，横跨两个价位带
+                c = 108 - 0.6 * j
+                bars.append(bar(last_t + j, c + 1, c - 1, round(c, 2)))
+        return bars
+
+    def _zigzag_bis(self, cycles=6, base=100, top=105):
+        """往复 zigzag：端点在 base/top 反复出现（触及次数累积、价位稳定成簇）。"""
+        bis, t = [], 0
+        for _ in range(cycles):
+            bis.append(bi("up", t, t + 10, base, top))
+            bis.append(bi("down", t + 10, t + 20, top, base))
+            t += 20
+        return bis
+
+    def _rising_bis(self, n=24):
+        """阶梯上升 zigzag：每次摆动端点价位都不同（近期笔数窗口越长簇越多）。"""
+        bis, t, p = [], 0, 100.0
+        for _ in range(n):
+            top = p + 3.0
+            bis.append(bi("up", t, t + 10, p, top))
+            bis.append(bi("down", t + 10, t + 20, top, top - 2.5))
+            p = top - 2.5
+            t += 20
+        return bis
+
+    def _run(self, bis, parts=("flip", "recent"), recent_bi=20, min_touch=None,
+             side_count=2, period="15", base=100, top=105, rising=False):
+        """compute_srflip 便捷调用：cluster 单类型 + 固定 ATR，返回 out。"""
+        bars = self._bars_simple(len(bis) * 20)
+        return compute_srflip(
+            {period: bis}, {period: bars}, [period],
+            srTypes=("cluster",), clusterParts=parts, periodAtrsIn={period: 0.5},
+            minTouchsIn={period: min_touch} if min_touch else None,
+            recentBiCount=recent_bi, maxPerPeriod=500, sideCount=side_count)
+
+    # ---- 用例 ----
+    def test_cluster_parts_filter(self):
+        bis = self._zigzag_bis()
+        full = self._run(bis)["periods"]["15"]
+        flip = self._run(bis, parts=("flip",))["periods"]["15"]
+        recent = self._run(bis, parts=("recent",))["periods"]["15"]
+        self.assertTrue(recent, "近期极值应恒有候选（无触及要求）")
+        self.assertTrue(all(f.get("recent") for f in recent))
+        self.assertTrue(all(not f.get("recent") for f in flip))
+        self.assertEqual(len(full), len(flip) + len(recent))  # 两子集互斥且相加 = 全集
+
+    def test_cluster_parts_none_is_empty(self):
+        out = self._run(self._zigzag_bis(), parts=())
+        self.assertEqual(out["periods"]["15"], [])
+
+    def test_recent_bi_count_window(self):
+        r20 = self._run(self._rising_bis(), parts=("recent",), recent_bi=20)["periods"]["15"]
+        r2 = self._run(self._rising_bis(), parts=("recent",), recent_bi=2)["periods"]["15"]
+        self.assertGreater(len(r20), len(r2))
+
+    def test_min_touchs_in_per_level(self):
+        bis = self._zigzag_bis()
+        default = self._run(bis, parts=("flip",))["periods"]["15"]
+        self.assertTrue(default, "突破尾段应触发强互换候选")
+        high = self._run(bis, parts=("flip",), min_touch=99)["periods"]["15"]
+        self.assertEqual(high, [])
+
+    def test_side_count_caps_drawn(self):
+        bars = [bar(t, 200, 80, 100 + i) for i, t in enumerate(range(1000, 1030))]
+        bis = {"3": [bi("up", 1000, 1010, 100, 110), bi("down", 1010, 1020, 110, 105),
+                     bi("up", 1020, 1030, 105, 115)]}
+        for sc, cap in ((1, 2), (2, 4), (5, 10)):
+            out = compute_srflip(bis, {"3": bars}, ["3"], srTypes=("boll",),
+                                 periodAtrsIn={"3": 0.1}, sideCount=sc)
+            self.assertLessEqual(len(out["drawnByPeriod"]["3"]), cap)
+
+    def test_flip_score_explicit_weights(self):
+        group = [{"touchCount": 1, "barsPassed": 1},
+                 {"touchCount": 2, "barsPassed": 100},
+                 {"touchCount": 3, "barsPassed": 101}]
+        f = group[1]
+        touch = flipScore(f, group, 1.0, 0.0)
+        bars_w = flipScore(f, group, 0.0, 1.0)
+        self.assertAlmostEqual(touch, 0.5)
+        self.assertGreater(bars_w, touch)
+
+    def test_merge_detail_members(self):
+        flips = {
+            "15": [{"price": 100.0, "type": "R2S", "touchCount": 4, "barsPassed": 50,
+                    "firstTouch": 1, "breakTime": 30}],
+            "60": [{"price": 100.4, "type": "R2S", "touchCount": 2, "barsPassed": 10,
+                    "firstTouch": 5, "breakTime": 40}],
+            "3": [{"price": 100.2, "type": "2卖", "touchCount": 1, "barsPassed": 3,
+                   "firstTouch": 9, "breakTime": 45, "fib": 0.5, "ratio": 0.5,
+                   "pending": True}],
+        }
+        merged = mergeFlipsAcrossPeriods(flips, tol=0.5, detail=True)
+        self.assertEqual(len(merged), 1)
+        m = merged[0]
+        self.assertEqual(len(m["members"]), 3)
+        # 成员记录并入前原价（排序展开后依次 100.0/100.2/100.4）
+        self.assertEqual([x["price"] for x in m["members"]], [100.0, 100.2, 100.4])
+        self.assertEqual(m["members"][0]["kind"], "cluster")
+        self.assertEqual(m["members"][1]["kind"], "fib")
+        self.assertEqual(m["members"][1]["ratio"], 0.5)
+        self.assertTrue(m["members"][1]["pending"])
+        self.assertEqual(m["members"][2]["source"], "60")
+        # 多来源混合线本身丢 fib/pending 标记（标 position 线口径），members 保留原字段
+        self.assertEqual(m["srcType"], "mixed")
+        self.assertNotIn("fib", m)
+        self.assertNotIn("pending", m)
+        # 加权平均价 = (100×4 + 100.2×1)×... 逐步加权：先 100&100.2 → ×5，再并 100.4×2
+        self.assertAlmostEqual(m["price"], (100.0 * 4 + 100.2 + 100.4 * 2) / 7)
+
+    def test_merge_detail_default_off(self):
+        flips = {
+            "15": [{"price": 100.0, "type": "R2S", "touchCount": 4, "barsPassed": 50,
+                    "firstTouch": 1, "breakTime": 30}],
+            "60": [{"price": 100.4, "type": "S2R", "touchCount": 2, "barsPassed": 10,
+                    "firstTouch": 5, "breakTime": 40}],
+        }
+        merged = mergeFlipsAcrossPeriods(flips, tol=0.5, detail=False)
+        self.assertNotIn("members", merged[0])
+
+    def test_default_kwargs_keep_old_output(self):
+        bis = self._zigzag_bis()
+        bars = self._bars_simple(len(bis) * 20)
+        kw = dict(periodBis={"15": bis}, barsByPeriod={"15": bars}, periods=["15"],
+                  srTypes=("cluster", "boll"), periodAtrsIn={"15": 0.5})
+        a = compute_srflip(**kw)
+        b = compute_srflip(**kw, clusterParts=("flip", "recent"), minTouchsIn=None,
+                           recentBiCount=20, touchWeight=0.6, barsWeight=0.4,
+                           sideCount=2, mergeDetail=False)
+        self.assertEqual(a, b)
 
 
 if __name__ == "__main__":
