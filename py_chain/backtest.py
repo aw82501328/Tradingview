@@ -52,7 +52,7 @@ from .chan_core import (
     MacdAccumulator, AtrAccumulator, extendLastBi, extendLastBiFrom,
 )
 from .mark_buy_sell import compute_all_marks
-from .sr_flip import compute_srflip
+from .sr_flip import compute_srflip, prepare_bar_arrays
 from .trading_plan import compute_plan
 from .mark_entry import (
     compute_entries, stop_ref_of, find_bi_event, filterDetectPeriods,
@@ -692,6 +692,15 @@ class BacktestEngine:
         # （同时刻），数据与决策完全同步、无窥视
         fine_sec = intervalSecOf(self.fine_res) or 180
 
+        # 全量 run() 期间历史输入不变，数组仅在本次运行内复用。
+        # 实时追加、覆盖和回退仍走原路径，不共享这些数组。
+        price_arrays = {res: prepare_bar_arrays(self.bars[res]["_list"])
+                        for res in self.periods}
+
+        def rebuild_chain():
+            self._rebuild_chain(include_entries=self.signal_mode != "realtime",
+                                price_arrays=price_arrays, bar_times=self._times)
+
         # 预热阶段（warmup 之前），先把切片推进到位（仅计算，不判定进场）
         for i in range(start_i):
             if stopped is not None and stopped.is_set():
@@ -705,7 +714,7 @@ class BacktestEngine:
 
         # 预热后先做一次全量链路重算（含支阻位/计划/进出场），之后只在笔结构变化时重算，
         # 避免每根K线全量重算链路（O(n) 扫描）导致回测 O(n²) 卡死
-        self._rebuild_chain()
+        rebuild_chain()
         if self.signal_mode == "realtime":
             # 当下背驰：预热完成时刻先评一次（链路状态已就绪，t=最后一根预热bar收盘）
             pending = self._collect_realtime(allSignals, stats, fine[start_i - 1]["time"] + fine_sec)
@@ -735,7 +744,7 @@ class BacktestEngine:
                 # 当下背驰：笔结构变化时重算链路（刷新①③所需的计划/支阻位缓存），
                 # 之后每根 fine 收盘都用当前增量状态（bis 已延伸到当下极值、MACD 增量）评估②
                 if changed:
-                    self._rebuild_chain()
+                    rebuild_chain()
                 pending = self._collect_realtime(allSignals, stats, t)
                 for s in pending:
                     _emit_signal(s)
@@ -743,7 +752,7 @@ class BacktestEngine:
                 # 确认制：笔结构无变化时仅推进K线，不重算链路、不产新信号
                 # （信号锚定在笔端点确认时出现）
                 if changed:
-                    self._rebuild_chain()
+                    rebuild_chain()
                     pending = self._collect_signals(allSignals, seen, stats)
                     for s in pending:
                         _emit_signal(s)
@@ -815,7 +824,7 @@ class BacktestEngine:
             changed = True
         return changed
 
-    def _rebuild_chain(self):
+    def _rebuild_chain(self, *, include_entries=True, price_arrays=None, bar_times=None):
         """链路重算：买卖点 → 支阻位 → 交易计划 → 进出场（使用增量缓存指标）。
 
         30S（periods 含时）只进 bis 与进出场，不进买卖点/支阻位/交易计划——
@@ -847,6 +856,13 @@ class BacktestEngine:
             srKw["bollLength"] = self.boll_length
         if self.boll_mult is not None:
             srKw["bollMult"] = self.boll_mult
+        if bar_times is not None:
+            srKw["periodBarTimesIn"] = bar_times
+        if price_arrays is not None:
+            srKw["periodBarArraysIn"] = {
+                res: (arrays[0][:self._cut[res]], arrays[1][:self._cut[res]])
+                for res, arrays in price_arrays.items() if arrays is not None
+            }
         try:
             self._sr = compute_srflip(periodBis, barsByPeriod, core,
                                       periodAtrsIn=periodAtr, periodMacdIn=periodMacd, **srKw)
@@ -860,6 +876,11 @@ class BacktestEngine:
             self._plan = {}
         # 4. 进出场（检测周期与 JS 一致：不含日线、不含 30S——30S 仅作背驰级别；
         #    且须有已加载的更低级别可供区间套下沉，30S 未加载时 3 不作检测周期）
+        # realtime 全量回测通过 _collect_realtime 收集信号，不消费 _entries。
+        # 默认仍计算确认式结果，保持 step_to 等现有调用方的行为。
+        if not include_entries:
+            self._entries = {}
+            return
         srLevels = (self._sr or {}).get("merged") or []
         detectPeriods = filterDetectPeriods(self.periods)
         try:

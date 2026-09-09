@@ -23,6 +23,8 @@
 不连接 CDP、不绘图；回测链路通过 compute_srflip 直接调用。
 """
 
+from bisect import bisect_right
+
 from .chan_core import calcATR, calcMACD, intervalSecOf, findBuyPoints, findSellPoints
 
 # numpy 可选加速（countBarsPassing 向量化；不可用时回退纯循环，结果一致）
@@ -36,12 +38,24 @@ except Exception:  # pragma: no cover - 环境无 numpy
 _barsArraysCache = {}
 
 
+def prepare_bar_arrays(bars):
+    """构建本次回测独享的价格数组，调用方必须裁剪至可见前缀。
+
+    无 NumPy 时返回 None，保留原逐根循环路径。
+    """
+    if _np is None:
+        return None
+    return (
+        _np.fromiter((b["low"] for b in bars), dtype=_np.float64, count=len(bars)),
+        _np.fromiter((b["high"] for b in bars), dtype=_np.float64, count=len(bars)),
+    )
+
+
 def _barsArrays(bars):
     ent = _barsArraysCache.get(id(bars))
     if ent is not None and ent[0] is bars and ent[1] == len(bars):
         return ent[2], ent[3]
-    lows = _np.fromiter((b["low"] for b in bars), dtype=_np.float64, count=len(bars))
-    highs = _np.fromiter((b["high"] for b in bars), dtype=_np.float64, count=len(bars))
+    lows, highs = prepare_bar_arrays(bars)
     if len(_barsArraysCache) > 16:
         _barsArraysCache.clear()
     _barsArraysCache[id(bars)] = (bars, len(bars), lows, highs)
@@ -124,7 +138,7 @@ def clusterPoints(points, tol):
     return clusters
 
 
-def detectFlip(cluster, bars, tol):
+def detectFlip(cluster, bars, tol, barTimes=None):
     """判断某个价位簇是否构成「支阻互换位」。
     规则：
       1. 若首尾触及角色相反（先高后低 → R2S，先低后高 → S2R），说明价位已被双向测试、角色已反转；
@@ -151,7 +165,10 @@ def detectFlip(cluster, bars, tol):
     lowCount = sum(1 for t in touches if t["kind"] == "low")
     dominant = "resistance" if highCount >= lowCount else "support"
     lastTouch = last["time"]
-    for bar in bars:
+    # 时间索引可能包含未来K线，二分上界必须限制在当前可见前缀内。
+    start = bisect_right(barTimes, lastTouch, hi=len(bars)) if barTimes is not None else 0
+    for i in range(start, len(bars)):
+        bar = bars[i]
         if bar["time"] <= lastTouch:
             continue
         if dominant == "resistance" and bar["close"] > price + tol:
@@ -289,7 +306,7 @@ def fibLevelsOf(refer, side, fibLevels):
             for r in fibLevels]
 
 
-def buildFibCandidates(fullBis, buyPts, sellPts, fibLevels, bars, tol):
+def buildFibCandidates(fullBis, buyPts, sellPts, fibLevels, bars, tol, barArrays=None):
     """组装黄金分割支阻位候选：每方向优先取「最新非一类点」× 全部比率（不回退更早点）；
     该方向无已形成点时走**预期回退**（pendingReferOf），生成 pending 预期位补位。
     @param fullBis 本周期全量笔（供参照笔定位，见 referBiOfPoint）
@@ -336,7 +353,7 @@ def buildFibCandidates(fullBis, buyPts, sellPts, fibLevels, bars, tol):
                 "firstTouch": found["refer"]["startTime"],
                 "lastTouch": srcPoint["time"],
                 "breakTime": srcPoint["time"],  # 信号点/形成笔极值时间 = fib 位生效/绘线锚点时间
-                "barsPassed": countBarsPassing(lv["price"], bars, tol),
+                "barsPassed": countBarsPassing(lv["price"], bars, tol, barArrays),
             }
             if pending:
                 cand["pending"] = True
@@ -434,16 +451,17 @@ def labelOf(f):
     return "%s+%s" % (sourceLabelOf(f), periodNameOf(f.get("level")))
 
 
-def countBarsPassing(price, bars, tol):
+def countBarsPassing(price, bars, tol, barArrays=None):
     """统计某价位带（price ± tol）被多少根 K 线覆盖/穿越（含影线）。
 
     性能：回测链路每次重算会对几十个支阻位各调一次本函数，逐根循环是长窗口下的
     主要热点之一。numpy 可用时用向量化比较（比较语义与逐根循环完全一致），
     并按 bars 列表对象缓存 lows/highs 数组——同一链路重算内 bars 不变，只建一次。
+    barArrays 可传本次运行预建的 (lows, highs)，必须已裁剪至 bars 的可见前缀。
     无 numpy 时回退逐根循环（结果一致）。"""
     hiP, loP = price + tol, price - tol
     if _np is not None and len(bars) >= 512:
-        lows, highs = _barsArrays(bars)
+        lows, highs = barArrays if barArrays is not None else _barsArrays(bars)
         return int(_np.count_nonzero((lows <= hiP) & (highs >= loP)))
     n = 0
     for b in bars:
@@ -636,7 +654,8 @@ def capPerPeriod(allFlips, maxPerPeriod, touchWeight=TOUCH_WEIGHT, barsWeight=BA
 def cluster_candidates(bis, bars, atr, *, clusterAtr=CLUSTER_ATR,
                        recentClusterAtr=RECENT_CLUSTER_ATR, minTouch=4,
                        recentBiCount=RECENT_BI_COUNT,
-                       clusterParts=("flip", "recent"), with_strength=True):
+                       clusterParts=("flip", "recent"), with_strength=True,
+                       barTimes=None, barArrays=None):
     """Single source for uncapped cluster generation (regular engine and tuner).
 
     with_strength=False omits only barsPassed, which is irrelevant before capping.
@@ -649,7 +668,7 @@ def cluster_candidates(bis, bars, atr, *, clusterAtr=CLUSTER_ATR,
     if "flip" in clusterParts:
         for c in clusterPoints(extractSwingPoints(bis), tol):
             if len(c["touches"]) >= minTouch:
-                flip = detectFlip(c, bars, tol)
+                flip = detectFlip(c, bars, tol, barTimes)
                 if flip:
                     out.append(flip)
     if "recent" in clusterParts:
@@ -660,7 +679,7 @@ def cluster_candidates(bis, bars, atr, *, clusterAtr=CLUSTER_ATR,
                 out.append(recent)
     if with_strength:
         for item in out:
-            item["barsPassed"] = countBarsPassing(item["price"], bars, tol)
+            item["barsPassed"] = countBarsPassing(item["price"], bars, tol, barArrays)
     return out
 
 
@@ -675,7 +694,8 @@ def compute_srflip(periodBis, barsByPeriod, periods,
                    recentBiCount=RECENT_BI_COUNT,
                    touchWeight=TOUCH_WEIGHT, barsWeight=BARS_WEIGHT,
                    sideCount=SIDE_COUNT, mergeDetail=False,
-                   clusterParamsByPeriod=None):
+                   clusterParamsByPeriod=None, periodBarTimesIn=None,
+                   periodBarArraysIn=None):
     """逐周期识别支阻位（密集区 + 黄金分割 + BOLL）并跨周期合并、按周期选取。
 
     @param periodBis    各周期笔 { 周期: [bis] }
@@ -697,8 +717,11 @@ def compute_srflip(periodBis, barsByPeriod, periods,
                drawnByPeriod: 各显示周期选中的 ≤2×sideCount 条(含来源标注),
                currentPrice: 当前价, periodAtrs: 各周期ATR }
     """
+    # 可选加速输入：时间索引与 bars 同序；价格数组仅含当前可见前缀。
     periodAtrsIn = periodAtrsIn or {}
     periodMacdIn = periodMacdIn or {}
+    periodBarTimesIn = periodBarTimesIn or {}
+    periodBarArraysIn = periodBarArraysIn or {}
     allFlips = {}
     allFibs = {}
     allBolls = {}
@@ -724,7 +747,9 @@ def compute_srflip(periodBis, barsByPeriod, periods,
             bis, bars, atr, clusterAtr=localCluster,
             recentClusterAtr=pcfg.get("recentClusterAtr", recentClusterAtr),
             recentBiCount=pcfg.get("recentBiCount", recentBiCount),
-            minTouch=minTouch, clusterParts=clusterParts) if "cluster" in srTypes else []
+            minTouch=minTouch, clusterParts=clusterParts,
+            barTimes=periodBarTimesIn.get(res),
+            barArrays=periodBarArraysIn.get(res)) if "cluster" in srTypes else []
 
         # 黄金分割支阻位：现算非一类买卖点（本函数无 fromTs 概念，窗口由调用方决定），
         # 每方向只取最新点，参照笔=回调前顺势笔（在全量笔上定位）
@@ -734,7 +759,8 @@ def compute_srflip(periodBis, barsByPeriod, periods,
             upperBis = periodBis.get(upperRes) if upperRes else None
             buyPts = findBuyPoints(bis, upperBis, macd, intervalSecOf(res))
             sellPts = findSellPoints(bis, upperBis, macd, intervalSecOf(res))
-            allFibs[res] = buildFibCandidates(bis, buyPts, sellPts, fibLevels, bars, clusterAtr * atr)
+            allFibs[res] = buildFibCandidates(bis, buyPts, sellPts, fibLevels, bars, clusterAtr * atr,
+                                            periodBarArraysIn.get(res))
 
     # 每周期候选数量上限（数据层截断，仅密集区；fib/boll 评分语义不适用，豁免）
     allFlipsCapped = capPerPeriod(allFlips, maxPerPeriod, touchWeight, barsWeight)

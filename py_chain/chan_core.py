@@ -299,6 +299,31 @@ def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False)
     nearDouble=True 时启用「近等双顶/双底平台取后顶/后底」（≥60m 周期由调用方开启）。"""
     gapThreshold = atr * CHAN_CFG["gapFilter"] if atr else 0
 
+    # ATR 在一次构建内固定，跳空判定只取决于相邻合并K线的原始极值。
+    # 首次需要时建立计数前缀，后续任意 [a,b) 区间直接查询。
+    # 不跨 buildBi 调用缓存，避免 ATR 改变或包含合并回写导致过期。
+    gapCounts = None
+
+    def gapBetween(a, b):
+        nonlocal gapCounts
+        if a >= b:
+            return False
+        if gapCounts is None:
+            gapCounts = [0]
+            remaining = iter(merged)
+            previous = next(remaining)
+            prevHigh = previous.get("rawHigh", previous["high"])
+            prevLow = previous.get("rawLow", previous["low"])
+            count = 0
+            for current in remaining:
+                curHigh = current.get("rawHigh", current["high"])
+                curLow = current.get("rawLow", current["low"])
+                if curLow - prevHigh >= gapThreshold or prevLow - curHigh >= gapThreshold:
+                    count += 1
+                gapCounts.append(count)
+                prevHigh, prevLow = curHigh, curLow
+        return gapCounts[b] != gapCounts[a]
+
     # 阶段一：严格交替分型序列
     seq = []
     for f in fractals:
@@ -447,7 +472,7 @@ def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False)
                 result.pop()
                 continue
         # 跳空优先
-        hasGap = gapThreshold > 0 and hasGapBetween(merged, last["mergedIdx"], k["mergedIdx"], atr, CHAN_CFG["gapFilter"])
+        hasGap = gapThreshold > 0 and gapBetween(last["mergedIdx"], k["mergedIdx"])
         if hasGap:
             if CHAN_CFG["debug"]:
                 print(f"[阶段二] 跳空成笔: {last['mergedIdx']} -> {k['mergedIdx']}")
@@ -496,13 +521,13 @@ def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False)
             # 方向性变色：底到顶(上涨) 柱状体由绿变红；顶到底(下跌) 柱状体由红变绿。
             gap = k["mergedIdx"] - last["mergedIdx"]
             direction = "up" if last["type"] == "bottom" else "down"
-            macdCross = bool(macdArr) and hasMacdCrossBetween(macdArr, merged, last["mergedIdx"], k["mergedIdx"], last["time"], k["time"], direction)
-            macdRawCount = countRaw(merged, last["mergedIdx"], k["mergedIdx"])
+            # 只有间隔恰为3才可能走 MACD 成笔；其余间隔无需计算变色。
+            macdCross = gap == 3 and bool(macdArr) and hasMacdCrossBetween(macdArr, merged, last["mergedIdx"], k["mergedIdx"], last["time"], k["time"], direction)
             if gap == 3 and macdCross and noMoreExtremeInside(last, k):
                 if CHAN_CFG["debug"]:
                     print(f"[阶段二] MACD变色成笔: {last['mergedIdx']} -> {k['mergedIdx']} (合并4根K, {'绿变红' if direction == 'up' else '红变绿'})")
                 k["macdCross"] = True
-                k["macdRaw"] = macdRawCount
+                k["macdRaw"] = countRaw(merged, last["mergedIdx"], k["mergedIdx"])
                 result.append(k)
             else:
                 if len(result) >= 2 and result[-2]["type"] == k["type"]:
