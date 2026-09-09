@@ -84,10 +84,11 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
 .plist-item{display:flex;align-items:center;gap:4px;padding:2px 6px;border-bottom:1px solid var(--border)}
 .plist-item:last-child{border-bottom:none}
 .plist-item.on{background:#1d2a44}
-.plist-item .nm{flex:1;text-align:left;background:transparent;border:none;color:var(--text);padding:3px 4px;cursor:pointer;font-size:12px}
+.plist-item .nm{flex:1;min-width:35px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;background:transparent;border:none;color:var(--text);padding:3px 4px;cursor:pointer;font-size:12px}
 .plist-item .nm:hover{color:#fff}
 .plist-empty{color:var(--muted);padding:8px;font-size:11px}
 </style>
+<link rel="stylesheet" href="/sr-tune.css">
 </head>
 <body>
 <h1>支阻位参数调试控制台 <span class="badge idle" id="badge-busy">idle</span>
@@ -113,22 +114,22 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
 
   <!-- ② 级别矩阵 -->
   <div class="card">
-    <h2>② 级别矩阵 <span class="hint">勾选=参与计算并作为显示周期</span></h2>
+    <h2>② 周期与参数 <span class="hint">勾选参与计算 · 点击周期编辑</span></h2>
     <table id="tbl-levels">
-      <thead><tr><th></th><th>级别</th><th>minTouch(触及≥)</th><th>ATR</th></tr></thead>
+      <thead><tr><th></th><th>周期</th><th>ATR</th></tr></thead>
       <tbody>
-        <tr data-res="W"><td><input type="checkbox" class="chk-res"></td><td>W 周线</td>
-          <td><input type="number" class="mt" min="1" max="99" value="4"></td><td class="num atr">—</td></tr>
-        <tr data-res="D"><td><input type="checkbox" class="chk-res" checked></td><td>D 日线</td>
-          <td><input type="number" class="mt" min="1" max="99" value="4"></td><td class="num atr">—</td></tr>
-        <tr data-res="240"><td><input type="checkbox" class="chk-res" checked></td><td>240 4小时</td>
-          <td><input type="number" class="mt" min="1" max="99" value="4"></td><td class="num atr">—</td></tr>
-        <tr data-res="60"><td><input type="checkbox" class="chk-res" checked></td><td>60 1小时</td>
-          <td><input type="number" class="mt" min="1" max="99" value="3"></td><td class="num atr">—</td></tr>
-        <tr data-res="15"><td><input type="checkbox" class="chk-res" checked></td><td>15 15分钟</td>
-          <td><input type="number" class="mt" min="1" max="99" value="3"></td><td class="num atr">—</td></tr>
-        <tr data-res="3"><td><input type="checkbox" class="chk-res" checked></td><td>3 3分钟 <span class="muted small">(minTouch 默认8)</span></td>
-          <td><input type="number" class="mt" min="1" max="99" value="8"></td><td class="num atr">—</td></tr>
+        <tr data-res="W"><td><input type="checkbox" class="chk-res"></td><td><button type="button" class="period-edit" data-period="W">W 周线</button></td>
+          <td class="num atr">—</td></tr>
+        <tr data-res="D"><td><input type="checkbox" class="chk-res" checked></td><td><button type="button" class="period-edit" data-period="D">D 日线</button></td>
+          <td class="num atr">—</td></tr>
+        <tr data-res="240"><td><input type="checkbox" class="chk-res" checked></td><td><button type="button" class="period-edit" data-period="240">240 4小时</button></td>
+          <td class="num atr">—</td></tr>
+        <tr data-res="60"><td><input type="checkbox" class="chk-res" checked></td><td><button type="button" class="period-edit" data-period="60">60 1小时</button></td>
+          <td class="num atr">—</td></tr>
+        <tr data-res="15"><td><input type="checkbox" class="chk-res" checked></td><td><button type="button" class="period-edit" data-period="15">15 15分钟</button></td>
+          <td class="num atr">—</td></tr>
+        <tr data-res="3"><td><input type="checkbox" class="chk-res" checked></td><td><button type="button" class="period-edit" data-period="3">3 3分钟 </button></td>
+          <td class="num atr">—</td></tr>
       </tbody>
     </table>
     <div class="merge-tip">显示周期 L 的候选池 = 级别 ≥ L 的全部合并线（高级别继承到低周期图）。1W/1D 别名与 30S 不入引擎（UI 已归一化为 W/D）。</div>
@@ -165,6 +166,9 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
       <button class="sm primary" id="btn-preset-save">新建</button>
     </div>
     <div class="merge-tip">点名称载入 · 行内「保存」=用当前参数改写该项</div>
+    <input type="file" id="preset-excel-file" accept=".xlsx" hidden>
+    <div id="preset-excel-status" class="merge-tip" role="status"></div>
+    <button type="button" class="sm" id="preset-excel-new">导入 Excel 为新预设</button>
     <div class="plist" id="preset-list"></div>
     <div class="merge-tip" id="loaded-badge"></div>
   </div>
@@ -172,6 +176,12 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
 
 <!-- ============ 右列 ============ -->
 <div>
+  <nav class="sr-work-tabs" aria-label="调参方式">
+    <button id="tune-manual-tab" class="selected">通用计算设置</button>
+    <button id="tune-auto-tab">自动调参</button>
+  </nav>
+  <div id="tune-root" hidden></div>
+  <div id="sr-manual">
   <div class="card">
     <div class="progress"><div id="prog-bar"></div></div>
     <div class="plabel" id="prog-label"></div>
@@ -179,9 +189,9 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
     <div class="banner" id="banner">⚠ 参数已改动，<b>结果表与图上仍为上次参数</b> —— 请「重算」后再画图。</div>
   </div>
 
-  <!-- ④ 识别与合并参数（生成 → 截断 ⊂ 密集区 → 合并 → 选取） -->
+  <!-- ④ 通用计算设置（生成 → 截断 ⊂ 密集区 → 合并 → 选取） -->
   <div class="card sec">
-    <h2>④ 识别与合并参数 <span class="hint">按生成 → 截断 → 合并 → 选取；改后重算生效</span></h2>
+    <h2>④ 通用计算设置 <span class="hint">按生成 → 截断 → 合并 → 选取；改后重算生效</span></h2>
 
     <fieldset class="step">
       <legend><span class="stepn">1</span> 生成候选</legend>
@@ -189,19 +199,7 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
 
       <fieldset class="nest" id="box-cluster">
         <legend>密集区 cluster</legend>
-        <fieldset class="nest2" id="box-flip">
-          <legend>强互换 flip（R2S / S2R）</legend>
-          <div class="row"><label style="width:158px">聚类容差(×ATR)</label>
-            <input type="number" data-k="clusterAtr" value="0.5" min="0.01" step="0.1">
-            <span class="merge-tip">minTouch 见左列②级别矩阵</span></div>
-        </fieldset>
-        <fieldset class="nest2" id="box-recent">
-          <legend>近期极值 recent（RES / SUP）</legend>
-          <div class="row"><label style="width:158px">聚类容差(×ATR)</label>
-            <input type="number" data-k="recentClusterAtr" value="1.0" min="0.1" step="0.1"></div>
-          <div class="row"><label style="width:158px">取最近笔数</label>
-            <input type="number" data-k="recentBiCount" value="20" min="1" step="1"></div>
-        </fieldset>
+        <div class="merge-tip">密集区识别参数统一在左侧「周期与参数」中按周期编辑。</div>
         <fieldset class="nest2">
           <legend>截断 <span class="tag">仅密集区</span></legend>
           <div class="merge-tip">超上限才按强度评分留 Top N；fib / BOLL 豁免，不走这一步。</div>
@@ -239,7 +237,6 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
         <label>合并容差(×最小周期ATR)</label>
         <input type="number" data-k="mergeAtr" value="0.5" min="0.01" step="0.1" style="width:70px">
         <span class="merge-tip" id="merge-preview"></span>
-        <button class="sm primary" id="btn-remerge" style="margin-left:auto" title="用当前全部参数重算（含合并容差改动）">改参 → 一键重算</button>
       </div>
       <div class="merge-tip">并条后：价按触及次数加权平均 · level=最大来源周期 · 类型冲突按触及多者 · 多来源混合线丢 fib/pending/boll 标记。调大 → 并条更多；调小 → 更少。用「合并池」tab 展开成员与 RAW 叠加核对。</div>
     </fieldset>
@@ -291,6 +288,7 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
       <li>选取上图 = 每显示周期池 = 级别 ≥ L 的合并线，距现价最近上/下各 sideCount 条，每条 ≤ 距离上限×线级别ATR</li>
     </ul>
   </details>
+  </div>
 </div>
 </div>
 
@@ -305,6 +303,11 @@ const state = { busy: null, active: null, hasResult: false, computedAt: null,
                 sessionComputed: false,   // 本页面会话内是否真实计算成功（画图解锁的唯一依据）
                 loadedPreset: null };     // 当前列表高亮的预设名
 let logs = [];
+let clusterParamsByPeriod = {};
+const defaultMinTouchs = {W:4,D:4,'240':4,'60':3,'15':3,'3':8};
+let minTouchsByPeriod = {...defaultMinTouchs};
+// Legacy defaults also retain the existing Fibonacci clustering behavior.
+let clusterDefaults = {clusterAtr:'0.5',recentClusterAtr:'1.0',recentBiCount:'20'};
 
 function el(id) { return document.getElementById(id); }
 function q(sel) { return document.querySelector(sel); }
@@ -385,7 +388,7 @@ function updateButtons() {
                        : '';
   el('btn-compute').disabled = occupied;
   el('btn-refresh').disabled = occupied;
-  el('btn-remerge').disabled = occupied;
+
   el('btn-draw').disabled = occupied || !!drawForbidden;
   el('btn-draw').title = drawForbidden || '把当前计算结果画到 TradingView';
   el('btn-clear').disabled = occupied;
@@ -394,7 +397,7 @@ function updateButtons() {
   const types = collectCfg().srTypes;
   if (!types.length && !busy) {
     el('btn-compute').disabled = true; el('btn-refresh').disabled = true;
-    el('btn-remerge').disabled = true;
+
   }
   syncParamDim();
 }
@@ -402,8 +405,8 @@ function syncParamDim() {
   // ③ 类型开关关掉时，④ 对应子块变淡（仍可改值，改后须重算）
   const on = id => el(id).checked;
   el('box-cluster').classList.toggle('dim', !on('t-cluster'));
-  el('box-flip').classList.toggle('dim', !on('t-cluster') || !on('t-flip'));
-  el('box-recent').classList.toggle('dim', !on('t-cluster') || !on('t-recent'));
+  el('box-flip')?.classList.toggle('dim', !on('t-cluster') || !on('t-flip'));
+  el('box-recent')?.classList.toggle('dim', !on('t-cluster') || !on('t-recent'));
   el('box-fib').classList.toggle('dim', !on('t-fib'));
   el('box-boll').classList.toggle('dim', !on('t-boll'));
 }
@@ -413,12 +416,9 @@ function collectCfg() {
   const cfg = { symbol: el('cfg-symbol').value.trim() || 'OANDA:XAUUSD',
                 from: el('cfg-from').value.trim() };
   cfg.periods = qa('.chk-res:checked').map(c => c.closest('tr').dataset.res);
-  const minTouchs = {};
-  qa('#tbl-levels tbody tr').forEach(tr => {
-    if (tr.querySelector('.chk-res').checked)
-      minTouchs[tr.dataset.res] = tr.querySelector('.mt').value;
-  });
-  cfg.minTouchs = minTouchs;
+  cfg.minTouchs = {...minTouchsByPeriod};
+  Object.assign(cfg, clusterDefaults);
+  cfg.clusterParamsByPeriod = structuredClone(clusterParamsByPeriod);
   cfg.srTypes = [];
   if (el('t-cluster').checked) cfg.srTypes.push('cluster');
   if (el('t-fib').checked) cfg.srTypes.push('fib');
@@ -437,7 +437,8 @@ function collectCfg() {
 function cfgSnapshot() {
   const c = collectCfg();
   return JSON.stringify({ symbol: c.symbol, from: c.from, periods: c.periods,
-    minTouchs: c.minTouchs, srTypes: c.srTypes, clusterParts: c.clusterParts,
+    minTouchs: c.minTouchs, clusterParamsByPeriod: c.clusterParamsByPeriod,
+    srTypes: c.srTypes, clusterParts: c.clusterParts,
     clusterAtr: c.clusterAtr, mergeAtr: c.mergeAtr, recentClusterAtr: c.recentClusterAtr,
     maxDistAtr: c.maxDistAtr, maxPerPeriod: c.maxPerPeriod, sideCount: c.sideCount,
     recentBiCount: c.recentBiCount, touchWeight: c.touchWeight, barsWeight: c.barsWeight,
@@ -445,15 +446,13 @@ function cfgSnapshot() {
 }
 let lastComputedSnap = null;
 function applyCfgToUI(cfg) {
+  clusterParamsByPeriod = structuredClone(cfg.clusterParamsByPeriod || {});
   el('cfg-symbol').value = cfg.symbol || 'OANDA:XAUUSD';
   if (cfg.from) el('cfg-from').value = cfg.from;
   const want = new Set(cfg.periods || []);
   qa('.chk-res').forEach(c => { c.checked = want.has(c.closest('tr').dataset.res); });
-  (cfg.minTouchs || {});
-  qa('#tbl-levels tbody tr').forEach(tr => {
-    const v = (cfg.minTouchs || {})[tr.dataset.res];
-    if (v != null) tr.querySelector('.mt').value = v;
-  });
+  minTouchsByPeriod = {...defaultMinTouchs, ...(cfg.minTouchs || {})};
+  clusterDefaults = {clusterAtr:cfg.clusterAtr??'0.5',recentClusterAtr:cfg.recentClusterAtr??'1.0',recentBiCount:cfg.recentBiCount??'20'};
   el('t-cluster').checked = (cfg.srTypes || []).includes('cluster');
   el('t-fib').checked = (cfg.srTypes || []).includes('fib');
   el('t-boll').checked = (cfg.srTypes || []).includes('boll');
@@ -469,6 +468,7 @@ function applyCfgToUI(cfg) {
   el('d-raw').checked = !!cfg.draw_raw;
   checkStale();
   updateButtons();   // 程序赋值不触发 input 事件，手动刷新按钮态
+  window.dispatchEvent(new Event('sr-config-loaded'));
 }
 function checkStale() {
   const stale = lastComputedSnap != null && cfgSnapshot() !== lastComputedSnap;
@@ -494,7 +494,7 @@ async function refreshPresetList() {
   if (!r) return;
   const presets = r.presets || [];
   if (!presets.length) {
-    box.innerHTML = '<div class="plist-empty">暂无预设，输入名称后点新建</div>';
+    box.innerHTML = '<div class="plist-empty">暂无预设，输入名称后点新建，或导入 Excel</div>';
     return;
   }
   box.innerHTML = presets.map(p => {
@@ -502,9 +502,47 @@ async function refreshPresetList() {
     return `<div class="plist-item" data-name="${n}">` +
       `<button type="button" class="nm" data-act="load" title="载入">${n}</button>` +
       `<button type="button" class="sm" data-act="save">保存</button>` +
-      `<button type="button" class="sm danger" data-act="del">删除</button></div>`;
+      `<button type="button" class="sm danger" data-act="del">删除</button>` +
+      `<button type="button" class="sm" data-act="import" title="从 Excel 更新此预设">导入</button>` +
+      `<button type="button" class="sm" data-act="export" title="导出此预设已保存的全部参数">导出</button></div>`;
   }).join('');
   markLoadedPreset(state.loadedPreset);
+}
+let excelTarget = '', excelBusy = false;
+function excelStatus(text, error=false) {
+  el('preset-excel-status').textContent=text;
+  el('preset-excel-status').style.color=error?'var(--warn)':'var(--ok)';
+}
+function choosePresetExcel(name) {
+  if(excelBusy)return;
+  excelTarget=name;el('preset-excel-file').value='';el('preset-excel-file').click();
+}
+async function exportPresetExcel(name) {
+  if(excelBusy)return;excelBusy=true;
+  try {
+    const r=await fetch('/api/sr/presets/excel/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    if(!r.ok)throw Error((await r.json()).error||'导出失败');
+    const url=URL.createObjectURL(await r.blob()),a=document.createElement('a');
+    a.href=url;a.download=name.replace(/[\\/:*?"<>|]/g,'_')+'.xlsx';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);
+    excelStatus('已导出 '+name+' 的全部已保存参数。');
+  } catch(e){excelStatus(e.message,true);} finally{excelBusy=false;}
+}
+async function importPresetExcel() {
+  const file=el('preset-excel-file').files[0];if(!file||excelBusy)return;
+  if(!/\.xlsx$/i.test(file.name)||file.size>2*1024*1024){excelStatus('请选择不超过 2 MB 的 .xlsx 文件。',true);return;}
+  excelBusy=true;excelStatus('正在校验并导入…');
+  try {
+    let target=excelTarget;
+    if(!target){
+      const existing=await api('/api/sr/presets',undefined,'GET');if(!existing)throw Error('无法读取预设列表');
+      const base=(el('preset-name').value.trim()||file.name.replace(/\.xlsx$/i,'')).slice(0,34)||'导入预设';target=base;let i=1;
+      while((existing.presets||[]).some(p=>p.name===target))target=base+' ('+(i++)+')';
+    }
+    const r=await fetch('/api/sr/presets/excel/import?name='+encodeURIComponent(target),{method:'POST',headers:{'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'},body:await file.arrayBuffer()});
+    const data=await r.json();if(!r.ok||!data.ok)throw Error(data.error||'导入失败');
+    applyCfgToUI(data.cfg);el('preset-name').value=data.name;state.loadedPreset=data.name;await refreshPresetList();
+    excelStatus('已导入并载入 '+data.name+'，计算后生效。');
+  } catch(e){excelStatus(e.message,true);} finally{excelBusy=false;el('preset-excel-file').value='';}
 }
 async function savePreset(name) {
   name = (name || el('preset-name').value).trim();
@@ -705,7 +743,7 @@ function refreshMergeTip() {
   const m = state.meta;
   const a = m ? m.merge_tol : null;
   const atr = m ? m.min_atr : null;
-  const val = el('[data-k="mergeAtr"]').value;
+  const val = q('[data-k="mergeAtr"]').value;
   el('merge-preview').textContent = m
     ? `上次计算: ${fmt(val)} × ${fmt(atr)} = ${a != null ? fmt(a) : '—'}；当前控件值 ${val}`
     : '计算后显示：合并容差 × 最小周期ATR';
@@ -849,10 +887,12 @@ function connectSSE() {
 function bindEvents() {
   el('btn-compute').onclick = () => doCompute('auto');
   el('btn-refresh').onclick = () => doCompute('refresh');
-  el('btn-remerge').onclick = () => { lastComputedSnap = null; doCompute('auto'); };
+
   el('btn-draw').onclick = doDraw;
   el('btn-clear').onclick = doClear;
   el('btn-preset-save').onclick = () => savePreset();
+  el('preset-excel-new').onclick = () => choosePresetExcel('');
+  el('preset-excel-file').onchange = importPresetExcel;
   el('preset-list').onclick = (e) => {
     const btn = e.target.closest('[data-act]');
     if (!btn) return;
@@ -862,6 +902,8 @@ function bindEvents() {
     if (btn.dataset.act === 'load') loadPreset(name);
     else if (btn.dataset.act === 'save') savePreset(name);
     else if (btn.dataset.act === 'del') delPreset(name);
+    else if (btn.dataset.act === 'import') choosePresetExcel(name);
+    else if (btn.dataset.act === 'export') exportPresetExcel(name);
   };
   el('d-raw').onchange = noteRawToggle;
   el('d-text').onchange = () => {};
@@ -895,9 +937,10 @@ function init() {
   updateButtons();
   refreshState();                     // 立即与服务端对齐（历史结果/忙状态）
   setInterval(refreshState, 4000);    // 轮询自愈：SSE 事件丢失不卡按钮
-  log('支阻位调试页就绪。步骤：选级别/类型/参数 → 计算 → 看明细表/画图 → 调整合并容差一键重算。');
+  log('支阻位调试页就绪。步骤：选级别/类型/参数 → 计算 → 看明细表/画图 → 调整参数后点击左侧计算。');
 }
 init();
 </script>
+<script src="/sr-tune.js"></script>
 </body>
 </html>

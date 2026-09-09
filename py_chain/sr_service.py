@@ -25,6 +25,7 @@ from .sr_flip import (LEVEL_ORDER, DEFAULT_SR_TYPES, FIB_LEVELS,
 # 级别（大 → 小，与 LEVEL_ORDER 相对顺序一致；不含 30S / 1W / 1D 别名键）
 CANONICAL_LEVELS = ["W", "D", "240", "60", "15", "3"]
 DEFAULT_LEVELS = ["D", "240", "60", "15", "3"]
+DEFAULT_FROM = "2026-06-30"
 # 页面 minTouch 矩阵默认（与引擎 _MIN_TOUCH_DEFAULT 一致；W 引擎无收录落底 4）
 MIN_TOUCH_UI = {"W": 4, "D": 4, "240": 4, "60": 4, "15": 3, "3": 8}
 MIN_BARS_OK = 6   # 单周期可建笔的最少K线数（缓存覆盖判定下限）
@@ -89,6 +90,8 @@ def ensure_data(periods, from_ts, log=None, refresh=False, symbol=None):
     @returns { 周期: [{time,open,high,low,close}] }（仅含请求周期，时间升序）
     """
     log = log or (lambda *a, **k: None)
+    if symbol:
+        return ensure_symbol_data(periods, from_ts, symbol, log, refresh)
     cache_file = data_loader.CACHE_FILE
     cached = {}
     try:
@@ -139,6 +142,44 @@ def ensure_data(periods, from_ts, log=None, refresh=False, symbol=None):
     return out
 
 
+def ensure_symbol_data(periods, from_ts, symbol, log, refresh=False):
+    """SR UI uses the same verified, symbol-separated cache as calibration.
+
+    The legacy shared cache has no provenance and is left untouched. Consumers
+    without a symbol keep their existing path above.
+    """
+    from .sr_tune import Store, digest
+    store = Store()
+    symbol = symbol.strip().upper()
+    cached = {}
+    for period in periods:
+        try:
+            item = store.get("market", digest({"symbol": symbol, "period": period}))
+            if item.get("symbol") == symbol and item.get("period") == period:
+                cached[period] = item["bars"]
+        except ValueError:
+            pass
+    cov = coverage(cached, periods, from_ts)
+    missing = [p for p in periods if refresh or cov[p] in ("missing", "short")]
+    if missing:
+        log(f"读取带品种校验的行情 {symbol} / {','.join(missing)} ...")
+        fetched = data_loader.fetch_bars(cfg=data_loader.CDPConfig(periods=missing),
+                                         from_ts=from_ts, cache=False, symbol=symbol,
+                                         log=log, verify_symbol=True)
+        for period in missing:
+            if not fetched.get(period):
+                raise RuntimeError(f"未能获取 {symbol}/{period} 的行情")
+            cached[period] = data_loader._dedup_sorted(fetched[period])
+            store.put("market", digest({"symbol": symbol, "period": period}),
+                      {"symbol": symbol, "period": period, "bars": cached[period]})
+    out = {p: [b for b in cached[p] if b["time"] >= from_ts] for p in periods}
+    for period, bars in out.items():
+        if len(bars) < MIN_BARS_OK:
+            raise RuntimeError(f"{symbol}/{period} 起始日期之后的K线不足")
+        log(f"{period}: {len(bars)} 根（品种已校验；窗口始于 {_ts_short(bars[0]['time'])}）")
+    return out
+
+
 def engine_kwargs_of(cfg):
     """把页面 cfg 映射为 compute_srflip 关键字参数（缺失键走引擎默认）。"""
     return {
@@ -148,6 +189,7 @@ def engine_kwargs_of(cfg):
         "maxDistAtr": float(cfg.get("maxDistAtr", MAX_DIST_ATR)),
         "maxPerPeriod": int(cfg.get("maxPerPeriod", MAX_PER_PERIOD)),
         "minTouchsIn": dict(cfg.get("minTouchs", {}) or {}),
+        "clusterParamsByPeriod": dict(cfg.get("clusterParamsByPeriod", {}) or {}),
         "srTypes": tuple(cfg.get("srTypes", DEFAULT_SR_TYPES)),
         "clusterParts": tuple(cfg.get("clusterParts", ("flip", "recent"))),
         "fibLevels": [float(x) for x in cfg.get("fibLevels", FIB_LEVELS)],

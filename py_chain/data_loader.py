@@ -299,7 +299,7 @@ def _read_bars(c):
         "const out = []; "
         "for (const it of items) { const v = it.value; "
         "out.push({ time: v[0], open: v[1], high: v[2], low: v[3], close: v[4] }); } "
-        "return { res: String(c.resolution()), bars: out, total: items.length }; })()"
+        "return { symbol: c.symbol(), res: String(c.resolution()), bars: out, total: items.length }; })()"
     )
     return c.evaluate(expr)
 
@@ -316,7 +316,8 @@ def _dedup_sorted(bars):
     return uniq
 
 
-def fetch_bars(cfg=None, from_ts=0, cache=True, cache_file=CACHE_FILE, symbol=None, log=None):
+def fetch_bars(cfg=None, from_ts=0, cache=True, cache_file=CACHE_FILE, symbol=None, log=None,
+               verify_symbol=False):
     """通过 CDP 拉取多周期历史K线。
 
     @param cfg        CDPConfig（端口、周期列表、等待时长）
@@ -395,6 +396,13 @@ def fetch_bars(cfg=None, from_ts=0, cache=True, cache_file=CACHE_FILE, symbol=No
             if not d or not d.get("bars"):
                 log(f"警告：周期 {res} 未读到K线")
                 continue
+            aliases = {"1W": "W", "1D": "D", "4H": "240", "1H": "60"}
+            actual_res = str(d.get("res")).upper()
+            requested_res = str(res).upper()
+            if verify_symbol and (str(d.get("symbol", "")).upper() != str(symbol).upper()
+                                  or aliases.get(actual_res, actual_res) != aliases.get(requested_res, requested_res)):
+                raise CDPError(f"行情来源不匹配：请求 {symbol}/{res}，实际 "
+                               f"{d.get('symbol')}/{d.get('res')}")
             bars = [b for b in d["bars"] if b["time"] >= from_ts]
             # 去重 + 时间升序
             data[res] = _dedup_sorted(bars)

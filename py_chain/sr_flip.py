@@ -633,6 +633,37 @@ def capPerPeriod(allFlips, maxPerPeriod, touchWeight=TOUCH_WEIGHT, barsWeight=BA
 # ============================================================
 
 
+def cluster_candidates(bis, bars, atr, *, clusterAtr=CLUSTER_ATR,
+                       recentClusterAtr=RECENT_CLUSTER_ATR, minTouch=4,
+                       recentBiCount=RECENT_BI_COUNT,
+                       clusterParts=("flip", "recent"), with_strength=True):
+    """Single source for uncapped cluster generation (regular engine and tuner).
+
+    with_strength=False omits only barsPassed, which is irrelevant before capping.
+    Neither input nor cached candidates are mutated.
+    """
+    if len(bis) < 3 or not bars:
+        return []
+    tol = clusterAtr * atr
+    out = []
+    if "flip" in clusterParts:
+        for c in clusterPoints(extractSwingPoints(bis), tol):
+            if len(c["touches"]) >= minTouch:
+                flip = detectFlip(c, bars, tol)
+                if flip:
+                    out.append(flip)
+    if "recent" in clusterParts:
+        for c in clusterPoints(extractRecentExtremes(bis, recentBiCount),
+                               recentClusterAtr * atr):
+            recent = detectRecentFlip(c)
+            if recent:
+                out.append(recent)
+    if with_strength:
+        for item in out:
+            item["barsPassed"] = countBarsPassing(item["price"], bars, tol)
+    return out
+
+
 def compute_srflip(periodBis, barsByPeriod, periods,
                    clusterAtr=CLUSTER_ATR, mergeAtr=MERGE_ATR,
                    recentClusterAtr=RECENT_CLUSTER_ATR,
@@ -643,7 +674,8 @@ def compute_srflip(periodBis, barsByPeriod, periods,
                    clusterParts=("flip", "recent"), minTouchsIn=None,
                    recentBiCount=RECENT_BI_COUNT,
                    touchWeight=TOUCH_WEIGHT, barsWeight=BARS_WEIGHT,
-                   sideCount=SIDE_COUNT, mergeDetail=False):
+                   sideCount=SIDE_COUNT, mergeDetail=False,
+                   clusterParamsByPeriod=None):
     """逐周期识别支阻位（密集区 + 黄金分割 + BOLL）并跨周期合并、按周期选取。
 
     @param periodBis    各周期笔 { 周期: [bis] }
@@ -684,34 +716,15 @@ def compute_srflip(periodBis, barsByPeriod, periods,
         if atr is None:
             atr = calcATR(bars, 14)
         periodAtrs[res] = atr
-        tol = clusterAtr * atr
+        pcfg = (clusterParamsByPeriod or {}).get(str(res).upper(), {})
+        localCluster = pcfg.get("clusterAtr", clusterAtr)
+        tol = localCluster * atr
         minTouch = (minTouchsIn or {}).get(str(res).upper()) or minTouchFor(res, minTouchOverride)
-
-        flips = []
-        recentFlips = []
-        if "cluster" in srTypes:
-            # 强支阻互换位（clusterParts 子开关：flip）
-            if "flip" in clusterParts:
-                swingPoints = extractSwingPoints(bis)
-                clusters = clusterPoints(swingPoints, tol)
-                for c in clusters:
-                    if len(c["touches"]) < minTouch:
-                        continue
-                    flip = detectFlip(c, bars, tol)
-                    if flip:
-                        flip["barsPassed"] = countBarsPassing(flip["price"], bars, tol)
-                        flips.append(flip)
-
-            # 近期极值位（clusterParts 子开关：recent；更宽的聚类容差，不要求触及次数）
-            if "recent" in clusterParts:
-                recentPoints = extractRecentExtremes(bis, recentBiCount)
-                recentClusters = clusterPoints(recentPoints, recentClusterAtr * atr)
-                for c in recentClusters:
-                    r = detectRecentFlip(c)
-                    if r:
-                        r["barsPassed"] = countBarsPassing(r["price"], bars, tol)
-                        recentFlips.append(r)
-        allFlips[res] = flips + recentFlips
+        allFlips[res] = cluster_candidates(
+            bis, bars, atr, clusterAtr=localCluster,
+            recentClusterAtr=pcfg.get("recentClusterAtr", recentClusterAtr),
+            recentBiCount=pcfg.get("recentBiCount", recentBiCount),
+            minTouch=minTouch, clusterParts=clusterParts) if "cluster" in srTypes else []
 
         # 黄金分割支阻位：现算非一类买卖点（本函数无 fromTs 概念，窗口由调用方决定），
         # 每方向只取最新点，参照笔=回调前顺势笔（在全量笔上定位）
@@ -721,7 +734,7 @@ def compute_srflip(periodBis, barsByPeriod, periods,
             upperBis = periodBis.get(upperRes) if upperRes else None
             buyPts = findBuyPoints(bis, upperBis, macd, intervalSecOf(res))
             sellPts = findSellPoints(bis, upperBis, macd, intervalSecOf(res))
-            allFibs[res] = buildFibCandidates(bis, buyPts, sellPts, fibLevels, bars, tol)
+            allFibs[res] = buildFibCandidates(bis, buyPts, sellPts, fibLevels, bars, clusterAtr * atr)
 
     # 每周期候选数量上限（数据层截断，仅密集区；fib/boll 评分语义不适用，豁免）
     allFlipsCapped = capPerPeriod(allFlips, maxPerPeriod, touchWeight, barsWeight)

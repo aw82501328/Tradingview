@@ -27,6 +27,7 @@ Thumbs.db
 *.log
 .cache/
 .cursor/cache/
+.sr-tune/
 
 # 生成的趋势报告（每次运行 full_report.js 重新生成）
 .cursor/skills/**/report.html

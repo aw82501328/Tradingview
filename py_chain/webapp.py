@@ -17,14 +17,16 @@
 """
 
 import argparse
+import math
 import json
 import os
 import queue
 import sys
 import threading
+import tempfile
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, quote
 
 from .data_loader import CDPConfig, DEFAULT_PERIODS, DEFAULT_CDP_PORT, load_bars
 from .backtest import BacktestEngine
@@ -32,7 +34,7 @@ from .main import parse_from
 from .chan_core import fmtT
 from .monitor import LiveMonitor, ReplayMonitor, clear_rt_markers
 from .marks import draw_signal_marks, draw_sr_marks, clear_signal_marks, clear_all_marks
-from . import sr_service, sr_draw
+from . import sr_service, sr_draw, sr_tune, sr_tune_api, sr_preset_excel
 
 # ============================================================
 # 全局互斥：三种模式同一时间最多运行一种
@@ -559,7 +561,7 @@ class ReplayWorker(ModeWorker):
 # HTTP 服务
 # ============================================================
 class ControlApp:
-    def __init__(self):
+    def __init__(self, tune_store=None):
         self.signals = SignalLog()
         self.broadcaster = Broadcaster()
         self.workers = {
@@ -569,6 +571,7 @@ class ControlApp:
         }
         # 支阻位调试模块：最近一次计算结果槽（cfg 快照 / computed_at / result / meta）
         self.sr = {"cfg": None, "computed_at": None, "result": None, "meta": None}
+        self.sr_tune = sr_tune.TuneManager(store=tune_store, emit=self.broadcaster.emit)
 
     def sr_counts(self):
         """支阻位结果概要（小载荷，供 /api/sr/state 与 status() 使用）。"""
@@ -614,9 +617,9 @@ class ControlApp:
         if not sr_types:
             raise ValueError("至少开启一种支阻类型（密集区/黄金分割/BOLL）")
         cfg["srTypes"] = sr_types
-        parts = [s for s in (cfg.get("clusterParts") or ["flip", "recent"])
+        parts = [s for s in cfg.get("clusterParts", ["flip", "recent"])
                  if s in ("flip", "recent")]
-        cfg["clusterParts"] = parts or ["flip", "recent"]
+        cfg["clusterParts"] = parts
         # 数字字段（非法直接 400）
         floats = {k: float(cfg[k]) for k in
                   ("clusterAtr", "mergeAtr", "recentClusterAtr", "maxDistAtr",
@@ -645,6 +648,7 @@ class ControlApp:
                 raise ValueError(f"{res} 的 minTouch 须 >= 1")
             mt[str(res).upper()] = iv
         cfg["minTouchs"] = mt
+        cfg["clusterParamsByPeriod"] = sr_tune.normalize_overrides(cfg.get("clusterParamsByPeriod", {}))
         # 黄金分割比率：逗号分隔文本或列表，0 < r < 1 且 <= 6 项
         raw_fib = cfg.get("fibLevels", "0.382,0.5,0.618")
         if isinstance(raw_fib, str):
@@ -729,8 +733,15 @@ def _presets_load():
 
 
 def _presets_save(presets):
-    with open(SR_PRESETS_FILE, "w", encoding="utf-8") as f:
-        json.dump(presets, f, ensure_ascii=False, indent=1)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(SR_PRESETS_FILE), suffix=".tmp", delete=False) as f:
+            temp_path = f.name
+            json.dump(presets, f, ensure_ascii=False, indent=1, allow_nan=False)
+        os.replace(temp_path, SR_PRESETS_FILE)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 
 def make_handler(app):
@@ -772,6 +783,11 @@ def make_handler(app):
         def do_GET(self):
             parsed = urlparse(self.path)
             path = parsed.path
+            if self._tune("GET"):
+                return
+            if path in ("/sr-tune.js", "/sr-tune.css"):
+                self._serve_file(path[1:], "text/javascript; charset=utf-8" if path.endswith(".js") else "text/css; charset=utf-8")
+                return
             if path == "/" or path == "/index.html":
                 self._serve_file("index.html", "text/html; charset=utf-8")
                 return
@@ -821,6 +837,8 @@ def make_handler(app):
 
         def do_POST(self):
             path = urlparse(self.path).path
+            if self._tune("POST"):
+                return
             if path == "/api/signals/clear":
                 n = app.signals.clear()
                 app.broadcaster.emit("signals_cleared", {"n": n})
@@ -930,6 +948,70 @@ def make_handler(app):
 
                 threading.Thread(target=_job, daemon=True, name="marks-clear").start()
                 self._send_json({"ok": True, "started": True})
+                return
+            if path == "/api/sr/presets/excel/export":
+                name = str(self._read_body().get("name") or "").strip()
+                with _presets_lock:
+                    preset = next((p for p in _presets_load() if p.get("name") == name), None)
+                if preset is None:
+                    self._send_json({"ok": False, "error": "预设不存在，请先保存"}, 404)
+                    return
+                try:
+                    payload = sr_preset_excel.export_preset(name, preset["cfg"])
+                except (ValueError, TypeError) as e:
+                    self._send_json({"ok": False, "error": str(e)}, 400)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(name + ".xlsx", safe=""))
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            if path == "/api/sr/presets/excel/import":
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                    if not 0 < length <= sr_preset_excel.LIMIT:
+                        self.close_connection = True
+                        raise ValueError("请选择不超过 2 MB 的 .xlsx 文件")
+                    source_name, cfg = sr_preset_excel.import_preset(self.rfile.read(length))
+                    name = parse_qs(urlparse(self.path).query).get("name", [source_name])[0].strip()
+                    if not name or len(name) > 40:
+                        raise ValueError("预设名须为 1~40 字符")
+                    # Validate without replacing original types or dropping additional settings.
+                    def finite(value):
+                        if isinstance(value, float) and not math.isfinite(value):
+                            raise ValueError("参数须为有限数字")
+                        if isinstance(value, dict):
+                            for v in value.values(): finite(v)
+                        if isinstance(value, list):
+                            for v in value: finite(v)
+                    finite(cfg)
+                    normalized = app.normalize_sr_cfg(cfg)
+                    finite(normalized)
+                    for k in ("recentBiCount", "maxPerPeriod", "sideCount", "bollLength"):
+                        if k in cfg and float(cfg[k]) != normalized[k]:
+                            raise ValueError(k + " 须为整数")
+                    for p, v in cfg.get("minTouchs", {}).items():
+                        if float(v) != int(v):
+                            raise ValueError(p + " 的 minTouch 须为整数")
+                    for k in ("draw_text", "draw_raw"):
+                        if k in cfg and not isinstance(cfg[k], bool):
+                            raise ValueError(k + " 须为 boolean 类型")
+                except (ValueError, TypeError, AttributeError, OverflowError, RecursionError) as e:
+                    self._send_json({"ok": False, "error": "导入失败：" + str(e)}, 400)
+                    return
+                with _presets_lock:
+                    presets = _presets_load()
+                    overwritten = any(p.get("name") == name for p in presets)
+                    out = [p for p in presets if p.get("name") != name]
+                    out.append({"name": name, "saved_at": int(time.time()), "cfg": cfg})
+                    try:
+                        _presets_save(out)
+                    except OSError as e:
+                        self._send_json({"ok": False, "error": "导入保存失败：" + str(e)}, 500)
+                        return
+                self._send_json({"ok": True, "name": name, "cfg": cfg, "overwritten": overwritten})
                 return
             if path == "/api/sr/presets":
                 # POST 保存/覆盖预设（同名覆盖）
@@ -1137,6 +1219,8 @@ def make_handler(app):
 
         def do_DELETE(self):
             path = urlparse(self.path).path
+            if self._tune("DELETE"):
+                return
             if path == "/api/sr/presets":
                 qs = parse_qs(urlparse(self.path).query)
                 name = str(qs.get("name", [""])[0]).strip()
@@ -1161,6 +1245,12 @@ def make_handler(app):
                 self._send_json({"ok": True, "removed": name})
                 return
             self._send_json({"ok": False, "error": f"未知路径 {path}"}, 404)
+
+        def _tune(self, method):
+            return sr_tune_api.handle(self, app, method, {
+                "acquire_active": acquire_active, "release_active": release_active,
+                "marks_lock": _marks_lock, "set_busy": _set_sr_busy,
+                "normalize_cfg": ControlApp.normalize_sr_cfg})
 
         def _serve_file(self, name, content_type="text/html; charset=utf-8"):
             """服务 py_chain/web/ 下静态文件（index.html / sr.html）。"""
