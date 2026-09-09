@@ -54,10 +54,16 @@ tr.line:hover td{background:#1d222e}
 .logbox{background:#0d1017;border:1px solid var(--border);border-radius:4px;padding:6px 8px;font:11px/1.6 Consolas,Menlo,monospace;height:110px;overflow:auto;color:#9aa3b2}
 .logbox .err{color:var(--buy)}
 fieldset{border:1px solid var(--border);border-radius:6px;padding:6px 9px;margin:6px 0}
-fieldset.wide{grid-column:1/-1}
+fieldset.step{border-color:#3a4a68}
+fieldset.nest{margin-left:12px;background:#161a23}
+fieldset.nest2{margin-left:12px;background:#12151c}
+.grid-src{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+@media (max-width:720px){.grid-src{grid-template-columns:1fr}}
 legend{font-size:12px;color:#fff;padding:0 5px}
 legend.warn{color:var(--warn);font-weight:600}
 legend .hl{color:var(--warn)}
+legend .stepn{display:inline-block;min-width:18px;color:var(--accent);font-weight:700}
+legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;background:var(--chip);border:1px solid var(--border);color:var(--muted);margin-left:4px;font-weight:400}
 .merge-tip{color:var(--muted);font-size:11px;margin:2px 0}
 .banner{display:none;background:#3a2a05;border:1px solid #7a5c10;color:#e8c877;font-size:12px;padding:3px 10px;border-radius:4px;margin:6px 0}
 .banner.show{display:block}
@@ -74,7 +80,13 @@ legend .hl{color:var(--warn)}
 .scrollbox{max-height:460px;overflow:auto;border:1px solid var(--border);border-radius:4px}
 .filterbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px;font-size:12px}
 .filterbar label{color:var(--muted)}
-#cnt{color:var(--muted);font-size:11px}
+.plist{border:1px solid var(--border);border-radius:4px;max-height:168px;overflow:auto;margin-top:6px;background:#0f1219}
+.plist-item{display:flex;align-items:center;gap:4px;padding:2px 6px;border-bottom:1px solid var(--border)}
+.plist-item:last-child{border-bottom:none}
+.plist-item.on{background:#1d2a44}
+.plist-item .nm{flex:1;text-align:left;background:transparent;border:none;color:var(--text);padding:3px 4px;cursor:pointer;font-size:12px}
+.plist-item .nm:hover{color:#fff}
+.plist-empty{color:var(--muted);padding:8px;font-size:11px}
 </style>
 </head>
 <body>
@@ -149,12 +161,11 @@ legend .hl{color:var(--warn)}
     <div class="merge-tip" id="raw-note" style="display:none;">叠加 RAW· 合并前原始候选线：每张图显示 级别 ≥ 本图 的全部来源候选（密集区黄 / 黄金分割蓝 / BOLL 青），与合并后灰线同框对照；只画距现价 ≤ 距离上限×级别ATR 的候选。</div>
     <div class="row" style="border-top:1px solid var(--border);margin-top:8px;padding-top:7px">
       <span style="color:#fff;font-size:12px">预设</span>
-      <input type="text" id="preset-name" placeholder="预设名称" maxlength="40">
-      <button class="sm primary" id="btn-preset-save">保存</button>
-      <select id="preset-list" style="width:140px"></select>
-      <button class="sm" id="btn-preset-load">载入</button>
-      <button class="sm danger" id="btn-preset-del">删除</button>
+      <input type="text" id="preset-name" placeholder="新预设名称" maxlength="40">
+      <button class="sm primary" id="btn-preset-save">新建</button>
     </div>
+    <div class="merge-tip">点名称载入 · 行内「保存」=用当前参数改写该项</div>
+    <div class="plist" id="preset-list"></div>
     <div class="merge-tip" id="loaded-badge"></div>
   </div>
 </div>
@@ -168,43 +179,79 @@ legend .hl{color:var(--warn)}
     <div class="banner" id="banner">⚠ 参数已改动，<b>结果表与图上仍为上次参数</b> —— 请「重算」后再画图。</div>
   </div>
 
-  <!-- ④ 分组参数 -->
+  <!-- ④ 识别与合并参数（生成 → 截断 ⊂ 密集区 → 合并 → 选取） -->
   <div class="card sec">
-    <h2>④ 识别与合并参数 <span class="hint">全部为引擎可配置项；改后重算生效</span></h2>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0 12px">
-      <fieldset><legend>密集区识别</legend>
-        <div class="row"><label style="width:158px">聚类容差(×ATR)</label><input type="number" data-k="clusterAtr" value="0.5" min="0.01" step="0.1"></div>
-        <div class="row"><label style="width:158px">每周期候选上限</label><input type="number" data-k="maxPerPeriod" value="50" min="1" step="1"></div>
-      </fieldset>
-      <fieldset><legend>近期极值</legend>
-        <div class="row"><label style="width:158px">聚类容差(×ATR)</label><input type="number" data-k="recentClusterAtr" value="1.0" min="0.1" step="0.1"></div>
-        <div class="row"><label style="width:158px">取最近笔数</label><input type="number" data-k="recentBiCount" value="20" min="1" step="1"></div>
-      </fieldset>
-      <fieldset><legend>强度评分 <span class="muted small" style="font-weight:400">(仅截断与score)</span></legend>
-        <div class="row"><label style="width:158px">触及次数权重</label><input type="number" data-k="touchWeight" value="0.6" min="0" max="1" step="0.05"></div>
-        <div class="row"><label style="width:158px">经过K线权重</label><input type="number" data-k="barsWeight" value="0.4" min="0" max="1" step="0.05"></div>
-      </fieldset>
-      <fieldset><legend>选取 / 显示</legend>
-        <div class="row"><label style="width:158px">距离上限(×线级别ATR)</label><input type="number" data-k="maxDistAtr" value="3.0" min="0.1" step="0.1"></div>
-        <div class="row"><label style="width:158px">每侧条数 sideCount</label><input type="number" data-k="sideCount" value="2" min="1" max="10" step="1"></div>
-      </fieldset>
-    </div>
+    <h2>④ 识别与合并参数 <span class="hint">按生成 → 截断 → 合并 → 选取；改后重算生效</span></h2>
 
-    <fieldset class="wide"><legend class="warn">══ 跨周期合并 ══ 合并容差 = 值 × 最小周期ATR（看哪些候选被并成一条位置线）</legend>
+    <fieldset class="step">
+      <legend><span class="stepn">1</span> 生成候选</legend>
+      <div class="merge-tip">三类各自出线；开关在③。密集区才有「截断」子步，fib / BOLL 不进截断。</div>
+
+      <fieldset class="nest" id="box-cluster">
+        <legend>密集区 cluster</legend>
+        <fieldset class="nest2" id="box-flip">
+          <legend>强互换 flip（R2S / S2R）</legend>
+          <div class="row"><label style="width:158px">聚类容差(×ATR)</label>
+            <input type="number" data-k="clusterAtr" value="0.5" min="0.01" step="0.1">
+            <span class="merge-tip">minTouch 见左列②级别矩阵</span></div>
+        </fieldset>
+        <fieldset class="nest2" id="box-recent">
+          <legend>近期极值 recent（RES / SUP）</legend>
+          <div class="row"><label style="width:158px">聚类容差(×ATR)</label>
+            <input type="number" data-k="recentClusterAtr" value="1.0" min="0.1" step="0.1"></div>
+          <div class="row"><label style="width:158px">取最近笔数</label>
+            <input type="number" data-k="recentBiCount" value="20" min="1" step="1"></div>
+        </fieldset>
+        <fieldset class="nest2">
+          <legend>截断 <span class="tag">仅密集区</span></legend>
+          <div class="merge-tip">超上限才按强度评分留 Top N；fib / BOLL 豁免，不走这一步。</div>
+          <div class="row"><label style="width:158px">每周期候选上限</label>
+            <input type="number" data-k="maxPerPeriod" value="50" min="1" step="1"></div>
+          <div class="row"><label style="width:158px">触及次数权重</label>
+            <input type="number" data-k="touchWeight" value="0.6" min="0" max="1" step="0.05"></div>
+          <div class="row"><label style="width:158px">经过K线权重</label>
+            <input type="number" data-k="barsWeight" value="0.4" min="0" max="1" step="0.05"></div>
+        </fieldset>
+      </fieldset>
+
+      <div class="grid-src">
+        <fieldset class="nest" id="box-fib">
+          <legend>黄金分割 fib</legend>
+          <div class="row"><label style="width:158px">黄金分割比率</label>
+            <input type="text" data-k="fibLevels" value="0.382,0.5,0.618" style="width:150px"></div>
+          <div class="merge-tip">关时忽略；0&lt;r&lt;1 至多 6 项</div>
+        </fieldset>
+        <fieldset class="nest" id="box-boll">
+          <legend>BOLL</legend>
+          <div class="row"><label style="width:90px">周期</label>
+            <input type="number" data-k="bollLength" value="26" min="2" step="1">
+            <label>σ 倍数</label>
+            <input type="number" data-k="bollMult" value="2.0" min="0.5" step="0.1"></div>
+          <div class="merge-tip">每周期三轨全生成；上图条数由第 3 步裁</div>
+        </fieldset>
+      </div>
+    </fieldset>
+
+    <fieldset class="step">
+      <legend class="warn"><span class="stepn">2</span> 跨周期合并</legend>
+      <div class="merge-tip">三类同池。价差 ≤ 容差×最小周期ATR 并成一条。不评分、不看离现价多远。</div>
       <div class="row">
-        <label>合并容差(×最小周期ATR)</label><input type="number" data-k="mergeAtr" value="0.5" min="0.01" step="0.1" style="width:70px">
+        <label>合并容差(×最小周期ATR)</label>
+        <input type="number" data-k="mergeAtr" value="0.5" min="0.01" step="0.1" style="width:70px">
         <span class="merge-tip" id="merge-preview"></span>
         <button class="sm primary" id="btn-remerge" style="margin-left:auto" title="用当前全部参数重算（含合并容差改动）">改参 → 一键重算</button>
       </div>
       <div class="merge-tip">并条后：价按触及次数加权平均 · level=最大来源周期 · 类型冲突按触及多者 · 多来源混合线丢 fib/pending/boll 标记。调大 → 并条更多；调小 → 更少。用「合并池」tab 展开成员与 RAW 叠加核对。</div>
     </fieldset>
 
-    <fieldset class="wide"><legend>黄金分割 / BOLL</legend>
-      <div class="row"><label style="width:158px">黄金分割比率</label>
-        <input type="text" data-k="fibLevels" value="0.382,0.5,0.618" style="width:150px">
-        <span class="merge-tip">fib 关时忽略；0&lt;r&lt;1 至多 6 项</span></div>
-      <div class="row"><label style="width:158px">BOLL 周期</label><input type="number" data-k="bollLength" value="26" min="2" step="1">
-        <label style="margin-left:10px">σ 倍数</label><input type="number" data-k="bollMult" value="2.0" min="0.5" step="0.1"></div>
+    <fieldset class="step">
+      <legend><span class="stepn">3</span> 选取上图</legend>
+      <div class="merge-tip">合并之后才走。距现价最近上/下各 N 条，且 ≤ 距离上限×该线级别ATR。纯就近，不再按评分。</div>
+      <div class="row"><label style="width:158px">距离上限(×线级别ATR)</label>
+        <input type="number" data-k="maxDistAtr" value="3.0" min="0.1" step="0.1"></div>
+      <div class="row"><label style="width:158px">每侧条数 sideCount</label>
+        <input type="number" data-k="sideCount" value="2" min="1" max="10" step="1">
+        <span class="merge-tip">每图最多 2×sideCount 条</span></div>
     </fieldset>
   </div>
 
@@ -216,14 +263,14 @@ legend .hl{color:var(--warn)}
         <select id="f-family" style="width:92px"><option value="">全部来源</option><option value="cluster">密集区</option><option value="fib">黄金分割</option><option value="boll">BOLL</option><option value="mixed">位置线(混合)</option></select>
         <select id="f-type" style="width:100px"><option value="">全部子类型</option><option>R2S</option><option>S2R</option><option>RES</option><option>SUP</option><option>上轨</option><option>中轨</option><option>下轨</option></select>
         <select id="f-level" style="width:72px"><option value="">全部级别</option></select>
-        <label class="chk small"><input type="checkbox" id="f-drawnonly" checked> 仅图上选中</label>
+        <label class="chk small"><input type="checkbox" id="f-drawnonly"> 仅图上选中</label>
         <span id="cnt" style="margin-left:6px"></span>
       </span>
     </h2>
     <div class="tabs">
-      <button class="on" data-tab="drawn">图上结果 drawnByPeriod</button>
-      <button data-tab="merged">合并池 merged</button>
-      <button data-tab="periods">原始候选 periods</button>
+      <button class="on" data-tab="periods">1 原始候选 periods</button>
+      <button data-tab="merged">2 合并池 merged</button>
+      <button data-tab="drawn">3 图上结果 drawnByPeriod</button>
     </div>
     <div class="merge-tip" id="merge-semantics"></div>
     <div class="filterbar" id="filter-row"></div>
@@ -234,13 +281,14 @@ legend .hl{color:var(--warn)}
   </div>
 
   <details class="details">
-    <summary>语义速查（生成 / 合并 / 显示规则）</summary>
+    <summary>语义速查（生成 / 截断 / 合并 / 选取）</summary>
     <ul>
-      <li>密集区 = 强互换(R2S/S2R：触及≥minTouch 且角色反转或突破) + 近期极值(RES/SUP：最近 N 笔端点、宽容差、无触及要求)；评分 = 触及权重×触及 + 经过K线权重×经K线（候选集内 min-max 归一）</li>
-      <li>黄金分割 = 每方向最新非一类买卖点（引擎内现算）参照笔 × 比率；无已形成点走 pending 预期位</li>
-      <li>BOLL = 每周期最后 <b>一根已收盘K线</b>的 SMA±σ×倍数 三轨；中轨按现价侧定支撑/阻力；不足 length 根无位</li>
+      <li>生成·密集区 = 强互换(R2S/S2R：触及≥minTouch 且角色反转或突破) + 近期极值(RES/SUP：最近 N 笔端点、宽容差、无触及要求)</li>
+      <li>生成·黄金分割 = 每方向最新非一类买卖点（引擎内现算）参照笔 × 比率；无已形成点走 pending 预期位</li>
+      <li>生成·BOLL = 每周期最后 <b>一根已收盘K线</b>的 SMA±σ×倍数 三轨；中轨按现价侧定支撑/阻力；不足 length 根无位</li>
+      <li>截断（仅密集区）= 超 maxPerPeriod 按评分留 Top N；评分 = 触及权重×触及 + 经过K线权重×经K线（候选集内 min-max 归一）；fib/boll 豁免</li>
       <li>合并 = 三类同池；价差 ≤ 合并容差×最小周期ATR 并条（价触及加权、level=最大来源周期、混合线去 fib/pending/boll 标记）</li>
-      <li>显示 = 每显示周期池 = 级别 ≥ L 的合并线，距现价最近上/下各 sideCount 条，每条 ≤ 距离上限×线级别ATR</li>
+      <li>选取上图 = 每显示周期池 = 级别 ≥ L 的合并线，距现价最近上/下各 sideCount 条，每条 ≤ 距离上限×线级别ATR</li>
     </ul>
   </details>
 </div>
@@ -253,8 +301,9 @@ const FAMILY = { cluster: '密集区', fib: '黄金分割', boll: 'BOLL', mixed:
 
 const state = { busy: null, active: null, hasResult: false, computedAt: null,
                 cfg: null, meta: null, periods: {}, merged: [], drawn: {}, current: null,
-                tab: 'drawn', expanded: {}, watchdogs: {},
-                sessionComputed: false };   // 本页面会话内是否真实计算成功（画图解锁的唯一依据）
+                tab: 'periods', expanded: {}, watchdogs: {},
+                sessionComputed: false,   // 本页面会话内是否真实计算成功（画图解锁的唯一依据）
+                loadedPreset: null };     // 当前列表高亮的预设名
 let logs = [];
 
 function el(id) { return document.getElementById(id); }
@@ -347,6 +396,16 @@ function updateButtons() {
     el('btn-compute').disabled = true; el('btn-refresh').disabled = true;
     el('btn-remerge').disabled = true;
   }
+  syncParamDim();
+}
+function syncParamDim() {
+  // ③ 类型开关关掉时，④ 对应子块变淡（仍可改值，改后须重算）
+  const on = id => el(id).checked;
+  el('box-cluster').classList.toggle('dim', !on('t-cluster'));
+  el('box-flip').classList.toggle('dim', !on('t-cluster') || !on('t-flip'));
+  el('box-recent').classList.toggle('dim', !on('t-cluster') || !on('t-recent'));
+  el('box-fib').classList.toggle('dim', !on('t-fib'));
+  el('box-boll').classList.toggle('dim', !on('t-boll'));
 }
 
 // ---------- 配置收集 / 应用 ----------
@@ -420,41 +479,63 @@ function noteRawToggle() {
   el('raw-note').style.display = el('d-raw').checked ? 'block' : 'none';
 }
 
-// ---------- 预设 ----------
+// ---------- 预设（列表：点名称载入 / 行内保存与删除） ----------
+function markLoadedPreset(name) {
+  state.loadedPreset = name || null;
+  qa('#preset-list .plist-item').forEach(row => {
+    row.classList.toggle('on', row.dataset.name === name);
+  });
+  el('loaded-badge').textContent = name ? ('已载入: ' + name) : '';
+  el('loaded-badge').style.color = name ? 'var(--warn)' : '';
+}
 async function refreshPresetList() {
   const r = await api('/api/sr/presets', undefined, 'GET');
-  const sel = el('preset-list');
+  const box = el('preset-list');
   if (!r) return;
-  sel.innerHTML = '';
-  (r.presets || []).forEach(p => {
-    const o = document.createElement('option');
-    o.value = p.name; o.textContent = p.name;
-    sel.appendChild(o);
-  });
+  const presets = r.presets || [];
+  if (!presets.length) {
+    box.innerHTML = '<div class="plist-empty">暂无预设，输入名称后点新建</div>';
+    return;
+  }
+  box.innerHTML = presets.map(p => {
+    const n = esc(p.name);
+    return `<div class="plist-item" data-name="${n}">` +
+      `<button type="button" class="nm" data-act="load" title="载入">${n}</button>` +
+      `<button type="button" class="sm" data-act="save">保存</button>` +
+      `<button type="button" class="sm danger" data-act="del">删除</button></div>`;
+  }).join('');
+  markLoadedPreset(state.loadedPreset);
 }
-async function savePreset() {
-  const name = el('preset-name').value.trim();
+async function savePreset(name) {
+  name = (name || el('preset-name').value).trim();
   if (!name) { log('请输入预设名', true); return; }
   const r = await api('/api/sr/presets', { name, cfg: collectCfg() });
-  if (r) { log(`预设已保存：${name}` + (r.overwritten ? '（覆盖同名）' : '')); refreshPresetList(); }
+  if (r) {
+    log((r.overwritten ? '预设已保存：' : '预设已新建：') + name);
+    el('preset-name').value = '';
+    state.loadedPreset = name;
+    await refreshPresetList();
+  }
 }
-async function loadPreset() {
-  const name = el('preset-list').value;
+async function loadPreset(name) {
   if (!name) return;
   const r = await api('/api/sr/presets', undefined, 'GET');
   if (!r) return;
   const p = (r.presets || []).find(x => x.name === name);
-  if (!p) return;
+  if (!p) { log('预设不存在：' + name, true); await refreshPresetList(); return; }
   applyCfgToUI(p.cfg);
-  el('loaded-badge').textContent = '已载入: ' + name;
-  el('loaded-badge').style.color = 'var(--warn)';
+  markLoadedPreset(name);
+  el('preset-name').value = name;
   log(`已载入预设：${name}`);
 }
-async function delPreset() {
-  const name = el('preset-list').value;
+async function delPreset(name) {
   if (!name) return;
   const r = await api('/api/sr/presets?name=' + encodeURIComponent(name), undefined, 'DELETE');
-  if (r) { log(`已删除预设：${name}`); el('loaded-badge').textContent = ''; refreshPresetList(); }
+  if (r) {
+    log(`已删除预设：${name}`);
+    if (state.loadedPreset === name) markLoadedPreset(null);
+    await refreshPresetList();
+  }
 }
 
 // ---------- 结果渲染 ----------
@@ -729,7 +810,7 @@ function connectSSE() {
     if (d.mode !== 'sr') return;
     const pct = d.pct != null ? d.pct : 0;
     el('prog-bar').style.width = pct + '%';
-    const ph = { fetch: '取数', bis: '重建笔', compute: '计算' }[d.phase] || d.phase;
+    const ph = { fetch: '取数', bis: '重建笔', compute: '计算', done: '完成' }[d.phase] || d.phase;
     el('prog-label').textContent = d.total ? `${ph} ${d.current}/${d.total} (${pct}%)`
                                             : `${ph}… (${pct}%)`;
   });
@@ -737,9 +818,14 @@ function connectSSE() {
     const d = JSON.parse(e.data);
     const busyName = state.busy;
     setBusy(null);
-    el('prog-label').textContent = '';
-    if (d.error) { log(`操作失败：${d.error}`, true); return; }
+    if (d.error) {
+      el('prog-label').textContent = '';
+      log(`操作失败：${d.error}`, true); return;
+    }
     if (d.op === 'compute') {
+      // 计算成功：进度条拉满（服务端原先 compute 阶段停在 95%）
+      el('prog-bar').style.width = '100%';
+      el('prog-label').textContent = '计算完成 (100%)';
       // 服务端已确认成功：本会话计算标志置位（画图解锁），不等 GET 直接生效
       if (!d.error) {
         state.hasResult = true;
@@ -749,9 +835,11 @@ function connectSSE() {
       }
       fetchResult();
     } else if (d.op === 'draw') {
+      el('prog-label').textContent = '';
       const c = d.counts || {};
       log(`画图完成：主线 ${c.drawn} 条${c.raw_drawn ? '，成员线 ' + c.raw_drawn + ' 条' : ''}，清除 ${c.cleared} 条`);
     } else if (d.op === 'clear') {
+      el('prog-label').textContent = '';
       log(`清除完成：${d.removed} 条`);
     }
   });
@@ -764,9 +852,17 @@ function bindEvents() {
   el('btn-remerge').onclick = () => { lastComputedSnap = null; doCompute('auto'); };
   el('btn-draw').onclick = doDraw;
   el('btn-clear').onclick = doClear;
-  el('btn-preset-save').onclick = savePreset;
-  el('btn-preset-load').onclick = loadPreset;
-  el('btn-preset-del').onclick = delPreset;
+  el('btn-preset-save').onclick = () => savePreset();
+  el('preset-list').onclick = (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    const row = btn.closest('.plist-item');
+    if (!row) return;
+    const name = row.dataset.name;
+    if (btn.dataset.act === 'load') loadPreset(name);
+    else if (btn.dataset.act === 'save') savePreset(name);
+    else if (btn.dataset.act === 'del') delPreset(name);
+  };
   el('d-raw').onchange = noteRawToggle;
   el('d-text').onchange = () => {};
   qa('.tabs button').forEach(b => b.onclick = () => {

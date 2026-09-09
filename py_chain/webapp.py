@@ -984,8 +984,11 @@ def make_handler(app):
                         app.broadcaster.emit("log", {"mode": "sr", "msg": str(msg)})
 
                     def prog(phase, cur=0, total=0):
-                        pct = {"fetch": int(cur / total * 70) if total else 0,
-                               "bis": 80, "compute": 95}.get(phase, 0)
+                        # 取数 0–70、重建笔 80、计算 95、全部完成后 100（到头）
+                        if phase == "fetch":
+                            pct = int(cur / total * 70) if total else 0
+                        else:
+                            pct = {"bis": 80, "compute": 95, "done": 100}.get(phase, 0)
                         app.broadcaster.emit("progress", {"mode": "sr", "phase": phase,
                                                           "current": cur, "total": total,
                                                           "pct": pct})
@@ -1005,6 +1008,7 @@ def make_handler(app):
                             app.sr["meta"] = meta
                         counts = app.sr_counts()
                         prog("compute", 1, 1)
+                        prog("done", 1, 1)
                         log(f"计算完成：当前价 {result.get('currentPrice')}，"
                             f"合并线 {len(result.get('merged') or [])} 条，"
                             f"图上 {sum(len(v) for v in (result.get('drawnByPeriod') or {}).values())} 条")
