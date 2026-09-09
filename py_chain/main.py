@@ -21,7 +21,7 @@ from .backtest import build_bis, run_backtest, summarize
 from .mark_buy_sell import compute_all_marks
 from .sr_flip import compute_srflip
 from .trading_plan import compute_plan
-from .mark_entry import compute_entries
+from .mark_entry import compute_entries, filterDetectPeriods
 from .tv_draw import draw_trades
 from .chan_core import intervalSecOf, fmtT
 
@@ -62,7 +62,7 @@ def build_full_chain(bars_by_period, periods, with_marks=True, sr_types=None, fi
     plan = compute_plan(bis, bars_by_period, core)
     srLevels = (sr or {}).get("merged") or []
     entries = compute_entries(bis, bars_by_period, plan, srLevels,
-                              detectPeriods=[p for p in core if p != "D"],
+                              detectPeriods=filterDetectPeriods(periods),
                               with_30s=any(str(p).upper() == "30S" for p in periods))
     return {"bis": bis, "marks": marks, "sr": sr, "plan": plan, "entries": entries}
 
@@ -138,6 +138,14 @@ def main(argv=None):
                     help="BOLL SMA 周期（默认 26，已收盘K线口径）")
     ap.add_argument("--boll-mult", type=float, default=None,
                     help="BOLL 标准差倍数（默认 2）")
+    ap.add_argument("--lots", type=int, default=4,
+                    help="每笔进场手数（盈亏 = 价格差 × 方向 × 手数），默认 4")
+    ap.add_argument("--slip-stop", type=float, default=3.0,
+                    help="止损位滑点（绝对价格：正确侧支阻位外侧偏移），默认 3")
+    ap.add_argument("--slip-fallback", type=float, default=10.0,
+                    help="兜底止损滑点（无正确侧支阻位时 止损 = 进场价 ± 该值），默认 10")
+    ap.add_argument("--slip-be", type=float, default=3.0,
+                    help="保本滑点（beStop = 进场成交K线极值 ± 该值），默认 3")
     args = ap.parse_args(argv)
 
     periods = [p.strip() for p in args.periods.split(",") if p.strip()]
@@ -174,6 +182,8 @@ def main(argv=None):
                           warmup_bars=args.warmup, with_marks=not args.no_marks,
                           sr_types=sr_types, fib_levels=fib_levels,
                           boll_length=args.boll_length, boll_mult=args.boll_mult,
+                          lots=args.lots, slip_stop=args.slip_stop,
+                          slip_fallback=args.slip_fallback, slip_be=args.slip_be,
                           log=lambda *a: print(*a) if a and a[0].startswith("回测") else None)
 
     # 4. 打印统计

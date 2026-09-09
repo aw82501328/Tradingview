@@ -13,20 +13,28 @@
   - 旧锚点保护：anchor 下锚点距收集时刻 > 检测周期 1 根 bar → 回落 confirm（fillMode=confirm-stale-anchor）。
 
 出场规则（三模式统一口径，模块级 advance_exit_decision / execute_pending_exit
-为唯一实现源；mark_entry.stop_ref_of/find_bi_event）：
+为唯一实现源；mark_entry.stop_ref_of/find_bi_event/forming_seg_ready/trend_following_of）：
   - 触发判定在「已收盘 bar」进行（bar 完整 high/low 判止损穿越；三档止盈用
-    endTime ≤ 收盘时刻的已确认笔）；
+    endTime ≤ 收盘时刻的已确认笔 / 检测周期形成段合并K线计数）；
   - 成交统一「下一根K线开盘」：止损/保本止损/平一半/全平的事件时间 = 触发 bar 的
     下一根 bar 时间、价格 = 其开盘价（跳空自然体现）；触发 bar 无下一根 → 未成交
     （持仓保持 open，mark-to-market 收尾）；
+  - 止损位：正确侧最近支阻位 ± slip_stop（short 上方+ / long 下方−）；无正确侧位兜底
+    进场价 ± slip_fallback（止损位永不为 None，不再有「不设止损」仓位）；
+  - 保本止损位 beStop：进场成交K线极值 ± slip_be（short: high+ / long: low−；
+    run() 批量路径成交 bar 当拍未收盘，存在 ≤1 根 fine bar 的微前视，step_to 实时
+    路径无前视——研究口径可接受）；
   - 止盈1 保本：背驰周期（markRes）够笔（进场后首笔有利方向笔完成）→ 止损位上移至
-    进场价（状态迁移，当拍生效、事件仅落盘）；
-  - 止盈2 平一半：检测周期（periodX）够笔 → 下一开盘平一半（需保本已触发）；
-  - 止盈3 全平：检测周期破前底/过前高（进场后开始的不利方向笔端点破前一同向笔端点）
-    → 下一开盘全平；
+    beStop（状态迁移，当拍生效、事件仅落盘）；
+  - 止盈2 平一半（仅顺势：计划 direction ∈ {多头多, 空头空}）：检测周期首个有利方向、
+    合并后 ≥5 根K且有成笔预期的形成段 → 下一开盘平一半，剩余半仓止损移至 beStop
+    （不要求保本先触发）；
+  - 止盈3 全平：顺势 = 检测周期有利方向笔破前高/前低（breakPrev）；逆势（多头空/空头多）
+    = 检测周期首个有利方向形成段（合并后 ≥5 根K成笔预期）→ 下一开盘全平；
+  - stopSr/stopBe：盘中破坏止损位 / 保本位 beStop；
   - 同向持仓互斥：同方向持仓未终局时新信号不成交（on_suppressed 回调）；多空互不影响；
-  - 已平仓盈亏按实际出场加权（TP2 半仓价 + 终局价各 0.5；未到 TP2 全量终局价），
-    未平仓仍按最新收盘价 mark-to-market。
+  - 已平仓盈亏 =（TP2 半仓价 + 终局价各 0.5，未到 TP2 全量终局价，减进场价）× 方向 × lots
+    （手数默认 4，参数化），未平仓仍按最新收盘价 mark-to-market × lots。
   - run() 与 step_to(execute=True) 同一套逐根逻辑（实时监控/回放从此也有成交与出场；
     step_to(execute=False) 仅预热推进）。
 
@@ -46,7 +54,11 @@ from .chan_core import (
 from .mark_buy_sell import compute_all_marks
 from .sr_flip import compute_srflip
 from .trading_plan import compute_plan
-from .mark_entry import compute_entries, stop_ref_of, find_bi_event
+from .mark_entry import (
+    compute_entries, stop_ref_of, find_bi_event, filterDetectPeriods,
+    trend_following_of, forming_seg_ready,
+    DEFAULT_LOTS, DEFAULT_SLIP_STOP, DEFAULT_SLIP_FALLBACK, DEFAULT_SLIP_BE,
+)
 
 DEFAULT_PERIODS = ["D", "240", "60", "15", "3"]
 DEFAULT_WARMUP_BARS = 60
@@ -61,42 +73,47 @@ RESYNC_EVERY = 1000
 # ============================================================
 
 
-def advance_exit_decision(pos, t, bar, mark_bis, px_bis):
+def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None):
     """出场判定（纯函数，三模式共用）——在「已收盘 bar」上判定一次。
 
-    统一语义（用户规则 2026-09-06）：
-      - 用 bar 完整 high/low 判止损/保本止损穿越；
-      - 三档止盈用 endTime <= t 的已确认笔（markRes 保本/半平、periodX 全平破前低/高）；
-      - breakeven：仅状态迁移（止损位 → 进场价），当拍生效、事件仅落盘；
+    统一语义（出场阶梯重构 2026-09-09：止损±滑点+兜底 / beStop / 顺势逆势分支）：
+      - 用 bar 完整 high/low 判止损/保本止损穿越（保本位 = beStop，非进场价）；
+      - TP1 用 markRes 已确认笔（endTime <= t）；TP3a 用 periodX 已确认笔（有利方向
+        breakPrev）；TP2/逆势TP3b 用检测周期形成段「合并后≥5根K成笔预期」
+        （forming_seg_ready，px_merged_times 缺省 None 时跳过形成段判定）；
+      - breakeven：仅状态迁移（止损位 → beStop），当拍生效、事件仅落盘；
       - half/close/stopSr/stopBe：成交型事件——只把 pos['pendingExit'] 挂起，
         由 execute_pending_exit 在「下一根K线开盘」执行成交（同一拍只挂一个，
         逐拍执行后继续判定）。
     @param t      决策时刻 = bar 收盘时刻（下一根开盘时刻）
     @param bar    该根已收盘 K线（{time,open,high,low,close}）
     @param mark_bis / px_bis  背驰级别 / 检测周期笔快照（endTime ≤ t 已含）
+    @param px_merged_times    检测周期合并K线块截止时间数组（升序；None 跳过形成段判定）
     @returns 挂起类型（"half"/"close"/"stopSr"/"stopBe"）或 None（含仅 breakeven）
     """
     if pos.get("pendingExit"):
         return None  # 已挂起等下一开盘，不再重复判定
     is_short = pos["direction"] == "short"
     fav = "down" if is_short else "up"    # 有利方向笔（short 盼下跌 / long 盼上涨）
-    adv = "up" if is_short else "down"    # 不利方向笔（TP3 破高低用）
+    trend = trend_following_of(pos.get("planDirection"), pos.get("strategyKey"))
     tp1 = find_bi_event(mark_bis, pos["signalTime"], fav)
-    tp2 = find_bi_event(px_bis, pos["signalTime"], fav)
-    tp3 = find_bi_event(px_bis, pos["signalTime"], adv, require_post_start=True, break_prev=True)
+    tp3a = find_bi_event(px_bis, pos["signalTime"], fav, break_prev=True) if trend else None
+    seg5 = forming_seg_ready(px_bis, px_merged_times, is_short) if px_merged_times else False
     # 同一拍顺序：保本 → 半平 → 全平 → 止损（逐拍各挂一个）
     if tp1 and tp1["time"] <= t and not pos.get("beDone"):
         pos["beDone"] = True
         pos["exits"].append({"type": "breakeven", "time": tp1["time"], "price": tp1["price"]})
-    if tp2 and tp2["time"] <= t and pos.get("beDone") and not pos.get("halfDone"):
+    if trend and seg5 and not pos.get("halfDone"):
+        # TP2 平一半（仅顺势）：形成段成笔预期即触发，不要求保本先触发
         pos["halfDone"] = True
         pos["pendingExit"] = "half"
         return "half"
-    if tp3 and tp3["time"] <= t:
+    if (tp3a and tp3a["time"] <= t) or ((not trend) and seg5):
+        # TP3 全平：顺势=有利方向笔破前高/前低；逆势=形成段成笔预期快速离场
         pos["pendingExit"] = "close"
         return "close"
-    stop = pos["entryPrice"] if pos.get("beDone") else pos.get("stopRef")
-    if stop is not None:
+    stop = pos.get("beStop") if pos.get("beDone") else pos.get("stopRef")
+    if stop is not None:  # 止损位永不为 None（兜底进场价±slip_fallback），此保护仅防御旧持仓数据
         hit = bar["high"] > stop if is_short else bar["low"] < stop
         if hit:
             typ = "stopBe" if pos.get("beDone") else "stopSr"
@@ -117,23 +134,27 @@ def execute_pending_exit(pos, exec_bar):
     pos["pendingExit"] = None
     pos["exits"].append({"type": et, "time": exec_bar["time"], "price": exec_bar["open"]})
     if et == "half":
+        # 剩余半仓止损移至保本位 beStop（后续打止损记 stopBe；若 TP1 尚未发生过，
+        # breakeven 事件不补记——half 本身已是状态迁移）
+        pos["beDone"] = True
         return None
     return close_trade(pos, et, exec_bar["time"], exec_bar["open"])
 
 
 def close_trade(pos, exit_type, exit_time, exit_price):
-    """标记持仓终局并结算盈亏（半仓按 half 事件价加权）。"""
+    """标记持仓终局并结算盈亏（半仓按 half 事件价加权，整体 × lots 手数）。"""
     pos["state"] = "closed"
     pos["exitType"] = exit_type
     pos["exitTime"] = exit_time
     pos["exitPrice"] = exit_price
     d = 1 if pos["direction"] == "long" else -1
     entry = pos["entryPrice"]
+    lots = pos.get("lots", 1)
     half_ev = next((e for e in pos.get("exits", []) if e["type"] == "half"), None)
     if half_ev:
-        pos["pnl"] = 0.5 * (half_ev["price"] - entry) * d + 0.5 * (exit_price - entry) * d
+        pos["pnl"] = (0.5 * (half_ev["price"] - entry) + 0.5 * (exit_price - entry)) * d * lots
     else:
-        pos["pnl"] = (exit_price - entry) * d
+        pos["pnl"] = (exit_price - entry) * d * lots
     return pos
 
 
@@ -152,7 +173,9 @@ class BacktestEngine:
 
     def __init__(self, bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
                  with_marks=False, cfg=None, fill_mode="anchor", signal_mode="realtime",
-                 sr_types=None, fib_levels=None, boll_length=None, boll_mult=None):
+                 sr_types=None, fib_levels=None, boll_length=None, boll_mult=None,
+                 lots=DEFAULT_LOTS, slip_stop=DEFAULT_SLIP_STOP,
+                 slip_fallback=DEFAULT_SLIP_FALLBACK, slip_be=DEFAULT_SLIP_BE):
         self.periods = list(periods or DEFAULT_PERIODS)
         # 各周期按时间升序整理 + 缓存时间数组
         self.bars = {}
@@ -210,10 +233,22 @@ class BacktestEngine:
         #     （intervalSecOf(periodX)，锚点明显过时——如「校验失败回退次新」选中的旧点）
         #     时，该笔回落 confirm 口径，fillMode 记 "confirm-stale-anchor"。
         self.fill_mode = fill_mode
+        # 出场参数（2026-09-09 出场阶梯重构）：
+        #   lots 手数（盈亏 × lots）；slip_stop 止损位滑点（支阻位外侧）；
+        #   slip_fallback 兜底止损滑点（无正确侧支阻位 → 进场价±该值）；
+        #   slip_be 保本滑点（beStop = 进场成交K线极值 ± 该值）
+        self.lots = lots
+        self.slip_stop = slip_stop
+        self.slip_fallback = slip_fallback
+        self.slip_be = slip_be
 
         # 增量状态
         self._cut = {res: 0 for res in self.periods}
         self._merged = {res: [] for res in self.periods}
+        # 合并块截止时间数组（与 _merged 平行：块 .time = 覆盖的最后一根原始K线时间，
+        # 严格递增）——出场 TP2/逆势TP3b 的形成段「合并后≥5根K」计数锚定用
+        # （forming_seg_ready 按末笔 endTime 二分定位，不能用 endIdx——延伸不更新它）
+        self._merged_times = {res: [] for res in self.periods}
         self._merge_dir = {res: 0 for res in self.periods}
         self._fractals = {res: [] for res in self.periods}
         self._bis = {res: [] for res in self.periods}
@@ -313,7 +348,15 @@ class BacktestEngine:
         atr = self._atr[res]
         for bar in new_bars:
             p = self._wick_process(res, bar)
+            n0 = len(merged)
             merged, direction = _mergeStep(merged, direction, p)
+            # _merged_times 平行维护：新块诞生 append、包含并入更新末元素
+            # （_mergeStep 内部对 last["time"] 的赋值与本数组保持同一语义）
+            mt = self._merged_times[res]
+            if len(merged) > n0:
+                mt.append(bar["time"])
+            elif mt:
+                mt[-1] = bar["time"]
             self._trimmed[res].append(p)
             macd.append(bar)
             self._macd_times[res].append(bar["time"])
@@ -363,6 +406,7 @@ class BacktestEngine:
         for p in trimmed:
             merged, direction = _mergeStep(merged, direction, p)
         self._merged[res] = merged
+        self._merged_times[res] = [m["time"] for m in merged]
         self._merge_dir[res] = direction
         self._trimmed[res] = list(trimmed)
         self._fractals[res] = findFractals(merged)
@@ -543,7 +587,8 @@ class BacktestEngine:
                 if pos is not None:
                     advance_exit_decision(pos, t_dec, fine[i],
                                           self._bis.get(pos.get("markRes")) or [],
-                                          self._bis.get(pos.get("periodX")) or [])
+                                          self._bis.get(pos.get("periodX")) or [],
+                                          self._merged_times.get(pos.get("periodX")) or [])
             # ② 收集进场信号（与 run 同序同口径）
             if self.signal_mode == "realtime":
                 if changed:
@@ -684,7 +729,8 @@ class BacktestEngine:
                     continue
                 advance_exit_decision(pos, t, fine[i],
                                       self._bis.get(pos.get("markRes")) or [],
-                                      self._bis.get(pos.get("periodX")) or [])
+                                      self._bis.get(pos.get("periodX")) or [],
+                                      self._merged_times.get(pos.get("periodX")) or [])
             if self.signal_mode == "realtime":
                 # 当下背驰：笔结构变化时重算链路（刷新①③所需的计划/支阻位缓存），
                 # 之后每根 fine 收盘都用当前增量状态（bis 已延伸到当下极值、MACD 增量）评估②
@@ -812,9 +858,10 @@ class BacktestEngine:
                                       periodMacd=periodMacd, periodAtr=periodAtr)
         except Exception:
             self._plan = {}
-        # 4. 进出场（检测周期与 JS 一致：不含日线、不含 30S——30S 仅作背驰级别）
+        # 4. 进出场（检测周期与 JS 一致：不含日线、不含 30S——30S 仅作背驰级别；
+        #    且须有已加载的更低级别可供区间套下沉，30S 未加载时 3 不作检测周期）
         srLevels = (self._sr or {}).get("merged") or []
-        detectPeriods = [p for p in core if str(p).upper() != "D"]
+        detectPeriods = filterDetectPeriods(self.periods)
         try:
             self._entries = compute_entries(periodBis, barsByPeriod, self._plan, srLevels,
                                             detectPeriods=detectPeriods,
@@ -847,8 +894,7 @@ class BacktestEngine:
         每个形成段只发一次；信号 time=形成中段当前极值时间（当下）。"""
         from .mark_entry import evaluateRealtimeEntries
         srLevels = (self._sr or {}).get("merged") or []
-        detectPeriods = [p for p in self.periods
-                         if str(p).upper() not in ("D", "30S")]  # 与确认制一致：不含日线、30S 仅作背驰级别
+        detectPeriods = filterDetectPeriods(self.periods)  # 与确认制一致：须有已加载更低级别
         sigs = evaluateRealtimeEntries(
             self._bis,
             {res: self._macd[res].entries for res in self.periods},
@@ -882,7 +928,8 @@ class BacktestEngine:
           - "confirm"：在收集拍的下一根 fine K线开盘成交（原行为，无未来函数）；
           - 旧锚点保护：anchor 模式下锚点距收集时刻 > 检测周期 1 根 bar 长度（回退选中的
             过时旧点）→ 该笔回落 confirm 口径，fillMode = "confirm-stale-anchor"。
-        简化的成交模型：单笔等权 1 手（平一半后 0.5 + 0.5），用于盈亏统计。
+        简化的成交模型：单笔 lots 手（默认 4，平一半后 0.5 + 0.5 加权），
+        盈亏 = 价格差 × 方向 × lots。
         """
         fine = self.bars[self.fine_res]["_list"]
         fineTimes = self._times[self.fine_res]
@@ -914,7 +961,17 @@ class BacktestEngine:
                         entryPrice = fine[idx]["open"]
                         fillMode = "anchor"
                     # idx 越界（锚点之后已无 fine bar）→ 维持 confirm 口径
-            stopRef = stop_ref_of(d, entryPrice, s.get("nearSr"), srLevels)
+            stopRef = stop_ref_of(d, entryPrice, s.get("nearSr"), srLevels,
+                                  slip_stop=self.slip_stop, slip_fallback=self.slip_fallback)
+            # 保本止损位 beStop = 进场成交K线极值 ± slip_be（short: high+ / long: low−）；
+            # 成交 bar 按 entryTime 定位于 fine 时间轴，取不到时兜底 进场价 ± slip_be。
+            # 注意：run() 批量路径成交 bar 当拍未收盘（微前视 ≤1 根 fine bar），
+            # step_to 实时路径成交 bar 已收盘、无前视（研究口径可接受，见模块 docstring）。
+            beStop = entryPrice + (self.slip_be if d == "short" else -self.slip_be)
+            bi = bisect.bisect_left(fineTimes, entryTime)
+            if bi < len(fine) and fine[bi]["time"] == entryTime:
+                beStop = (fine[bi]["high"] + self.slip_be) if d == "short" \
+                    else (fine[bi]["low"] - self.slip_be)
             trades.append({
                 "tradeNo": len(trades) + 1,
                 "periodX": s["periodX"],
@@ -927,8 +984,11 @@ class BacktestEngine:
                 "entryPrice": entryPrice,
                 "fillMode": fillMode,
                 "nearSr": s.get("nearSr"),
+                "planDirection": s.get("planDirection"),
+                "lots": self.lots,
                 # 出场状态机字段（advance_exit_decision/execute_pending_exit 增量维护）
                 "stopRef": stopRef,
+                "beStop": beStop,
                 "state": "open",
                 "beDone": False,
                 "halfDone": False,
@@ -941,8 +1001,9 @@ class BacktestEngine:
     def _finish(self, allSignals, trades, stats):
         """整理回测结果：信号列表、成交明细、统计、时间轴、盈亏。
 
-        已平仓（state=closed）的盈亏在 _close_pos 终局时已结算（on_exit 回调携带），
-        此处保留；未平仓按最新收盘价 mark-to-market。
+        已平仓（state=closed）的盈亏在 close_trade 终局时已结算（on_exit 回调携带），
+        此处保留；未平仓按最新收盘价 mark-to-market（已平一半的按 0.5 half 价
+        + 0.5 最新收盘加权），整体 × lots 手数。
         """
         lastPrice = None
         lastTime = None
@@ -952,9 +1013,19 @@ class BacktestEngine:
             lastTime = lastBar["time"]
         for tr in trades:
             if tr.get("state") == "closed":
-                continue  # pnl 已在 _close_pos 结算
+                continue  # pnl 已在 close_trade 结算
+            if lastPrice is None:
+                tr["pnl"] = 0.0
+                continue
             d = 1 if tr["direction"] == "long" else -1
-            tr["pnl"] = (lastPrice - tr["entryPrice"]) * d if lastPrice is not None else 0.0
+            lots = tr.get("lots", 1)
+            half_ev = next((e for e in tr.get("exits", []) if e["type"] == "half"), None)
+            if half_ev:
+                # 已平一半：半仓按 half 价已实现 + 半仓按最新收盘 mark-to-market
+                tr["pnl"] = (0.5 * (half_ev["price"] - tr["entryPrice"])
+                             + 0.5 * (lastPrice - tr["entryPrice"])) * d * lots
+            else:
+                tr["pnl"] = (lastPrice - tr["entryPrice"]) * d * lots
         return {
             "signals": allSignals,        # { markRes: [signals] }
             "trades": trades,             # [ { tradeNo, periodX, direction, ... } ]
@@ -969,16 +1040,22 @@ class BacktestEngine:
 def run_backtest(bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
                  with_marks=False, to_ts=None, log=None, fill_mode="anchor",
                  signal_mode="realtime", sr_types=None, fib_levels=None,
-                 boll_length=None, boll_mult=None):
+                 boll_length=None, boll_mult=None,
+                 lots=DEFAULT_LOTS, slip_stop=DEFAULT_SLIP_STOP,
+                 slip_fallback=DEFAULT_SLIP_FALLBACK, slip_be=DEFAULT_SLIP_BE):
     """便捷入口：构建引擎并运行。fill_mode 见 BacktestEngine（anchor=锚点当拍成交，confirm=确认成交）；
     signal_mode：realtime=当下背驰（每拍评估形成中段，默认），confirm=确认制（结构变化时收集）；
     sr_types/fib_levels 透传支阻位类型开关与黄金分割比率（None → compute_srflip 默认）；
-    boll_length/boll_mult 透传 BOLL 布林带周期与标准差倍数（None → compute_srflip 默认 26/2）。"""
+    boll_length/boll_mult 透传 BOLL 布林带周期与标准差倍数（None → compute_srflip 默认 26/2）；
+    lots/slip_stop/slip_fallback/slip_be 透传出场参数（手数/止损滑点/兜底止损滑点/保本滑点，
+    默认 4 / 3 / 10 / 3，绝对价格单位）。"""
     engine = BacktestEngine(bars_by_period, periods=periods, warmup_bars=warmup_bars,
                             with_marks=with_marks, fill_mode=fill_mode,
                             signal_mode=signal_mode,
                             sr_types=sr_types, fib_levels=fib_levels,
-                            boll_length=boll_length, boll_mult=boll_mult)
+                            boll_length=boll_length, boll_mult=boll_mult,
+                            lots=lots, slip_stop=slip_stop,
+                            slip_fallback=slip_fallback, slip_be=slip_be)
     return engine.run(to_ts=to_ts, log=log)
 
 
@@ -1042,6 +1119,7 @@ def summarize(result):
         "按背驰级别分布": st["markRes"],
         "按策略分布": st["strategyKeys"],
         "成交多空": {"多": longT, "空": shortT},
+        "手数合计": sum(t.get("lots", 1) for t in trades),
         "已平仓数": len(closedT),
         "仍持仓数": len(openT),
         "出场类型": exitTypes,

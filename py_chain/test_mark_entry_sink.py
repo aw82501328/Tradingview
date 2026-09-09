@@ -3,6 +3,7 @@
 
 覆盖：
   - levelsBelow 连续链（缺中间级别截断，不跳级）
+  - filterDetectPeriods：检测周期须有已加载更低级别（30S 未加载时 3 被剔除）
   - sinkChainRealtime：案例 A 形态（60 内 15 五笔、末段内 3 单笔）→ 停 15；
     案例B 形态（15 内 3 单笔）→ 停 15；次级别展开不足 → 停 X
   - sinkChainConfirm：P 无 X 级端点笔 → 无链；正常下沉
@@ -15,7 +16,7 @@
 import unittest
 
 from py_chain.mark_entry import (
-    levelsBelow, sinkChainRealtime, sinkChainConfirm,
+    levelsBelow, filterDetectPeriods, sinkChainRealtime, sinkChainConfirm,
     realtimeLowerDiverge, lowerDiverge, findDivergePoints,
 )
 
@@ -77,6 +78,23 @@ class TestLevelsBelow(unittest.TestCase):
     def test_chain_full(self):
         data = {"60": pd(B15), "15": pd(B15), "3": pd(B3_RICH)}
         self.assertEqual(levelsBelow(data, "60"), ["15", "3"])
+
+
+class TestFilterDetectPeriods(unittest.TestCase):
+    """检测周期须有已加载更低级别：30S 未加载时 3 之下无级别 → 3 被剔除
+    （最小检测 15m、背驰最深 3m），避免 realtime 模式 det=3/div=3。"""
+
+    def test_no_30s_drops_3(self):
+        self.assertEqual(filterDetectPeriods(["D", "240", "60", "15", "3"]),
+                         ["240", "60", "15"])
+
+    def test_with_30s_keeps_3(self):
+        self.assertEqual(filterDetectPeriods(["D", "240", "60", "15", "3", "30S"]),
+                         ["240", "60", "15", "3"])  # D/30S 永不作检测周期
+
+    def test_missing_middle_drops_above(self):
+        # 缺 15：60 之下链截断（不可跳级到 3），60 亦被剔除；3 无 30S 同样剔除
+        self.assertEqual(filterDetectPeriods(["D", "240", "60", "3"]), ["240"])
 
 
 class TestVirtualBi(unittest.TestCase):
@@ -202,6 +220,17 @@ class TestRealtimeLowerDiverge(unittest.TestCase):
         self.assertEqual(cands[0]["res"], "15")          # 案例A：markRes=15，不再是 3
         self.assertEqual(cands[0]["point"]["price"], 4461.7)
         self.assertEqual(cands[0]["segStart"], 78300)
+
+    def test_stop_at_x_no_signal(self):
+        # 案例B：X=15，末段内 3 仅 1 笔（下沉链一步未走、停止级=15=X）→
+        # 背驰必须落在严格更低级别 → 不产信号（即使 15 自身形成段满足背驰标准）
+        macdArr = self._macd_for_diverge()  # 15 末段 vs 参照：创新高 + MACD 变弱
+        data = {"15": pd(B15, macdArr), "3": pd(B3)}
+        stop, _ = sinkChainRealtime(data, "15", "short")
+        self.assertEqual(stop, "15")  # 前置确认：停止级 = X 自身
+        cands = realtimeLowerDiverge(data, "15", "short", 82900,
+                                     periodTimes={"15": TIMES15})
+        self.assertEqual(cands, [], "S=X（markRes=periodX）不应产生信号")
 
     def test_cross_parent_refer_invalid(self):
         # 内部小同向段 span 不足被跳过 → 最近合格参照在 60m 主笔之外（跨上级笔）→ 规则2 无效

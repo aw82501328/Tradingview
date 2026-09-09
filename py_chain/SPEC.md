@@ -91,24 +91,25 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
   → mark_entry(进出场) → backtest(点状重放+持仓模拟) → tv_draw(CDP 回画进场箭头)
 ```
 
-## 2.1 出场规则与同向持仓互斥（2026-09-05 新增，与 mark_entry.js 对齐）
+## 2.1 出场规则与同向持仓互斥（2026-09-09 出场阶梯重构，与 mark_entry.js 对齐）
 
-引擎（`BacktestEngine.run`，全量回测模式）在成交后对每个持仓按时间顺序增量推进出场；
-`step_to`（回放/实时）只收集信号不成交，无出场状态机。规则：
+引擎（`BacktestEngine.run` / `step_to(execute=True)` 三模式同一套 `advance_exit_decision`/`execute_pending_exit`）
+在成交后对每个持仓按时间顺序增量推进出场，**同拍顺序：保本 → 平一半 → 全平 → 止损（同拍只挂一个）**：
 
 | 事件 | 触发条件 | 动作 |
 |------|----------|------|
-| 止损 `stopSr` | fine K线**盘中**破坏止损参考位（`stop_ref_of` 方向感知选位：short 上方最近 / long 下方最近支阻位；跳空按开盘价成交） | 全平终局 |
-| 保本 `breakeven` | 背驰周期（markRes）**够笔**：进场后首笔有利方向笔（short→down/long→up）完成（`find_bi_event`） | 止损位上移至**进场价**（实际成交价） |
-| 平一半 `half` | 检测周期（periodX）**够笔**（需保本已触发） | 平一半（0.5 手） |
-| 全平 `close` | 检测周期**破前底/过前高**：进场后开始的不利方向笔端点破前一同向笔端点 | 全平终局 |
-| 保本止损 `stopBe` | 保本后盘中触及进场价 | 全平终局 |
+| 止损 `stopSr` | fine K线**盘中**破坏止损位（`stop_ref_of`：正确侧最近支阻位 ± 止损滑点；**无正确侧位兜底 = 进场价 ± 兜底滑点**，止损位永不为 None；跳空按开盘价成交） | 全平终局 |
+| 保本 `breakeven` | 背驰周期（markRes）**够笔**：进场后首笔有利方向笔（short→down/long→up）完成（`find_bi_event`） | 止损位上移至**保本止损位 beStop** |
+| 平一半 `half` | **仅顺势**（plan.direction ∈ {多头多, 空头空}，`trend_following_of`）：检测周期首个有利方向、**合并后 ≥5 根K且有成笔预期**的形成段（`forming_seg_ready`，引擎增量 `_merged_times` 计数；不要求保本先触发） | 平一半（剩余 lots/2），剩余半仓止损移至 beStop |
+| 全平 `close` | **顺势**：检测周期**有利方向笔破前高/前低**（breakPrev）；**逆势**（多头空/空头多）：首个有利方向形成段（合并后 ≥5 根K成笔预期） | 全平终局 |
+| 保本止损 `stopBe` | 保本（TP1 或 half）后盘中破坏 **beStop** | 全平终局 |
 
+- **beStop** = 进场成交K线极值 ± 保本滑点（short: high+ / long: low−）；run() 批量路径成交 bar 当拍未收盘（≤1 根 fine bar 微前视），step_to 实时路径无前视。
+- **手数 lots**（默认 4，参数化：CLI `--lots` / Web 回测界面 / `run_backtest`）：已平仓盈亏 =（0.5×TP2 价 + 0.5×终局价 − 进场价）× 方向 × lots（未到 TP2 全量终局价）；未平仓 mark-to-market × lots（已 half 的按 0.5 half + 0.5 最新收盘加权）。
 - **同向持仓互斥**：同方向持仓未终局时新信号不成交（`stats["suppressed"]` + `on_suppressed` 回调，Web 行状态=同向过滤）；**多空互不影响**（各方向独立状态机）；同时刻同向共振按检测周期从大到小取一条。
-- **盈亏口径**：已平仓 = 0.5×TP2 价 + 0.5×终局价（未到 TP2 则全量终局价）；未平仓 mark-to-market。`summarize` 拆「已平仓盈亏/未平仓浮盈」+ 出场类型统计。
 - **回测新增回调**：`on_exit(tr)`（持仓终局）、`on_suppressed(s)`（互斥过滤）。
-- **与 JS 的口径差**：JS（mark_entry.js `simulatePosition`）用最终笔快照全 hindsight 模拟、保本价=信号价（背驰点价）；引擎用当前快照（笔确认有时延、无未来窥视）、保本价=实际成交价——同一信号出场时序在笔重构处可能略有差异，属研究口径差。
-- **Web 控制台**：信号行状态流转 `信号→持仓中→已平仓`（或 `同向过滤`），新增出场时间/出场价/出场类型/盈亏列；「标记进出场」按钮画箭头 + 灰色出场标记（`marks.py`：终局 xcross / 平一半 circle，默认 `#787B86`）。
+- **与 JS 的口径差**：JS（mark_entry.js `simulatePosition`）用最终笔快照全 hindsight 模拟、beStop 取 sig.time 对应 markRes bar 极值；引擎用当下快照（笔确认有时延、无未来窥视）、beStop 取实际成交 fine bar 极值；形成段 ≥5 块计数两侧锚点定义不同（引擎=末笔延伸终点所在块之后；JS=首个有利笔起点块之后第 5 块诞生时间）——同一信号出场时序可能略有差异，属研究口径差。
+- **Web 控制台**：信号行状态流转 `信号→持仓中→已平仓`（或 `同向过滤`），含出场时间/出场价/出场类型/盈亏/手数列；「标记进出场」按钮画箭头 + 灰色出场标记（`marks.py`：终局 xcross / 平一半 circle，默认 `#787B86`）。
 
 ## 2.2 支阻位三类来源（2026-09-08 新增 BOLL 并统一合并管线，与 mark_sr_flip.js 对齐）
 

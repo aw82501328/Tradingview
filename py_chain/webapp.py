@@ -135,6 +135,7 @@ class SignalLog:
                 "status": "信号",
                 "entryTime": None,
                 "entryPrice": None,
+                "lots": None,
                 # 出场相关（成交/出场时回填）
                 "stopRef": None,
                 "state": None,
@@ -170,6 +171,7 @@ class SignalLog:
                     "entryTime": tr.get("entryTime"),
                     "entryPrice": tr.get("entryPrice"),
                     "fillMode": tr.get("fillMode"),
+                    "lots": tr.get("lots"),
                     "stopRef": tr.get("stopRef"),
                     "state": tr.get("state", "open"),
                     "exitTime": None,
@@ -185,6 +187,7 @@ class SignalLog:
             row["entryTime"] = tr.get("entryTime")
             row["entryPrice"] = tr.get("entryPrice")
             row["fillMode"] = tr.get("fillMode")
+            row["lots"] = tr.get("lots")
             row["stopRef"] = tr.get("stopRef")
             row["state"] = tr.get("state", "open")
             row["exits"] = list(tr.get("exits") or [])
@@ -413,7 +416,11 @@ class BacktestWorker(ModeWorker):
                                 warmup_bars=cfg.get("warmup", 60),
                                 with_marks=cfg.get("with_marks", False),
                                 fill_mode=cfg.get("fill_mode", "anchor"),
-                                signal_mode=cfg.get("signal_mode", "realtime"))
+                                signal_mode=cfg.get("signal_mode", "realtime"),
+                                lots=cfg.get("lots", 4),
+                                slip_stop=cfg.get("slip_stop", 3.0),
+                                slip_fallback=cfg.get("slip_fallback", 10.0),
+                                slip_be=cfg.get("slip_be", 3.0))
         self.log(f"回测开始（最小周期 {engine.fine_res}，成交口径 {engine.fill_mode}，"
                  f"信号模式 {'当下背驰' if engine.signal_mode == 'realtime' else '确认制'}）...")
         result = engine.run(
@@ -676,13 +683,13 @@ class ControlApp:
     def normalize_cfg(cfg, mode):
         """把前端字符串配置规范化为引擎所需类型（时间戳/数字/周期列表）。"""
         out = dict(cfg or {})
-        for k in ("warmup", "speed", "tail", "port"):
+        for k in ("warmup", "speed", "tail", "port", "lots"):
             if k in out and out[k] not in (None, ""):
                 try:
                     out[k] = int(out[k])
                 except (TypeError, ValueError):
                     pass
-        for k in ("interval", "hold"):
+        for k in ("interval", "hold", "slip_stop", "slip_fallback", "slip_be"):
             if k in out and out[k] not in (None, ""):
                 try:
                     out[k] = float(out[k])

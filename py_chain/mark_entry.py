@@ -7,9 +7,12 @@
   - 买点（多头）= 红色向上箭头（arrow_up）
   - 卖点（空头）= 向下绿色箭头（arrow_down）
 
-信号画在「背驰级别」（更低周期）。出场规则（止损 + 三档止盈）的状态机由
-backtest.BacktestEngine 增量推进；本模块提供方向感知止损参考位（stop_ref_of）
-与笔事件查找（find_bi_event），与 mark_entry.js 的 stopRefOf/findBiEvent 对齐。
+信号画在「背驰级别」（更低周期）。出场规则（止损 + 滑点/兜底 + 三档止盈）的状态机由
+backtest.BacktestEngine 增量推进；本模块提供出场构件（与 mark_entry.js 对齐）：
+  - stop_ref_of        方向感知止损参考位（支阻位 ± 滑点，无正确侧位兜底 进场价 ± 滑点，永不为 None）
+  - trend_following_of 顺势/逆势判定（计划 direction ∈ {多头多,空头空} 为顺势）
+  - forming_seg_ready  检测周期形成段「合并后≥5根K成笔预期」判定（TP2 / 逆势 TP3b 事件源）
+  - find_bi_event      笔事件查找（TP1/TP3a 事件源，返回含 startTime）
 
 不连接 CDP、不绘图；回测链路通过 compute_entries 直接调用。
 """
@@ -26,6 +29,21 @@ SELL_COLOR = "#089981"
 
 # 靠近支阻位阈值（×当前周期ATR）
 NEAR_ATR = 1.0
+
+# ---- 出场参数（2026-09-09 出场阶梯重构；与 mark_entry.js / CLI / Web 回测界面同名） ----
+# 进场手数（盈亏 = 价格差 × 方向 × lots）
+DEFAULT_LOTS = 4
+# 止损位滑点（绝对价格）：正确侧支阻位外侧偏移（short 上方+ / long 下方−）
+DEFAULT_SLIP_STOP = 3.0
+# 兜底止损滑点：无正确侧支阻位时 止损 = 进场价 ± slip_fallback（止损位永不为 None）
+DEFAULT_SLIP_FALLBACK = 10.0
+# 保本滑点：保本止损位 beStop = 进场成交K线极值 ± slip_be（short: high+ / long: low−）
+DEFAULT_SLIP_BE = 3.0
+# 形成段「成笔预期」门槛：合并后 ≥5 根K（chan_core.isValid gap>=4 同口径）
+EXIT_MIN_MERGED = 5
+# 顺势（计划方向=多头多/空头空）判定集合；plan_direction 缺失时按 strategyKey 兜底
+TREND_PLAN_DIRS = {"多头多", "空头空"}
+TREND_STRATEGY_KEYS = {"wait2Buy", "waitBuy", "wait2Sell", "waitSell"}
 
 
 # ============================================================
@@ -119,6 +137,26 @@ def levelsBelow(periodData, X):
         chain.append(nxt)
         cur = nxt
     return chain
+
+
+def filterDetectPeriods(periods):
+    """检测周期 = 自身之下存在**已加载**更低级别的周期（不含 D/30S）。
+    下一级映射与 levelsBelow 一致：lowerResOf（240→60→15→3），3 之下挂 30S。
+    30S 未加载时 3 之下无级别 → 3 不作为检测周期（最小检测 15m，背驰最深 3m），
+    避免 realtime 模式下沉链为空、背驰落在检测周期自身（det=3/div=3）。"""
+    loaded = {str(p).upper() for p in periods}
+    out = []
+    for p in periods:
+        pu = str(p).upper()
+        if pu in ("D", "30S"):
+            continue
+        nxt = lowerResOf(pu)
+        if nxt is None and pu == "3":
+            nxt = "30S"
+        if nxt is None or nxt not in loaded:
+            continue
+        out.append(p)
+    return out
 
 
 def biEndingAt(bis, pTime, tol, wantType):
@@ -523,7 +561,8 @@ def realtimeLowerDiverge(periodData, X, wantDir, tCut,
     下沉判定（SPEC_divergence_chanset 规则 1/2/3）：对 (X, wantDir) 先走下沉链
     sinkChainRealtime（P = X 末段当前极值），只在「下沉停止级 S」产候选——
     S 级展开不足 3 笔的更低级别（如与其上级 15m 笔同笔的 3m 末段）不再产候选；
-    S 可为 X 自身（次级别展开不足时在本级判定）。
+    S = X（次级别展开不足、下沉链一步未走）→ **不产信号**：背驰必须落在严格
+    更低级别（markRes < periodX），在本级自身形成段上判背驰等于无低级别确认。
 
     候选条件（与确认制 findDivergePoints 同一套背驰标准，对象换成 S 级形成中段）：
       - 段方向匹配（做多→形成中下跌段 / 做空→形成中上涨段）；
@@ -537,8 +576,8 @@ def realtimeLowerDiverge(periodData, X, wantDir, tCut,
     @returns 候选列表（≤1 条）[ { res, point:{time,price,direction}, segStart } ]
     """
     S, parentBi = sinkChainRealtime(periodData, X, wantDir)
-    if S is None:
-        return []
+    if S is None or str(S) == str(X):
+        return []  # 链不通 / 停止级=检测周期自身 → 无严格更低级别背驰，不产信号
     pd = periodData.get(S) or {}
     bis = pd.get("bis") or []
     if len(bis) < 2:
@@ -608,7 +647,7 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
     @param periodMacdTimes   各周期MACD时间数组 { res: [times] }（切片用，可选；
                              缺省时 realtimeLowerDiverge 内部现建）
     @returns 新信号列表（flat），每项含 { periodX, markRes, time, price, direction,
-             strategyKey, nearSr, realtime:True, segStart }
+             strategyKey, nearSr, planDirection, realtime:True, segStart }
     """
     fired = fired if fired is not None else set()
     if tCut is None:
@@ -684,6 +723,7 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
                 "direction": direction,
                 "strategyKey": key,
                 "nearSr": near["sr"]["price"],
+                "planDirection": plan.get("direction"),
                 "realtime": True,
                 "segStart": c["segStart"],
             })
@@ -714,7 +754,7 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
     @param periodAtr     可选：各周期预计算 ATR { 周期: atr }
     @param with_30s      启用 30 秒级别（ALL_RES 追加 30S，仍按数据存在性过滤）
     @returns { 标记级别: [信号...] }，信号含 { periodX, time, price, direction, strategyKey,
-             nearSr, color, markRes }
+             nearSr, color, markRes, planDirection }
     """
     periodMacd = periodMacd or {}
     periodAtr = periodAtr or {}
@@ -787,30 +827,36 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
             "nearSr": evalRes["nearSr"],
             "color": BUY_COLOR if strategy["direction"] == "long" else SELL_COLOR,
             "markRes": evalRes["markRes"],
+            "planDirection": plan.get("direction"),
         }
         allEntries.setdefault(evalRes["markRes"], []).append(sig)
     return allEntries
 
 
 # ============================================================
-# 出场规则（与 mark_entry.js 对齐：stopRefOf / findBiEvent）
+# 出场规则（与 mark_entry.js 对齐：stopRefOf / findBiEvent / formingSegReady）
 # ============================================================
 
 
-def stop_ref_of(direction, entry_price, near_sr, sr_levels):
-    """方向感知的止损参考位：short 取进场价上方最近支阻位（阻力）、long 取下方最近（支撑）。
+def stop_ref_of(direction, entry_price, near_sr, sr_levels,
+                slip_stop=DEFAULT_SLIP_STOP, slip_fallback=DEFAULT_SLIP_FALLBACK):
+    """方向感知的止损参考位（含滑点偏移与兜底，返回值永不为 None）：
+    short 取进场价上方最近支阻位（阻力）+ slip_stop、long 取下方最近（支撑）− slip_stop。
 
     near_sr（进场校验按绝对价差最近命中的支阻位价，不分上下方）已在正确侧直接沿用；
     否则从 sr_levels 重选正确侧最近位（进场判定逻辑不变，仅供出场止损参考）。
-    无正确侧位 → None（该仓不设止损，仅三档止盈出场）。
-    @param direction   "long" | "short"
-    @param entry_price 进场价
-    @param near_sr     信号自带的近支阻位价格（可为 None）
-    @param sr_levels   支阻位列表（dict 含 "price"，或直接为价格数值）
+    无正确侧位 → 兜底止损 = 进场价 ± slip_fallback（不再有「不设止损」情形）。
+    @param direction     "long" | "short"
+    @param entry_price   进场价
+    @param near_sr       信号自带的近支阻位价格（可为 None）
+    @param sr_levels     支阻位列表（dict 含 "price"，或直接为价格数值）
+    @param slip_stop     支阻位滑点（绝对价格，short + / long −）
+    @param slip_fallback 兜底止损滑点（绝对价格，short + / long −）
     """
     is_short = direction == "short"
+    slip = slip_stop if is_short else -slip_stop
     if near_sr is not None and (near_sr > entry_price if is_short else near_sr < entry_price):
-        return near_sr
+        return near_sr + slip
     best = None
     for sr in (sr_levels or []):
         p = sr.get("price") if isinstance(sr, dict) else sr
@@ -820,7 +866,45 @@ def stop_ref_of(direction, entry_price, near_sr, sr_levels):
             d = abs(p - entry_price)
             if best is None or d < best[1]:
                 best = (p, d)
-    return best[0] if best else None
+    if best is None:
+        return entry_price + (slip_fallback if is_short else -slip_fallback)
+    return best[0] + slip
+
+
+def trend_following_of(plan_direction, strategy_key=None):
+    """顺势/逆势判定（TP2 平一半 / TP3 分支门槛）：
+    交易计划 direction ∈ {多头多, 空头空} 为顺势（计划结构方向=操作方向）；
+    {多头空, 空头多} 为逆势。plan_direction 缺失时按 strategyKey 兜底
+    （wait2Buy/waitBuy/wait2Sell/waitSell → 顺势；wait1Buy/wait1Sell → 逆势）。
+    """
+    if plan_direction:
+        return plan_direction in TREND_PLAN_DIRS
+    return strategy_key in TREND_STRATEGY_KEYS
+
+
+def forming_seg_ready(px_bis, px_merged_times, is_short, min_merged=EXIT_MIN_MERGED):
+    """检测周期形成段「成笔预期」判定（TP2 / 逆势 TP3b 事件源，当下状态无前视）：
+    末笔为不利方向（short→up / long→down）且其后正在走的有利方向形成段，
+    自末笔延伸终点所在合并块起，其后合并K线块数 ≥ min_merged−1（与 isValid
+    「两分型间隔 gap>=4」同口径，含锚点块共 min_merged 块）。
+
+    锚点按末笔 endTime 在 px_merged_times（合并块截止时间数组，升序）中二分定位——
+    不能用 bis[-1]["endIdx"]：extendLastBiFrom 延伸时不更新 endIdx。
+    末笔延伸（创新不利极值）时 endTime 推进、锚点右移、计数自动归零。
+    @param px_bis          检测周期笔列表（末笔可为延伸中的形成笔）
+    @param px_merged_times 检测周期合并K线块截止时间数组（升序，与引擎 _merged_times 同构）
+    @param is_short        持仓方向是否空头
+    @param min_merged      成笔预期门槛（默认 EXIT_MIN_MERGED=5）
+    """
+    if not px_bis or not px_merged_times:
+        return False
+    last = px_bis[-1]
+    if last["type"] != ("up" if is_short else "down"):
+        return False  # 末笔为有利方向 → 其后形成段为不利方向，不触发
+    anchor = bisect.bisect_left(px_merged_times, last["endTime"])
+    if anchor >= len(px_merged_times):
+        return False
+    return (len(px_merged_times) - 1) - anchor >= min_merged - 1
 
 
 def find_bi_event(bis, from_t, bi_type, require_post_start=False, break_prev=False):
@@ -833,7 +917,7 @@ def find_bi_event(bis, from_t, bi_type, require_post_start=False, break_prev=Fal
                              开始的新反向笔，排除进场前已存在的同向笔——进场背驰点
                              本身常是「创新高/新低」笔）
     @param break_prev        True 时再要求端点破前一同向笔端点（up 过前高 / down 破前底）
-    @returns None | {time, price}（笔完成时间 endTime 与端点价）
+    @returns None | {time, price, startTime}（笔完成时间 endTime、端点价、起点时间）
     """
     if not bis:
         return None
@@ -854,5 +938,5 @@ def find_bi_event(bis, from_t, bi_type, require_post_start=False, break_prev=Fal
                 else (b["endPrice"] < bis[j]["endPrice"])
             if not broke:
                 continue
-        return {"time": b["endTime"], "price": b["endPrice"]}
+        return {"time": b["endTime"], "price": b["endPrice"], "startTime": b["startTime"]}
     return None

@@ -891,3 +891,46 @@ describe("keepRecentAll 不分类保留最近 keep 个（现行主流程保留�
     assert.deepEqual(kept.map(p => p.time), [1000, 1500]);
   });
 });
+
+// ============================================================
+// mergeStep 逐根回放 == mergeBars 全量（等价性回归；mark_entry.js 形成段计数依赖）
+// ============================================================
+
+describe("mergeStep 增量等价性", () => {
+  // 覆盖包含合并两个方向 + 无包含 + _topCand/_origLow 传播的混合序列
+  const bars = [
+    bar(1, 100, 90, 95), bar(2, 110, 92, 105), bar(3, 108, 94, 100),   // 上包含（高高）
+    bar(4, 105, 91, 98),                                                // 下包含（低低）
+    bar(5, 120, 96, 110), bar(6, 118, 97, 112),                         // 上包含
+    bar(7, 112, 93, 100), bar(8, 90, 80, 85),                           // 无包含（新块）
+    bar(9, 88, 82, 85), bar(10, 87, 83, 84),                            // 下包含
+    Object.assign(bar(11, 86, 60, 80), { _topCand: 130 }),              // 长影 _topCand 传播
+    Object.assign(bar(12, 88, 62, 75), { _origLow: 62 }),               // _origLow 传播
+  ];
+  const FIELDS = ["time", "high", "low", "highTime", "lowTime", "rawHigh", "rawLow",
+    "rawHighTime", "rawLowTime", "_rawCount", "_topCand", "_topCandTime", "_origLow", "_origLowTime"];
+
+  test("逐根 mergeStep 回放与 mergeBars 全量结果一致", () => {
+    const full = core.mergeBars(bars);
+    const inc = [];
+    let dir = 0;
+    for (const b of bars) dir = core.mergeStep(inc, dir, b);
+    assert.equal(inc.length, full.length);
+    for (let i = 0; i < full.length; i++) {
+      for (const f of FIELDS) {
+        assert.deepEqual(inc[i][f], full[i][f], `块${i} 字段 ${f} 不一致`);
+      }
+    }
+  });
+
+  test("mergeBars 内部改为循环调用 mergeStep 后行为不变（块数/极值抽查）", () => {
+    const merged = core.mergeBars(bars);
+    assert.equal(merged.length, 8);
+    assert.equal(merged[1].rawHigh, 110);   // 块1 覆盖 bar2-3（上包含），真实高点 110
+    assert.equal(merged[1].low, 94);        // 向上合并取「高高」→ low 抬到 94
+    assert.equal(merged[5].rawHigh, 90);    // 块5 覆盖 bar8-10，真实高点 90
+    assert.equal(merged[5].high, 87);       // 向下合并取「低低」→ high 压到 87
+    assert.equal(merged[6]._topCand, 130);  // 长影 _topCand 保留在所在块
+    assert.equal(merged[7]._origLow, 62);   // 探底插针真低保留在所在块
+  });
+});

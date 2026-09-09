@@ -1,6 +1,6 @@
 # 标记进出场 mark-entry 规格（SPEC）
 
-> 文档用途：描述「标记进出场」SKILL 的功能规格——读取交易计划落盘结果判定各周期当前进场状态，映射到 6 种进场策略，校验策略进场条件（够笔/破前底过前高/MACD 0轴/出中枢力度变弱/以下级别背驰/支阻位附近），在「背驰级别」（更低周期）标记买点（向上红箭头）/卖点（向下绿箭头）；并对每个进场模拟**出场**（止损 + 三档止盈）与**同向持仓互斥**，出场点以统一**黄色箭头**标记（多头出场 ↓ / 空头出场 ↑，title = `EXIT_<背驰级别>`，与 Web 控制台一致）。
+> 文档用途：描述「标记进出场」SKILL 的功能规格——读取交易计划落盘结果判定各周期当前进场状态，映射到 6 种进场策略，校验策略进场条件（够笔/破前底过前高/MACD 0轴/出中枢力度变弱/以下级别背驰/支阻位附近），在「背驰级别」（更低周期）标记买点（向上红箭头）/卖点（向下绿箭头）；并对每个进场模拟**出场**（止损±滑点+兜底 + 三档止盈，出场阶梯重构 2026-09-09）与**同向持仓互斥**，出场点以统一**黄色箭头**标记（多头出场 ↓ / 空头出场 ↑，title = `EXIT_<背驰级别>`，与 Web 控制台一致）。
 > 对应脚本：`.cursor/skills/mark-entry/scripts/mark_entry.js`。
 > 算法来源：缠论算法复用 `chan-core`（唯一算法源）；**进场状态判定不自行实现**，直接读取 `trading-plan` 落盘的 `plan_<品种>.json`；「以下级别背驰」的区间套下沉判定与出场规则均与 `py_chain` 回测引擎（mark_entry.py / backtest.py）对齐。
 
@@ -22,6 +22,10 @@
 | `--from=YYYY-MM-DD` | 无（必填） | 起始日期，应与画笔/支阻位/交易计划一致 |
 | `--periods=...` | `240,60,15,3` | 检测周期（注意：默认不含日线） |
 | `--near=K` | 1.0 | 靠近支阻位阈值（×状态所在周期ATR） |
+| `--lots=N` | 4 | 每笔进场手数（仅落盘记录；盈亏口径 = 价格差×方向×手数，JS 端不算盈亏） |
+| `--slip-stop=K` | 3 | 止损位滑点（绝对价格：正确侧支阻位外侧偏移，short +/long −） |
+| `--slip-fallback=K` | 10 | 兜底止损滑点（无正确侧支阻位 → 止损 = 进场价±该值；止损位永不为 null） |
+| `--slip-be=K` | 3 | 保本滑点（beStop = 进场K线极值±该值，short: high+/long: low−） |
 | `--dry` | 关闭 | 只计算不绘图 |
 | `--debug` | 关闭 | 打印调试信息 |
 
@@ -75,20 +79,24 @@
 - **MACD 0轴**：`calcMACD` 返回的 `dif`，当前值 <0（下0轴）/ >0（上0轴）。
 - **以下级别背驰**：`findDivergePoints(bis, macdArr)`（复用，不做区间套/锚定）识别各更低周期背驰点，候选点含 `referStart`（参照笔起点，供下沉判定的规则 2 参照 containment）。
 
-### 2.4 出场条件（simulatePosition，纯函数）
+### 2.4 出场条件（simulatePosition，纯函数；出场阶梯重构 2026-09-09）
 
-每个进场信号从进场时刻起按时间顺序模拟，事件按时间归并处理：
+每个进场信号从进场时刻起按时间顺序模拟，事件按时间归并处理，**同拍顺序：保本 → 平一半 → 全平 → 止损（同拍只挂一个成交型事件，与 py 引擎一致）**：
 
 | 事件 | 触发条件 | 动作 | 图标 |
 |------|----------|------|------|
-| 止损 `stopSr` | 背驰级别（markRes）K线**盘中**破坏止损参考位：short `high > 位` / long `low < 位` | 全平终局（下一开盘成交） | 黄 `↓/↑` |
-| 保本 `breakeven` | **背驰周期够笔**：markRes 首个 `endTime > 进场时间`、type 为有利方向（short→down / long→up）的笔完成 | 止损位上移至**进场价** | 仅落盘 |
-| 平一半 `half` | **检测周期够笔**：periodX 首个 `endTime > 进场时间`、type 为有利方向的笔完成（需保本已触发） | 平一半（仅一次，下一开盘成交） | 黄 `↓/↑` |
-| 全平 `close` | **检测周期破前底/过前高**：periodX 首个 `startTime >= 进场时间`、type 为不利方向、端点破前一同向笔端点的笔完成 | 全平终局（下一开盘成交） | 黄 `↓/↑` |
-| 保本止损 `stopBe` | 保本触发后盘中触及**进场价**（short `high > 进场价` / long `low < 进场价`） | 全平终局（下一开盘成交） | 黄 `↓/↑` |
+| 止损 `stopSr` | 背驰级别（markRes）K线**盘中**破坏止损位：short `high > 位` / long `low < 位`（跳空按开盘价成交） | 全平终局（下一开盘成交） | 黄 `↓/↑` |
+| 保本 `breakeven` | **背驰周期够笔**：markRes 首个 `endTime > 进场时间`、type 为有利方向（short→down / long→up）的笔完成 | 止损位上移至**保本止损位 beStop** | 仅落盘 |
+| 平一半 `half` | **仅顺势**（plan.direction ∈ {多头多, 空头空}）：periodX 首个有利方向、**合并后 ≥5 根K且有成笔预期**的形成段（`favSeg5Time`） | 平一半（下一开盘成交），剩余半仓止损移至 beStop（不要求保本先触发） | 黄 `↓/↑` |
+| 全平 `close` | **顺势**：periodX 进场后**有利方向**笔破前高/前低（`findBiEvent(..., fav, breakPrev)`）；**逆势**（多头空/空头多）：periodX 首个有利方向形成段（合并后 ≥5 根K成笔预期） | 全平终局（下一开盘成交） | 黄 `↓/↑` |
+| 保本止损 `stopBe` | 保本触发后盘中破坏 **beStop**（short `high > beStop` / long `low < beStop`） | 全平终局（跳空按开盘价成交） | 黄 `↓/↑` |
 | 仍持仓 `stillOpen` | 数据末尾未终局 | `state:'open'` | 无 |
 
-**止损参考位**（`stopRefOf`，方向感知）：short 取进场价**上方**最近支阻位（阻力）、long 取**下方**最近（支撑）；信号自带 `nearSr`（进场校验按绝对价差最近命中，不分上下方）已在正确侧则直接沿用，否则从 `srLevels` 重选正确侧最近位（**进场判定逻辑不变**）。无正确侧位 → null（不设止损，仅三档止盈出场）。
+**止损位**（`stopRefOf`，方向感知，**永不为 null**）：short 取进场价**上方**最近支阻位（阻力）+ 止损滑点、long 取**下方**最近（支撑）− 止损滑点；信号自带 `nearSr`（进场校验按绝对价差最近命中，不分上下方）已在正确侧则直接沿用（± 滑点），否则从 `srLevels` 重选正确侧最近位（**进场判定逻辑不变**）。**无正确侧位 → 兜底止损 = 进场价 ± 兜底滑点**（不再有「不设止损」仓位）。
+
+**保本止损位 beStop** = 进场K线极值 ± 保本滑点（short: high+ / long: low−）。JS 取 `sig.time` 对应 markRes bar 的极值；py 引擎取成交那根 fine bar 的极值（run() 批量路径该 bar 当拍未收盘，存在 ≤1 根 fine bar 的微前视；step_to 实时路径无前视——研究口径可接受）。
+
+**合并后 ≥5 根K且有成笔预期**（TP2 / 逆势 TP3 条件）：检测周期形成段自段起点合并块起 **≥5 块**（chan_core `isValid` 的 gap≥4 成笔门槛同口径）。JS 用 `favSeg5Time`（`mergeStep` 回放记录每块诞生时间，触发 = 段内第 5 块诞生 bar，成交 = 其后第一根 markRes bar 开盘）；py 引擎用 `forming_seg_ready`（增量 `_merged_times` 按末笔延伸终点二分计数）。**已知近似差异**：形成段达 5 后若被最终笔结构吸收（未成笔），py 引擎当下已触发、JS hindsight 不触发。
 
 **已知口径**：bis 最后一笔为延伸中的形成笔（chan-bi 落盘口径，`extendLastBi` 延伸至最新极值），其「完成」事件按延伸端点时间计（当下语义）。
 
@@ -137,14 +145,18 @@
   "fromTs": 1782086400,
   "generatedAt": "...",
   "nearAtr": 1.0,
-  "periods": { "15": [{ "periodX": "60", "time": 1724908800, "price": 4631.98, "direction": "short", "strategyKey": "wait2Sell", "nearSr": 4640.1, "color": "#089981",
-                         "stopRef": 4644.2, "state": "closed",
+  "lots": 4,
+  "slipStop": 3,
+  "slipFallback": 10,
+  "slipBe": 3,
+  "periods": { "15": [{ "periodX": "60", "time": 1724908800, "price": 4631.98, "direction": "short", "strategyKey": "wait2Sell", "nearSr": 4640.1, "planDirection": "空头空", "color": "#089981",
+                         "stopRef": 4643.1, "beStop": 4636.5, "state": "closed",
                          "exits": [{ "type": "breakeven", "time": 1724913000, "price": 4620.5 },
-                                    { "type": "stopBe", "time": 1724918000, "price": 4631.98 }] }] }
+                                    { "type": "stopBe", "time": 1724918000, "price": 4636.5 }] }] }
 }
 ```
 
-`periods` 按**背驰级别**聚合（同级别绘制/清除）；出场字段：`stopRef`（方向感知止损参考位，可为 null）、`state`（closed/open）、`exits`（事件列表，含 breakeven）；互斥过滤信号带 `suppressed: true` + `suppressedBy`。
+`periods` 按**背驰级别**聚合（同级别绘制/清除）；出场字段：`stopRef`（止损位 = 支阻位±止损滑点或兜底进场价±兜底滑点，永不为 null）、`beStop`（保本止损位 = 进场K线极值±保本滑点）、`state`（closed/open）、`exits`（事件列表，含 breakeven）；互斥过滤信号带 `suppressed: true` + `suppressedBy`。
 
 ### 3.6 绘制
 
@@ -178,7 +190,7 @@
 | 3 分钟周期 | 默认为最小周期，无更低级别背驰 → 状态不产生进场信号；`--with-30s` 启用后可检测 30S 背驰 → 状态产生信号（箭头画在 30S 级别） |
 | 数据未覆盖起始日期 | `scrollToFirstBar` 加载完整历史（周期性重新触发，防回弹） |
 | 早期信号超数据范围 | 绘制前 ensureBarsCover 强制加载，仅在连续 30 次（约 36 秒）无进展时兜底放弃 |
-| 无正确侧支阻位（止损参考位为 null） | 该仓不设止损，仅三档止盈出场（`stopRef: null` 落盘） |
+| 无正确侧支阻位 | 兜底止损 = 进场价 ± 兜底滑点（`--slip-fallback`，默认 10；止损位永不为 null） |
 | 数据末尾仍未终局 | `state: "open"`，`exits` 记录已触发事件，无终局图标 |
 | 同时刻多周期同向共振信号 | 按检测周期从大到小取一条，其余 `suppressed`（落盘不画箭头） |
 | 同方向持仓期间的新信号 | `suppressed: true` + `suppressedBy`（持仓信号时间），不画箭头；平仓后放行 |
@@ -197,7 +209,7 @@
 | `chan-bi`（画笔） | **强制依赖**：读取其落盘笔数据 `bis_<品种>.json` |
 | `mark-sr-flip`（支阻位） | **强制依赖**：读取其落盘 `srflip_<品种>.json` 的 `merged` 字段 |
 | `trading-plan`（交易计划） | **强制依赖**：读取其落盘 `plan_<品种>.json` 的 `periods` 字段（判定各周期进场状态） |
-| `chan-core` | 复用 `calcATR`/`calcMACD`/`isBiDiverge`/`buildZSByUpper`/`fmtT`/`lowerResOf`/`intervalSecOf` |
+| `chan-core` | 复用 `calcATR`/`calcMACD`/`isBiDiverge`/`buildZSByUpper`/`fmtT`/`lowerResOf`/`intervalSecOf`/`mergeStep`（TP2/逆势TP3 的形成段合并K线计数） |
 
 ## 8. 依赖链总览
 

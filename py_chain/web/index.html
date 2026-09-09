@@ -146,7 +146,7 @@
         <tr>
           <th>#</th><th>模式</th><th>信号时间</th><th>方向</th><th>检测周期</th>
           <th>策略</th><th>背驰级别</th><th>价格</th><th>近支阻</th><th>状态</th><th>成交时间</th><th>成交价</th><th>口径</th>
-          <th>出场时间</th><th>出场价</th><th>出场类型</th><th>盈亏</th>
+          <th>出场时间</th><th>出场价</th><th>出场类型</th><th>手数</th><th>盈亏</th>
         </tr>
       </thead>
       <tbody id="sig-body"></tbody>
@@ -211,6 +211,10 @@ function buildCard(m) {
       { k: 'warmup', label: '预热根数', type: 'text', def: '60' },
       { k: 'signal_mode', label: '信号模式', type: 'select', def: 'realtime',
         options: [['realtime', '当下背驰（形成中段当拍判断）'], ['confirm', '确认制（等笔端点确认）']] },
+      { k: 'lots', label: '手数', type: 'text', def: '4' },
+      { k: 'slip_stop', label: '止损滑点', type: 'text', def: '3' },
+      { k: 'slip_fallback', label: '兜底止损滑点', type: 'text', def: '10' },
+      { k: 'slip_be', label: '保本滑点', type: 'text', def: '3' },
     ],
     replay: [
       { k: 'start', label: '回放起点', type: 'text', def: '2026-08-01' },
@@ -271,7 +275,9 @@ function fillModeName(m) {
   if (m === 'confirm') return '确认';
   return m || '-';
 }
-// 出场类型：stopSr=支阻位止损 | stopBe=保本止损 | close=全平；exits 含 half=平一半/breakeven=保本
+// 出场类型：stopSr=支阻位止损（支阻位±止损滑点；无正确侧位兜底 进场价±兜底滑点）
+//          | stopBe=保本止损（beStop=进场K线极值±保本滑点）| close=全平（顺势=有利方向破前高/低；
+//          逆势=形成段≥5合并K）；exits 含 half=平一半（顺势形成段≥5合并K）/breakeven=保本
 function exitTypeName(t) {
   if (t === 'stopSr') return '支阻位止损';
   if (t === 'stopBe') return '保本止损';
@@ -343,6 +349,7 @@ function renderTable() {
       <td>${fmtTime(r.exitTime)}</td>
       <td>${r.exitPrice != null ? Number(r.exitPrice).toFixed(2) : '-'}</td>
       <td title="${exitEventsDesc(r)}">${r.exitType ? exitTypeName(r.exitType) : (r.state === 'open' ? '持仓中' : '-')}</td>
+      <td>${r.lots != null ? r.lots : '-'}</td>
       <td class="${pnlCls}">${pnlTxt}</td>
     </tr>`;
   }).join('');

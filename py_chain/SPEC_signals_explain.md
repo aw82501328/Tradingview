@@ -1,5 +1,7 @@
 # SPEC：单笔信号"进出场原因"快查优化（方案存档，暂未实现）
 
+> ⚠️ 2026-09-09 出场阶梯重构后，本文引用的出场规则/行号基于旧口径（TP2=检测周期够笔需保本、TP3=不利方向破高低点、无止损兜底、无 lots），实现时需按新规则重写叙事模板：止损位=支阻位±滑点/兜底、beStop=进场成交K线极值±保本滑点、TP2=顺势形成段合并后≥5根K、TP3=顺势有利方向破高低点/逆势形成段≥5根K、盈亏×lots。
+
 > 状态：**方案草案，仅存档，未执行**。实现前需按「验证」节做改动前回归基线。
 
 ## Context（为什么慢）
@@ -35,11 +37,11 @@
 
 ### 3. `py_chain/backtest.py`
 - `advance_exit_decision`：
-  - breakeven 事件（84 行）直接带 `why`：`TP1 保本：{markRes} 首笔有利{方向}笔 {fmtT(tp1.time)} @ {tp1.price:.2f} 完成，止损位上移至进场价`。
-  - half/close/stop 三处置 `pos["pendingWhy"] = {"rule", "note"}`：half=`TP2 半平触发：{periodX} 有利笔 @ {tp2.time} 完成（保本已生效）`；close=`TP3 全平触发：{periodX} 不利笔 {fmtT(tp3.time)} @ {price} 破前一同向笔端点 {refPrice}`；stopSr/stopBe=`止损/保本止损触发：{fmtT(bar.time)} bar {low/high} {extreme:.2f} {跌破/升破} 止损/保本位 {stop:.2f}`。
+  - breakeven 事件（84 行）直接带 `why`：`TP1 保本：{markRes} 首笔有利{方向}笔 {fmtT(tp1.time)} @ {tp1.price:.2f} 完成，止损位上移至 beStop {beStop:.2f}`。
+  - half/close/stop 三处置 `pos["pendingWhy"] = {"rule", "note"}`：half=`TP2 半平触发（顺势 {planDirection}）：{periodX} 有利方向形成段合并后≥5根K（t5 时刻），剩余半仓止损移至 beStop`；close=顺势 `TP3 全平触发：{periodX} 有利笔 {fmtT(tp3a.time)} @ {price} 破前一同向笔端点 {refPrice}` / 逆势 `TP3 全平触发（逆势 {planDirection}）：{periodX} 有利方向形成段合并后≥5根K`；stopSr/stopBe=`止损/保本止损触发：{fmtT(bar.time)} bar {low/high} {extreme:.2f} {跌破/升破} 止损/保本位 {stop:.2f}`。
 - `execute_pending_exit`：112 行事件 append 带 `why = note + f"；下一开盘 {fmtT(exec_time)} @ {exec_price:.2f} 成交"`，随后清掉 `pos["pendingWhy"]`。
 - `close_trade`：`pos["exitWhy"] = pos["exits"][-1].get("why")`。
-- `_fill_pending`：trade dict（753-771）加 `strategyLabel/signalNote/entryWhy`（entryWhy 由小助手组：`做{多/空} {label}：信号 {fmtT} @ price；口径 {FILL_MODE_LABELS}，{fmtT entryTime} @ entryPrice 成交；止损参考位 {stopRef 或 "无（仅三档止盈）"}`）；suppressed 分支（727-734）在 `on_suppressed(s)` 前给 `s["suppressedWhy"] = f"同向{d}互斥：已有持仓单 #{open_pos[d]['tradeNo']}…，本信号不成交"`。
+- `_fill_pending`：trade dict（753-771）加 `strategyLabel/signalNote/entryWhy`（entryWhy 由小助手组：`做{多/空} {label}：信号 {fmtT} @ price；口径 {FILL_MODE_LABELS}，{fmtT entryTime} @ entryPrice 成交；止损位 {stopRef:.2f}（支阻位±滑点/兜底）；保本位 beStop {beStop:.2f}；{lots} 手`）；suppressed 分支（727-734）在 `on_suppressed(s)` 前给 `s["suppressedWhy"] = f"同向{d}互斥：已有持仓单 #{open_pos[d]['tradeNo']}…，本信号不成交"`。
 - `summarize`（856 行）出场名映射换 `labels.EXIT_LABELS`。
 
 ### 4. `py_chain/webapp.py` — SignalLog 镜像

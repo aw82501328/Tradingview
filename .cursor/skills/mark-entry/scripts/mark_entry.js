@@ -9,11 +9,17 @@
  * 与 py_chain/mark_entry.py 对齐）：候选点先走下沉链（sinkChainConfirm），
  * 只在「下沉停止级」产生候选；参照笔必须与候选段同处其所属上级笔内部。
  *
- * 出场规则（同向持仓互斥：同方向持仓未终局不再开新仓，多空互不影响）：
- *   - 止损：盘中破坏进场参考的支阻位（方向感知选位：short 上方最近 / long 下方最近）
- *   - 止盈1：背驰周期够笔（有利方向笔完成）→ 保本（止损位上移至进场价）
- *   - 止盈2：检测周期够笔 → 平一半
- *   - 止盈3：检测周期破前底/过前高（进场后反向笔端点破前一同向笔端点）→ 全平
+ * 出场规则（出场阶梯重构 2026-09-09，与 py_chain/backtest.py 引擎口径对齐；
+ * 同向持仓互斥：同方向持仓未终局不再开新仓，多空互不影响）：
+ *   - 止损位：正确侧最近支阻位 ± 止损滑点（short 上方+ / long 下方−）；无正确侧位
+ *     兜底 进场价 ± 兜底滑点（永不为 null，不再有「不设止损」仓位）
+ *   - 保本止损位 beStop：进场K线极值 ± 保本滑点（short: high+ / long: low−）
+ *   - 止盈1 保本：背驰周期够笔（有利方向笔完成）→ 止损位上移至 beStop（仅状态迁移）
+ *   - 止盈2 平一半（仅顺势：计划 direction ∈ 多头多/空头空）：检测周期首个有利方向、
+ *     合并后 ≥5 根K且有成笔预期的形成段 → 平一半，剩余半仓止损移至 beStop
+ *   - 止盈3 全平：顺势 = 检测周期有利方向笔破前高/前低；逆势（多头空/空头多）=
+ *     检测周期首个有利方向形成段（合并后 ≥5 根K成笔预期）→ 全平
+ *   - stopSr/stopBe：盘中破坏止损位 / 保本位 beStop
  *   出场标记统一黄色箭头（EXIT_COLOR #FFEB3B）：方向=平仓方向（多头出场 ↓ / 空头出场 ↑），title = EXIT_<背驰级别>
  *
  * 用法：
@@ -24,6 +30,10 @@
  *   --from=YYYY-MM-DD   起始日期（应与画笔/支阻位/交易计划一致）
  *   --periods=...       检测周期（逗号分隔，默认 240,60,15,3）
  *   --near=K            靠近支阻位阈值（×状态所在周期ATR，默认 1.0）
+ *   --lots=N            每笔进场手数（仅落盘记录，默认 4；盈亏口径 = 价格差×方向×手数）
+ *   --slip-stop=K       止损位滑点（绝对价格，默认 3）
+ *   --slip-fallback=K   兜底止损滑点（无正确侧支阻位 → 进场价±该值，默认 10）
+ *   --slip-be=K         保本滑点（beStop = 进场K线极值±该值，默认 3）
  *   --dry               只计算不绘图
  *   --debug             打印调试信息
  *
@@ -54,6 +64,20 @@ const getStrArg = (name, def) => {
 };
 // 靠近支阻位阈值（×当前周期ATR）
 const NEAR_ATR = Math.max(parseFloat(getArg("near", 1.0)) || 1.0, 0.01);
+// ---- 出场参数（2026-09-09 出场阶梯重构；与 py_chain / CLI / Web 回测界面同名，绝对价格单位） ----
+// 进场手数（仅落盘记录；盈亏口径 = 价格差 × 方向 × 手数，JS 端不算盈亏）
+const LOTS = Math.max(1, Math.round(getArg("lots", 4) || 4));
+// 止损位滑点：正确侧支阻位外侧偏移（short 上方+ / long 下方−）
+const SLIP_STOP = getArg("slip-stop", 3);
+// 兜底止损滑点：无正确侧支阻位时 止损 = 进场价 ± 该值（止损位永不为 null）
+const SLIP_FALLBACK = getArg("slip-fallback", 10);
+// 保本滑点：beStop = 进场K线极值 ± 该值（short: high+ / long: low−）
+const SLIP_BE = getArg("slip-be", 3);
+// 形成段「成笔预期」门槛：合并后 ≥5 根K（chan_core isValid gap>=4 同口径）
+const EXIT_MIN_MERGED = 5;
+// 顺势（计划方向=多头多/空头空）判定集合；planDirection 缺失时按 strategyKey 兜底
+const TREND_PLAN_DIRS = new Set(["多头多", "空头空"]);
+const TREND_STRATEGY_KEYS = new Set(["wait2Buy", "waitBuy", "wait2Sell", "waitSell"]);
 const FROM_DATE = getStrArg("from", "");
 let FROM_TS = null;
 {
@@ -62,6 +86,8 @@ let FROM_TS = null;
   else if (FROM_DATE) console.log("警告: --from 日期格式应为 YYYY-MM-DD，忽略该参数");
 }
 // 检测周期列表（默认 4小时/1小时/15分钟/3分钟，从大到小）
+// 检测周期须自身之下存在已加载的更低级别（hasLowerResLoaded）：30S 未加载时 3 之下
+// 无级别，3 不作检测周期（最小检测 15m、背驰最深 3m）。
 // --with-30s：启用 30 秒级别（ALL_RES 追加 30S，3分钟状态可用 30S 背驰产生进场信号，
 // 箭头画在 30S 级别；30S 自身无更低级别，不作为检测周期）
 const WITH_30S = args.includes("--with-30s");
@@ -193,6 +219,18 @@ function levelsBelow(periodData, X) {
     cur = nxt;
   }
   return chain;
+}
+
+/**
+ * 检测周期 X 是否存在**已加载**的更低级别（下一级映射与 levelsBelow 一致：
+ * lowerResOf + 3 之下挂 30S）。无更低级别的周期不作为检测周期——与
+ * py_chain/mark_entry.py 的 filterDetectPeriods 对齐：30S 未加载时 3 之下无级别，
+ * 3 不作检测周期（最小检测 15m、背驰最深 3m）；30S 自身无更低级别，亦不作检测周期。
+ */
+function hasLowerResLoaded(periodData, X) {
+  let nxt = lowerResOf(X);
+  if (nxt === null && String(X) === "3") nxt = "30S";
+  return nxt !== null && !!periodData[nxt];
 }
 
 /**
@@ -562,23 +600,27 @@ function evaluateEntry(ctx, strategy) {
 }
 
 // ============================================================
-// 出场条件（止损 + 三档止盈）与同向持仓互斥（纯函数，可单测）
+// 出场条件（止损±滑点+兜底 + 三档止盈）与同向持仓互斥（纯函数，可单测）
 // ============================================================
 
 /**
- * 方向感知的止损参考位：short 取进场价上方最近的支阻位（阻力）、long 取下方最近（支撑）。
+ * 方向感知的止损参考位（含滑点偏移与兜底，返回值永不为 null）：
+ * short 取进场价上方最近支阻位（阻力）+ slipStop、long 取下方最近（支撑）− slipStop。
  * 信号自带的 nearSr（进场校验时按绝对价差最近命中，不分上下方）若已在正确侧直接沿用；
  * 否则从 srLevels 重选正确侧最近位（进场判定逻辑不变，此处仅供出场止损参考）。
- * 无正确侧支阻位 → null（该仓不设止损，仅三档止盈出场）。
+ * 无正确侧支阻位 → 兜底 进场价 ± slipFallback（不再有「不设止损」仓位）。
  * @param {object} sig 进场信号（用 direction/price/nearSr）
  * @param {Array} srLevels 支阻位列表（每项含 price）
- * @returns {null|number} 止损参考位价格
+ * @param {number} [slipStop=SLIP_STOP] 止损位滑点（short + / long −）
+ * @param {number} [slipFallback=SLIP_FALLBACK] 兜底止损滑点（short + / long −）
+ * @returns {number} 止损参考位价格（永不为 null）
  */
-function stopRefOf(sig, srLevels) {
+function stopRefOf(sig, srLevels, slipStop = SLIP_STOP, slipFallback = SLIP_FALLBACK) {
   const isShort = sig.direction === "short";
   const entryP = sig.price;
+  const slip = isShort ? slipStop : -slipStop;
   if (sig.nearSr != null && (isShort ? sig.nearSr > entryP : sig.nearSr < entryP)) {
-    return sig.nearSr;
+    return sig.nearSr + slip;
   }
   let best = null;
   for (const sr of (srLevels || [])) {
@@ -588,7 +630,8 @@ function stopRefOf(sig, srLevels) {
       if (!best || d < best.d) best = { p, d };
     }
   }
-  return best ? best.p : null;
+  if (!best) return entryP + (isShort ? slipFallback : -slipFallback);
+  return best.p + slip;
 }
 
 /**
@@ -600,7 +643,7 @@ function stopRefOf(sig, srLevels) {
  *   必须是进场后开始的新笔，排除进场前已存在的同向笔——进场背驰点本身常是「创新高/新低」笔）
  * @param {boolean} breakPrev true 时再要求端点破前一同向笔端点
  *   （up 笔 endPrice > 前一 up 笔 endPrice = 过前高；down 笔 = 破前底）
- * @returns {null|{time:number, price:number}} 笔完成时间（endTime）与端点价
+ * @returns {null|{time:number, price:number, startTime:number}} 笔完成时间（endTime）、端点价、起点时间
  */
 function findBiEvent(bis, fromT, type, requirePostStart, breakPrev) {
   if (!bis) return null;
@@ -616,65 +659,162 @@ function findBiEvent(bis, fromT, type, requirePostStart, breakPrev) {
       const broke = type === "up" ? b.endPrice > bis[j].endPrice : b.endPrice < bis[j].endPrice;
       if (!broke) continue;
     }
-    return { time: b.endTime, price: b.endPrice };
+    return { time: b.endTime, price: b.endPrice, startTime: b.startTime };
   }
   return null;
 }
 
 /**
- * 出场状态机：对单个进场信号从进场时刻起按时间顺序模拟出场事件。
- *   止损：markRes K线逐根盘中检查（short high>止损位 / long low<止损位），跳空按开盘价成交；
- *         止损位初始 = stopRef，TP1 后 = 进场价（保本）
- *   TP1 保本：markRes 首个进场后完成的有利方向笔（short→down / long→up）
- *   TP2 平一半：periodX 首个进场后完成的有利方向笔（需 TP1 已触发，渐进式）
- *   TP3 全平：periodX 首个进场后开始的不利方向笔、端点破前一同向笔端点（破前底/过前高）
+ * 顺势/逆势判定（TP2 平一半 / TP3 分支门槛）：计划 direction ∈ {多头多, 空头空} 为顺势
+ * （计划结构方向=操作方向）；{多头空, 空头多} 为逆势。planDirection 缺失时按 strategyKey
+ * 兜底（wait2Buy/waitBuy/wait2Sell/waitSell → 顺势；wait1Buy/wait1Sell → 逆势）。
+ * 与 py_chain.mark_entry.trend_following_of 对齐。
+ */
+function trendFollowingOf(planDirection, strategyKey) {
+  if (planDirection) return TREND_PLAN_DIRS.has(planDirection);
+  return TREND_STRATEGY_KEYS.has(strategyKey);
+}
+
+/**
+ * 回放包含合并，返回每个合并块「诞生」的原始 bar 时间数组（块索引 = 诞生顺序，严格递增）。
+ * 与 py 引擎 _merged_times（块截止时间）同构：计数锚定用段起点块，两侧一致
+ * （成对单测用同构数据校验）。
+ */
+function mergedBornTimes(bars) {
+  const merged = [];
+  let dir = 0;
+  const born = [];
+  for (const b of (bars || [])) {
+    const n0 = merged.length;
+    dir = core.mergeStep(merged, dir, b);
+    if (merged.length > n0) born.push(b.time);
+  }
+  return born;
+}
+
+/**
+ * 进场后首个有利方向形成段「第 5 块合并K」诞生时间（TP2 / 逆势 TP3b 事件源，hindsight 口径）。
+ * 目标段 = 进场后首个有利方向笔：优先 findBiEvent（完成的笔，endTime > entryT、startTime
+ * 可早于 entryT——与旧 TP2 宽松语义一致）；无则末笔为延伸中的有利笔（其 startTime 作段起点）。
+ * 段起点块 s = 最后一个 born[k] <= 段起点时间 的 k；触发时间 T5 = born[s + EXIT_MIN_MERGED - 1]
+ * （含起点块共 5 块，isValid gap>=4 同口径）；不足 5 块 → null。
+ * 已知近似差异（与 py 引擎）：形成段达 5 后若被最终笔结构吸收（未成笔），引擎当下已触发、
+ * 本函数按最终结构不触发（研究口径差，成对单测用双方一致的构造数据规避）。
+ */
+function favSeg5Time(pd, isShort, entryT) {
+  if (!pd || !pd.bars || !pd.bis || !pd.bis.length) return null;
+  const fav = isShort ? "down" : "up";
+  const born = mergedBornTimes(pd.bars);
+  if (born.length < EXIT_MIN_MERGED) return null;
+  let segStart = null;
+  const done = findBiEvent(pd.bis, entryT, fav);
+  if (done) segStart = done.startTime;
+  else {
+    const last = pd.bis[pd.bis.length - 1];
+    if (last && last.type === fav && last.endTime > entryT) segStart = last.startTime;
+  }
+  if (segStart == null) return null;
+  // 段起点块 s = 最后一个诞生时间 <= 段起点 的块（upperBound - 1）
+  let lo = 0, hi = born.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (born[mid] <= segStart) lo = mid + 1; else hi = mid;
+  }
+  const s = lo - 1;
+  const t5 = s + EXIT_MIN_MERGED - 1 < born.length ? born[s + EXIT_MIN_MERGED - 1] : null;
+  return t5;
+}
+
+/**
+ * 出场状态机：对单个进场信号从进场时刻起按时间顺序模拟出场事件
+ * （出场阶梯重构 2026-09-09，与 py_chain/backtest.advance_exit_decision 口径对齐）。
+ *   止损位：stopRef（支阻位±止损滑点 / 兜底进场价±兜底滑点，永不为 null）；
+ *           TP1 / half 后 = beStop（保本位）
+ *   beStop：进场K线（sig.time 对应 markRes bar，取不到时兜底 进场价±保本滑点）极值 ± slipBe
+ *   TP1 保本：markRes 首个进场后完成的有利方向笔 → 止损位上移至 beStop（仅状态迁移，不成交）
+ *   TP2 平一半（仅顺势）：periodX 首个有利方向形成段合并后≥5根K（favSeg5Time）→ 平一半，
+ *           剩余半仓止损移至 beStop；不要求 TP1 先触发
+ *   TP3 全平：顺势 = periodX 有利方向笔破前高/前低（breakPrev）；逆势 = favSeg5Time
+ *   half/close 成交 = 触发后第一根 markRes bar 开盘价（跳空自然体现；无下一根 → 未成交，
+ *           与 py 引擎「触发 bar 无下一根 → 未成交」语义一致）
+ *   止损：markRes K线逐根盘中检查（short high>止损位 / long low<止损位），跳空按开盘价成交
  * 已知口径：bis 最后一笔为延伸中的形成笔（chan-bi 落盘口径），其完成事件按延伸端点时间计。
- * @param {object} sig 进场信号
- * @param {null|number} stopRef stopRefOf 的输出
+ * @param {object} sig 进场信号（含 planDirection / strategyKey）
+ * @param {number} stopRef stopRefOf 的输出（永不为 null）
  * @param {object} markResData 背驰级别周期数据 {bis, bars}
  * @param {object} periodXData 检测周期数据 {bis, bars}
- * @returns {{events:Array<{type:string,time:number,price:number|null}>, closed:boolean}}
+ * @param {object} [opts] {slipBe}（默认 SLIP_BE）
+ * @returns {{events:Array<{type:string,time:number,price:number|null}>, closed:boolean, beStop:number}}
  *   type: breakeven | half | close | stopSr（支阻位止损）| stopBe（保本止损）| stillOpen
  */
-function simulatePosition(sig, stopRef, markResData, periodXData) {
+function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
   const isShort = sig.direction === "short";
   const entryT = sig.time;
   const entryP = sig.price;
+  const slipBe = opts && opts.slipBe != null ? opts.slipBe : SLIP_BE;
   const fav = isShort ? "down" : "up"; // 有利方向笔（short 持仓盼下跌笔）
-  const adv = isShort ? "up" : "down"; // 不利方向笔（TP3 破高低点用）
+  const trend = trendFollowingOf(sig.planDirection, sig.strategyKey);
+  // 保本止损位：进场K线极值 ± slipBe（sig.time 对应 markRes bar；取不到取 ≤ entryT 最近一根）
+  let beStop = entryP + (isShort ? slipBe : -slipBe);
+  const mbars = (markResData && markResData.bars) || [];
+  for (let i = mbars.length - 1; i >= 0; i--) {
+    if (mbars[i].time <= entryT) {
+      beStop = isShort ? mbars[i].high + slipBe : mbars[i].low - slipBe;
+      break;
+    }
+  }
   const tp1 = findBiEvent(markResData && markResData.bis, entryT, fav);
-  const tp2 = findBiEvent(periodXData && periodXData.bis, entryT, fav);
-  const tp3 = findBiEvent(periodXData && periodXData.bis, entryT, adv, true, true);
+  const tp3a = trend ? findBiEvent(periodXData && periodXData.bis, entryT, fav, false, true) : null;
+  const t5 = favSeg5Time(periodXData, isShort, entryT);
+  // 触发后第一根 markRes bar（half/close 成交价；以最近成交时间为下界——保证成交时序
+  // 单调不回退，且进场前已达门槛的视同首拍触发）
+  let lastFill = entryT;
+  const nextOpen = (t) => {
+    const T = Math.max(t, lastFill);
+    for (const b of mbars) if (b.time > T) return b;
+    return null;
+  };
 
   const events = [];
   let stop = stopRef;
   let be = false, half = false;
-  // 应用 upto 时刻之前（含）的止盈事件；返回 true 表示已终局（TP3 全平）
+  // 应用 upto 时刻之前（含）的止盈事件（同拍顺序 保本→半平→全平，且同拍只挂一个
+  // 成交型事件——与 py 引擎 advance_exit_decision 的单事件挂起语义一致）：
+  //   返回 "close"（终局）| "half"（挂起，本拍跳过止损检查）| null（含仅 breakeven 状态迁移）
   const applyTps = (upto) => {
-    for (const [k, e] of [["breakeven", tp1], ["half", tp2], ["close", tp3]]) {
-      if (!e || e.time > upto) continue;
-      if (k === "breakeven" && !be) {
-        be = true;
-        stop = entryP; // 保本：止损位上移至进场价
-        events.push({ type: "breakeven", time: e.time, price: e.price });
-      }
-      if (k === "half" && !half && be) {
+    if (tp1 && tp1.time <= upto && !be) {
+      be = true;
+      stop = beStop; // 保本：止损位上移至 beStop（进场K线极值±保本滑点）
+      events.push({ type: "breakeven", time: tp1.time, price: tp1.price });
+    }
+    if (trend && t5 != null && t5 <= upto && !half) {
+      const nb = nextOpen(t5);
+      if (nb) { // 触发后无下一根 → 未成交（与引擎口径一致）
         half = true;
-        events.push({ type: "half", time: e.time, price: e.price });
-      }
-      if (k === "close") {
-        events.push({ type: "close", time: e.time, price: e.price });
-        return true;
+        be = true;  // 剩余半仓止损移至 beStop
+        stop = beStop;
+        lastFill = nb.time;
+        events.push({ type: "half", time: nb.time, price: nb.open });
+        return "half";
       }
     }
-    return false;
+    const closeT = trend ? (tp3a ? tp3a.time : null) : t5;
+    if (closeT != null && closeT <= upto) {
+      const nb = nextOpen(closeT);
+      if (nb) {
+        events.push({ type: "close", time: nb.time, price: nb.open });
+        return "close";
+      }
+    }
+    return null;
   };
 
-  const bars = (markResData && markResData.bars) || [];
   let closed = false;
-  for (const bar of bars) {
+  for (const bar of mbars) {
     if (bar.time <= entryT) continue; // 进场当根不计（进场K线自身的高低点）
-    if (applyTps(bar.time)) { closed = true; break; }
+    const ev = applyTps(bar.time);
+    if (ev === "close") { closed = true; break; }
+    if (ev === "half") continue; // 本拍已挂 half，跳过止损检查（同拍单事件）
     if (stop != null) {
       const hit = isShort ? bar.high > stop : bar.low < stop;
       if (hit) {
@@ -689,11 +829,11 @@ function simulatePosition(sig, stopRef, markResData, periodXData) {
   if (!closed) {
     applyTps(Infinity); // 数据末尾仍持仓：补记已触发的止盈事件
     if (!events.some(e => e.type === "close" || e.type === "stopSr" || e.type === "stopBe")) {
-      events.push({ type: "stillOpen", time: bars.length ? bars[bars.length - 1].time : entryT, price: null });
+      events.push({ type: "stillOpen", time: mbars.length ? mbars[mbars.length - 1].time : entryT, price: null });
     }
   }
   events.sort((a, b) => a.time - b.time);
-  return { events, closed };
+  return { events, closed, beStop };
 }
 
 // ============================================================
@@ -978,6 +1118,12 @@ async function main() {
       };
       if (DEBUG) console.log(`[数据] ${res}: K线 ${d.bars.length} 根 ATR=${periodData[res].atr.toFixed(2)} 笔 ${periodBis[res].length}`);
     }
+
+    // 生效检测周期：须自身之下存在已加载更低级别（30S 未加载时 3 被剔除，最小检测 15m）
+    const DETECT_RES = PERIODS.filter(res => periodData[res] && hasLowerResLoaded(periodData, res));
+    const dropped = PERIODS.filter(res => !DETECT_RES.includes(res));
+    console.log("生效检测周期:", DETECT_RES.join(", ") || "（无）",
+                dropped.length ? `（剔除: ${dropped.join(", ")}——之下无已加载更低级别）` : "");
     // 上一级别周期映射：240→D、60→240、15→60、3→15
     const upperResOf = (res) => {
       const sec = intervalSecOf(res) || 0;
@@ -998,6 +1144,10 @@ async function main() {
       const pd = periodData[res];
       if (!pd) {
         console.log(`\n[周期 ${res}] 无周期数据，跳过`);
+        continue;
+      }
+      if (!hasLowerResLoaded(periodData, res)) {
+        console.log(`\n[周期 ${res}] 之下无已加载更低级别，不作检测周期，跳过`);
         continue;
       }
       // 从交易计划结果取该周期状态
@@ -1036,6 +1186,7 @@ async function main() {
         direction: strategy.direction,
         strategyKey: strategy.key,
         nearSr: evalRes.nearSr,
+        planDirection: plan.direction,
         color: strategy.direction === "long" ? BUY_COLOR : SELL_COLOR,
       };
       (allEntries[evalRes.markRes] = allEntries[evalRes.markRes] || []).push(sig);
@@ -1077,10 +1228,11 @@ async function main() {
       );
       s.exits = sim.events;
       s.state = sim.closed ? "closed" : "open";
+      s.beStop = sim.beStop;
       const terminal = [...sim.events].reverse().find(e => e.type === "close" || e.type === "stopSr" || e.type === "stopBe");
       openPos[s.direction] = { sig: s, endTime: terminal ? terminal.time : Infinity };
       const evDesc = sim.events.map(e => `${EXIT_NAMES[e.type] || e.type} ${toT(e.time)}${e.price != null ? " @" + e.price.toFixed(2) : ""}`).join(" → ");
-      console.log(`[持仓] ${toT(s.time)} ${s.direction === "long" ? "做多" : "做空"}（检测周期 ${s.periodX}，止损参考 ${s.stopRef != null ? s.stopRef.toFixed(2) : "无"}）: ${evDesc || "无出场事件"}`);
+      console.log(`[持仓] ${toT(s.time)} ${s.direction === "long" ? "做多" : "做空"}（检测周期 ${s.periodX}，${trendFollowingOf(s.planDirection, s.strategyKey) ? "顺势" : "逆势"}，${LOTS} 手，止损参考 ${s.stopRef.toFixed(2)}，保本位 ${sim.beStop.toFixed(2)}）: ${evDesc || "无出场事件"}`);
     }
     // 重新按背驰级别聚合（flatSigs 为带互斥/出场信息的信号副本，落盘与绘制都用它）
     allEntries = {};
@@ -1111,6 +1263,10 @@ async function main() {
         fromTs: FROM_TS,
         generatedAt: new Date().toISOString(),
         nearAtr: NEAR_ATR,
+        lots: LOTS,
+        slipStop: SLIP_STOP,
+        slipFallback: SLIP_FALLBACK,
+        slipBe: SLIP_BE,
         periods: allEntries,
       };
       fs.writeFileSync(entryFile, JSON.stringify(payload, null, 2), "utf8");
@@ -1387,6 +1543,7 @@ module.exports = {
   // 背驰识别（含区间套下沉判定）
   findDivergePoints,
   levelsBelow,
+  hasLowerResLoaded,
   biEndingAt,
   upperResOfIn,
   upperContainingBi,
@@ -1407,6 +1564,9 @@ module.exports = {
   // 出场
   stopRefOf,
   findBiEvent,
+  trendFollowingOf,
+  mergedBornTimes,
+  favSeg5Time,
   simulatePosition,
 };
 

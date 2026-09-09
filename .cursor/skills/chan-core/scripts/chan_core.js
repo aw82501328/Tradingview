@@ -120,6 +120,70 @@ function markWickBars(rawBars) {
 // ============================================================
 
 /**
+ * mergeBars 的单步逻辑（与 py_chain.chan_core._mergeStep 镜像）：把 bar 并入
+ * merged 尾部（原地修改），返回更新后的 direction。供 mark_entry.js 出场
+ * 形成段「合并后≥5根K」计数回放使用（逐根推进时记录每块诞生时间）。
+ */
+function mergeStep(merged, direction, bar) {
+  const pushBar = (b) => {
+    merged.push({
+      ...b, _rawCount: 1,
+      highTime: b.time, lowTime: b.time,
+      rawHigh: b.high, rawLow: b.low, rawHighTime: b.time, rawLowTime: b.time,
+    });
+  };
+  if (merged.length === 0) {
+    pushBar(bar);
+    return direction;
+  }
+  const last = merged[merged.length - 1];
+  const containUp = bar.high >= last.high && bar.low <= last.low;
+  const containDown = bar.high <= last.high && bar.low >= last.low;
+  const hasContain = containUp || containDown;
+  if (hasContain) {
+    let dir = direction;
+    if (dir === 0 && merged.length >= 2) {
+      dir = last.high >= merged[merged.length - 2].high ? 1 : -1;
+    }
+    if (dir === 0) dir = 1;
+    if (dir === 1) {
+      if (bar.high > last.high) { last.high = bar.high; last.highTime = bar.time; }
+      if (bar.low > last.low) { last.low = bar.low; last.lowTime = bar.time; }
+    } else {
+      if (bar.high < last.high) { last.high = bar.high; last.highTime = bar.time; }
+      if (bar.low < last.low) { last.low = bar.low; last.lowTime = bar.time; }
+    }
+    // 记录覆盖原始K线的真实极值范围（跳空检测用，不受合并方向高低取舍影响），
+    // 同时记录极值出现的原始K线时间（端点极值修正用，见 fixBiExtremes）
+    if (bar.high > last.rawHigh) { last.rawHigh = bar.high; last.rawHighTime = bar.time; }
+    if (bar.low < last.rawLow) { last.rawLow = bar.low; last.rawLowTime = bar.time; }
+    // 端点候选价（_topCand）随覆盖范围传播：覆盖范围内「可成顶分型中心」的
+    // 长影 bar（markWickBars 记 _topCand）的影线价，作为合并 bar 成为顶分型
+    // 中心时的端点价（影线可成端点——60m 7-16 02:00 的 4081.52），
+    // 同时记录影线价所在原始K线时间（端点时间用——合并 bar 的 highTime 可能
+    // 被抬高的普通 bar 占据，需用 _topCandTime 定位真实冲高 bar）
+    if (bar._topCand !== undefined && bar._topCand > (last._topCand || 0)) {
+      last._topCand = bar._topCand;
+      last._topCandTime = bar.time;
+    }
+    // 探底插针真低（_origLow）随覆盖范围传播：markWickBars 压平长下影时保留的
+    // 原低（及所在原始K线时间），供 fixBiExtremes 在笔终点后恢复为更低的真实
+    // 端点。只进端点恢复通道，不写入 rawLow/rawHigh——跳空检测与分型结构
+    // 保持压平语义（与 _topCand 同模式：结构压平、真值旁路保留）
+    if (bar._origLow !== undefined && (last._origLow === undefined || bar._origLow < last._origLow)) {
+      last._origLow = bar._origLow;
+      last._origLowTime = bar._origLowTime !== undefined ? bar._origLowTime : bar.time;
+    }
+    last._rawCount += 1;
+    last.time = bar.time;
+    return dir;
+  }
+  direction = bar.high > last.high ? 1 : -1;
+  pushBar(bar);
+  return direction;
+}
+
+/**
  * 包含关系处理（合并K线）
  * 相邻K线有包含关系时合并，方向由前序趋势决定：
  *   向上合并取「高高」，向下合并取「低低」
@@ -128,63 +192,8 @@ function markWickBars(rawBars) {
 function mergeBars(rawBars) {
   const merged = [];
   let direction = 0;
-  const pushBar = (bar) => {
-    merged.push({
-      ...bar, _rawCount: 1,
-      highTime: bar.time, lowTime: bar.time,
-      rawHigh: bar.high, rawLow: bar.low, rawHighTime: bar.time, rawLowTime: bar.time,
-    });
-  };
   for (const bar of rawBars) {
-    if (merged.length === 0) {
-      pushBar(bar);
-      continue;
-    }
-    const last = merged[merged.length - 1];
-    const containUp = bar.high >= last.high && bar.low <= last.low;
-    const containDown = bar.high <= last.high && bar.low >= last.low;
-    const hasContain = containUp || containDown;
-    if (hasContain) {
-      let dir = direction;
-      if (dir === 0 && merged.length >= 2) {
-        dir = last.high >= merged[merged.length - 2].high ? 1 : -1;
-      }
-      if (dir === 0) dir = 1;
-      if (dir === 1) {
-        if (bar.high > last.high) { last.high = bar.high; last.highTime = bar.time; }
-        if (bar.low > last.low) { last.low = bar.low; last.lowTime = bar.time; }
-      } else {
-        if (bar.high < last.high) { last.high = bar.high; last.highTime = bar.time; }
-        if (bar.low < last.low) { last.low = bar.low; last.lowTime = bar.time; }
-      }
-      // 记录覆盖原始K线的真实极值范围（跳空检测用，不受合并方向高低取舍影响），
-      // 同时记录极值出现的原始K线时间（端点极值修正用，见 fixBiExtremes）
-      if (bar.high > last.rawHigh) { last.rawHigh = bar.high; last.rawHighTime = bar.time; }
-      if (bar.low < last.rawLow) { last.rawLow = bar.low; last.rawLowTime = bar.time; }
-      // 端点候选价（_topCand）随覆盖范围传播：覆盖范围内「可成顶分型中心」的
-      // 长影 bar（markWickBars 记 _topCand）的影线价，作为合并 bar 成为顶分型
-      // 中心时的端点价（影线可成端点——60m 7-16 02:00 的 4081.52），
-      // 同时记录影线价所在原始K线时间（端点时间用——合并 bar 的 highTime 可能
-      // 被抬高的普通 bar 占据，需用 _topCandTime 定位真实冲高 bar）
-      if (bar._topCand !== undefined && bar._topCand > (last._topCand || 0)) {
-        last._topCand = bar._topCand;
-        last._topCandTime = bar.time;
-      }
-      // 探底插针真低（_origLow）随覆盖范围传播：markWickBars 压平长下影时保留的
-      // 原低（及所在原始K线时间），供 fixBiExtremes 在笔终点后恢复为更低的真实
-      // 端点。只进端点恢复通道，不写入 rawLow/rawHigh——跳空检测与分型结构
-      // 保持压平语义（与 _topCand 同模式：结构压平、真值旁路保留）
-      if (bar._origLow !== undefined && (last._origLow === undefined || bar._origLow < last._origLow)) {
-        last._origLow = bar._origLow;
-        last._origLowTime = bar._origLowTime !== undefined ? bar._origLowTime : bar.time;
-      }
-      last._rawCount += 1;
-      last.time = bar.time;
-      direction = dir;
-    } else {
-      direction = bar.high > last.high ? 1 : -1;
-      pushBar(bar);
-    }
+    direction = mergeStep(merged, direction, bar);
   }
   return merged;
 }
@@ -1703,6 +1712,7 @@ module.exports = {
   // K线/分型/笔
   markWickBars,
   mergeBars,
+  mergeStep,
   findFractals,
   countRaw,
   hasGapBetween,
