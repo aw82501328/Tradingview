@@ -1,15 +1,10 @@
 /**
- * 打开 TradingView Desktop（带 CDP 调试端口 9222）
- *
- * 功能：
- *   1. 检查端口 9222 是否已监听（已运行则直接返回）
- *   2. 在 WindowsApps 目录查找 TradingView.exe（MSIX 安装，版本号通配）
- *   3. 以 --remote-debugging-port=9222 启动（spawn → PowerShell → 包内启动三级兜底）
- *   4. 轮询等待调试端口就绪（最多 30 秒）
- *
- * 用法：node open_tradingview.js
+ * Launch TradingView Desktop with CDP on localhost:9222.
+ * Usage: node open_tradingview.js [--json] [--allow-restart]
+ * A running instance is never terminated without --allow-restart.
+ * PowerShell and MSIX package launch methods share CDP readiness checks.
  */
-const { spawn, execFile } = require("child_process");
+const { execFile } = require("child_process");
 const net = require("net");
 const fs = require("fs");
 const path = require("path");
@@ -25,6 +20,7 @@ function sleep(ms) {
 function isPortListening(port) {
   return new Promise((resolve) => {
     const socket = net.connect({ port, host: "127.0.0.1" });
+    socket.setTimeout(1500, () => { socket.destroy(); resolve(false); });
     socket.once("connect", () => { socket.destroy(); resolve(true); });
     socket.once("error", () => resolve(false));
   });
@@ -62,7 +58,7 @@ function findTradingViewExeByAppx() {
         "-Command",
         "Get-AppxPackage -Name TradingView.Desktop | Select-Object -ExpandProperty InstallLocation",
       ],
-      { timeout: 15000 },
+      { timeout: 15000, windowsHide: true },
       (err, stdout) => {
         if (err) return resolve(null);
         const loc = String(stdout).trim();
@@ -78,8 +74,8 @@ function findTradingViewExeByAppx() {
 /** 检测 TradingView 进程是否已在运行 */
 function hasTradingViewProcess() {
   return new Promise((resolve) => {
-    execFile("tasklist", ["/FI", "IMAGENAME eq TradingView.exe"], { timeout: 10000 }, (err, stdout) => {
-      if (err) return resolve(false);
+    execFile("tasklist", ["/FI", "IMAGENAME eq TradingView.exe"], { timeout: 10000, windowsHide: true }, (err, stdout) => {
+      if (err) return resolve(true);
       resolve(/TradingView\.exe/i.test(stdout));
     });
   });
@@ -88,7 +84,7 @@ function hasTradingViewProcess() {
 /** 强制结束所有 TradingView 进程（taskkill /F /IM） */
 function killTradingView() {
   return new Promise((resolve) => {
-    execFile("taskkill", ["/F", "/IM", "TradingView.exe"], { timeout: 15000 }, () => resolve());
+    execFile("taskkill", ["/F", "/IM", "TradingView.exe"], { timeout: 15000, windowsHide: true }, () => resolve());
   });
 }
 
@@ -111,10 +107,10 @@ async function waitProcessExit() {
 function launchWithPowerShell(exe) {
   const args = [
     "-NoProfile", "-NonInteractive", "-Command",
-    `Start-Process -FilePath '${exe}' -ArgumentList '--remote-debugging-port=${PORT}'`,
+    `Start-Process -FilePath '${exe.replace(/'/g, "''")}' -ArgumentList '--remote-debugging-port=${PORT}'`,
   ];
   return new Promise((resolve) => {
-    execFile("powershell.exe", args, { timeout: 15000 }, (err) => resolve(!err));
+    execFile("powershell.exe", args, { timeout: 15000, windowsHide: true }, (err) => resolve(!err));
   });
 }
 
@@ -133,81 +129,63 @@ function launchInPackageContext() {
     "Invoke-CommandInDesktopPackage -PackageFamilyName $pkg.PackageFamilyName -AppId $appId -Command (Join-Path $pkg.InstallLocation 'TradingView.exe') -Args '--remote-debugging-port=" + PORT + "'",
   ].join("; ");
   return new Promise((resolve) => {
-    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { timeout: 30000 }, (err) =>
+    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { timeout: 30000, windowsHide: true }, (err) =>
       resolve(!err)
     );
   });
 }
 
-/** 轮询等待调试端口就绪（最多 seconds 秒），就绪返回 true */
-async function waitPortReady(seconds) {
-  for (let i = 0; i < seconds; i++) {
-    await sleep(1000);
-    if (await isPortListening(PORT)) return true;
-  }
-  return false;
+// Web and CLI share the same explicit restart policy.
+async function probe() {
+  if (!(await isPortListening(PORT))) return {state:'offline'};
+  try {
+    const get = async route => {
+      const r = await fetch(`http://127.0.0.1:${PORT}${route}`, {signal:AbortSignal.timeout(3000)});
+      if (!r.ok) throw Error('invalid CDP response');
+      return r.json();
+    };
+    const version = await get('/json/version');
+    const pages = await get('/json');
+    const tv = p => { try { const h=new URL(p.url).hostname; return h==='tradingview.com'||h.endsWith('.tradingview.com'); } catch { return false; } };
+    if (!version.webSocketDebuggerUrl || !Array.isArray(pages) || !pages.some(tv))
+      return {state:'error',message:'9222端口已占用，但未识别到TradingView调试页面'};
+    return {state:'ready',message:'TD已连接',hasCharts:pages.some(p=>tv(p)&&p.type==='page'&&new URL(p.url).pathname.startsWith('/chart/'))};
+  } catch { return {state:'error',message:'9222端口已占用，但不是可用的TradingView调试服务'}; }
 }
-
-(async () => {
-  // 1. 已运行则直接返回
-  if (await isPortListening(PORT)) {
-    console.log(`TradingView 已在运行（端口 ${PORT} 已监听），无需重新启动`);
-    process.exit(0);
+async function launch(allowRestart=false, deps={}) {
+  const d={probe,hasTradingViewProcess,find:async()=>findTradingViewExe()||await findTradingViewExeByAppx(),
+    killTradingView,waitProcessExit,launchWithPowerShell,launchInPackageContext,sleep,...deps};
+  if (process.platform!=='win32' && !deps.probe) return {state:'error',message:'启动TD仅支持Windows'};
+  const initial=await d.probe();
+  if(initial.state!=='offline') return initial;
+  const running=await d.hasTradingViewProcess();
+  if(running&&!allowRestart) return {state:'needs_confirmation',message:'需要重启 TD，当前窗口会关闭，请先保存布局'};
+  const exe=await d.find();
+  if(!exe) return {state:'error',message:'未找到TradingView.exe，请确认已安装TradingView Desktop'};
+  async function clear() {
+    if(!(await d.hasTradingViewProcess())) return true;
+    if(!allowRestart) return false;
+    await d.killTradingView();
+    if(!(await d.waitProcessExit())) throw Error('TD未能退出，请手动关闭后重试');
+    return true;
   }
-
-  // 2. 查找可执行文件（先按原逻辑枚举 WindowsApps，找不到时再走新增的 AppxPackage 查询兜底）
-  const exe = findTradingViewExe() || (await findTradingViewExeByAppx());
-  if (!exe) {
-    console.log("ERROR: 未找到 TradingView.exe，请确认已安装 TradingView Desktop");
-    process.exit(1);
-  }
-
-  // 3. 首次尝试：直接 spawn 启动（detached 防止子进程阻塞），等待 15 秒
-  console.log(`启动 TradingView: ${exe}`);
-  spawn(exe, [`--remote-debugging-port=${PORT}`], { detached: true, stdio: "ignore" }).unref();
-  console.log(`已发出启动命令（调试端口 ${PORT}），等待加载...`);
-  if (await waitPortReady(15)) {
-    console.log(`SUCCESS: TradingView 启动成功，CDP 端口 ${PORT} 已就绪`);
-    process.exit(0);
-  }
-
-  // 4. spawn 后端口未就绪：检测到进程已起来说明调试参数被忽略，
-  //    先清理该实例，再用 PowerShell Start-Process 兜底重试一次
-  if (await hasTradingViewProcess()) {
-    console.log(`调试端口 ${PORT} 未就绪且进程已启动（参数可能被忽略），清理后用 PowerShell 重试...`);
-    await killTradingView();
-    if (!(await waitProcessExit())) {
-      console.log("WARN: 清理 TradingView 进程超时，继续尝试 PowerShell 启动");
+  if(running) await clear();
+  for(const start of [()=>d.launchWithPowerShell(exe),()=>d.launchInPackageContext()]) {
+    if(!(await clear())) return {state:'needs_confirmation',message:'需要重启 TD，当前窗口会关闭，请先保存布局'};
+    await start();
+    for(let i=0;i<30;i++) {
+      await d.sleep(1000);
+      const result=await d.probe();
+      if(result.state==='ready') return result;
     }
   }
-  const sent = await launchWithPowerShell(exe);
-  console.log(sent
-    ? `已用 PowerShell 发出启动命令（调试端口 ${PORT}），等待加载...`
-    : "PowerShell 启动命令发送失败，继续等待端口超时检查");
-  if (await waitPortReady(20)) {
-    console.log(`SUCCESS: TradingView 启动成功，CDP 端口 ${PORT} 已就绪`);
-    process.exit(0);
-  }
-
-  // 5. Start-Process 仍超时：MSIX 应用可能不允许脱离包身份直启 exe（启动即退），
-  //    改用 Invoke-CommandInDesktopPackage 在包内上下文携带调试参数启动（最终兜底）
-  if (await hasTradingViewProcess()) {
-    console.log(`调试端口 ${PORT} 仍未就绪，清理残留进程后改用包内方式启动...`);
-    await killTradingView();
-    if (!(await waitProcessExit())) {
-      console.log("WARN: 清理 TradingView 进程超时，继续尝试包内启动");
-    }
-  }
-  const sentInPkg = await launchInPackageContext();
-  console.log(sentInPkg
-    ? `已通过 Invoke-CommandInDesktopPackage 发出启动命令（调试端口 ${PORT}），等待加载...`
-    : "包内启动命令发送失败，继续等待端口超时检查");
-  if (await waitPortReady(20)) {
-    console.log(`SUCCESS: TradingView 启动成功，CDP 端口 ${PORT} 已就绪`);
-    process.exit(0);
-  }
-
-  // 6. 仍超时则报错退出
-  console.log(`ERROR: 等待端口 ${PORT} 超时，TradingView 可能启动失败`);
-  process.exit(1);
-})();
+  const last=await d.probe();
+  return last.state==='error'?last:{state:'error',message:'等待TD调试端口9222超时，请检查TD是否成功启动后重试'};
+}
+module.exports={launch,probe};
+if(require.main===module) {
+  launch(process.argv.includes('--allow-restart')).catch(e=>({state:'error',message:e.message})).then(result=>{
+    console.log(process.argv.includes('--json')?JSON.stringify(result):result.message);
+    process.exitCode=result.state==='ready'?0:result.state==='needs_confirmation'?2:1;
+  });
+}
