@@ -31,7 +31,7 @@ const {
 } = core;
 
 // 缓存目录：chan-bi 画笔落盘笔数据（强制依赖）
-const CACHE_DIR = path.join(__dirname, "..", "..", "..", "..", ".cursor", "cache");
+const CACHE_DIR = process.env.CHAN_CACHE_DIR || path.join(__dirname, "..", "..", "..", "..", ".cursor", "cache");
 const cacheFile = (prefix, symbol) => path.join(CACHE_DIR, `${prefix}_${String(symbol).replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
 
 // 解析命令行参数
@@ -451,9 +451,11 @@ async function main() {
     let bisCache = null;
     try {
       if (fs.existsSync(bisCachePath)) bisCache = JSON.parse(fs.readFileSync(bisCachePath, "utf8"));
+    if (bisCache && bisCache.analysisInvalidReason) throw new Error(bisCache.analysisInvalidReason);
     } catch (e) {
       console.log("错误: 笔数据文件解析失败:", e.message);
     }
+    if (bisCache && bisCache.analysisInvalidReason) throw new Error(bisCache.analysisInvalidReason);
     if (!bisCache || !bisCache.periods || Object.keys(bisCache.periods).length === 0) {
       console.log(`错误: 未找到 ${SYMBOL} 的笔数据文件（${bisCachePath}）。`);
       console.log("本 SKILL 强制依赖 chan-bi 画笔 SKILL：请先运行「画笔」生成笔数据，再运行本脚本。");

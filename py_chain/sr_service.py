@@ -203,14 +203,19 @@ def engine_kwargs_of(cfg):
     }
 
 
-def build_chain_result(bars_by_period, cfg, log=None):
+def build_chain_result(bars_by_period, cfg, log=None, bis_by_period=None):
     """重建笔 → compute_srflip → meta。
     @returns (result, meta)；result 键：periods/merged/drawnByPeriod/currentPrice/periodAtrs
     """
     log = log or (lambda *a, **k: None)
     periods = list(cfg["periods"])
-    log("重建各周期笔 ...")
-    bis_by_period = build_bis(bars_by_period, periods=periods)
+    if bis_by_period is None:
+        log("重建各周期笔 ...")
+        bis_by_period = build_bis(bars_by_period, periods=periods)
+    else:
+        log("使用本轮画笔数据（不重算笔） ...")
+        if any(r not in bis_by_period for r in periods):
+            raise ValueError("本轮笔数据缺少支阻位所需周期")
     for res in periods:
         log(f"  {res:>4}: {len(bis_by_period.get(res) or [])} 笔"
             f"（K线 {len(bars_by_period[res])} 根）")

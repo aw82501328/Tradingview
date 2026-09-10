@@ -47,7 +47,7 @@ const core = require("../../chan-core/scripts/chan_core.js");
 const { calcATR, calcMACD, isBiDiverge, fmtT, lowerResOf, buildZSByUpper, intervalSecOf } = core;
 
 // 缓存目录（chan-bi 笔数据、mark-sr-flip 支阻位数据、本脚本落盘进出场数据）
-const CACHE_DIR = path.join(__dirname, "..", "..", "..", "..", ".cursor", "cache");
+const CACHE_DIR = process.env.CHAN_CACHE_DIR || path.join(__dirname, "..", "..", "..", "..", ".cursor", "cache");
 const cacheFile = (prefix, symbol) => path.join(CACHE_DIR, `${prefix}_${String(symbol).replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
 
 // 解析命令行参数
@@ -878,6 +878,7 @@ async function main() {
       process.exit(1);
     }
     const bisData = JSON.parse(fs.readFileSync(bisFile, "utf8"));
+    if (bisData && bisData.analysisInvalidReason) throw new Error(bisData.analysisInvalidReason);
     if (bisData.symbol !== SYMBOL) {
       console.log(`ERROR: 笔数据文件属于 ${bisData.symbol}，与当前品种 ${SYMBOL} 不一致`);
       console.log("请先对当前品种运行「画笔」SKILL（chan-bi）生成笔数据，再运行本脚本。");
@@ -893,6 +894,7 @@ async function main() {
       process.exit(1);
     }
     const srData = JSON.parse(fs.readFileSync(srFile, "utf8"));
+    if (srData && srData.analysisInvalidReason) throw new Error(srData.analysisInvalidReason);
     const srLevels = (srData.merged && srData.merged.length > 0) ? srData.merged : [];
     if (srLevels.length === 0) {
       console.log("ERROR: 支阻位数据为空（merged 列表无数据），请先运行「支阻互换位」SKILL 生成支阻位。");
@@ -909,6 +911,7 @@ async function main() {
       process.exit(1);
     }
     const planData = JSON.parse(fs.readFileSync(planFile, "utf8"));
+    if (planData && planData.analysisInvalidReason) throw new Error(planData.analysisInvalidReason);
     if (planData.symbol !== SYMBOL) {
       console.log(`ERROR: 交易计划数据文件属于 ${planData.symbol}，与当前品种 ${SYMBOL} 不一致`);
       console.log("请先对当前品种运行「交易计划」SKILL（trading-plan）生成计划数据，再运行本脚本。");

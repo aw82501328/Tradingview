@@ -34,17 +34,37 @@ from .main import parse_from
 from .chan_core import fmtT
 from .monitor import LiveMonitor, ReplayMonitor, clear_rt_markers
 from .marks import draw_signal_marks, draw_sr_marks, clear_signal_marks, clear_all_marks
-from . import sr_service, sr_draw, sr_tune, sr_tune_api, sr_preset_excel
+from . import sr_service, sr_draw, sr_tune, sr_tune_api, sr_preset_excel, analysis_service, analysis_api
 
 # ============================================================
 # 全局互斥：三种模式同一时间最多运行一种
 # ============================================================
 _active_lock = threading.Lock()
 _active_mode = None          # 当前运行中的模式名（backtest/replay/live）或 None
+_active_owner = None
+
+
+class ChartLock:
+    """Atomically coordinate standalone chart operations with mode startup."""
+    def __init__(self):
+        self._lock = threading.Lock()
+
+    def acquire(self, blocking=False):
+        # All current consumers use non-blocking acquisition.
+        with _active_lock:
+            if _active_mode is not None and _active_owner != threading.get_ident():
+                return False
+            return self._lock.acquire(blocking=False)
+
+    def release(self):
+        self._lock.release()
+
+    def locked(self):
+        return self._lock.locked()
 
 # 标记操作（marks/draw、marks/sr_draw、marks/clear、sr/*）互斥：
 # 都驱动同一张 TradingView 图表，独立锁会让两路 CDP 任务并行切周期
-_marks_lock = threading.Lock()
+_marks_lock = ChartLock()
 
 # 支阻位调试模块状态：busy 当前操作名（compute/refresh/draw/clear）或 None
 _sr_busy = None
@@ -59,20 +79,24 @@ _presets_lock = threading.Lock()
 
 def acquire_active(mode):
     """尝试占用模式互斥；成功返回 True，失败返回当前占用者。"""
-    global _active_mode
+    global _active_mode, _active_owner
     with _active_lock:
         if _active_mode is not None:
             return _active_mode
+        if _marks_lock.locked():
+            return "图表操作"
         _active_mode = mode
+        _active_owner = threading.get_ident()
         return True
 
 
 def release_active(mode):
     """释放模式互斥（仅当占用者是自己时）。"""
-    global _active_mode
+    global _active_mode, _active_owner
     with _active_lock:
         if _active_mode == mode:
             _active_mode = None
+            _active_owner = None
 
 
 def active_mode():
@@ -579,6 +603,13 @@ class ControlApp:
         # 支阻位调试模块：最近一次计算结果槽（cfg 快照 / computed_at / result / meta）
         self.sr = {"cfg": None, "computed_at": None, "result": None, "meta": None}
         self.sr_tune = sr_tune.TuneManager(store=tune_store, emit=self.broadcaster.emit)
+        self.analysis = analysis_service.AnalysisManager(
+            self.broadcaster.emit, acquire_active, release_active, _marks_lock,
+            self.normalize_sr_cfg, self.publish_analysis_sr)
+
+    def publish_analysis_sr(self, cfg, result, meta):
+        with _sr_result_lock:
+            self.sr = {"cfg": cfg, "computed_at": time.time(), "result": result, "meta": meta}
 
     def sr_counts(self):
         """支阻位结果概要（小载荷，供 /api/sr/state 与 status() 使用）。"""
@@ -721,6 +752,7 @@ class ControlApp:
         base = {
             "active": active_mode(),
             "modes": {name: w.status() for name, w in self.workers.items()},
+            "analysis": self.analysis.snapshot(),
         }
         try:
             base["sr"] = {"busy": busy, **self.sr_counts()}
@@ -790,13 +822,22 @@ def make_handler(app):
         def do_GET(self):
             parsed = urlparse(self.path)
             path = parsed.path
+            if analysis_api.handle(self, app, "GET"):
+                return
             if self._tune("GET"):
                 return
             if path in ("/sr-tune.js", "/sr-tune.css"):
                 self._serve_file(path[1:], "text/javascript; charset=utf-8" if path.endswith(".js") else "text/css; charset=utf-8")
                 return
             if path == "/" or path == "/index.html":
-                self._serve_file("index.html", "text/html; charset=utf-8")
+                self._serve_file("workbench.html", "text/html; charset=utf-8")
+                return
+            if path == "/modes.html":
+                self._serve_file("index.html")
+                return
+            if path in ("/analysis.js", "/analysis-catalog.json", "/shell.css"):
+                content_type = "text/javascript" if path.endswith(".js") else "application/json" if path.endswith(".json") else "text/css"
+                self._serve_file(path[1:], content_type + "; charset=utf-8")
                 return
             if path == "/sr" or path == "/sr.html":
                 self._serve_file("sr.html", "text/html; charset=utf-8")
@@ -844,6 +885,8 @@ def make_handler(app):
 
         def do_POST(self):
             path = urlparse(self.path).path
+            if analysis_api.handle(self, app, "POST"):
+                return
             if self._tune("POST"):
                 return
             if path == "/api/signals/clear":
@@ -1324,6 +1367,7 @@ def main(argv=None):
     except KeyboardInterrupt:
         print("\n已退出 Web 控制台。")
     finally:
+        app.analysis.close()
         server.server_close()
 
 

@@ -942,5 +942,8 @@ function init() {
 init();
 </script>
 <script src="/sr-tune.js"></script>
+<script>
+if (new URLSearchParams(location.search).has("embed")) { document.querySelectorAll("h1 a").forEach(a => a.hidden = true); }
+</script>
 </body>
 </html>

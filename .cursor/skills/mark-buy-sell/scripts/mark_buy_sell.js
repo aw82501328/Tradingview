@@ -29,7 +29,7 @@ const {
 } = core;
 
 // 笔数据缓存目录：由 chan-bi 画笔 SKILL 落盘，本脚本强制读取（画笔 → 标记 数据依赖）
-const CACHE_DIR = path.join(__dirname, "..", "..", "..", "..", ".cursor", "cache");
+const CACHE_DIR = process.env.CHAN_CACHE_DIR || path.join(__dirname, "..", "..", "..", "..", ".cursor", "cache");
 // 品种名中的特殊字符替换为下划线，保证文件名合法（与 chan-bi 落盘规则一致）
 const bisCacheFile = (symbol) => path.join(CACHE_DIR, `bis_${String(symbol).replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
 
@@ -188,10 +188,12 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
     try {
       if (fs.existsSync(bisCachePath)) {
         bisCache = JSON.parse(fs.readFileSync(bisCachePath, "utf8"));
+    if (bisCache && bisCache.analysisInvalidReason) throw new Error(bisCache.analysisInvalidReason);
       }
     } catch (e) {
       console.log("错误: 笔数据文件解析失败:", e.message);
     }
+    if (bisCache && bisCache.analysisInvalidReason) throw new Error(bisCache.analysisInvalidReason);
     if (!bisCache || !bisCache.periods || Object.keys(bisCache.periods).length === 0) {
       console.log(`错误: 未找到 ${SYMBOL} 的笔数据文件（${bisCachePath}）。`);
       console.log("本 SKILL 强制依赖 chan-bi 画笔 SKILL：请先运行「画笔」生成笔数据（会落盘到 .cursor/cache/bis_<symbol>.json），再运行「标记买卖点」。");

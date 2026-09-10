@@ -24,7 +24,7 @@ const core = require("../../chan-core/scripts/chan_core.js");
 const { buildZSByUpper, lowerResOf, intervalSecOf } = core;
 
 // 缓存目录（chan-bi 画笔落盘笔数据、本脚本落盘中枢数据）
-const CACHE_DIR = path.join(__dirname, "..", "..", "..", "..", ".cursor", "cache");
+const CACHE_DIR = process.env.CHAN_CACHE_DIR || path.join(__dirname, "..", "..", "..", "..", ".cursor", "cache");
 const cacheFile = (prefix, symbol) => path.join(CACHE_DIR, `${prefix}_${String(symbol).replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
 
 // 解析命令行参数
@@ -140,6 +140,7 @@ function onlyThisInterval(res) {
       process.exit(1);
     }
     const bisData = JSON.parse(fs.readFileSync(bisFile, "utf8"));
+    if (bisData && bisData.analysisInvalidReason) throw new Error(bisData.analysisInvalidReason);
     if (bisData.symbol !== SYMBOL) {
       console.log(`ERROR: 笔数据文件属于 ${bisData.symbol}，与当前品种 ${SYMBOL} 不一致`);
       console.log("请先对当前品种运行「画笔」SKILL（chan-bi）生成笔数据，再运行本脚本画中枢。");

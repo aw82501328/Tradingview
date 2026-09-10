@@ -49,10 +49,13 @@ EVALUATE_READ_TIMEOUT = 45
 class CDPConfig:
     """CDP 连接与取数配置。"""
 
-    def __init__(self, port=DEFAULT_CDP_PORT, periods=None, host="127.0.0.1"):
+    def __init__(self, port=DEFAULT_CDP_PORT, periods=None, host="127.0.0.1",
+                 target_id=None, expected_symbol=None):
         self.host = host
         self.port = port
         self.periods = list(periods or DEFAULT_PERIODS)
+        self.target_id = target_id
+        self.expected_symbol = expected_symbol
         # 每周期两个等待：setResolution 后等图数据刷新、scrollToFirstBar 后等加载
         self.res_wait = 4.0
         self.scroll_wait = 15.0
@@ -130,10 +133,12 @@ class CDPClient:
         TradingView 桌面端（带调试端口），等待就绪后再重试连接。
         """
         if not _cdp_port_ready(self.cfg):
+            if self.cfg.target_id:
+                raise CDPError("目标图表已断开，请重新连接")
             if not ensure_cdp_ready(self.cfg, self._log):
                 raise CDPError(
                     "TradingView 未运行且自动启动失败，请手动打开 TradingView 桌面端后重试")
-        ws_url = self._find_target(retry=60)
+        ws_url = self._find_target(retry=0 if self.cfg.target_id else 60)
         import websocket  # 延迟导入，websocket-client
         # suppress_origin：Chromium 新版默认拒绝非白名单 origin 的 WS 握手（403），
         # 桌面端启动参数未带 --remote-allow-origins 时，必须抑制 Origin 头才能连上。
@@ -198,6 +203,8 @@ class CDPClient:
                 with urllib.request.urlopen(f"{self.cfg.http_url}/json", timeout=10) as resp:
                     targets = json.loads(resp.read().decode("utf-8", errors="replace"))
                 for t in targets:
+                    if self.cfg.target_id and t.get("id") != self.cfg.target_id:
+                        continue
                     if t.get("type") == "page" and "tradingview.com" in (t.get("url") or ""):
                         ws = t.get("webSocketDebuggerUrl")
                         if ws:
@@ -224,6 +231,11 @@ class CDPClient:
         """
         if self._ws is None:
             self.connect()
+        if self.cfg.expected_symbol:
+            expression = (
+                "if (TradingViewApi.activeChart().symbol() !== "
+                + json.dumps(self.cfg.expected_symbol)
+                + ") throw new Error('ANALYSIS_TARGET_CHANGED');\n" + expression)
         self._msg_id += 1
         mid = self._msg_id
         self._ws.send(json.dumps({

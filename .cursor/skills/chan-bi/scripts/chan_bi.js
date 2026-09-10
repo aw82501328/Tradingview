@@ -28,7 +28,7 @@ const {
 } = core;
 
 // 笔数据落盘目录（mark-buy-sell SKILL 强制从此读取，实现「画笔 → 标记」数据依赖）
-const CACHE_DIR = path.join(__dirname, "..", "..", "..", "..", ".cursor", "cache");
+const CACHE_DIR = process.env.CHAN_CACHE_DIR || path.join(__dirname, "..", "..", "..", "..", ".cursor", "cache");
 // 品种名中的特殊字符替换为下划线，保证文件名合法（如 TVC:UKOIL → TVC_UKOIL）
 const bisCacheFile = (symbol) => path.join(CACHE_DIR, `bis_${String(symbol).replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
 
@@ -572,6 +572,7 @@ function intervalVisibility(res) {
     // 画某个周期时，按需加载其「低一级」周期K线作为端点时间校准基准
     //   （15分钟用3分钟校准，1小时用15分钟校准，4小时用1小时校准，日线用4小时校准）
     const refCache = {};
+    const allRawBars = {};
     const allBis = {}; // 收集各周期最终绘制的笔（含校准后的端点时间），循环结束后落盘供 mark-buy-sell 读取
 
     let prevBis = null;           // 上一周期的笔（用于确定下一层的锚点）
@@ -629,6 +630,7 @@ function intervalVisibility(res) {
       }
 
       const rawBars = windowBars;
+      allRawBars[res] = rawBars;
       // ATR/MACD 基于未剔除的原始K线计算（ATR 是波动率度量，插针也属波动；
       // MACD 用收盘价序列，不受长影剔除影响）
       const atr = calcATR(rawBars, 14);
@@ -893,6 +895,7 @@ function intervalVisibility(res) {
         from: FROM_DATE || null,
         fromTs: FROM_TS,
         generatedAt: new Date().toISOString(),
+        bars: process.env.CHAN_CACHE_DIR ? allRawBars : undefined,
         periods: allBis, // key=周期(如 D/240/60/15/3), value=该周期笔数组
       };
       fs.writeFileSync(cacheFile, JSON.stringify(payload, null, 2), "utf8");
