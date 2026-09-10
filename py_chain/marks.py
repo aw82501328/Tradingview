@@ -18,7 +18,7 @@ TradingView 图表对应周期K线上（箭头锚点为背驰点 time，已对�
 删除时只删自己创建的标记，不影响用户图形与其它标记。
 
 支阻横线（「标记支阻位」按钮，draw_sr_marks）：把信号列表「近支阻」（nearSr）
-画成 11 根K线宽的 1px 线段（shape='line' 两点锚定，中心=进场点K线、左右各 5 根，
+画成 11 根K线宽的 1px 线段（shape='trend_line' 两点锚定，中心=进场点K线、左右各 5 根，
 默认灰可调，只在背驰周期显示）。前缀 ML·SR 与独立键 mark_sr_ids —— 重画横线只清
 上次的横线，重画箭头（ML·）只清箭头，两个标记按钮互不清除。「删除标记」按钮
 （clear_all_marks）则把 ML·（含横线）/BT·/RT· 全部系统标记一次清空。
@@ -37,7 +37,7 @@ IDS_KEY = "mark_list_ids"
 CHUNK = 50
 
 # 支阻横线（「标记支阻位」按钮）：独立前缀/键，与箭头按钮互不清除。
-# 横线 = 近支阻价位（nearSr）的 11 根K线宽线段（shape='line' 两点锚定，
+# 横线 = 近支阻价位（nearSr）的 11 根K线宽线段（shape='trend_line' 两点锚定，
 # horizontal_line 是全宽线无法限定宽度），以进场点K线为中心左右各 SR_SPAN 根，
 # 只在背驰周期（markRes）显示，1px 默认灰（可调）。
 SR_PREFIX = "ML·SR"
@@ -336,7 +336,7 @@ def _draw_sr_chunk(c, chunk, color, res):
     已加载K线数组（m_bars._items），在 JS 内二分定位「含信号 time 的 bar」索引 i，
     取 i±SR_SPAN 的实际 bar 时间为两端点；数据源边缘不足时截断到可用范围。
 
-    shape='line'（两点线段）：horizontal_line 是全宽线，无法限定左右各 5 根的宽度。
+    shape='trend_line'（两点线段）：horizontal_line 是全宽线，无法限定左右各 5 根的宽度。
     颜色 1px 走 overrides.linecolor/linewidth；文本走 overrides.text + title 双保险
     （multipoint 顶层 text 未经生产验证，_clear_sr_marks 读 text 或 title 均可命中）。
     周期可见性以创建后 applyIV 逐字段 setValue 为准（multipoint 先例均如此），
@@ -405,8 +405,10 @@ def _draw_sr_chunk(c, chunk, color, res):
         "  try { "
         "    const v = await chart.createMultipointShape( "
         "      [{ time: T[i1], price: s.price }, { time: T[i2], price: s.price }], "
-        "      { shape: 'line', lock: false, "
+        "      { shape: 'trend_line', lock: false, "
         "        overrides: { linecolor: '" + color + "', linewidth: 1, "
+        "                    linestyle: 0, extendLeft: false, extendRight: false, "
+        "                    leftEnd: 0, rightEnd: 0, showPriceLabels: false, "
         "                    text: label, title: label" + iv_override + " } }); "
         "    if (v) { ids.push(v); applyIV(v); } else { skipped++; } "
         "  } catch (e) { skipped++; } "

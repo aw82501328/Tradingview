@@ -23,7 +23,7 @@ const CDP = require("../../../../server-cdp/node_modules/chrome-remote-interface
 const core = require("../../chan-core/scripts/chan_core.js");
 const {
   markWickBars, mergeBars, findFractals, countRaw, hasGapBetween, buildBi, fixBiExtremes, lockedPivotsOf, alignBiToUpper,
-  calcATR, calcMACD, hasMacdCrossBetween,
+  calcATR, calcMACD, hasMacdCrossBetween, makeBiLowerContext,
   extendLastBi, lowerResOf, calibrateBiTimes, intervalSecOf,
 } = core;
 
@@ -572,6 +572,7 @@ function intervalVisibility(res) {
     // 画某个周期时，按需加载其「低一级」周期K线作为端点时间校准基准
     //   （15分钟用3分钟校准，1小时用15分钟校准，4小时用1小时校准，日线用4小时校准）
     const refCache = {};
+    let lowerContext60 = null;
     const allRawBars = {};
     const allBis = {}; // 收集各周期最终绘制的笔（含校准后的端点时间），循环结束后落盘供 mark-buy-sell 读取
 
@@ -583,7 +584,7 @@ function intervalVisibility(res) {
         currentRes = res;
       }
 
-      const d = await fetchBars(intervalSecOf(res), FROM_TS, ANCHOR_BUFFER, DRAW_WINDOW_DAYS[res]);
+      const d = await fetchBars(intervalSecOf(res), FROM_TS, ANCHOR_BUFFER, res === '15' ? undefined : DRAW_WINDOW_DAYS[res]);
       if (!d || d.error || !d.bars || d.bars.length === 0) {
         console.log(`\n[周期 ${res}] 无K线数据或切换失败，跳过`);
         continue;
@@ -645,9 +646,21 @@ function intervalVisibility(res) {
       // 区间套强制对齐：把上一层（更高级别）笔的端点作为锁定端点传入 buildBi，
       // 保证本级别笔端点与上级笔的极值端点严格重合（优先级最高）。
       const lockedPivots = lockedPivotsOf(prevBis);
+      // 60m近等端点补充确认需要完整15m历史，显示窗口不限制计算输入。
+      if (res === '60') {
+        await ensureResolution('15');
+        const lower = await fetchBars(900, FROM_TS || rawBars[0].time, ANCHOR_BUFFER);
+        if (lower && !lower.error && lower.bars?.length) {
+          lowerContext60 = makeBiLowerContext('60', lower.bars, Math.floor(Date.now() / 1000));
+          refCache['15'] = markWickBars(lower.bars);
+        }
+        await ensureResolution(res);
+        currentRes = res;
+      }
+
       // 近等双顶/双底平台取后顶/后底：仅 ≥1h（60/240/D）周期开启（15m/3m 平台尾噪声多，
       // 全周期实施曾实测 61 次触发致微观结构大面积重排——影响评估后用户决策限 ≥1h）
-      let bis = buildBi(fractals, merged, atr, macdArr, lockedPivots, intervalSecOf(res) >= 3600);
+      let bis = buildBi(fractals, merged, atr, macdArr, lockedPivots, intervalSecOf(res) >= 3600, res === '60' ? lowerContext60 : null);
 
       // 端点极值修正：包含合并可能吞掉更极端的插针低点/高点（如 60分钟 7-29 09:00 的 4010.41 被
       // 08:00/09:00 的向上合并吞掉），把笔终点平移到区间内被掩盖的真实极值，使笔终点落在真实极值K线上

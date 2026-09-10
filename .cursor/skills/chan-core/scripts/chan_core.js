@@ -29,6 +29,8 @@ const CHAN_CFG = {
   debug: false,   // 调试打印（buildBi / 买卖点识别过程）
   nearDoubleAtrK: 0.3, // 近等双顶/双底平台取后顶/后底：价差与回调深度的 ATR 系数
   nearDoublePct: 0.001, // 近等双顶/双底平台取后顶/后底：价差下限（价格比例，与 ATR 项取 max）
+  nearDoubleLowerRelax: 1.5, // 仅60m：15m双动能确认时的最大容差倍数
+  nearDoubleLowerRatio: 0.5, // 柱峰值和DIF幅度均须减弱至此前的50%以内
 };
 
 // ============================================================
@@ -275,7 +277,48 @@ function hasGapBetween(merged, aIdx, bIdx, atr, gapFilter) {
  *   - 阶段二：遍历序列，处理跳空成笔 / MACD变色成笔 / 前顶前底作废 / 分型范围脱离 / 极值规则
  *   - 阶段三：两两连笔（此时首尾自然连续）
  */
-function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble) {
+function makeBiLowerContext(res, bars, cutoff = Infinity, macd = null) {
+  if (String(res) !== '60' || !bars?.length) return null;
+  const values = macd || calcMACD(bars);
+  if(values.length!==bars.length || values.some((m,i)=>!m || m.time!==bars[i].time || !Number.isFinite(m.macd) || !Number.isFinite(m.dif)))return null;
+  return {res:'60', bars, times:bars.map(b=>b.time), macd:values, cutoff};
+}
+
+// 这是近等端点的补充确认，不改变 isBiDiverge / 买卖点的创新极值定义。
+function lowerEndpointWeaker(old, end, fractals, context) {
+  if (!context || context.res !== '60' || !context.bars?.length) return false;
+  const {bars,times,macd,cutoff} = context;
+  const before = f => {
+    for (let i=fractals.length-1;i>=0;i--) if(fractals[i].mergedIdx<f.mergedIdx && fractals[i].type!==f.type)return fractals[i];
+    return null;
+  };
+  const exact = f => {
+    if(!f || !times.length || times[0]>f.time)return null;
+    let lo=0,hi=times.length;
+    while(lo<hi){const mid=(lo+hi)>>1;if(times[mid]<f.time)lo=mid+1;else hi=mid;}
+    const field=f.type==='top'?'high':'low';
+    for(let i=lo;i<bars.length && times[i]<f.time+3600;i++){
+      if(times[i]+900>cutoff)break;
+      if(Math.abs(bars[i][field]-f[field])<=0.001)return times[i];
+    }
+    return null;
+  };
+  const t=[exact(before(old)),exact(old),exact(before(end)),exact(end)];
+  if(t.some(x=>x===null) || t[0]>=t[1] || t[2]>=t[3])return false;
+  const bound = (time, right=false) => {
+    let lo=0,hi=times.length;
+    while(lo<hi){const mid=(lo+hi)>>1;if(times[mid]<time || (right && times[mid]===time))lo=mid+1;else hi=mid;}
+    return lo;
+  };
+  const metrics=(startTime,endTime)=>biMacdMetrics({startTime,endTime},macd.slice(bound(startTime),bound(endTime,true)));
+  const a=metrics(t[0],t[1]),b=metrics(t[2],t[3]);
+  const top=end.type==='top', peak=top?'redMax':'greenMax', dif=top?'difHigh':'difLow', sign=top?1:-1;
+  const ratio=CHAN_CFG.nearDoubleLowerRatio;
+  return !!a && !!b && a[peak]>0 && b[peak]>0 && a[dif]*sign>0 && b[dif]*sign>0
+    && b[peak]<=a[peak]*ratio && Math.abs(b[dif])<=Math.abs(a[dif])*ratio;
+}
+
+function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lowerContext = null) {
   const gapThreshold = atr ? atr * CHAN_CFG.gapFilter : 0;
   // 阶段一：严格交替分型序列
   const seq = [];
@@ -320,6 +363,19 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble) {
     for (let i = a.mergedIdx + 1; i < b.mergedIdx; i++) {
       if (b.type === "bottom" && merged[i].low < b.low) return false;
       if (b.type === "top" && merged[i].high > b.high) return false;
+    }
+    return true;
+  };
+
+  // MACD 让位检查整笔双向极值，含中间分型影线价；等价允许。
+  const replacementExtremesClear = (origin, old, middle, end) => {
+    const ceiling = origin.type === "top" ? origin.high : end.high;
+    const floor = end.type === "bottom" ? end.low : origin.low;
+    for (const x of [old, middle]) {
+      if (x.high > ceiling || x.low < floor) return false;
+    }
+    for (let i = origin.mergedIdx + 1; i < end.mergedIdx; i++) {
+      if (merged[i].high > ceiling || merged[i].low < floor) return false;
     }
     return true;
   };
@@ -399,7 +455,9 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble) {
         const refPrice = k.type === "top" ? last.high : last.low;
         const thr = Math.max(atr * CHAN_CFG.nearDoubleAtrK, refPrice * CHAN_CFG.nearDoublePct);
         const diff = k.type === "top" ? last.high - k.high : k.low - last.low;
-        if (diff >= 0 && diff <= thr) {
+        const lowerConfirmed = diff > thr && diff <= thr * CHAN_CFG.nearDoubleLowerRelax
+          && lowerEndpointWeaker(last, k, fractals, lowerContext);
+        if (diff >= 0 && (diff <= thr || lowerConfirmed)) {
           let plateau = true, pull = false, prevF = last, cnt = 0;
           for (const f of fractals) {
             if (f.mergedIdx <= last.mergedIdx || f.mergedIdx >= k.mergedIdx) continue;
@@ -411,7 +469,7 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble) {
           }
           if (k.mergedIdx - prevF.mergedIdx >= 4) plateau = false;
           if (cnt > 0 && plateau && pull) {
-            if (CHAN_CFG.debug) console.log(`[阶段二] 近等双顶/双底平台取后: ${k.type === "top" ? "顶" : "底"}@${last.mergedIdx}(${refPrice}) → ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}(${k.type === "top" ? k.high : k.low})（差 ${diff.toFixed(2)} ≤ ${thr.toFixed(2)}，平台内无成笔结构）`);
+            if (CHAN_CFG.debug) console.log(`[阶段二] 近等双顶/双底平台取后: ${k.type === "top" ? "顶" : "底"}@${last.mergedIdx}(${refPrice}) → ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}(${k.type === "top" ? k.high : k.low})（差 ${diff.toFixed(2)} ≤ ${(thr * (lowerConfirmed ? CHAN_CFG.nearDoubleLowerRelax : 1)).toFixed(2)}${lowerConfirmed ? '，15m双动能确认' : ''}，平台内无成笔结构）`);
             k.nearDouble = true; // 单跳封顶
             result[result.length - 1] = k;
           }
@@ -423,12 +481,14 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble) {
     // MACD 变色成笔端点让位：若 result[-2] 是 MACD 变色成笔的端点，且当前分型 k 是
     // 更极端的同类型分型，让位更新该端点并移除中间分型，保证 MACD 变色成笔的终点是
     // 区间内最新的绝对极值（例：92.83 应让位给更低的 92.74）。
-    if (result.length >= 2) {
+    if (result.length >= 3) {
+      const origin = result[result.length - 3];
       const prev2 = result[result.length - 2];
       const topOne = result[result.length - 1];
       if (prev2.macdCross === true && prev2.type === k.type &&
-          !topOne.locked &&
-          ((k.type === "top" && k.high > prev2.high) || (k.type === "bottom" && k.low < prev2.low))) {
+          !topOne.locked && !prev2.locked &&
+          ((k.type === "top" && k.high > prev2.high) || (k.type === "bottom" && k.low < prev2.low)) &&
+          replacementExtremesClear(origin, prev2, topOne, k)) {
         if (CHAN_CFG.debug) console.log(`[阶段二] MACD端点让位: ${prev2.type === "top" ? "顶" : "底"}@${prev2.mergedIdx}(${prev2.type === "top" ? prev2.high : prev2.low}) → ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}(${k.type === "top" ? k.high : k.low}) 更新为更极端${k.type === "top" ? "高点" : "低点"}，移除中间分型`);
         k.macdCross = true;
         result[result.length - 2] = k;
@@ -1717,6 +1777,8 @@ module.exports = {
   countRaw,
   hasGapBetween,
   buildBi,
+  makeBiLowerContext,
+  lowerEndpointWeaker,
   fixBiExtremes,
   buildZS,
   buildZSByUpper,

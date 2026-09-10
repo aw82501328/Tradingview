@@ -85,8 +85,10 @@
   链不可跳级）、≥3 笔展开 + 末段终点即 P、**虚拟形成笔**桥接（X 末段端点已过、后续
   反向结构未确认——案例 A 的 60m 平台顶 4464.23 后近等后顶场景，与图表「近等双顶
   取后顶」最终结构结果等价）、规则 2 参照 containment（跨所属上级笔 → 候选无效）。
-- realtimeLowerDiverge / lowerDiverge 只在停止级产候选；停止级可为 X 自身（新增
-  S=X 信号类，realtime 实测出现 60 级 3 个）；去重键语义不变（验证通过）。
+- realtimeLowerDiverge / lowerDiverge 只在停止级产候选；~~停止级可为 X 自身（S=X 信号类）~~
+  **（2026-09-09 移除）背驰必须落在严格更低级别（markRes < periodX）**：realtime 停止级
+  = X（次级别展开不足、下沉链一步未走）→ 不产信号；确认制本就只取 sec < xSec 候选，
+  行为不变；去重键语义不变（验证通过）。
 - **JS 图表侧同步移植（2026-09-08）**：`mark_entry.js` 移植确认制路径（`sinkChainConfirm`
   + `lowerDiverge` 下沉过滤 + `findDivergePoints` referStart，含虚拟形成笔），图表箭头
   归属口径与回测引擎一致；脚本重构为 `main()` + `module.exports` + `require.main`
@@ -117,3 +119,14 @@
 - py 单测 53/53（test_chan_core_rules 12 + test_mark_entry_sink 16 + test_sr_flip 25）；
   JS 79/79（chan_core 69 + mark_entry 下沉判定 10——顺带修复 chan_core.test.js 三个既有
   夹具问题：分型落在 idx 0 / 缺右邻 bar，与双向 fractalRangeClear 冲突——非算法改动）。
+
+
+## 一小时近等端点补充确认（2026-09-10）
+
+原阈值 max(0.3×ATR, 0.001×价格) 保持。仅60分钟价差超过原阈值但不超过1.5倍时，可由15分钟双动能确认：后段同色柱峰值与同侧DIF极值绝对值均不超过前段50%，两段柱峰值均非零，双底DIF均负、双顶均正。保留平台间隔、原阈值反向波动、锁定端点和单次替换保护；数据不足不走补充分支，不改变买卖点创新极值背驰定义。
+
+JS/Python的`buildBi`增加可选末参`lowerContext`；用`makeBiLowerContext(res,bars,cutoff,macd)`准备15分钟数据和MACD索引，缺省参数保持旧行为。新增配置`nearDoubleLowerRelax=1.5`、`nearDoubleLowerRatio=0.5`。
+
+画笔构建60分钟前需要完整15分钟历史（最近30天仅限显示）；回测、回放和监控仅使用当前决策时刻已收盘数据，先更新低周期。目标小时K线为8月7日08:00、4229.875，15分钟精确极值为08:45；固定样本仅目标相邻两笔变化，实际全量影响需回归检查。
+
+完整条件、接口、保护和测试见[现行补充规范](../spec/plans/SPEC_near_double_lower_confirmation.md)。早期章节中原阈值的说明描述基础分支，与本补充分支共同适用。

@@ -47,7 +47,7 @@ import bisect
 import time
 
 from .chan_core import (
-    buildBi, fixBiExtremes, calcATR, calcMACD, intervalSecOf, fmtT,
+    buildBi, makeBiLowerContext, fixBiExtremes, calcATR, calcMACD, intervalSecOf, fmtT,
     CHAN_CFG,
     MacdAccumulator, AtrAccumulator, extendLastBi, extendLastBiFrom,
 )
@@ -453,7 +453,12 @@ class BacktestEngine:
         from .chan_core import fixBiExtremes
         if len(fractals) < 2:
             return []
-        bis = buildBi(fractals, merged, atr, macd, None, intervalSecOf(res) >= 3600)
+        lower = None
+        if str(res) == '60' and '15' in self._cut:
+            raw = self.bars['15']['_list'][:self._cut['15']]
+            lower = makeBiLowerContext(res, raw, cutoff=getattr(self, '_decision_time', float('inf')),
+                                       macd=self._macd['15'].to_list())
+        bis = buildBi(fractals, merged, atr, macd, None, intervalSecOf(res) >= 3600, lower)
         bis = fixBiExtremes(bis, merged) or bis
         return bis
 
@@ -465,7 +470,8 @@ class BacktestEngine:
         实时bar（未收盘）的 OHLC 每轮更新时，合并/分型/MACD/ATR/笔等增量状态
         需随新数据修正，故整周期重放（保证与全量计算一致）。返回 True 触发链路重算。
         """
-        bl = self.bars[res]["_list"]
+        # 重放只修正已经推进的前缀；新收盘bar由 _advance_cut 统一按时刻纳入。
+        bl = self.bars[res]["_list"][:self._cut[res]]
         macd = MacdAccumulator()
         macd_t = []
         atr = AtrAccumulator(14)
@@ -513,6 +519,8 @@ class BacktestEngine:
             # t < last_t：已加载过，跳过
         if overridden:
             self._replay_needed.add(res)
+            if str(res) == '15' and '60' in self._cut:
+                self._replay_needed.add('60')
         return "append" if appended else ("override" if overridden else None)
 
     def step_to(self, t, execute=False):
@@ -527,13 +535,14 @@ class BacktestEngine:
         与 run() 共用 advance_exit_decision/execute_pending_exit/_fill_pending，
         保证三模式出场口径一致。
         """
+        self._decision_time = t
+        changed = False
+        if self._replay_needed:
+            for res in sorted(self._replay_needed, key=lambda r: intervalSecOf(r) or 0):
+                if self._rewind_res(res):
+                    changed = True
+            self._replay_needed.clear()
         if not execute:
-            changed = False
-            if self._replay_needed:
-                for res in self._replay_needed:
-                    if self._rewind_res(res):
-                        changed = True
-                self._replay_needed.clear()
             if self._advance_cut(t):
                 changed = True
             if not changed:
@@ -541,6 +550,8 @@ class BacktestEngine:
             self._rebuild_chain()
             return self._collect_signals(self._live_allSignals, self._live_seen,
                                          self._live_stats)
+        if changed:
+            self._rebuild_chain()
         return self._step_execute(t)
 
     def _step_execute(self, t):
@@ -805,8 +816,10 @@ class BacktestEngine:
         的未来高点 4585.13 提前成立、信号延后触发）。fine 周期 bar i 的收盘时刻
         恰为决策时刻（下一根开盘），仍及时包含。
         """
+        self._decision_time = t
         changed = False
-        for res in self.periods:
+        # 低级别已收盘数据先推进，保证60m确认不依赖调用方周期排列。
+        for res in sorted(self.periods, key=lambda r: intervalSecOf(r) or 0):
             times = self._times[res]
             sec = intervalSecOf(res) or 0
             k = bisect.bisect_right(times, t - sec) if sec > 0 else bisect.bisect_right(times, t)
@@ -1098,7 +1111,8 @@ def build_bis(bars_by_period, periods=None):
         atr = calcATR(bl, 14)
         macd = calcMACD(bl)
         # 近等双顶/双底平台取后顶/后底：与 chan-bi 一致仅 ≥60m（60/240/D）开启
-        bis = buildBi(fractals, merged, atr, macd, None, intervalSecOf(res) >= 3600)
+        lower = makeBiLowerContext(res, sorted(bars_by_period.get('15', []), key=lambda b: b['time']))
+        bis = buildBi(fractals, merged, atr, macd, None, intervalSecOf(res) >= 3600, lower)
         bis = fixBiExtremes(bis, merged) or bis
         bis = extendLastBi(bis, trimmed)
         if bis:

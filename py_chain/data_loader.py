@@ -220,7 +220,7 @@ class CDPClient:
 
     # ---------------- 执行 JS ----------------
 
-    def evaluate(self, expression, await_promise=True, timeout=30000):
+    def evaluate(self, expression, await_promise=True, timeout=30000, read_timeout=None):
         """Runtime.evaluate 执行 JS，返回 result.value（value 类型 object 时自动转为 dict）。
 
         读侧超时兜底：Runtime.evaluate 的 awaitPromise + timeout 在页面主线程繁忙/卡死时可能
@@ -249,7 +249,8 @@ class CDPClient:
             },
         }))
         try:
-            self._ws.settimeout(EVALUATE_READ_TIMEOUT)
+            response_timeout = EVALUATE_READ_TIMEOUT if read_timeout is None else min(EVALUATE_READ_TIMEOUT, read_timeout)
+            self._ws.settimeout(response_timeout)
             while True:
                 msg = json.loads(self._ws.recv())
                 if msg.get("id") != mid:
@@ -274,7 +275,7 @@ class CDPClient:
                 pass
             self._ws = None
             raise CDPError(
-                f"CDP 执行响应超时（{EVALUATE_READ_TIMEOUT}s 无响应，页面可能繁忙/卡死），已断开重连") from None
+                f"CDP 执行响应超时（{response_timeout}s 无响应，页面可能繁忙/卡死），已断开重连") from None
 
 
 # ============================================================

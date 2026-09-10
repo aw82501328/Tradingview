@@ -243,5 +243,42 @@ class TestFixBiExtremesOrigLow(unittest.TestCase):
         self.assertEqual(out[0]["endPrice"], 85)  # 未被 rawLow 下移
 
 
+class TestMacdReplacementExtremes(unittest.TestCase):
+    def test_symmetric_boundaries_and_locks(self):
+        import copy
+        import json
+        from pathlib import Path
+        cases = json.loads((Path(__file__).parent / "fixtures/macd_replacement_cases.json").read_text())
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                bis = cc.buildBi(copy.deepcopy(case["fractals"]), case["merged"], 0,
+                                 case["macd"], case["locked"])
+                self.assertEqual([[b["startIdx"], b["endIdx"]] for b in bis], case["expected"])
+                self.assert_structure(bis, case["merged"])
+
+    def assert_structure(self, bis, merged):
+        for i, b in enumerate(bis):
+            self.assertLess(b["startTime"], b["endTime"])
+            self.assertEqual(b["span"], abs(b["endPrice"] - b["startPrice"]))
+            self.assertEqual(b["rawCount"], cc.countRaw(merged, b["startIdx"], b["endIdx"]))
+            if i:
+                self.assertEqual((bis[i-1]["endTime"], bis[i-1]["endPrice"]),
+                                 (b["startTime"], b["startPrice"]))
+
+    def test_gold_september_9_keeps_intermediate_top(self):
+        import json
+        from pathlib import Path
+        bars = json.loads((Path(__file__).parent / "fixtures/macd_xauusd_20260909.json").read_text())["15"]
+        merged = cc.mergeBars(cc.markWickBars(bars))
+        bis = cc.buildBi(cc.findFractals(merged), merged, cc.calcATR(bars, 14), cc.calcMACD(bars))
+        cc.fixBiExtremes(bis, merged)
+        self.assert_structure(bis, merged)
+        recent = [b for b in bis if 1788954300 <= b["startTime"] < 1788966900]
+        self.assertEqual([(b["startTime"], b["endTime"]) for b in recent],
+                         [(1788954300,1788957000),(1788957000,1788960600),(1788960600,1788966900)])
+        self.assertTrue(recent[0]["macdCross"])
+        self.assertEqual(recent[1]["endPrice"], 4434.175)
+
+
 if __name__ == "__main__":
     unittest.main()

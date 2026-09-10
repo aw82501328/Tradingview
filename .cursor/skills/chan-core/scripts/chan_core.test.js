@@ -934,3 +934,37 @@ describe("mergeStep 增量等价性", () => {
     assert.equal(merged[7]._origLow, 62);   // 探底插针真低保留在所在块
   });
 });
+
+
+describe("MACD replacement preserves both endpoint extremes", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const fixture = name => JSON.parse(fs.readFileSync(path.resolve(__dirname, "../../../../py_chain/fixtures", name), "utf8"));
+  function checkStructure(bis, merged) {
+    bis.forEach((b, i) => {
+      assert.ok(b.startTime < b.endTime);
+      assert.equal(b.span, Math.abs(b.endPrice - b.startPrice));
+      assert.equal(b.rawCount, core.countRaw(merged, b.startIdx, b.endIdx));
+      if (i) assert.deepEqual([bis[i-1].endTime, bis[i-1].endPrice], [b.startTime, b.startPrice]);
+    });
+  }
+  for (const c of fixture("macd_replacement_cases.json")) {
+    test(c.name, () => {
+      const bis = core.buildBi(structuredClone(c.fractals), c.merged, 0, c.macd, c.locked);
+      assert.deepEqual(bis.map(b => [b.startIdx,b.endIdx]), c.expected);
+      checkStructure(bis, c.merged);
+    });
+  }
+  test("gold September 9 retains MACD short stroke and 21:30 top", () => {
+    const bars = fixture("macd_xauusd_20260909.json")["15"];
+    const merged = core.mergeBars(core.markWickBars(bars));
+    const bis = core.buildBi(core.findFractals(merged), merged, core.calcATR(bars,14), core.calcMACD(bars));
+    core.fixBiExtremes(bis, merged);
+    checkStructure(bis, merged);
+    const recent = bis.filter(b => b.startTime >= 1788954300 && b.startTime < 1788966900);
+    assert.deepEqual(recent.map(b => [b.startTime,b.endTime]),
+      [[1788954300,1788957000],[1788957000,1788960600],[1788960600,1788966900]]);
+    assert.equal(recent[0].macdCross, true);
+    assert.equal(recent[1].endPrice, 4434.175);
+  });
+});

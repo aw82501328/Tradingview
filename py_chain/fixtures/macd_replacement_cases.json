@@ -1,0 +1,3278 @@
+[
+  {
+    "name": "higher_top",
+    "merged": [
+      {
+        "time": 1,
+        "high": 115,
+        "low": 108,
+        "_rawCount": 1,
+        "highTime": 1,
+        "lowTime": 1,
+        "rawHigh": 115,
+        "rawLow": 108,
+        "rawHighTime": 1,
+        "rawLowTime": 1
+      },
+      {
+        "time": 2,
+        "high": 120,
+        "low": 110,
+        "_rawCount": 1,
+        "highTime": 2,
+        "lowTime": 2,
+        "rawHigh": 120,
+        "rawLow": 110,
+        "rawHighTime": 2,
+        "rawLowTime": 2
+      },
+      {
+        "time": 3,
+        "high": 115,
+        "low": 107,
+        "_rawCount": 1,
+        "highTime": 3,
+        "lowTime": 3,
+        "rawHigh": 115,
+        "rawLow": 107,
+        "rawHighTime": 3,
+        "rawLowTime": 3
+      },
+      {
+        "time": 4,
+        "high": 110,
+        "low": 103,
+        "_rawCount": 1,
+        "highTime": 4,
+        "lowTime": 4,
+        "rawHigh": 110,
+        "rawLow": 103,
+        "rawHighTime": 4,
+        "rawLowTime": 4
+      },
+      {
+        "time": 5,
+        "high": 105,
+        "low": 100,
+        "_rawCount": 1,
+        "highTime": 5,
+        "lowTime": 5,
+        "rawHigh": 105,
+        "rawLow": 100,
+        "rawHighTime": 5,
+        "rawLowTime": 5
+      },
+      {
+        "time": 6,
+        "high": 108,
+        "low": 103,
+        "_rawCount": 1,
+        "highTime": 6,
+        "lowTime": 6,
+        "rawHigh": 108,
+        "rawLow": 103,
+        "rawHighTime": 6,
+        "rawLowTime": 6
+      },
+      {
+        "time": 7,
+        "high": 112,
+        "low": 105,
+        "_rawCount": 1,
+        "highTime": 7,
+        "lowTime": 7,
+        "rawHigh": 112,
+        "rawLow": 105,
+        "rawHighTime": 7,
+        "rawLowTime": 7
+      },
+      {
+        "time": 8,
+        "high": 116,
+        "low": 108,
+        "_rawCount": 1,
+        "highTime": 8,
+        "lowTime": 8,
+        "rawHigh": 116,
+        "rawLow": 108,
+        "rawHighTime": 8,
+        "rawLowTime": 8
+      },
+      {
+        "time": 9,
+        "high": 130,
+        "low": 112,
+        "_rawCount": 1,
+        "highTime": 9,
+        "lowTime": 9,
+        "rawHigh": 130,
+        "rawLow": 112,
+        "rawHighTime": 9,
+        "rawLowTime": 9
+      },
+      {
+        "time": 10,
+        "high": 115,
+        "low": 105,
+        "_rawCount": 1,
+        "highTime": 10,
+        "lowTime": 10,
+        "rawHigh": 115,
+        "rawLow": 105,
+        "rawHighTime": 10,
+        "rawLowTime": 10
+      },
+      {
+        "time": 11,
+        "high": 108,
+        "low": 100,
+        "_rawCount": 1,
+        "highTime": 11,
+        "lowTime": 11,
+        "rawHigh": 108,
+        "rawLow": 100,
+        "rawHighTime": 11,
+        "rawLowTime": 11
+      },
+      {
+        "time": 12,
+        "high": 100,
+        "low": 95,
+        "_rawCount": 1,
+        "highTime": 12,
+        "lowTime": 12,
+        "rawHigh": 100,
+        "rawLow": 95,
+        "rawHighTime": 12,
+        "rawLowTime": 12
+      },
+      {
+        "time": 13,
+        "high": 95,
+        "low": 90,
+        "_rawCount": 1,
+        "highTime": 13,
+        "lowTime": 13,
+        "rawHigh": 95,
+        "rawLow": 90,
+        "rawHighTime": 13,
+        "rawLowTime": 13
+      },
+      {
+        "time": 14,
+        "high": 100,
+        "low": 95,
+        "_rawCount": 1,
+        "highTime": 14,
+        "lowTime": 14,
+        "rawHigh": 100,
+        "rawLow": 95,
+        "rawHighTime": 14,
+        "rawLowTime": 14
+      }
+    ],
+    "fractals": [
+      {
+        "mergedIdx": 1,
+        "type": "top",
+        "high": 120,
+        "low": 110,
+        "time": 2
+      },
+      {
+        "mergedIdx": 4,
+        "type": "bottom",
+        "high": 105,
+        "low": 100,
+        "time": 5
+      },
+      {
+        "mergedIdx": 8,
+        "type": "top",
+        "high": 130,
+        "low": 112,
+        "time": 9
+      },
+      {
+        "mergedIdx": 12,
+        "type": "bottom",
+        "high": 95,
+        "low": 90,
+        "time": 13
+      }
+    ],
+    "macd": [
+      {
+        "time": 1,
+        "macd": 1
+      },
+      {
+        "time": 2,
+        "macd": 1
+      },
+      {
+        "time": 3,
+        "macd": 1
+      },
+      {
+        "time": 4,
+        "macd": -1
+      },
+      {
+        "time": 5,
+        "macd": -1
+      },
+      {
+        "time": 6,
+        "macd": -1
+      },
+      {
+        "time": 7,
+        "macd": -1
+      },
+      {
+        "time": 8,
+        "macd": -1
+      },
+      {
+        "time": 9,
+        "macd": -1
+      },
+      {
+        "time": 10,
+        "macd": -1
+      },
+      {
+        "time": 11,
+        "macd": -1
+      },
+      {
+        "time": 12,
+        "macd": -1
+      },
+      {
+        "time": 13,
+        "macd": -1
+      },
+      {
+        "time": 14,
+        "macd": -1
+      }
+    ],
+    "locked": null,
+    "expected": [
+      [
+        1,
+        4
+      ],
+      [
+        4,
+        8
+      ],
+      [
+        8,
+        12
+      ]
+    ]
+  },
+  {
+    "name": "lower_bottom",
+    "merged": [
+      {
+        "time": 1,
+        "high": 142,
+        "low": 135,
+        "_rawCount": 1,
+        "highTime": 1,
+        "lowTime": 1,
+        "rawHigh": 142,
+        "rawLow": 135,
+        "rawHighTime": 1,
+        "rawLowTime": 1
+      },
+      {
+        "time": 2,
+        "high": 140,
+        "low": 130,
+        "_rawCount": 1,
+        "highTime": 2,
+        "lowTime": 2,
+        "rawHigh": 140,
+        "rawLow": 130,
+        "rawHighTime": 2,
+        "rawLowTime": 2
+      },
+      {
+        "time": 3,
+        "high": 143,
+        "low": 135,
+        "_rawCount": 1,
+        "highTime": 3,
+        "lowTime": 3,
+        "rawHigh": 143,
+        "rawLow": 135,
+        "rawHighTime": 3,
+        "rawLowTime": 3
+      },
+      {
+        "time": 4,
+        "high": 147,
+        "low": 140,
+        "_rawCount": 1,
+        "highTime": 4,
+        "lowTime": 4,
+        "rawHigh": 147,
+        "rawLow": 140,
+        "rawHighTime": 4,
+        "rawLowTime": 4
+      },
+      {
+        "time": 5,
+        "high": 150,
+        "low": 145,
+        "_rawCount": 1,
+        "highTime": 5,
+        "lowTime": 5,
+        "rawHigh": 150,
+        "rawLow": 145,
+        "rawHighTime": 5,
+        "rawLowTime": 5
+      },
+      {
+        "time": 6,
+        "high": 147,
+        "low": 142,
+        "_rawCount": 1,
+        "highTime": 6,
+        "lowTime": 6,
+        "rawHigh": 147,
+        "rawLow": 142,
+        "rawHighTime": 6,
+        "rawLowTime": 6
+      },
+      {
+        "time": 7,
+        "high": 145,
+        "low": 138,
+        "_rawCount": 1,
+        "highTime": 7,
+        "lowTime": 7,
+        "rawHigh": 145,
+        "rawLow": 138,
+        "rawHighTime": 7,
+        "rawLowTime": 7
+      },
+      {
+        "time": 8,
+        "high": 142,
+        "low": 134,
+        "_rawCount": 1,
+        "highTime": 8,
+        "lowTime": 8,
+        "rawHigh": 142,
+        "rawLow": 134,
+        "rawHighTime": 8,
+        "rawLowTime": 8
+      },
+      {
+        "time": 9,
+        "high": 138,
+        "low": 120,
+        "_rawCount": 1,
+        "highTime": 9,
+        "lowTime": 9,
+        "rawHigh": 138,
+        "rawLow": 120,
+        "rawHighTime": 9,
+        "rawLowTime": 9
+      },
+      {
+        "time": 10,
+        "high": 145,
+        "low": 135,
+        "_rawCount": 1,
+        "highTime": 10,
+        "lowTime": 10,
+        "rawHigh": 145,
+        "rawLow": 135,
+        "rawHighTime": 10,
+        "rawLowTime": 10
+      },
+      {
+        "time": 11,
+        "high": 150,
+        "low": 142,
+        "_rawCount": 1,
+        "highTime": 11,
+        "lowTime": 11,
+        "rawHigh": 150,
+        "rawLow": 142,
+        "rawHighTime": 11,
+        "rawLowTime": 11
+      },
+      {
+        "time": 12,
+        "high": 155,
+        "low": 150,
+        "_rawCount": 1,
+        "highTime": 12,
+        "lowTime": 12,
+        "rawHigh": 155,
+        "rawLow": 150,
+        "rawHighTime": 12,
+        "rawLowTime": 12
+      },
+      {
+        "time": 13,
+        "high": 160,
+        "low": 155,
+        "_rawCount": 1,
+        "highTime": 13,
+        "lowTime": 13,
+        "rawHigh": 160,
+        "rawLow": 155,
+        "rawHighTime": 13,
+        "rawLowTime": 13
+      },
+      {
+        "time": 14,
+        "high": 155,
+        "low": 150,
+        "_rawCount": 1,
+        "highTime": 14,
+        "lowTime": 14,
+        "rawHigh": 155,
+        "rawLow": 150,
+        "rawHighTime": 14,
+        "rawLowTime": 14
+      }
+    ],
+    "fractals": [
+      {
+        "mergedIdx": 1,
+        "type": "bottom",
+        "high": 140,
+        "low": 130,
+        "time": 2
+      },
+      {
+        "mergedIdx": 4,
+        "type": "top",
+        "high": 150,
+        "low": 145,
+        "time": 5
+      },
+      {
+        "mergedIdx": 8,
+        "type": "bottom",
+        "high": 138,
+        "low": 120,
+        "time": 9
+      },
+      {
+        "mergedIdx": 12,
+        "type": "top",
+        "high": 160,
+        "low": 155,
+        "time": 13
+      }
+    ],
+    "macd": [
+      {
+        "time": 1,
+        "macd": -1
+      },
+      {
+        "time": 2,
+        "macd": -1
+      },
+      {
+        "time": 3,
+        "macd": -1
+      },
+      {
+        "time": 4,
+        "macd": 1
+      },
+      {
+        "time": 5,
+        "macd": 1
+      },
+      {
+        "time": 6,
+        "macd": 1
+      },
+      {
+        "time": 7,
+        "macd": 1
+      },
+      {
+        "time": 8,
+        "macd": 1
+      },
+      {
+        "time": 9,
+        "macd": 1
+      },
+      {
+        "time": 10,
+        "macd": 1
+      },
+      {
+        "time": 11,
+        "macd": 1
+      },
+      {
+        "time": 12,
+        "macd": 1
+      },
+      {
+        "time": 13,
+        "macd": 1
+      },
+      {
+        "time": 14,
+        "macd": 1
+      }
+    ],
+    "locked": null,
+    "expected": [
+      [
+        1,
+        4
+      ],
+      [
+        4,
+        8
+      ],
+      [
+        8,
+        12
+      ]
+    ]
+  },
+  {
+    "name": "safe_down",
+    "merged": [
+      {
+        "time": 1,
+        "high": 115,
+        "low": 108,
+        "_rawCount": 1,
+        "highTime": 1,
+        "lowTime": 1,
+        "rawHigh": 115,
+        "rawLow": 108,
+        "rawHighTime": 1,
+        "rawLowTime": 1
+      },
+      {
+        "time": 2,
+        "high": 120,
+        "low": 110,
+        "_rawCount": 1,
+        "highTime": 2,
+        "lowTime": 2,
+        "rawHigh": 120,
+        "rawLow": 110,
+        "rawHighTime": 2,
+        "rawLowTime": 2
+      },
+      {
+        "time": 3,
+        "high": 115,
+        "low": 107,
+        "_rawCount": 1,
+        "highTime": 3,
+        "lowTime": 3,
+        "rawHigh": 115,
+        "rawLow": 107,
+        "rawHighTime": 3,
+        "rawLowTime": 3
+      },
+      {
+        "time": 4,
+        "high": 110,
+        "low": 103,
+        "_rawCount": 1,
+        "highTime": 4,
+        "lowTime": 4,
+        "rawHigh": 110,
+        "rawLow": 103,
+        "rawHighTime": 4,
+        "rawLowTime": 4
+      },
+      {
+        "time": 5,
+        "high": 105,
+        "low": 100,
+        "_rawCount": 1,
+        "highTime": 5,
+        "lowTime": 5,
+        "rawHigh": 105,
+        "rawLow": 100,
+        "rawHighTime": 5,
+        "rawLowTime": 5
+      },
+      {
+        "time": 6,
+        "high": 108,
+        "low": 103,
+        "_rawCount": 1,
+        "highTime": 6,
+        "lowTime": 6,
+        "rawHigh": 108,
+        "rawLow": 103,
+        "rawHighTime": 6,
+        "rawLowTime": 6
+      },
+      {
+        "time": 7,
+        "high": 112,
+        "low": 105,
+        "_rawCount": 1,
+        "highTime": 7,
+        "lowTime": 7,
+        "rawHigh": 112,
+        "rawLow": 105,
+        "rawHighTime": 7,
+        "rawLowTime": 7
+      },
+      {
+        "time": 8,
+        "high": 116,
+        "low": 108,
+        "_rawCount": 1,
+        "highTime": 8,
+        "lowTime": 8,
+        "rawHigh": 116,
+        "rawLow": 108,
+        "rawHighTime": 8,
+        "rawLowTime": 8
+      },
+      {
+        "time": 9,
+        "high": 119,
+        "low": 112,
+        "_rawCount": 1,
+        "highTime": 9,
+        "lowTime": 9,
+        "rawHigh": 119,
+        "rawLow": 112,
+        "rawHighTime": 9,
+        "rawLowTime": 9
+      },
+      {
+        "time": 10,
+        "high": 115,
+        "low": 105,
+        "_rawCount": 1,
+        "highTime": 10,
+        "lowTime": 10,
+        "rawHigh": 115,
+        "rawLow": 105,
+        "rawHighTime": 10,
+        "rawLowTime": 10
+      },
+      {
+        "time": 11,
+        "high": 108,
+        "low": 100,
+        "_rawCount": 1,
+        "highTime": 11,
+        "lowTime": 11,
+        "rawHigh": 108,
+        "rawLow": 100,
+        "rawHighTime": 11,
+        "rawLowTime": 11
+      },
+      {
+        "time": 12,
+        "high": 100,
+        "low": 95,
+        "_rawCount": 1,
+        "highTime": 12,
+        "lowTime": 12,
+        "rawHigh": 100,
+        "rawLow": 95,
+        "rawHighTime": 12,
+        "rawLowTime": 12
+      },
+      {
+        "time": 13,
+        "high": 95,
+        "low": 90,
+        "_rawCount": 1,
+        "highTime": 13,
+        "lowTime": 13,
+        "rawHigh": 95,
+        "rawLow": 90,
+        "rawHighTime": 13,
+        "rawLowTime": 13
+      },
+      {
+        "time": 14,
+        "high": 100,
+        "low": 95,
+        "_rawCount": 1,
+        "highTime": 14,
+        "lowTime": 14,
+        "rawHigh": 100,
+        "rawLow": 95,
+        "rawHighTime": 14,
+        "rawLowTime": 14
+      }
+    ],
+    "fractals": [
+      {
+        "mergedIdx": 1,
+        "type": "top",
+        "high": 120,
+        "low": 110,
+        "time": 2
+      },
+      {
+        "mergedIdx": 4,
+        "type": "bottom",
+        "high": 105,
+        "low": 100,
+        "time": 5
+      },
+      {
+        "mergedIdx": 8,
+        "type": "top",
+        "high": 119,
+        "low": 112,
+        "time": 9
+      },
+      {
+        "mergedIdx": 12,
+        "type": "bottom",
+        "high": 95,
+        "low": 90,
+        "time": 13
+      }
+    ],
+    "macd": [
+      {
+        "time": 1,
+        "macd": 1
+      },
+      {
+        "time": 2,
+        "macd": 1
+      },
+      {
+        "time": 3,
+        "macd": 1
+      },
+      {
+        "time": 4,
+        "macd": -1
+      },
+      {
+        "time": 5,
+        "macd": -1
+      },
+      {
+        "time": 6,
+        "macd": -1
+      },
+      {
+        "time": 7,
+        "macd": -1
+      },
+      {
+        "time": 8,
+        "macd": -1
+      },
+      {
+        "time": 9,
+        "macd": -1
+      },
+      {
+        "time": 10,
+        "macd": -1
+      },
+      {
+        "time": 11,
+        "macd": -1
+      },
+      {
+        "time": 12,
+        "macd": -1
+      },
+      {
+        "time": 13,
+        "macd": -1
+      },
+      {
+        "time": 14,
+        "macd": -1
+      }
+    ],
+    "locked": null,
+    "expected": [
+      [
+        1,
+        12
+      ]
+    ]
+  },
+  {
+    "name": "safe_up",
+    "merged": [
+      {
+        "time": 1,
+        "high": 142,
+        "low": 135,
+        "_rawCount": 1,
+        "highTime": 1,
+        "lowTime": 1,
+        "rawHigh": 142,
+        "rawLow": 135,
+        "rawHighTime": 1,
+        "rawLowTime": 1
+      },
+      {
+        "time": 2,
+        "high": 140,
+        "low": 130,
+        "_rawCount": 1,
+        "highTime": 2,
+        "lowTime": 2,
+        "rawHigh": 140,
+        "rawLow": 130,
+        "rawHighTime": 2,
+        "rawLowTime": 2
+      },
+      {
+        "time": 3,
+        "high": 143,
+        "low": 135,
+        "_rawCount": 1,
+        "highTime": 3,
+        "lowTime": 3,
+        "rawHigh": 143,
+        "rawLow": 135,
+        "rawHighTime": 3,
+        "rawLowTime": 3
+      },
+      {
+        "time": 4,
+        "high": 147,
+        "low": 140,
+        "_rawCount": 1,
+        "highTime": 4,
+        "lowTime": 4,
+        "rawHigh": 147,
+        "rawLow": 140,
+        "rawHighTime": 4,
+        "rawLowTime": 4
+      },
+      {
+        "time": 5,
+        "high": 150,
+        "low": 145,
+        "_rawCount": 1,
+        "highTime": 5,
+        "lowTime": 5,
+        "rawHigh": 150,
+        "rawLow": 145,
+        "rawHighTime": 5,
+        "rawLowTime": 5
+      },
+      {
+        "time": 6,
+        "high": 147,
+        "low": 142,
+        "_rawCount": 1,
+        "highTime": 6,
+        "lowTime": 6,
+        "rawHigh": 147,
+        "rawLow": 142,
+        "rawHighTime": 6,
+        "rawLowTime": 6
+      },
+      {
+        "time": 7,
+        "high": 145,
+        "low": 138,
+        "_rawCount": 1,
+        "highTime": 7,
+        "lowTime": 7,
+        "rawHigh": 145,
+        "rawLow": 138,
+        "rawHighTime": 7,
+        "rawLowTime": 7
+      },
+      {
+        "time": 8,
+        "high": 142,
+        "low": 134,
+        "_rawCount": 1,
+        "highTime": 8,
+        "lowTime": 8,
+        "rawHigh": 142,
+        "rawLow": 134,
+        "rawHighTime": 8,
+        "rawLowTime": 8
+      },
+      {
+        "time": 9,
+        "high": 138,
+        "low": 131,
+        "_rawCount": 1,
+        "highTime": 9,
+        "lowTime": 9,
+        "rawHigh": 138,
+        "rawLow": 131,
+        "rawHighTime": 9,
+        "rawLowTime": 9
+      },
+      {
+        "time": 10,
+        "high": 145,
+        "low": 135,
+        "_rawCount": 1,
+        "highTime": 10,
+        "lowTime": 10,
+        "rawHigh": 145,
+        "rawLow": 135,
+        "rawHighTime": 10,
+        "rawLowTime": 10
+      },
+      {
+        "time": 11,
+        "high": 150,
+        "low": 142,
+        "_rawCount": 1,
+        "highTime": 11,
+        "lowTime": 11,
+        "rawHigh": 150,
+        "rawLow": 142,
+        "rawHighTime": 11,
+        "rawLowTime": 11
+      },
+      {
+        "time": 12,
+        "high": 155,
+        "low": 150,
+        "_rawCount": 1,
+        "highTime": 12,
+        "lowTime": 12,
+        "rawHigh": 155,
+        "rawLow": 150,
+        "rawHighTime": 12,
+        "rawLowTime": 12
+      },
+      {
+        "time": 13,
+        "high": 160,
+        "low": 155,
+        "_rawCount": 1,
+        "highTime": 13,
+        "lowTime": 13,
+        "rawHigh": 160,
+        "rawLow": 155,
+        "rawHighTime": 13,
+        "rawLowTime": 13
+      },
+      {
+        "time": 14,
+        "high": 155,
+        "low": 150,
+        "_rawCount": 1,
+        "highTime": 14,
+        "lowTime": 14,
+        "rawHigh": 155,
+        "rawLow": 150,
+        "rawHighTime": 14,
+        "rawLowTime": 14
+      }
+    ],
+    "fractals": [
+      {
+        "mergedIdx": 1,
+        "type": "bottom",
+        "high": 140,
+        "low": 130,
+        "time": 2
+      },
+      {
+        "mergedIdx": 4,
+        "type": "top",
+        "high": 150,
+        "low": 145,
+        "time": 5
+      },
+      {
+        "mergedIdx": 8,
+        "type": "bottom",
+        "high": 138,
+        "low": 131,
+        "time": 9
+      },
+      {
+        "mergedIdx": 12,
+        "type": "top",
+        "high": 160,
+        "low": 155,
+        "time": 13
+      }
+    ],
+    "macd": [
+      {
+        "time": 1,
+        "macd": -1
+      },
+      {
+        "time": 2,
+        "macd": -1
+      },
+      {
+        "time": 3,
+        "macd": -1
+      },
+      {
+        "time": 4,
+        "macd": 1
+      },
+      {
+        "time": 5,
+        "macd": 1
+      },
+      {
+        "time": 6,
+        "macd": 1
+      },
+      {
+        "time": 7,
+        "macd": 1
+      },
+      {
+        "time": 8,
+        "macd": 1
+      },
+      {
+        "time": 9,
+        "macd": 1
+      },
+      {
+        "time": 10,
+        "macd": 1
+      },
+      {
+        "time": 11,
+        "macd": 1
+      },
+      {
+        "time": 12,
+        "macd": 1
+      },
+      {
+        "time": 13,
+        "macd": 1
+      },
+      {
+        "time": 14,
+        "macd": 1
+      }
+    ],
+    "locked": null,
+    "expected": [
+      [
+        1,
+        12
+      ]
+    ]
+  },
+  {
+    "name": "equal_down",
+    "merged": [
+      {
+        "time": 1,
+        "high": 115,
+        "low": 108,
+        "_rawCount": 1,
+        "highTime": 1,
+        "lowTime": 1,
+        "rawHigh": 115,
+        "rawLow": 108,
+        "rawHighTime": 1,
+        "rawLowTime": 1
+      },
+      {
+        "time": 2,
+        "high": 120,
+        "low": 110,
+        "_rawCount": 1,
+        "highTime": 2,
+        "lowTime": 2,
+        "rawHigh": 120,
+        "rawLow": 110,
+        "rawHighTime": 2,
+        "rawLowTime": 2
+      },
+      {
+        "time": 3,
+        "high": 115,
+        "low": 107,
+        "_rawCount": 1,
+        "highTime": 3,
+        "lowTime": 3,
+        "rawHigh": 115,
+        "rawLow": 107,
+        "rawHighTime": 3,
+        "rawLowTime": 3
+      },
+      {
+        "time": 4,
+        "high": 110,
+        "low": 103,
+        "_rawCount": 1,
+        "highTime": 4,
+        "lowTime": 4,
+        "rawHigh": 110,
+        "rawLow": 103,
+        "rawHighTime": 4,
+        "rawLowTime": 4
+      },
+      {
+        "time": 5,
+        "high": 105,
+        "low": 100,
+        "_rawCount": 1,
+        "highTime": 5,
+        "lowTime": 5,
+        "rawHigh": 105,
+        "rawLow": 100,
+        "rawHighTime": 5,
+        "rawLowTime": 5
+      },
+      {
+        "time": 6,
+        "high": 108,
+        "low": 103,
+        "_rawCount": 1,
+        "highTime": 6,
+        "lowTime": 6,
+        "rawHigh": 108,
+        "rawLow": 103,
+        "rawHighTime": 6,
+        "rawLowTime": 6
+      },
+      {
+        "time": 7,
+        "high": 112,
+        "low": 105,
+        "_rawCount": 1,
+        "highTime": 7,
+        "lowTime": 7,
+        "rawHigh": 112,
+        "rawLow": 105,
+        "rawHighTime": 7,
+        "rawLowTime": 7
+      },
+      {
+        "time": 8,
+        "high": 116,
+        "low": 108,
+        "_rawCount": 1,
+        "highTime": 8,
+        "lowTime": 8,
+        "rawHigh": 116,
+        "rawLow": 108,
+        "rawHighTime": 8,
+        "rawLowTime": 8
+      },
+      {
+        "time": 9,
+        "high": 120,
+        "low": 112,
+        "_rawCount": 1,
+        "highTime": 9,
+        "lowTime": 9,
+        "rawHigh": 120,
+        "rawLow": 112,
+        "rawHighTime": 9,
+        "rawLowTime": 9
+      },
+      {
+        "time": 10,
+        "high": 115,
+        "low": 105,
+        "_rawCount": 1,
+        "highTime": 10,
+        "lowTime": 10,
+        "rawHigh": 115,
+        "rawLow": 105,
+        "rawHighTime": 10,
+        "rawLowTime": 10
+      },
+      {
+        "time": 11,
+        "high": 108,
+        "low": 100,
+        "_rawCount": 1,
+        "highTime": 11,
+        "lowTime": 11,
+        "rawHigh": 108,
+        "rawLow": 100,
+        "rawHighTime": 11,
+        "rawLowTime": 11
+      },
+      {
+        "time": 12,
+        "high": 100,
+        "low": 95,
+        "_rawCount": 1,
+        "highTime": 12,
+        "lowTime": 12,
+        "rawHigh": 100,
+        "rawLow": 95,
+        "rawHighTime": 12,
+        "rawLowTime": 12
+      },
+      {
+        "time": 13,
+        "high": 95,
+        "low": 90,
+        "_rawCount": 1,
+        "highTime": 13,
+        "lowTime": 13,
+        "rawHigh": 95,
+        "rawLow": 90,
+        "rawHighTime": 13,
+        "rawLowTime": 13
+      },
+      {
+        "time": 14,
+        "high": 100,
+        "low": 95,
+        "_rawCount": 1,
+        "highTime": 14,
+        "lowTime": 14,
+        "rawHigh": 100,
+        "rawLow": 95,
+        "rawHighTime": 14,
+        "rawLowTime": 14
+      }
+    ],
+    "fractals": [
+      {
+        "mergedIdx": 1,
+        "type": "top",
+        "high": 120,
+        "low": 110,
+        "time": 2
+      },
+      {
+        "mergedIdx": 4,
+        "type": "bottom",
+        "high": 105,
+        "low": 100,
+        "time": 5
+      },
+      {
+        "mergedIdx": 8,
+        "type": "top",
+        "high": 120,
+        "low": 112,
+        "time": 9
+      },
+      {
+        "mergedIdx": 12,
+        "type": "bottom",
+        "high": 95,
+        "low": 90,
+        "time": 13
+      }
+    ],
+    "macd": [
+      {
+        "time": 1,
+        "macd": 1
+      },
+      {
+        "time": 2,
+        "macd": 1
+      },
+      {
+        "time": 3,
+        "macd": 1
+      },
+      {
+        "time": 4,
+        "macd": -1
+      },
+      {
+        "time": 5,
+        "macd": -1
+      },
+      {
+        "time": 6,
+        "macd": -1
+      },
+      {
+        "time": 7,
+        "macd": -1
+      },
+      {
+        "time": 8,
+        "macd": -1
+      },
+      {
+        "time": 9,
+        "macd": -1
+      },
+      {
+        "time": 10,
+        "macd": -1
+      },
+      {
+        "time": 11,
+        "macd": -1
+      },
+      {
+        "time": 12,
+        "macd": -1
+      },
+      {
+        "time": 13,
+        "macd": -1
+      },
+      {
+        "time": 14,
+        "macd": -1
+      }
+    ],
+    "locked": null,
+    "expected": [
+      [
+        1,
+        12
+      ]
+    ]
+  },
+  {
+    "name": "equal_up",
+    "merged": [
+      {
+        "time": 1,
+        "high": 142,
+        "low": 135,
+        "_rawCount": 1,
+        "highTime": 1,
+        "lowTime": 1,
+        "rawHigh": 142,
+        "rawLow": 135,
+        "rawHighTime": 1,
+        "rawLowTime": 1
+      },
+      {
+        "time": 2,
+        "high": 140,
+        "low": 130,
+        "_rawCount": 1,
+        "highTime": 2,
+        "lowTime": 2,
+        "rawHigh": 140,
+        "rawLow": 130,
+        "rawHighTime": 2,
+        "rawLowTime": 2
+      },
+      {
+        "time": 3,
+        "high": 143,
+        "low": 135,
+        "_rawCount": 1,
+        "highTime": 3,
+        "lowTime": 3,
+        "rawHigh": 143,
+        "rawLow": 135,
+        "rawHighTime": 3,
+        "rawLowTime": 3
+      },
+      {
+        "time": 4,
+        "high": 147,
+        "low": 140,
+        "_rawCount": 1,
+        "highTime": 4,
+        "lowTime": 4,
+        "rawHigh": 147,
+        "rawLow": 140,
+        "rawHighTime": 4,
+        "rawLowTime": 4
+      },
+      {
+        "time": 5,
+        "high": 150,
+        "low": 145,
+        "_rawCount": 1,
+        "highTime": 5,
+        "lowTime": 5,
+        "rawHigh": 150,
+        "rawLow": 145,
+        "rawHighTime": 5,
+        "rawLowTime": 5
+      },
+      {
+        "time": 6,
+        "high": 147,
+        "low": 142,
+        "_rawCount": 1,
+        "highTime": 6,
+        "lowTime": 6,
+        "rawHigh": 147,
+        "rawLow": 142,
+        "rawHighTime": 6,
+        "rawLowTime": 6
+      },
+      {
+        "time": 7,
+        "high": 145,
+        "low": 138,
+        "_rawCount": 1,
+        "highTime": 7,
+        "lowTime": 7,
+        "rawHigh": 145,
+        "rawLow": 138,
+        "rawHighTime": 7,
+        "rawLowTime": 7
+      },
+      {
+        "time": 8,
+        "high": 142,
+        "low": 134,
+        "_rawCount": 1,
+        "highTime": 8,
+        "lowTime": 8,
+        "rawHigh": 142,
+        "rawLow": 134,
+        "rawHighTime": 8,
+        "rawLowTime": 8
+      },
+      {
+        "time": 9,
+        "high": 138,
+        "low": 130,
+        "_rawCount": 1,
+        "highTime": 9,
+        "lowTime": 9,
+        "rawHigh": 138,
+        "rawLow": 130,
+        "rawHighTime": 9,
+        "rawLowTime": 9
+      },
+      {
+        "time": 10,
+        "high": 145,
+        "low": 135,
+        "_rawCount": 1,
+        "highTime": 10,
+        "lowTime": 10,
+        "rawHigh": 145,
+        "rawLow": 135,
+        "rawHighTime": 10,
+        "rawLowTime": 10
+      },
+      {
+        "time": 11,
+        "high": 150,
+        "low": 142,
+        "_rawCount": 1,
+        "highTime": 11,
+        "lowTime": 11,
+        "rawHigh": 150,
+        "rawLow": 142,
+        "rawHighTime": 11,
+        "rawLowTime": 11
+      },
+      {
+        "time": 12,
+        "high": 155,
+        "low": 150,
+        "_rawCount": 1,
+        "highTime": 12,
+        "lowTime": 12,
+        "rawHigh": 155,
+        "rawLow": 150,
+        "rawHighTime": 12,
+        "rawLowTime": 12
+      },
+      {
+        "time": 13,
+        "high": 160,
+        "low": 155,
+        "_rawCount": 1,
+        "highTime": 13,
+        "lowTime": 13,
+        "rawHigh": 160,
+        "rawLow": 155,
+        "rawHighTime": 13,
+        "rawLowTime": 13
+      },
+      {
+        "time": 14,
+        "high": 155,
+        "low": 150,
+        "_rawCount": 1,
+        "highTime": 14,
+        "lowTime": 14,
+        "rawHigh": 155,
+        "rawLow": 150,
+        "rawHighTime": 14,
+        "rawLowTime": 14
+      }
+    ],
+    "fractals": [
+      {
+        "mergedIdx": 1,
+        "type": "bottom",
+        "high": 140,
+        "low": 130,
+        "time": 2
+      },
+      {
+        "mergedIdx": 4,
+        "type": "top",
+        "high": 150,
+        "low": 145,
+        "time": 5
+      },
+      {
+        "mergedIdx": 8,
+        "type": "bottom",
+        "high": 138,
+        "low": 130,
+        "time": 9
+      },
+      {
+        "mergedIdx": 12,
+        "type": "top",
+        "high": 160,
+        "low": 155,
+        "time": 13
+      }
+    ],
+    "macd": [
+      {
+        "time": 1,
+        "macd": -1
+      },
+      {
+        "time": 2,
+        "macd": -1
+      },
+      {
+        "time": 3,
+        "macd": -1
+      },
+      {
+        "time": 4,
+        "macd": 1
+      },
+      {
+        "time": 5,
+        "macd": 1
+      },
+      {
+        "time": 6,
+        "macd": 1
+      },
+      {
+        "time": 7,
+        "macd": 1
+      },
+      {
+        "time": 8,
+        "macd": 1
+      },
+      {
+        "time": 9,
+        "macd": 1
+      },
+      {
+        "time": 10,
+        "macd": 1
+      },
+      {
+        "time": 11,
+        "macd": 1
+      },
+      {
+        "time": 12,
+        "macd": 1
+      },
+      {
+        "time": 13,
+        "macd": 1
+      },
+      {
+        "time": 14,
+        "macd": 1
+      }
+    ],
+    "locked": null,
+    "expected": [
+      [
+        1,
+        12
+      ]
+    ]
+  },
+  {
+    "name": "locked_middle",
+    "merged": [
+      {
+        "time": 1,
+        "high": 115,
+        "low": 108,
+        "_rawCount": 1,
+        "highTime": 1,
+        "lowTime": 1,
+        "rawHigh": 115,
+        "rawLow": 108,
+        "rawHighTime": 1,
+        "rawLowTime": 1
+      },
+      {
+        "time": 2,
+        "high": 120,
+        "low": 110,
+        "_rawCount": 1,
+        "highTime": 2,
+        "lowTime": 2,
+        "rawHigh": 120,
+        "rawLow": 110,
+        "rawHighTime": 2,
+        "rawLowTime": 2
+      },
+      {
+        "time": 3,
+        "high": 115,
+        "low": 107,
+        "_rawCount": 1,
+        "highTime": 3,
+        "lowTime": 3,
+        "rawHigh": 115,
+        "rawLow": 107,
+        "rawHighTime": 3,
+        "rawLowTime": 3
+      },
+      {
+        "time": 4,
+        "high": 110,
+        "low": 103,
+        "_rawCount": 1,
+        "highTime": 4,
+        "lowTime": 4,
+        "rawHigh": 110,
+        "rawLow": 103,
+        "rawHighTime": 4,
+        "rawLowTime": 4
+      },
+      {
+        "time": 5,
+        "high": 105,
+        "low": 100,
+        "_rawCount": 1,
+        "highTime": 5,
+        "lowTime": 5,
+        "rawHigh": 105,
+        "rawLow": 100,
+        "rawHighTime": 5,
+        "rawLowTime": 5
+      },
+      {
+        "time": 6,
+        "high": 108,
+        "low": 103,
+        "_rawCount": 1,
+        "highTime": 6,
+        "lowTime": 6,
+        "rawHigh": 108,
+        "rawLow": 103,
+        "rawHighTime": 6,
+        "rawLowTime": 6
+      },
+      {
+        "time": 7,
+        "high": 112,
+        "low": 105,
+        "_rawCount": 1,
+        "highTime": 7,
+        "lowTime": 7,
+        "rawHigh": 112,
+        "rawLow": 105,
+        "rawHighTime": 7,
+        "rawLowTime": 7
+      },
+      {
+        "time": 8,
+        "high": 116,
+        "low": 108,
+        "_rawCount": 1,
+        "highTime": 8,
+        "lowTime": 8,
+        "rawHigh": 116,
+        "rawLow": 108,
+        "rawHighTime": 8,
+        "rawLowTime": 8
+      },
+      {
+        "time": 9,
+        "high": 119,
+        "low": 112,
+        "_rawCount": 1,
+        "highTime": 9,
+        "lowTime": 9,
+        "rawHigh": 119,
+        "rawLow": 112,
+        "rawHighTime": 9,
+        "rawLowTime": 9
+      },
+      {
+        "time": 10,
+        "high": 115,
+        "low": 105,
+        "_rawCount": 1,
+        "highTime": 10,
+        "lowTime": 10,
+        "rawHigh": 115,
+        "rawLow": 105,
+        "rawHighTime": 10,
+        "rawLowTime": 10
+      },
+      {
+        "time": 11,
+        "high": 108,
+        "low": 100,
+        "_rawCount": 1,
+        "highTime": 11,
+        "lowTime": 11,
+        "rawHigh": 108,
+        "rawLow": 100,
+        "rawHighTime": 11,
+        "rawLowTime": 11
+      },
+      {
+        "time": 12,
+        "high": 100,
+        "low": 95,
+        "_rawCount": 1,
+        "highTime": 12,
+        "lowTime": 12,
+        "rawHigh": 100,
+        "rawLow": 95,
+        "rawHighTime": 12,
+        "rawLowTime": 12
+      },
+      {
+        "time": 13,
+        "high": 95,
+        "low": 90,
+        "_rawCount": 1,
+        "highTime": 13,
+        "lowTime": 13,
+        "rawHigh": 95,
+        "rawLow": 90,
+        "rawHighTime": 13,
+        "rawLowTime": 13
+      },
+      {
+        "time": 14,
+        "high": 100,
+        "low": 95,
+        "_rawCount": 1,
+        "highTime": 14,
+        "lowTime": 14,
+        "rawHigh": 100,
+        "rawLow": 95,
+        "rawHighTime": 14,
+        "rawLowTime": 14
+      }
+    ],
+    "fractals": [
+      {
+        "mergedIdx": 1,
+        "type": "top",
+        "high": 120,
+        "low": 110,
+        "time": 2
+      },
+      {
+        "mergedIdx": 4,
+        "type": "bottom",
+        "high": 105,
+        "low": 100,
+        "time": 5
+      },
+      {
+        "mergedIdx": 8,
+        "type": "top",
+        "high": 119,
+        "low": 112,
+        "time": 9
+      },
+      {
+        "mergedIdx": 12,
+        "type": "bottom",
+        "high": 95,
+        "low": 90,
+        "time": 13
+      }
+    ],
+    "macd": [
+      {
+        "time": 1,
+        "macd": 1
+      },
+      {
+        "time": 2,
+        "macd": 1
+      },
+      {
+        "time": 3,
+        "macd": 1
+      },
+      {
+        "time": 4,
+        "macd": -1
+      },
+      {
+        "time": 5,
+        "macd": -1
+      },
+      {
+        "time": 6,
+        "macd": -1
+      },
+      {
+        "time": 7,
+        "macd": -1
+      },
+      {
+        "time": 8,
+        "macd": -1
+      },
+      {
+        "time": 9,
+        "macd": -1
+      },
+      {
+        "time": 10,
+        "macd": -1
+      },
+      {
+        "time": 11,
+        "macd": -1
+      },
+      {
+        "time": 12,
+        "macd": -1
+      },
+      {
+        "time": 13,
+        "macd": -1
+      },
+      {
+        "time": 14,
+        "macd": -1
+      }
+    ],
+    "locked": [
+      {
+        "dir": "top",
+        "price": 119
+      }
+    ],
+    "expected": [
+      [
+        1,
+        4
+      ],
+      [
+        4,
+        8
+      ],
+      [
+        8,
+        12
+      ]
+    ]
+  },
+  {
+    "name": "locked_old",
+    "merged": [
+      {
+        "time": 1,
+        "high": 115,
+        "low": 108,
+        "_rawCount": 1,
+        "highTime": 1,
+        "lowTime": 1,
+        "rawHigh": 115,
+        "rawLow": 108,
+        "rawHighTime": 1,
+        "rawLowTime": 1
+      },
+      {
+        "time": 2,
+        "high": 120,
+        "low": 110,
+        "_rawCount": 1,
+        "highTime": 2,
+        "lowTime": 2,
+        "rawHigh": 120,
+        "rawLow": 110,
+        "rawHighTime": 2,
+        "rawLowTime": 2
+      },
+      {
+        "time": 3,
+        "high": 115,
+        "low": 107,
+        "_rawCount": 1,
+        "highTime": 3,
+        "lowTime": 3,
+        "rawHigh": 115,
+        "rawLow": 107,
+        "rawHighTime": 3,
+        "rawLowTime": 3
+      },
+      {
+        "time": 4,
+        "high": 110,
+        "low": 103,
+        "_rawCount": 1,
+        "highTime": 4,
+        "lowTime": 4,
+        "rawHigh": 110,
+        "rawLow": 103,
+        "rawHighTime": 4,
+        "rawLowTime": 4
+      },
+      {
+        "time": 5,
+        "high": 105,
+        "low": 100,
+        "_rawCount": 1,
+        "highTime": 5,
+        "lowTime": 5,
+        "rawHigh": 105,
+        "rawLow": 100,
+        "rawHighTime": 5,
+        "rawLowTime": 5
+      },
+      {
+        "time": 6,
+        "high": 108,
+        "low": 103,
+        "_rawCount": 1,
+        "highTime": 6,
+        "lowTime": 6,
+        "rawHigh": 108,
+        "rawLow": 103,
+        "rawHighTime": 6,
+        "rawLowTime": 6
+      },
+      {
+        "time": 7,
+        "high": 112,
+        "low": 105,
+        "_rawCount": 1,
+        "highTime": 7,
+        "lowTime": 7,
+        "rawHigh": 112,
+        "rawLow": 105,
+        "rawHighTime": 7,
+        "rawLowTime": 7
+      },
+      {
+        "time": 8,
+        "high": 116,
+        "low": 108,
+        "_rawCount": 1,
+        "highTime": 8,
+        "lowTime": 8,
+        "rawHigh": 116,
+        "rawLow": 108,
+        "rawHighTime": 8,
+        "rawLowTime": 8
+      },
+      {
+        "time": 9,
+        "high": 119,
+        "low": 112,
+        "_rawCount": 1,
+        "highTime": 9,
+        "lowTime": 9,
+        "rawHigh": 119,
+        "rawLow": 112,
+        "rawHighTime": 9,
+        "rawLowTime": 9
+      },
+      {
+        "time": 10,
+        "high": 115,
+        "low": 105,
+        "_rawCount": 1,
+        "highTime": 10,
+        "lowTime": 10,
+        "rawHigh": 115,
+        "rawLow": 105,
+        "rawHighTime": 10,
+        "rawLowTime": 10
+      },
+      {
+        "time": 11,
+        "high": 108,
+        "low": 100,
+        "_rawCount": 1,
+        "highTime": 11,
+        "lowTime": 11,
+        "rawHigh": 108,
+        "rawLow": 100,
+        "rawHighTime": 11,
+        "rawLowTime": 11
+      },
+      {
+        "time": 12,
+        "high": 100,
+        "low": 95,
+        "_rawCount": 1,
+        "highTime": 12,
+        "lowTime": 12,
+        "rawHigh": 100,
+        "rawLow": 95,
+        "rawHighTime": 12,
+        "rawLowTime": 12
+      },
+      {
+        "time": 13,
+        "high": 95,
+        "low": 90,
+        "_rawCount": 1,
+        "highTime": 13,
+        "lowTime": 13,
+        "rawHigh": 95,
+        "rawLow": 90,
+        "rawHighTime": 13,
+        "rawLowTime": 13
+      },
+      {
+        "time": 14,
+        "high": 100,
+        "low": 95,
+        "_rawCount": 1,
+        "highTime": 14,
+        "lowTime": 14,
+        "rawHigh": 100,
+        "rawLow": 95,
+        "rawHighTime": 14,
+        "rawLowTime": 14
+      }
+    ],
+    "fractals": [
+      {
+        "mergedIdx": 1,
+        "type": "top",
+        "high": 120,
+        "low": 110,
+        "time": 2
+      },
+      {
+        "mergedIdx": 4,
+        "type": "bottom",
+        "high": 105,
+        "low": 100,
+        "time": 5
+      },
+      {
+        "mergedIdx": 8,
+        "type": "top",
+        "high": 119,
+        "low": 112,
+        "time": 9
+      },
+      {
+        "mergedIdx": 12,
+        "type": "bottom",
+        "high": 95,
+        "low": 90,
+        "time": 13
+      }
+    ],
+    "macd": [
+      {
+        "time": 1,
+        "macd": 1
+      },
+      {
+        "time": 2,
+        "macd": 1
+      },
+      {
+        "time": 3,
+        "macd": 1
+      },
+      {
+        "time": 4,
+        "macd": -1
+      },
+      {
+        "time": 5,
+        "macd": -1
+      },
+      {
+        "time": 6,
+        "macd": -1
+      },
+      {
+        "time": 7,
+        "macd": -1
+      },
+      {
+        "time": 8,
+        "macd": -1
+      },
+      {
+        "time": 9,
+        "macd": -1
+      },
+      {
+        "time": 10,
+        "macd": -1
+      },
+      {
+        "time": 11,
+        "macd": -1
+      },
+      {
+        "time": 12,
+        "macd": -1
+      },
+      {
+        "time": 13,
+        "macd": -1
+      },
+      {
+        "time": 14,
+        "macd": -1
+      }
+    ],
+    "locked": [
+      {
+        "dir": "bottom",
+        "price": 100
+      }
+    ],
+    "expected": [
+      [
+        1,
+        4
+      ],
+      [
+        4,
+        8
+      ],
+      [
+        8,
+        12
+      ]
+    ]
+  },
+  {
+    "name": "missing_origin",
+    "merged": [
+      {
+        "time": 1,
+        "high": 115,
+        "low": 108,
+        "_rawCount": 1,
+        "highTime": 1,
+        "lowTime": 1,
+        "rawHigh": 115,
+        "rawLow": 108,
+        "rawHighTime": 1,
+        "rawLowTime": 1
+      },
+      {
+        "time": 2,
+        "high": 120,
+        "low": 110,
+        "_rawCount": 1,
+        "highTime": 2,
+        "lowTime": 2,
+        "rawHigh": 120,
+        "rawLow": 110,
+        "rawHighTime": 2,
+        "rawLowTime": 2
+      },
+      {
+        "time": 3,
+        "high": 115,
+        "low": 107,
+        "_rawCount": 1,
+        "highTime": 3,
+        "lowTime": 3,
+        "rawHigh": 115,
+        "rawLow": 107,
+        "rawHighTime": 3,
+        "rawLowTime": 3
+      },
+      {
+        "time": 4,
+        "high": 110,
+        "low": 103,
+        "_rawCount": 1,
+        "highTime": 4,
+        "lowTime": 4,
+        "rawHigh": 110,
+        "rawLow": 103,
+        "rawHighTime": 4,
+        "rawLowTime": 4
+      },
+      {
+        "time": 5,
+        "high": 105,
+        "low": 100,
+        "_rawCount": 1,
+        "highTime": 5,
+        "lowTime": 5,
+        "rawHigh": 105,
+        "rawLow": 100,
+        "rawHighTime": 5,
+        "rawLowTime": 5
+      },
+      {
+        "time": 6,
+        "high": 108,
+        "low": 103,
+        "_rawCount": 1,
+        "highTime": 6,
+        "lowTime": 6,
+        "rawHigh": 108,
+        "rawLow": 103,
+        "rawHighTime": 6,
+        "rawLowTime": 6
+      },
+      {
+        "time": 7,
+        "high": 112,
+        "low": 105,
+        "_rawCount": 1,
+        "highTime": 7,
+        "lowTime": 7,
+        "rawHigh": 112,
+        "rawLow": 105,
+        "rawHighTime": 7,
+        "rawLowTime": 7
+      },
+      {
+        "time": 8,
+        "high": 116,
+        "low": 108,
+        "_rawCount": 1,
+        "highTime": 8,
+        "lowTime": 8,
+        "rawHigh": 116,
+        "rawLow": 108,
+        "rawHighTime": 8,
+        "rawLowTime": 8
+      },
+      {
+        "time": 9,
+        "high": 119,
+        "low": 112,
+        "_rawCount": 1,
+        "highTime": 9,
+        "lowTime": 9,
+        "rawHigh": 119,
+        "rawLow": 112,
+        "rawHighTime": 9,
+        "rawLowTime": 9
+      },
+      {
+        "time": 10,
+        "high": 115,
+        "low": 105,
+        "_rawCount": 1,
+        "highTime": 10,
+        "lowTime": 10,
+        "rawHigh": 115,
+        "rawLow": 105,
+        "rawHighTime": 10,
+        "rawLowTime": 10
+      },
+      {
+        "time": 11,
+        "high": 108,
+        "low": 100,
+        "_rawCount": 1,
+        "highTime": 11,
+        "lowTime": 11,
+        "rawHigh": 108,
+        "rawLow": 100,
+        "rawHighTime": 11,
+        "rawLowTime": 11
+      },
+      {
+        "time": 12,
+        "high": 100,
+        "low": 95,
+        "_rawCount": 1,
+        "highTime": 12,
+        "lowTime": 12,
+        "rawHigh": 100,
+        "rawLow": 95,
+        "rawHighTime": 12,
+        "rawLowTime": 12
+      },
+      {
+        "time": 13,
+        "high": 95,
+        "low": 90,
+        "_rawCount": 1,
+        "highTime": 13,
+        "lowTime": 13,
+        "rawHigh": 95,
+        "rawLow": 90,
+        "rawHighTime": 13,
+        "rawLowTime": 13
+      },
+      {
+        "time": 14,
+        "high": 100,
+        "low": 95,
+        "_rawCount": 1,
+        "highTime": 14,
+        "lowTime": 14,
+        "rawHigh": 100,
+        "rawLow": 95,
+        "rawHighTime": 14,
+        "rawLowTime": 14
+      }
+    ],
+    "fractals": [
+      {
+        "mergedIdx": 4,
+        "type": "bottom",
+        "high": 105,
+        "low": 100,
+        "time": 5,
+        "macdCross": true
+      },
+      {
+        "mergedIdx": 8,
+        "type": "top",
+        "high": 119,
+        "low": 112,
+        "time": 9
+      },
+      {
+        "mergedIdx": 12,
+        "type": "bottom",
+        "high": 95,
+        "low": 90,
+        "time": 13
+      }
+    ],
+    "macd": [
+      {
+        "time": 1,
+        "macd": 1
+      },
+      {
+        "time": 2,
+        "macd": 1
+      },
+      {
+        "time": 3,
+        "macd": 1
+      },
+      {
+        "time": 4,
+        "macd": -1
+      },
+      {
+        "time": 5,
+        "macd": -1
+      },
+      {
+        "time": 6,
+        "macd": -1
+      },
+      {
+        "time": 7,
+        "macd": -1
+      },
+      {
+        "time": 8,
+        "macd": -1
+      },
+      {
+        "time": 9,
+        "macd": -1
+      },
+      {
+        "time": 10,
+        "macd": -1
+      },
+      {
+        "time": 11,
+        "macd": -1
+      },
+      {
+        "time": 12,
+        "macd": -1
+      },
+      {
+        "time": 13,
+        "macd": -1
+      },
+      {
+        "time": 14,
+        "macd": -1
+      }
+    ],
+    "locked": null,
+    "expected": [
+      [
+        4,
+        8
+      ],
+      [
+        8,
+        12
+      ]
+    ]
+  },
+  {
+    "name": "fractal_wick_extreme",
+    "merged": [
+      {
+        "time": 1,
+        "high": 115,
+        "low": 108,
+        "_rawCount": 1,
+        "highTime": 1,
+        "lowTime": 1,
+        "rawHigh": 115,
+        "rawLow": 108,
+        "rawHighTime": 1,
+        "rawLowTime": 1
+      },
+      {
+        "time": 2,
+        "high": 120,
+        "low": 110,
+        "_rawCount": 1,
+        "highTime": 2,
+        "lowTime": 2,
+        "rawHigh": 120,
+        "rawLow": 110,
+        "rawHighTime": 2,
+        "rawLowTime": 2
+      },
+      {
+        "time": 3,
+        "high": 115,
+        "low": 107,
+        "_rawCount": 1,
+        "highTime": 3,
+        "lowTime": 3,
+        "rawHigh": 115,
+        "rawLow": 107,
+        "rawHighTime": 3,
+        "rawLowTime": 3
+      },
+      {
+        "time": 4,
+        "high": 110,
+        "low": 103,
+        "_rawCount": 1,
+        "highTime": 4,
+        "lowTime": 4,
+        "rawHigh": 110,
+        "rawLow": 103,
+        "rawHighTime": 4,
+        "rawLowTime": 4
+      },
+      {
+        "time": 5,
+        "high": 105,
+        "low": 100,
+        "_rawCount": 1,
+        "highTime": 5,
+        "lowTime": 5,
+        "rawHigh": 105,
+        "rawLow": 100,
+        "rawHighTime": 5,
+        "rawLowTime": 5
+      },
+      {
+        "time": 6,
+        "high": 108,
+        "low": 103,
+        "_rawCount": 1,
+        "highTime": 6,
+        "lowTime": 6,
+        "rawHigh": 108,
+        "rawLow": 103,
+        "rawHighTime": 6,
+        "rawLowTime": 6
+      },
+      {
+        "time": 7,
+        "high": 112,
+        "low": 105,
+        "_rawCount": 1,
+        "highTime": 7,
+        "lowTime": 7,
+        "rawHigh": 112,
+        "rawLow": 105,
+        "rawHighTime": 7,
+        "rawLowTime": 7
+      },
+      {
+        "time": 8,
+        "high": 116,
+        "low": 108,
+        "_rawCount": 1,
+        "highTime": 8,
+        "lowTime": 8,
+        "rawHigh": 116,
+        "rawLow": 108,
+        "rawHighTime": 8,
+        "rawLowTime": 8
+      },
+      {
+        "time": 9,
+        "high": 119,
+        "low": 112,
+        "_rawCount": 1,
+        "highTime": 9,
+        "lowTime": 9,
+        "rawHigh": 130,
+        "rawLow": 112,
+        "rawHighTime": 9,
+        "rawLowTime": 9
+      },
+      {
+        "time": 10,
+        "high": 115,
+        "low": 105,
+        "_rawCount": 1,
+        "highTime": 10,
+        "lowTime": 10,
+        "rawHigh": 115,
+        "rawLow": 105,
+        "rawHighTime": 10,
+        "rawLowTime": 10
+      },
+      {
+        "time": 11,
+        "high": 108,
+        "low": 100,
+        "_rawCount": 1,
+        "highTime": 11,
+        "lowTime": 11,
+        "rawHigh": 108,
+        "rawLow": 100,
+        "rawHighTime": 11,
+        "rawLowTime": 11
+      },
+      {
+        "time": 12,
+        "high": 100,
+        "low": 95,
+        "_rawCount": 1,
+        "highTime": 12,
+        "lowTime": 12,
+        "rawHigh": 100,
+        "rawLow": 95,
+        "rawHighTime": 12,
+        "rawLowTime": 12
+      },
+      {
+        "time": 13,
+        "high": 95,
+        "low": 90,
+        "_rawCount": 1,
+        "highTime": 13,
+        "lowTime": 13,
+        "rawHigh": 95,
+        "rawLow": 90,
+        "rawHighTime": 13,
+        "rawLowTime": 13
+      },
+      {
+        "time": 14,
+        "high": 100,
+        "low": 95,
+        "_rawCount": 1,
+        "highTime": 14,
+        "lowTime": 14,
+        "rawHigh": 100,
+        "rawLow": 95,
+        "rawHighTime": 14,
+        "rawLowTime": 14
+      }
+    ],
+    "fractals": [
+      {
+        "mergedIdx": 1,
+        "type": "top",
+        "high": 120,
+        "low": 110,
+        "time": 2
+      },
+      {
+        "mergedIdx": 4,
+        "type": "bottom",
+        "high": 105,
+        "low": 100,
+        "time": 5
+      },
+      {
+        "mergedIdx": 8,
+        "type": "top",
+        "high": 130,
+        "low": 112,
+        "time": 9
+      },
+      {
+        "mergedIdx": 12,
+        "type": "bottom",
+        "high": 95,
+        "low": 90,
+        "time": 13
+      }
+    ],
+    "macd": [
+      {
+        "time": 1,
+        "macd": 1
+      },
+      {
+        "time": 2,
+        "macd": 1
+      },
+      {
+        "time": 3,
+        "macd": 1
+      },
+      {
+        "time": 4,
+        "macd": -1
+      },
+      {
+        "time": 5,
+        "macd": -1
+      },
+      {
+        "time": 6,
+        "macd": -1
+      },
+      {
+        "time": 7,
+        "macd": -1
+      },
+      {
+        "time": 8,
+        "macd": -1
+      },
+      {
+        "time": 9,
+        "macd": -1
+      },
+      {
+        "time": 10,
+        "macd": -1
+      },
+      {
+        "time": 11,
+        "macd": -1
+      },
+      {
+        "time": 12,
+        "macd": -1
+      },
+      {
+        "time": 13,
+        "macd": -1
+      },
+      {
+        "time": 14,
+        "macd": -1
+      }
+    ],
+    "locked": null,
+    "expected": [
+      [
+        1,
+        4
+      ],
+      [
+        4,
+        8
+      ],
+      [
+        8,
+        12
+      ]
+    ]
+  },
+  {
+    "name": "interior_high",
+    "merged": [
+      {
+        "time": 1,
+        "high": 115,
+        "low": 108,
+        "_rawCount": 1,
+        "highTime": 1,
+        "lowTime": 1,
+        "rawHigh": 115,
+        "rawLow": 108,
+        "rawHighTime": 1,
+        "rawLowTime": 1
+      },
+      {
+        "time": 2,
+        "high": 120,
+        "low": 110,
+        "_rawCount": 1,
+        "highTime": 2,
+        "lowTime": 2,
+        "rawHigh": 120,
+        "rawLow": 110,
+        "rawHighTime": 2,
+        "rawLowTime": 2
+      },
+      {
+        "time": 3,
+        "high": 125,
+        "low": 107,
+        "_rawCount": 1,
+        "highTime": 3,
+        "lowTime": 3,
+        "rawHigh": 115,
+        "rawLow": 107,
+        "rawHighTime": 3,
+        "rawLowTime": 3
+      },
+      {
+        "time": 4,
+        "high": 110,
+        "low": 103,
+        "_rawCount": 1,
+        "highTime": 4,
+        "lowTime": 4,
+        "rawHigh": 110,
+        "rawLow": 103,
+        "rawHighTime": 4,
+        "rawLowTime": 4
+      },
+      {
+        "time": 5,
+        "high": 105,
+        "low": 100,
+        "_rawCount": 1,
+        "highTime": 5,
+        "lowTime": 5,
+        "rawHigh": 105,
+        "rawLow": 100,
+        "rawHighTime": 5,
+        "rawLowTime": 5
+      },
+      {
+        "time": 6,
+        "high": 108,
+        "low": 103,
+        "_rawCount": 1,
+        "highTime": 6,
+        "lowTime": 6,
+        "rawHigh": 108,
+        "rawLow": 103,
+        "rawHighTime": 6,
+        "rawLowTime": 6
+      },
+      {
+        "time": 7,
+        "high": 112,
+        "low": 105,
+        "_rawCount": 1,
+        "highTime": 7,
+        "lowTime": 7,
+        "rawHigh": 112,
+        "rawLow": 105,
+        "rawHighTime": 7,
+        "rawLowTime": 7
+      },
+      {
+        "time": 8,
+        "high": 116,
+        "low": 108,
+        "_rawCount": 1,
+        "highTime": 8,
+        "lowTime": 8,
+        "rawHigh": 116,
+        "rawLow": 108,
+        "rawHighTime": 8,
+        "rawLowTime": 8
+      },
+      {
+        "time": 9,
+        "high": 119,
+        "low": 112,
+        "_rawCount": 1,
+        "highTime": 9,
+        "lowTime": 9,
+        "rawHigh": 119,
+        "rawLow": 112,
+        "rawHighTime": 9,
+        "rawLowTime": 9
+      },
+      {
+        "time": 10,
+        "high": 115,
+        "low": 105,
+        "_rawCount": 1,
+        "highTime": 10,
+        "lowTime": 10,
+        "rawHigh": 115,
+        "rawLow": 105,
+        "rawHighTime": 10,
+        "rawLowTime": 10
+      },
+      {
+        "time": 11,
+        "high": 108,
+        "low": 100,
+        "_rawCount": 1,
+        "highTime": 11,
+        "lowTime": 11,
+        "rawHigh": 108,
+        "rawLow": 100,
+        "rawHighTime": 11,
+        "rawLowTime": 11
+      },
+      {
+        "time": 12,
+        "high": 100,
+        "low": 95,
+        "_rawCount": 1,
+        "highTime": 12,
+        "lowTime": 12,
+        "rawHigh": 100,
+        "rawLow": 95,
+        "rawHighTime": 12,
+        "rawLowTime": 12
+      },
+      {
+        "time": 13,
+        "high": 95,
+        "low": 90,
+        "_rawCount": 1,
+        "highTime": 13,
+        "lowTime": 13,
+        "rawHigh": 95,
+        "rawLow": 90,
+        "rawHighTime": 13,
+        "rawLowTime": 13
+      },
+      {
+        "time": 14,
+        "high": 100,
+        "low": 95,
+        "_rawCount": 1,
+        "highTime": 14,
+        "lowTime": 14,
+        "rawHigh": 100,
+        "rawLow": 95,
+        "rawHighTime": 14,
+        "rawLowTime": 14
+      }
+    ],
+    "fractals": [
+      {
+        "mergedIdx": 1,
+        "type": "top",
+        "high": 120,
+        "low": 110,
+        "time": 2
+      },
+      {
+        "mergedIdx": 4,
+        "type": "bottom",
+        "high": 105,
+        "low": 100,
+        "time": 5
+      },
+      {
+        "mergedIdx": 8,
+        "type": "top",
+        "high": 119,
+        "low": 112,
+        "time": 9
+      },
+      {
+        "mergedIdx": 12,
+        "type": "bottom",
+        "high": 95,
+        "low": 90,
+        "time": 13
+      }
+    ],
+    "macd": [
+      {
+        "time": 1,
+        "macd": 1
+      },
+      {
+        "time": 2,
+        "macd": 1
+      },
+      {
+        "time": 3,
+        "macd": 1
+      },
+      {
+        "time": 4,
+        "macd": -1
+      },
+      {
+        "time": 5,
+        "macd": -1
+      },
+      {
+        "time": 6,
+        "macd": -1
+      },
+      {
+        "time": 7,
+        "macd": -1
+      },
+      {
+        "time": 8,
+        "macd": -1
+      },
+      {
+        "time": 9,
+        "macd": -1
+      },
+      {
+        "time": 10,
+        "macd": -1
+      },
+      {
+        "time": 11,
+        "macd": -1
+      },
+      {
+        "time": 12,
+        "macd": -1
+      },
+      {
+        "time": 13,
+        "macd": -1
+      },
+      {
+        "time": 14,
+        "macd": -1
+      }
+    ],
+    "locked": null,
+    "expected": [
+      [
+        1,
+        4
+      ],
+      [
+        4,
+        8
+      ],
+      [
+        8,
+        12
+      ]
+    ]
+  },
+  {
+    "name": "interior_low",
+    "merged": [
+      {
+        "time": 1,
+        "high": 115,
+        "low": 108,
+        "_rawCount": 1,
+        "highTime": 1,
+        "lowTime": 1,
+        "rawHigh": 115,
+        "rawLow": 108,
+        "rawHighTime": 1,
+        "rawLowTime": 1
+      },
+      {
+        "time": 2,
+        "high": 120,
+        "low": 110,
+        "_rawCount": 1,
+        "highTime": 2,
+        "lowTime": 2,
+        "rawHigh": 120,
+        "rawLow": 110,
+        "rawHighTime": 2,
+        "rawLowTime": 2
+      },
+      {
+        "time": 3,
+        "high": 115,
+        "low": 107,
+        "_rawCount": 1,
+        "highTime": 3,
+        "lowTime": 3,
+        "rawHigh": 115,
+        "rawLow": 107,
+        "rawHighTime": 3,
+        "rawLowTime": 3
+      },
+      {
+        "time": 4,
+        "high": 110,
+        "low": 103,
+        "_rawCount": 1,
+        "highTime": 4,
+        "lowTime": 4,
+        "rawHigh": 110,
+        "rawLow": 103,
+        "rawHighTime": 4,
+        "rawLowTime": 4
+      },
+      {
+        "time": 5,
+        "high": 105,
+        "low": 100,
+        "_rawCount": 1,
+        "highTime": 5,
+        "lowTime": 5,
+        "rawHigh": 105,
+        "rawLow": 100,
+        "rawHighTime": 5,
+        "rawLowTime": 5
+      },
+      {
+        "time": 6,
+        "high": 108,
+        "low": 103,
+        "_rawCount": 1,
+        "highTime": 6,
+        "lowTime": 6,
+        "rawHigh": 108,
+        "rawLow": 103,
+        "rawHighTime": 6,
+        "rawLowTime": 6
+      },
+      {
+        "time": 7,
+        "high": 112,
+        "low": 105,
+        "_rawCount": 1,
+        "highTime": 7,
+        "lowTime": 7,
+        "rawHigh": 112,
+        "rawLow": 105,
+        "rawHighTime": 7,
+        "rawLowTime": 7
+      },
+      {
+        "time": 8,
+        "high": 116,
+        "low": 108,
+        "_rawCount": 1,
+        "highTime": 8,
+        "lowTime": 8,
+        "rawHigh": 116,
+        "rawLow": 108,
+        "rawHighTime": 8,
+        "rawLowTime": 8
+      },
+      {
+        "time": 9,
+        "high": 119,
+        "low": 112,
+        "_rawCount": 1,
+        "highTime": 9,
+        "lowTime": 9,
+        "rawHigh": 119,
+        "rawLow": 112,
+        "rawHighTime": 9,
+        "rawLowTime": 9
+      },
+      {
+        "time": 10,
+        "high": 115,
+        "low": 105,
+        "_rawCount": 1,
+        "highTime": 10,
+        "lowTime": 10,
+        "rawHigh": 115,
+        "rawLow": 105,
+        "rawHighTime": 10,
+        "rawLowTime": 10
+      },
+      {
+        "time": 11,
+        "high": 108,
+        "low": 85,
+        "_rawCount": 1,
+        "highTime": 11,
+        "lowTime": 11,
+        "rawHigh": 108,
+        "rawLow": 100,
+        "rawHighTime": 11,
+        "rawLowTime": 11
+      },
+      {
+        "time": 12,
+        "high": 100,
+        "low": 95,
+        "_rawCount": 1,
+        "highTime": 12,
+        "lowTime": 12,
+        "rawHigh": 100,
+        "rawLow": 95,
+        "rawHighTime": 12,
+        "rawLowTime": 12
+      },
+      {
+        "time": 13,
+        "high": 95,
+        "low": 90,
+        "_rawCount": 1,
+        "highTime": 13,
+        "lowTime": 13,
+        "rawHigh": 95,
+        "rawLow": 90,
+        "rawHighTime": 13,
+        "rawLowTime": 13
+      },
+      {
+        "time": 14,
+        "high": 100,
+        "low": 95,
+        "_rawCount": 1,
+        "highTime": 14,
+        "lowTime": 14,
+        "rawHigh": 100,
+        "rawLow": 95,
+        "rawHighTime": 14,
+        "rawLowTime": 14
+      }
+    ],
+    "fractals": [
+      {
+        "mergedIdx": 1,
+        "type": "top",
+        "high": 120,
+        "low": 110,
+        "time": 2
+      },
+      {
+        "mergedIdx": 4,
+        "type": "bottom",
+        "high": 105,
+        "low": 100,
+        "time": 5
+      },
+      {
+        "mergedIdx": 8,
+        "type": "top",
+        "high": 119,
+        "low": 112,
+        "time": 9
+      },
+      {
+        "mergedIdx": 12,
+        "type": "bottom",
+        "high": 95,
+        "low": 90,
+        "time": 13
+      }
+    ],
+    "macd": [
+      {
+        "time": 1,
+        "macd": 1
+      },
+      {
+        "time": 2,
+        "macd": 1
+      },
+      {
+        "time": 3,
+        "macd": 1
+      },
+      {
+        "time": 4,
+        "macd": -1
+      },
+      {
+        "time": 5,
+        "macd": -1
+      },
+      {
+        "time": 6,
+        "macd": -1
+      },
+      {
+        "time": 7,
+        "macd": -1
+      },
+      {
+        "time": 8,
+        "macd": -1
+      },
+      {
+        "time": 9,
+        "macd": -1
+      },
+      {
+        "time": 10,
+        "macd": -1
+      },
+      {
+        "time": 11,
+        "macd": -1
+      },
+      {
+        "time": 12,
+        "macd": -1
+      },
+      {
+        "time": 13,
+        "macd": -1
+      },
+      {
+        "time": 14,
+        "macd": -1
+      }
+    ],
+    "locked": null,
+    "expected": [
+      [
+        1,
+        4
+      ],
+      [
+        4,
+        8
+      ]
+    ]
+  }
+]

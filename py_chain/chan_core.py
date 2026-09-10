@@ -27,6 +27,7 @@
 """
 
 import bisect
+import math
 import re
 
 from datetime import datetime
@@ -43,6 +44,8 @@ CHAN_CFG = {
                            # 两段时长比 > 该值时不具可比性，面积项不计入背驰（只用 DIF/柱高判据）
     "nearDoubleAtrK": 0.3,  # 近等双顶/双底平台取后顶/后底：价差与回调深度的 ATR 系数
     "nearDoublePct": 0.001,  # 近等双顶/双底平台取后顶/后底：价差下限（价格比例，与 ATR 项取 max）
+    "nearDoubleLowerRelax": 1.5,  # 仅60m：15m双动能确认的容差倍数
+    "nearDoubleLowerRatio": 0.5,  # 柱峰值和DIF幅度均不超过前段50%
     "debug": False,    # 调试打印（buildBi / 买卖点识别过程）
 }
 
@@ -294,9 +297,58 @@ def hasGapBetween(merged, aIdx, bIdx, atr, gapFilter):
 # ============================================================
 
 
-def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False):
+def makeBiLowerContext(res, bars, cutoff=float('inf'), macd=None):
+    if str(res) != '60' or not bars:
+        return None
+    values = calcMACD(bars) if macd is None else macd
+    if len(values) != len(bars) or any(not isinstance(m, dict) or m.get('time') != b['time']
+                                      or not isinstance(m.get('macd'), (int, float))
+                                      or not isinstance(m.get('dif'), (int, float))
+                                      or not math.isfinite(m['macd']) or not math.isfinite(m['dif'])
+                                      for m, b in zip(values, bars)):
+        return None
+    return dict(res='60', bars=bars, times=[b['time'] for b in bars], macd=values, cutoff=cutoff)
+
+
+def lowerEndpointWeaker(old, end, fractals, context):
+    """近等端点补充确认，不修改买卖点的创新极值背驰定义。"""
+    if not context or context['res'] != '60' or not context['bars']:
+        return False
+    bars, times, macd, cutoff = (context[k] for k in ('bars', 'times', 'macd', 'cutoff'))
+
+    def before(f):
+        return next((x for x in reversed(fractals)
+                     if x['mergedIdx'] < f['mergedIdx'] and x['type'] != f['type']), None)
+
+    def exact(f):
+        if not f or not times or times[0] > f['time']:
+            return None
+        field = 'high' if f['type'] == 'top' else 'low'
+        i = bisect.bisect_left(times, f['time'])
+        while i < len(times) and times[i] < f['time'] + 3600:
+            if times[i] + 900 > cutoff:
+                break
+            if abs(bars[i][field] - f[field]) <= 0.001:
+                return times[i]
+            i += 1
+        return None
+
+    t = [exact(before(old)), exact(old), exact(before(end)), exact(end)]
+    if any(x is None for x in t) or t[0] >= t[1] or t[2] >= t[3]:
+        return False
+    a = biMacdMetrics(dict(startTime=t[0], endTime=t[1]), macd)
+    b = biMacdMetrics(dict(startTime=t[2], endTime=t[3]), macd)
+    top = end['type'] == 'top'
+    peak, dif, sign = ('redMax', 'difHigh', 1) if top else ('greenMax', 'difLow', -1)
+    ratio = CHAN_CFG['nearDoubleLowerRatio']
+    return bool(a and b and a[peak] > 0 and b[peak] > 0 and a[dif] * sign > 0 and b[dif] * sign > 0
+                and b[peak] <= a[peak] * ratio and abs(b[dif]) <= abs(a[dif]) * ratio)
+
+
+def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False, lowerContext=None):
     """笔构建。与 JS 版 buildBi 对齐。lockedPivots 为上级笔端点（区间套强制对齐，优先级最高）；
-    nearDouble=True 时启用「近等双顶/双底平台取后顶/后底」（≥60m 周期由调用方开启）。"""
+    nearDouble=True 时启用「近等双顶/双底平台取后顶/后底」（≥60m 周期由调用方开启）。
+    lowerContext 为可选15分钟上下文，仅60m补充分支使用；缺省时沿用原阈值。"""
     gapThreshold = atr * CHAN_CFG["gapFilter"] if atr else 0
 
     # ATR 在一次构建内固定，跳空判定只取决于相邻合并K线的原始极值。
@@ -323,6 +375,17 @@ def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False)
                 gapCounts.append(count)
                 prevHigh, prevLow = curHigh, curLow
         return gapCounts[b] != gapCounts[a]
+
+    def replacementExtremesClear(origin, old, middle, end):
+        ceiling = origin["high"] if origin["type"] == "top" else end["high"]
+        floor = end["low"] if end["type"] == "bottom" else origin["low"]
+        for x in (old, middle):
+            if x["high"] > ceiling or x["low"] < floor:
+                return False
+        for i in range(origin["mergedIdx"] + 1, end["mergedIdx"]):
+            if merged[i]["high"] > ceiling or merged[i]["low"] < floor:
+                return False
+        return True
 
     # 阶段一：严格交替分型序列
     seq = []
@@ -433,7 +496,9 @@ def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False)
                 ref_price = last["high"] if k["type"] == "top" else last["low"]
                 thr = max(atr * CHAN_CFG["nearDoubleAtrK"], ref_price * CHAN_CFG["nearDoublePct"])
                 diff = (last["high"] - k["high"]) if k["type"] == "top" else (k["low"] - last["low"])
-                if 0 <= diff <= thr:
+                lower_confirmed = (diff > thr and diff <= thr * CHAN_CFG['nearDoubleLowerRelax']
+                                   and lowerEndpointWeaker(last, k, fractals, lowerContext))
+                if diff >= 0 and (diff <= thr or lower_confirmed):
                     plateau, pull, prev_f, cnt = True, False, last, 0
                     for f in fractals:
                         if f["mergedIdx"] <= last["mergedIdx"] or f["mergedIdx"] >= k["mergedIdx"]:
@@ -452,19 +517,23 @@ def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False)
                         if CHAN_CFG["debug"]:
                             print(f"[阶段二] 近等双顶/双底平台取后: {k['type']}@{last['mergedIdx']}({ref_price}) -> "
                                   f"{k['type']}@{k['mergedIdx']}({k['high'] if k['type']=='top' else k['low']}) "
-                                  f"（差 {diff:.2f} ≤ {thr:.2f}，平台内无成笔结构）")
+                                  f"（差 {diff:.2f} ≤ {thr * (CHAN_CFG['nearDoubleLowerRelax'] if lower_confirmed else 1):.2f}"
+                                  f"{'，15m双动能确认' if lower_confirmed else ''}，平台内无成笔结构）")
                         k["nearDouble"] = True  # 单跳封顶
                         result[-1] = k
             continue
         # 异类型
-        # MACD 变色成笔端点让位
-        if len(result) >= 2:
+        # MACD 端点让位必须保住整根候选笔的双向极值（等价允许）。
+        # 中间分型可能携带影线端点价，不能只检查合并K线。
+        if len(result) >= 3:
+            origin = result[-3]
             prev2 = result[-2]
             topOne = result[-1]
             if prev2.get("macdCross", False) is True and prev2["type"] == k["type"] and \
-               not topOne.get("locked", False) and \
+               not topOne.get("locked", False) and not prev2.get("locked", False) and \
                ((k["type"] == "top" and k["high"] > prev2["high"]) or
-                (k["type"] == "bottom" and k["low"] < prev2["low"])):
+                (k["type"] == "bottom" and k["low"] < prev2["low"])) and \
+               replacementExtremesClear(origin, prev2, topOne, k):
                 if CHAN_CFG["debug"]:
                     print(f"[阶段二] MACD端点让位: {prev2['mergedIdx']} -> {k['mergedIdx']}")
                 k["macdCross"] = True

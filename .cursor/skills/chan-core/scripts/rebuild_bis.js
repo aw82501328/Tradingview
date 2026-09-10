@@ -6,9 +6,9 @@
  * 用途：SPEC_divergence_chanset.md 块1 回归——py↔JS 笔结构对齐，目标 0 差异。
  * 管线与 py_chain.backtest.build_bis 同口径（不含图表管线专属步骤 lockedPivots/
  * alignBiToUpper/ATR过滤/校准——那些依赖运行时图表状态，不在模块级对拍范围）：
- *   markWickBars → mergeBars → findFractals → buildBi(…, null, sec>=3600)
+ *   markWickBars → mergeBars → findFractals → buildBi(…, null, sec>=3600, lowerContext)
  *   → fixBiExtremes → extendLastBi(trimmed)
- * ATR/MACD 用原始K线（与 chan-bi 一致）。
+ * ATR/MACD 用原始K线（与 chan-bi 一致）。60m上下文来自同份输入的15m已收盘前缀。
  *
  * 用法：node rebuild_bis.js <bars.json> [res1,res2,...]
  */
@@ -32,7 +32,7 @@ for (const res of Object.keys(data)) {
   const fractals = core.findFractals(merged);
   const atr = core.calcATR(bars, 14);
   const macd = core.calcMACD(bars);
-  let bis = core.buildBi(fractals, merged, atr, macd, null, core.intervalSecOf(res) >= 3600);
+  let bis = core.buildBi(fractals, merged, atr, macd, null, core.intervalSecOf(res) >= 3600, core.makeBiLowerContext(res, data['15']));
   bis = core.fixBiExtremes(bis, merged) || bis;
   bis = core.extendLastBi(bis, trimmed);
   out[res] = bis;
