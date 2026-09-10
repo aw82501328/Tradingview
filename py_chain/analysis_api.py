@@ -13,7 +13,9 @@ def handle(handler, app, method):
     manager = app.analysis
     try:
         if method == "GET":
-            if action == "state":
+            if action == "launch-td-status":
+                result = app.td_launcher.snapshot()
+            elif action == "state":
                 result = manager.snapshot()
             elif action == "targets":
                 result = {"targets": list_targets(manager.cfg.get("port", 9222))}
@@ -35,7 +37,14 @@ def handle(handler, app, method):
             body = handler._read_body()
             if not isinstance(body, dict):
                 raise ValueError("请求体须为对象")
-            if action == "config":
+            if action == "launch-td":
+                if set(body) - {"allowRestart"}:
+                    raise ValueError("不支持的启动参数")
+                result = app.td_launcher.start(body.get("allowRestart", False))
+                if not result.get("ok"):
+                    handler._send_json(result, 409)
+                    return True
+            elif action == "config":
                 result = manager.configure(body.get("cfg") or {})
             elif action == "start":
                 result = manager.start(body.get("module", "all"))

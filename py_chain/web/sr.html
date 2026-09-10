@@ -5,11 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>支阻位参数调试控制台</title>
 <style>
-:root{
-  --bg:#0f1115; --card:#1a1d24; --border:#2c313c; --text:#d5d9e0; --muted:#8b93a1;
-  --accent:#3b82f6; --buy:#f23645; --sell:#089981; --ok:#089981; --warn:#f0b90b;
-  --chip:#2a2f3a;
-}
+
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--text);font:13px/1.5 "Segoe UI",system-ui,sans-serif;padding:14px 18px}
 h1{font-size:19px;color:#fff}
@@ -89,6 +85,8 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
 .plist-empty{color:var(--muted);padding:8px;font-size:11px}
 </style>
 <link rel="stylesheet" href="/sr-tune.css">
+<link rel="stylesheet" href="/theme.css">
+<link rel="stylesheet" href="/legacy-theme.css">
 </head>
 <body>
 <h1>支阻位参数调试控制台 <span class="badge idle" id="badge-busy">idle</span>
@@ -943,7 +941,7 @@ init();
 </script>
 <script src="/sr-tune.js"></script>
 <script>
-if (new URLSearchParams(location.search).has("embed")) { document.querySelectorAll("h1 a").forEach(a => a.hidden = true); }
+if (new URLSearchParams(location.search).has("embed")) { document.body.classList.add("embedded"); document.querySelector(".statusline").append(document.getElementById("badge-busy")); }
 </script>
 </body>
 </html>

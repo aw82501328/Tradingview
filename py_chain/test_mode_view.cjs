@@ -1,0 +1,25 @@
+const fs=require('fs'),vm=require('vm'),assert=require('node:assert/strict');
+const html=fs.readFileSync('py_chain/web/index.html','utf8');
+let script=[...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].find(m=>m[1].includes('const MODES'))[1].replace(/init\(\);\s*$/, '');
+const nodes=new Map();const node=id=>{if(!nodes.has(id))nodes.set(id,{value:'',textContent:'',innerHTML:'',style:{},hidden:false});return nodes.get(id)};
+const ctx={console,URLSearchParams,location:{search:'?mode=bad',origin:'http://localhost'},window:{addEventListener(){}},document:{getElementById:node,querySelector:()=>({firstChild:{textContent:''}})}};
+vm.createContext(ctx);vm.runInContext(script,ctx);
+vm.runInContext(`
+if(selectedMode!=='backtest')throw Error('invalid mode default');
+sigRows=[{id:1,mode:'backtest',status:'已平仓',pnl:10},{id:2,mode:'live',status:'已平仓',pnl:999},{id:3,mode:'backtest',status:'信号'}];
+selectMode('backtest');
+if(filteredRows().length!==2)throw Error('cross-mode rows');
+el('filter-status').value='已平仓';
+selectMode('live');
+if(filteredRows().length!==1||filteredRows()[0].pnl!==999)throw Error('live rows');
+selectMode('backtest');
+if(el('filter-status').value!=='已平仓'||filteredRows().length!==1)throw Error('filter lost');
+if(el('card-backtest').hidden||!el('card-live').hidden)throw Error('visibility');
+if(el('pnl-summary').innerHTML.includes('999'))throw Error('cross-mode summary');
+applyStatus({active:'live',modes:{live:{state:'running',progress:{pct:25,current:1,total:4}},backtest:{state:'idle'}}});
+selectMode('live');selectMode('backtest');
+if(state.modes.live.state!=='running'||el('bar-live').style.width!=='25%')throw Error('hidden task state lost');
+if(!el('btn-start-backtest').disabled)throw Error('mutex status lost');
+`,ctx);
+assert.equal(node('count').textContent,'筛选 1 / 共 2 条');
+console.log('Mode selection, visibility, filter retention, count and summary checks passed');

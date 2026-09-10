@@ -30,11 +30,13 @@ from urllib.parse import parse_qs, urlparse, quote
 
 from .data_loader import CDPConfig, DEFAULT_PERIODS, DEFAULT_CDP_PORT, load_bars
 from .backtest import BacktestEngine
+from .service_restart import RestartManager
+from .signal_locator import LocateManager
 from .main import parse_from
 from .chan_core import fmtT
 from .monitor import LiveMonitor, ReplayMonitor, clear_rt_markers
 from .marks import draw_signal_marks, draw_sr_marks, clear_signal_marks, clear_all_marks
-from . import sr_service, sr_draw, sr_tune, sr_tune_api, sr_preset_excel, analysis_service, analysis_api
+from . import td_launcher, sr_service, sr_draw, sr_tune, sr_tune_api, sr_preset_excel, analysis_service, analysis_api
 
 # ============================================================
 # 全局互斥：三种模式同一时间最多运行一种
@@ -42,6 +44,7 @@ from . import sr_service, sr_draw, sr_tune, sr_tune_api, sr_preset_excel, analys
 _active_lock = threading.Lock()
 _active_mode = None          # 当前运行中的模式名（backtest/replay/live）或 None
 _active_owner = None
+_service_restarting = False
 
 
 class ChartLock:
@@ -52,6 +55,8 @@ class ChartLock:
     def acquire(self, blocking=False):
         # All current consumers use non-blocking acquisition.
         with _active_lock:
+            if _service_restarting:
+                return False
             if _active_mode is not None and _active_owner != threading.get_ident():
                 return False
             return self._lock.acquire(blocking=False)
@@ -81,6 +86,8 @@ def acquire_active(mode):
     """尝试占用模式互斥；成功返回 True，失败返回当前占用者。"""
     global _active_mode, _active_owner
     with _active_lock:
+        if _service_restarting:
+            return '服务重启中'
         if _active_mode is not None:
             return _active_mode
         if _marks_lock.locked():
@@ -119,6 +126,8 @@ def ensure_idle():
 
     @returns (True, None) 全部空闲可操作；或 (False, 提示信息)
     """
+    if _service_restarting:
+        return False, '服务重启中'
     mode = active_mode()
     if mode is not None:
         return False, f"有 {mode} 模式运行中，请先停止再标记"
@@ -142,13 +151,14 @@ class SignalLog:
         return (mode, s.get("time") or s.get("signalTime"), s.get("periodX"),
                 s.get("direction"), s.get("strategyKey"))
 
-    def append_signal(self, mode, s):
+    def append_signal(self, mode, s, symbol=None):
         """记录一条新进场信号，返回该行。"""
         with self.lock:
             self._id += 1
             row = {
                 "id": self._id,
                 "mode": mode,
+                "symbol": symbol or s.get("symbol"),
                 "time": s.get("time") or s.get("signalTime"),
                 "direction": s.get("direction"),
                 "periodX": s.get("periodX"),
@@ -173,7 +183,7 @@ class SignalLog:
             self._key_to_idx[self._row_key(mode, s)] = len(self.rows) - 1
             return row
 
-    def fill_trade(self, mode, tr):
+    def fill_trade(self, mode, tr, symbol=None):
         """回测成交时回填对应信号行的成交状态（持仓中）；找不到则追加一行记录。"""
         key = (mode, tr.get("signalTime"), tr.get("periodX"),
                tr.get("direction"), tr.get("strategyKey"))
@@ -184,6 +194,7 @@ class SignalLog:
                 row = {
                     "id": self._id,
                     "mode": mode,
+                    "symbol": symbol or tr.get("symbol"),
                     "time": tr.get("signalTime"),
                     "direction": tr.get("direction"),
                     "periodX": tr.get("periodX"),
@@ -247,20 +258,25 @@ class SignalLog:
             row["status"] = "同向过滤"
             return row
 
-    def list(self, limit=None):
+    def list(self, limit=None, mode=None):
         with self.lock:
-            rows = list(self.rows)
+            rows = [r for r in self.rows if mode is None or r.get("mode") == mode]
         if limit:
             rows = rows[-int(limit):]
         return rows
 
-    def clear(self):
+    def get(self, row_id, mode):
+        with self.lock:
+            return next((dict(r) for r in self.rows if r['id'] == row_id and r['mode'] == mode), None)
+
+    def clear(self, mode=None):
         with self.lock:
             n = len(self.rows)
-            self.rows = []
-            self._key_to_idx = {}
-            self._id = 0
-            return n
+            self.rows = [r for r in self.rows if mode is not None and r.get("mode") != mode]
+            self._key_to_idx = {self._row_key(r["mode"], r): i for i, r in enumerate(self.rows)}
+            # Keep IDs unique for the service lifetime: an in-flight locate must
+            # never match a new record created after clearing the table.
+            return n - len(self.rows)
 
 
 # ============================================================
@@ -337,14 +353,14 @@ class ModeWorker:
 
     # ---- 信号记录 ----
     def _on_signal(self, s):
-        row = self.signals.append_signal(self.MODE, s)
+        row = self.signals.append_signal(self.MODE, s, symbol=self.cfg.get('symbol'))
         self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
         d = "做多" if s.get("direction") == "long" else "做空"
         self.log(f"新进场信号：{d} 策略 {s.get('strategyKey')} "
                  f"周期 {s.get('periodX')} @ {fmtT(s.get('time'))} {s.get('price')}")
 
     def _on_trade(self, tr):
-        row = self.signals.fill_trade(self.MODE, tr)
+        row = self.signals.fill_trade(self.MODE, tr, symbol=self.cfg.get('symbol'))
         self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
 
     def _on_exit(self, tr):
@@ -466,7 +482,7 @@ class BacktestWorker(ModeWorker):
         for tr in result["trades"]:
             if tr.get("state") == "closed":
                 continue
-            row = self.signals.fill_trade(self.MODE, tr)
+            row = self.signals.fill_trade(self.MODE, tr, symbol=self.cfg.get('symbol'))
             self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
         st = result["stats"]
         self.log(f"回测完成：{st['steps']} 步，信号 {st['signals']}，成交 {st['executed']}，"
@@ -593,8 +609,10 @@ class ReplayWorker(ModeWorker):
 # ============================================================
 class ControlApp:
     def __init__(self, tune_store=None):
+        self.service = None
         self.signals = SignalLog()
         self.broadcaster = Broadcaster()
+        self.locator = LocateManager(self.signals, _marks_lock, self.broadcaster.emit)
         self.workers = {
             "backtest": BacktestWorker(self.signals, self.broadcaster),
             "replay": ReplayWorker(self.signals, self.broadcaster),
@@ -603,6 +621,7 @@ class ControlApp:
         # 支阻位调试模块：最近一次计算结果槽（cfg 快照 / computed_at / result / meta）
         self.sr = {"cfg": None, "computed_at": None, "result": None, "meta": None}
         self.sr_tune = sr_tune.TuneManager(store=tune_store, emit=self.broadcaster.emit)
+        self.td_launcher = td_launcher.TDLauncher(acquire_active, release_active)
         self.analysis = analysis_service.AnalysisManager(
             self.broadcaster.emit, acquire_active, release_active, _marks_lock,
             self.normalize_sr_cfg, self.publish_analysis_sr)
@@ -750,6 +769,7 @@ class ControlApp:
         with _sr_busy_lock:
             busy = _sr_busy
         base = {
+            "service": self.service.status() if self.service else None,
             "active": active_mode(),
             "modes": {name: w.status() for name, w in self.workers.items()},
             "analysis": self.analysis.snapshot(),
@@ -817,11 +837,14 @@ def make_handler(app):
             try:
                 super().handle_one_request()
             except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
-                pass
+                self.close_connection = True
 
         def do_GET(self):
             parsed = urlparse(self.path)
             path = parsed.path
+            if path == '/api/signals/locate':
+                self._send_json({'ok': True, 'job': app.locator.snapshot()})
+                return
             if analysis_api.handle(self, app, "GET"):
                 return
             if self._tune("GET"):
@@ -835,7 +858,7 @@ def make_handler(app):
             if path == "/modes.html":
                 self._serve_file("index.html")
                 return
-            if path in ("/analysis.js", "/analysis-catalog.json", "/shell.css"):
+            if path in ("/analysis.js", "/service-restart.js", "/analysis-catalog.json", "/shell.css", "/theme.css", "/legacy-theme.css"):
                 content_type = "text/javascript" if path.endswith(".js") else "application/json" if path.endswith(".json") else "text/css"
                 self._serve_file(path[1:], content_type + "; charset=utf-8")
                 return
@@ -884,14 +907,68 @@ def make_handler(app):
             self._send_json({"ok": False, "error": f"未知路径 {path}"}, 404)
 
         def do_POST(self):
+            global _service_restarting
             path = urlparse(self.path).path
+            if path == '/api/service/restart':
+                self._read_body()
+                origin = self.headers.get('Origin')
+                if origin and urlparse(origin).netloc != self.headers.get('Host'):
+                    self._send_json({'ok': False, 'error': '不允许跨站重启请求'}, 403)
+                    return
+                if app.service is None:
+                    self._send_json({'ok': False, 'error': '服务重启尚未初始化'}, 503)
+                    return
+                with _active_lock:
+                    _service_restarting = True
+                try:
+                    service = app.service.prepare()
+                except Exception as exc:
+                    with _active_lock:
+                        _service_restarting = False
+                    self._send_json({'ok': False, 'error': str(exc)}, 503)
+                    return
+                try:
+                    self._send_json({'ok': True, 'service': service}, 202)
+                    self.wfile.flush()
+                finally:
+                    app.service.commit()
+                return
+            if _service_restarting:
+                self.close_connection = True
+                self._send_json({'ok': False, 'error': '服务重启中，请稍候'}, 503)
+                return
             if analysis_api.handle(self, app, "POST"):
                 return
             if self._tune("POST"):
                 return
+            if path == '/api/signals/locate':
+                body = self._read_body()
+                if (not isinstance(body, dict) or body.get('mode') not in ('backtest', 'replay', 'live')
+                        or type(body.get('id')) is not int or body['id'] <= 0):
+                    self._send_json({'ok': False, 'error': '无效的模式或记录ID'}, 400)
+                    return
+                try:
+                    job = app.locator.start(body['mode'], body['id'])
+                except ValueError as exc:
+                    self._send_json({'ok': False, 'error': str(exc)}, 400)
+                except LookupError as exc:
+                    self._send_json({'ok': False, 'error': str(exc)}, 404)
+                except RuntimeError as exc:
+                    self._send_json({'ok': False, 'error': str(exc)}, 409)
+                except Exception as exc:
+                    self._send_json({'ok': False, 'error': str(exc)}, 500)
+                else:
+                    self._send_json({'ok': True, 'job': job}, 202)
+                return
+            if path in ("/api/signals/clear", "/api/marks/draw", "/api/marks/sr_draw"):
+                body = self._read_body()
+                if not isinstance(body, dict) or ("mode" in body and body["mode"] not in ("backtest", "replay", "live")):
+                    self._send_json({"ok": False, "error": "无效的mode"}, 400)
+                    return
+                selected_mode = body.get("mode")
             if path == "/api/signals/clear":
-                n = app.signals.clear()
-                app.broadcaster.emit("signals_cleared", {"n": n})
+                n = app.signals.clear(selected_mode)
+                app.broadcaster.emit("signals_cleared", {"n": n, "mode": selected_mode})
                 self._send_json({"ok": True, "cleared": n})
                 return
             if path == "/api/marks/draw":
@@ -899,9 +976,8 @@ def make_handler(app):
                 if not ok:
                     self._send_json({"ok": False, "error": err}, 409)
                     return
-                body = self._read_body()
                 colors = body.get("colors") or {}
-                rows = app.signals.list(None)
+                rows = app.signals.list(None, mode=selected_mode)
                 if not rows:
                     self._send_json({"ok": False, "error": "信号列表为空，无可标记的进场点"})
                     return
@@ -935,9 +1011,8 @@ def make_handler(app):
                 if not ok:
                     self._send_json({"ok": False, "error": err}, 409)
                     return
-                body = self._read_body()
                 colors = body.get("colors") or {}
-                rows = app.signals.list(None)
+                rows = app.signals.list(None, mode=selected_mode)
                 if not rows:
                     self._send_json({"ok": False, "error": "信号列表为空，无可标记的支阻位"}, 409)
                     return
@@ -1360,6 +1435,18 @@ def main(argv=None):
 
     app = ControlApp()
     server = ThreadingHTTPServer((args.host, args.port), make_handler(app))
+    def shutdown_service():
+        app.analysis.close()
+        app.sr_tune.stop_event.set()
+        for worker in app.workers.values():
+            worker._stop_evt.set()
+        deadline = time.monotonic() + 9
+        threads = [w.thread for w in app.workers.values()] + [app.analysis.thread, app.sr_tune.thread]
+        for thread in threads:
+            if thread and thread.is_alive():
+                thread.join(max(0, deadline - time.monotonic()))
+        server.shutdown()
+    app.service = RestartManager(args.host, args.port, shutdown_service)
     print(f"三模式 Web 控制台已启动：http://{args.host}:{args.port}")
     print("三种模式同一时间最多运行一种；Ctrl+C 退出。")
     try:

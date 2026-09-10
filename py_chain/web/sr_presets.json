@@ -1,32 +1,47 @@
 [
  {
   "name": "001",
-  "saved_at": 1788874795,
+  "saved_at": 1788948825,
   "cfg": {
    "symbol": "OANDA:XAUUSD",
    "from": "2026-07-02",
    "periods": [
-    "240"
+    "60"
    ],
    "minTouchs": {
-    "240": "4"
+    "3": 8,
+    "15": 3,
+    "60": 4,
+    "240": 4,
+    "W": 4,
+    "D": 4
+   },
+   "clusterAtr": 0.5,
+   "recentClusterAtr": 1,
+   "recentBiCount": 20,
+   "clusterParamsByPeriod": {
+    "60": {
+     "clusterAtr": 1.68,
+     "recentClusterAtr": 0.05,
+     "recentBiCount": 21
+    }
    },
    "srTypes": [
-    "boll"
+    "cluster"
    ],
-   "clusterParts": [],
-   "clusterAtr": "0.5",
+   "clusterParts": [
+    "flip",
+    "recent"
+   ],
    "maxPerPeriod": "50",
-   "recentClusterAtr": "1.0",
-   "recentBiCount": "20",
    "touchWeight": "0.6",
    "barsWeight": "0.4",
-   "maxDistAtr": "3.0",
-   "sideCount": "2",
-   "mergeAtr": "0.5",
    "fibLevels": "0.382,0.5,0.618",
    "bollLength": "26",
-   "bollMult": "2.0",
+   "bollMult": "2",
+   "mergeAtr": "0.5",
+   "maxDistAtr": "3",
+   "sideCount": "2",
    "color": "#787b86",
    "draw_text": true,
    "draw_raw": false

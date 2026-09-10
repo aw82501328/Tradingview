@@ -5,19 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>三模式控制台 · 缠论回测</title>
 <style>
-  :root {
-    --bg: #0f1115;
-    --card: #1a1d24;
-    --card-2: #21252f;
-    --border: #2c313c;
-    --text: #d5d9e0;
-    --muted: #8b93a1;
-    --accent: #3b82f6;
-    --buy: #f23645;
-    --sell: #089981;
-    --ok: #089981;
-    --warn: #f0b90b;
-  }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     background: var(--bg); color: var(--text);
@@ -83,12 +70,11 @@
     border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
     background: var(--card-2); font-size: 12px; color: var(--muted);
   }
-  #pnl-summary .pos { color: var(--ok); }
-  #pnl-summary .neg { color: var(--buy); }
   #pnl-summary b { color: var(--text); font-weight: 600; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { padding: 8px 10px; text-align: left; border-top: 1px solid var(--border); white-space: nowrap; }
   th { background: var(--card-2); color: var(--muted); font-weight: 600; position: sticky; top: 0; }
+  th .sort-button { padding: 0 4px; border: 0; background: transparent; color: inherit; font: inherit; }
   td.long { color: var(--buy); }
   td.short { color: var(--sell); }
   .mode-tag { font-size: 11px; padding: 1px 7px; border-radius: 8px; background: #2a2f3a; }
@@ -101,16 +87,28 @@
   .status-tag.open { background: #3d3208; color: var(--warn); }
   .status-tag.closed { background: #0d3b31; color: var(--ok); }
   .status-tag.filtered { background: #2a2f3a; color: var(--muted); }
-  td.pnl-pos { color: var(--buy); }
-  td.pnl-neg { color: var(--sell); }
+  #pnl-summary .pnl-pos, td.pnl-pos { color: var(--buy); }
+  #pnl-summary .pnl-neg, td.pnl-neg { color: var(--sell); }
   .scroll { max-height: 420px; overflow-y: auto; }
+  #sig-body tr { cursor: pointer; }
+  #sig-body tr:hover td { background: var(--card-2); }
+  #sig-body tr.selected td { background: color-mix(in srgb, var(--accent) 18%, var(--card)); }
+  #sig-body tr.selected:not(.exit-continuation) td:first-child { box-shadow: inset 3px 0 var(--accent); }
+  #sig-body td[rowspan] { vertical-align: middle; }
+  #sig-body tr.exit-continuation td { border-top-style: dashed; }
+  #sig-body tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  #locate-status { padding: 8px 14px; color: var(--muted); font-size: 12px; }
 </style>
+<link rel="stylesheet" href="/theme.css">
+<link rel="stylesheet" href="/legacy-theme.css">
 </head>
 <body>
 <h1>三模式控制台 <a href="/sr.html" style="float:right;font-size:14px;color:var(--accent);text-decoration:none;">支阻位参数调试 →</a></h1>
 <div class="sub">全量回测（纯后台） · K线回放 · 实时监控 — 同一时间最多运行一种；进场信号实时记录到下方表格</div>
 
-<div class="grid" id="cards"></div>
+<nav id="mode-nav" class="mode-nav" aria-label="回测与监控功能"></nav>
+<div class="grid single-mode" id="cards"></div>
+<p class="sub">记录和汇总仅属于当前功能。标记操作使用当前功能全部记录；绘制会替换共享 TD 图表上的对应标记，删除标记作用于共享图表。</p>
 
 <div class="table-wrap">
   <div class="head">
@@ -140,13 +138,14 @@
     </div>
   </div>
   <div id="pnl-summary"></div>
+  <div id="locate-status" role="status" aria-live="polite">点击记录，定位到 TradingView 的信号K线</div>
   <div class="scroll">
     <table>
       <thead>
         <tr>
-          <th>#</th><th>模式</th><th>信号时间</th><th>方向</th><th>检测周期</th>
-          <th>策略</th><th>背驰级别</th><th>价格</th><th>近支阻</th><th>状态</th><th>成交时间</th><th>成交价</th><th>口径</th>
-          <th>出场时间</th><th>出场价</th><th>出场类型</th><th>手数</th><th>盈亏</th>
+          <th>#</th><th>信号时间</th><th>方向</th><th>检测周期</th>
+          <th>策略</th><th>背驰级别</th><th>价格</th><th>近支阻</th><th>状态</th><th>成交时间</th><th>成交价</th>
+          <th>出场时间</th><th>出场价</th><th>出场类型</th><th title="分批出场时分别显示本次出场或剩余持仓手数">手数</th><th id="pnl-header" aria-sort="none"><button type="button" id="sort-pnl" class="sort-button" title="点击按整笔交易盈亏从高到低排序">盈亏 ↕</button></th>
         </tr>
       </thead>
       <tbody id="sig-body"></tbody>
@@ -156,13 +155,39 @@
 
 <script>
 const MODES = [
-  { id: 'backtest', name: '全量回测', color: '#7cb0ff', desc: '纯后台逐根推进，可用缓存离线运行' },
+  { id: 'backtest', name: '全量回测', color: '#7cb0ff', desc: '当下背驰 · 纯后台逐根推进，可用缓存离线运行' },
   { id: 'replay', name: 'K线回放', color: '#c9a0ff', desc: '驱动软件 Bar Replay 自动播放，信号触发切周期标记' },
   { id: 'live', name: '实时监控', color: '#7fe0b0', desc: '固定 3m，新收盘 bar 全周期刷新' },
 ];
 
 const state = { active: null, modes: {} };
 let sigRows = [];
+const validMode = mode => MODES.some(m=>m.id===mode);
+let selectedMode = new URLSearchParams(location.search).get('mode');
+if(!validMode(selectedMode))selectedMode='backtest';
+const modeFilters = {backtest:'',replay:'',live:''};
+const modePnlSort = {backtest:'none',replay:'none',live:'none'};
+const selectedSignal = {backtest:null,replay:null,live:null};
+const locateMessages = {backtest:'',replay:'',live:''};
+let locatePending = null;
+let locatePoll = null;
+function reportModes(){
+  if(parent!==window)parent.postMessage({type:'modes-status',modes:Object.fromEntries(MODES.map(m=>[m.id,state.modes[m.id]?.state||'idle']))},location.origin);
+}
+function selectMode(mode){
+  if(!validMode(mode))return;
+  modeFilters[selectedMode]=el('filter-status').value;
+  selectedMode=mode;
+  el('filter-status').value=modeFilters[mode];
+  MODES.forEach(m=>el('card-'+m.id).hidden=m.id!==mode);
+  el('mode-nav').innerHTML=MODES.map(m=>`<button data-mode="${m.id}" aria-pressed="${m.id===mode}">${m.name}</button>`).join('');
+  document.querySelector('h1').firstChild.textContent=modeName(mode)+' ';
+  renderTable();
+}
+window.addEventListener('message',e=>{
+  if(e.origin!==location.origin||e.source!==parent||e.data?.type!=='select-mode')return;
+  selectMode(e.data.mode);
+});
 let logs = { backtest: [], replay: [], live: [] };
 let markBusy = false;   // 标记操作（画/删）进行中
 let markWatchdog = null; // 标记操作兜底复位定时器（SSE mark_done 丢失/线程异常时避免永久灰置）
@@ -189,7 +214,7 @@ function startMarkWatchdog() {
 }
 function stopMarkWatchdog() { clearTimeout(markWatchdog); markWatchdog = null; }
 function updateMarkButtons() {
-  const busy = markBusy;
+  const busy = markBusy || !!locatePending;
   el('btn-mark-draw').disabled = busy || isAnyModeRunning();
   el('btn-sr-draw').disabled = busy || isAnyModeRunning();
   el('btn-mark-clear').disabled = busy || isAnyModeRunning();
@@ -209,8 +234,6 @@ function buildCard(m) {
   const extras = {
     backtest: [
       { k: 'warmup', label: '预热根数', type: 'text', def: '60' },
-      { k: 'signal_mode', label: '信号模式', type: 'select', def: 'realtime',
-        options: [['realtime', '当下背驰（形成中段当拍判断）'], ['confirm', '确认制（等笔端点确认）']] },
       { k: 'lots', label: '手数', type: 'text', def: '4' },
       { k: 'slip_stop', label: '止损滑点', type: 'text', def: '3' },
       { k: 'slip_fallback', label: '兜底止损滑点', type: 'text', def: '10' },
@@ -246,7 +269,7 @@ function buildCard(m) {
   <div class="card" id="card-${m.id}">
     <h2><span>${m.name}</span><span class="badge" id="badge-${m.id}">idle</span></h2>
     <div style="font-size:11px;color:var(--muted);">${m.desc}</div>
-    ${rows.join('')}
+    <div class="mode-fields">${rows.join('')}</div>
     <div class="progress"><div id="bar-${m.id}"></div></div>
     <div class="progress-label" id="plabel-${m.id}"></div>
     <div class="log-box" id="log-${m.id}"></div>
@@ -268,17 +291,18 @@ function fmtTime(t) {
   return `${d.getUTCFullYear()}-${p(d.getUTCMonth()+1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
 }
 function modeName(id) { return MODES.find(m => m.id === id)?.name || id; }
-// 成交口径：anchor=锚点当拍（回测理想化）| confirm=确认成交 | confirm-stale-anchor=旧锚点保护回落
-function fillModeName(m) {
-  if (m === 'anchor') return '锚点';
-  if (m === 'confirm-stale-anchor') return '确认(旧锚)';
-  if (m === 'confirm') return '确认';
-  return m || '-';
+function signalDirectionName(r) {
+  const directions = ['多头多', '空头空', '多头空', '空头多'];
+  if (directions.includes(r.planDirection)) return r.planDirection;
+  // 旧记录未保存 planDirection，按 trading_plan.strategyOf / entryStrategyOf 的固定对应关系显示。
+  return {wait2Buy:'多头多',waitBuy:'多头多',wait2Sell:'空头空',waitSell:'空头空',
+    wait1Sell:'多头空',wait1Buy:'空头多'}[r.strategyKey] || '-';
 }
 // 出场类型：stopSr=支阻位止损（支阻位±止损滑点；无正确侧位兜底 进场价±兜底滑点）
 //          | stopBe=保本止损（beStop=进场K线极值±保本滑点）| close=全平（顺势=有利方向破前高/低；
 //          逆势=形成段≥5合并K）；exits 含 half=平一半（顺势形成段≥5合并K）/breakeven=保本
 function exitTypeName(t) {
+  if (t === 'half') return '半平';
   if (t === 'stopSr') return '支阻位止损';
   if (t === 'stopBe') return '保本止损';
   if (t === 'close') return '全平';
@@ -288,13 +312,32 @@ function exitEventsDesc(r) {
   const names = { breakeven: '保本', half: '半', close: '平', stopSr: '损', stopBe: '保损' };
   return (r.exits || []).map(e => names[e.type] || e.type).join('·') || '';
 }
+// 分批出场只拆分展示，仍按整笔交易计数、汇总和排序。
+function exitDisplayRows(r) {
+  const numeric = value => value != null && Number.isFinite(Number(value)) ? Number(value) : null;
+  const totalPnl = numeric(r.pnl), lots = numeric(r.lots);
+  const final = {time:r.exitTime,price:r.exitPrice,type:r.exitType,
+    label:r.exitType ? exitTypeName(r.exitType) : (r.state === 'open' ? '持仓中' : '-'),lots,pnl:totalPnl};
+  // 现有结算按首次 half 平掉原持仓一半；breakeven 仅移动止损，不是出场。
+  const half = (r.exits || []).find(e=>e.type === 'half');
+  if (!half) return [final];
+  const halfLots = lots == null ? null : lots / 2;
+  const entry = numeric(r.entryPrice), price = numeric(half.price);
+  const direction = r.direction === 'long' ? 1 : r.direction === 'short' ? -1 : null;
+  const halfPnl = entry == null || price == null || halfLots == null || direction == null
+    ? null : (price - entry) * direction * halfLots;
+  final.lots = halfLots;
+  final.pnl = totalPnl == null || halfPnl == null ? null : totalPnl - halfPnl;
+  if (!r.exitType) final.label = '剩余持仓';
+  return [{time:half.time,price:half.price,type:'half',label:'半平',lots:halfLots,pnl:halfPnl},final];
+}
 function statusClass(s) {
   return { '已平仓': 'closed', '持仓中': 'open', '同向过滤': 'filtered', '已成交': 'filled' }[s] || 'sig';
 }
 // 状态过滤器：'' = 全部
 function filteredRows() {
   const f = el('filter-status').value;
-  return f ? sigRows.filter(r => r.status === f) : sigRows;
+  return sigRows.filter(r=>r.mode===selectedMode&&(!f||r.status===f));
 }
 // 盈亏汇总（对过滤后的行实时聚合）：已平仓胜率/盈亏、浮盈、合计、出场分布。
 // pnl 为 null 的行（信号/同向过滤）不参与任何盈亏合计；pnl=0 不计盈亏（保本单）。
@@ -307,8 +350,12 @@ function renderSummary(rows) {
   const floating = openP.reduce((s, r) => s + r.pnl, 0);
   const total = realized + floating;
   const fmtV = v => (v > 0 ? '+' : '') + v.toFixed(2);
-  const cls = v => (v > 0 ? 'pos' : v < 0 ? 'neg' : '');
+  const cls = v => (v > 0 ? 'pnl-pos' : v < 0 ? 'pnl-neg' : '');
   const winRate = (win.length + lose.length) ? Math.round(100 * win.length / (win.length + lose.length)) : null;
+  // 已平仓平均盈利 / 平均亏损绝对值；保本单和持仓浮盈不参与。
+  const avgWin = win.length ? win.reduce((s, r) => s + r.pnl, 0) / win.length : 0;
+  const avgLoss = lose.length ? -lose.reduce((s, r) => s + r.pnl, 0) / lose.length : 0;
+  const payoffRatio = avgLoss ? (avgWin / avgLoss).toFixed(2) : win.length ? '∞' : '—';
   const ex = { stopBe: 0, stopSr: 0, close: 0, half: 0 };
   for (const r of rows) {
     if (r.exitType && r.exitType in ex) ex[r.exitType]++;
@@ -317,6 +364,7 @@ function renderSummary(rows) {
   const nameMap = { stopBe: '保损', stopSr: '止损', close: '全平' };
   const parts = [
     `已平仓 <b>${closed.length}</b>（盈 ${win.length} / 亏 ${lose.length}${winRate != null ? ' · 胜率 ' + winRate + '%' : ''}）`,
+    `<span title="已平仓平均盈利 ÷ 平均亏损绝对值；不含保本单和持仓浮盈。仅盈利显示∞，仅亏损显示0.00，无盈亏样本显示—。">盈亏比 <b>${payoffRatio}</b></span>`,
     `已平仓盈亏 <b class="${cls(realized)}">${fmtV(realized)}</b>`,
     `浮盈 <b class="${cls(floating)}">${fmtV(floating)}</b>`,
     `合计 <b class="${cls(total)}">${fmtV(total)}</b>`,
@@ -326,17 +374,33 @@ function renderSummary(rows) {
 }
 function renderTable() {
   const rows = filteredRows();
+  if (!sigRows.some(r=>r.mode===selectedMode&&r.id===selectedSignal[selectedMode])) {
+    selectedSignal[selectedMode] = null;
+    locateMessages[selectedMode] = '';
+  }
+  el('locate-status').textContent = locateMessages[selectedMode] || '点击记录，定位到 TradingView 的信号K线';
+  // 仅排列展示副本；无盈亏的记录始终置后，相同盈亏保持原始顺序。
+  const sort = modePnlSort[selectedMode];
+  el('pnl-header').ariaSort = sort;
+  el('sort-pnl').textContent = '盈亏 ' + ({none:'↕',descending:'↓',ascending:'↑'}[sort]);
+  el('sort-pnl').title = {none:'点击按整笔交易盈亏从高到低排序',descending:'点击按整笔交易盈亏从低到高排序',ascending:'点击恢复默认顺序'}[sort];
+  renderSummary(rows);
+  if (sort !== 'none') {
+    rows.sort((a, b) => {
+      const aValue = a.pnl == null ? NaN : Number(a.pnl);
+      const bValue = b.pnl == null ? NaN : Number(b.pnl);
+      const aValid = Number.isFinite(aValue), bValid = Number.isFinite(bValue);
+      if (!aValid || !bValid) return aValid ? -1 : bValid ? 1 : 0;
+      return sort === 'ascending' ? aValue - bValue : bValue - aValue;
+    });
+  }
   const body = el('sig-body');
   body.innerHTML = rows.map(r => {
-    const pnl = r.pnl != null ? Number(r.pnl) : null;
-    const pnlCls = pnl == null || pnl === 0 ? '' : (pnl > 0 ? 'pnl-pos' : 'pnl-neg');
-    const pnlTxt = pnl == null ? '-' : (pnl > 0 ? '+' : '') + pnl.toFixed(2);
-    return `
-    <tr>
+    const exits = exitDisplayRows(r);
+    const shared = `
       <td>${r.id}</td>
-      <td><span class="mode-tag ${r.mode}">${modeName(r.mode)}</span></td>
       <td>${fmtTime(r.time)}</td>
-      <td class="${r.direction === 'long' ? 'long' : 'short'}">${r.direction === 'long' ? '做多' : '做空'}</td>
+      <td class="${r.direction === 'long' ? 'long' : 'short'}">${signalDirectionName(r)}</td>
       <td>${r.periodX || '-'}</td>
       <td>${r.strategyKey || '-'}</td>
       <td>${r.markRes || '-'}</td>
@@ -345,18 +409,109 @@ function renderTable() {
       <td><span class="status-tag ${statusClass(r.status)}">${r.status}</span></td>
       <td>${fmtTime(r.entryTime)}</td>
       <td>${r.entryPrice != null ? Number(r.entryPrice).toFixed(2) : '-'}</td>
-      <td>${fillModeName(r.fillMode)}</td>
-      <td>${fmtTime(r.exitTime)}</td>
-      <td>${r.exitPrice != null ? Number(r.exitPrice).toFixed(2) : '-'}</td>
-      <td title="${exitEventsDesc(r)}">${r.exitType ? exitTypeName(r.exitType) : (r.state === 'open' ? '持仓中' : '-')}</td>
-      <td>${r.lots != null ? r.lots : '-'}</td>
-      <td class="${pnlCls}">${pnlTxt}</td>
-    </tr>`;
+    `.replace(/<td(?=[ >])/g, `<td rowspan="${exits.length}"`);
+    return exits.map((exit, i) => {
+      const pnl = exit.pnl;
+      const pnlCls = pnl == null || pnl === 0 ? '' : (pnl > 0 ? 'pnl-pos' : 'pnl-neg');
+      const pnlTxt = pnl == null ? '-' : (pnl > 0 ? '+' : '') + pnl.toFixed(2);
+      const totalTxt = r.pnl == null ? '-' : Number(r.pnl).toFixed(2);
+      const selected = selectedSignal[selectedMode] === r.id;
+      const classes = [selected ? 'selected' : '', i ? 'exit-continuation' : ''].filter(Boolean).join(' ');
+      return `<tr data-signal-id="${r.id}" tabindex="0" class="${classes}" aria-selected="${selected}" title="点击定位信号K线">
+        ${i === 0 ? shared : ''}
+        <td>${fmtTime(exit.time)}</td>
+        <td>${exit.price != null ? Number(exit.price).toFixed(2) : '-'}</td>
+        <td title="${exitEventsDesc(r)}">${exit.label}</td>
+        <td>${exit.lots != null ? exit.lots : '-'}</td>
+        <td class="${pnlCls}" title="${exits.length > 1 ? (exit.type ? '本次出场盈亏' : '剩余持仓浮盈') + '；整笔交易合计：' + totalTxt : '整笔交易盈亏'}">${pnlTxt}</td>
+      </tr>`;
+    }).join('');
   }).join('');
-  el('count').textContent = rows.length === sigRows.length
-    ? `共 ${sigRows.length} 条`
-    : `筛选 ${rows.length} / 共 ${sigRows.length} 条`;
-  renderSummary(rows);
+  const modeCount=sigRows.filter(r=>r.mode===selectedMode).length;
+  el('count').textContent = rows.length === modeCount
+    ? `共 ${modeCount} 条`
+    : `筛选 ${rows.length} / 共 ${modeCount} 条`;
+}
+
+function togglePnlSort() {
+  modePnlSort[selectedMode] = {none:'descending',descending:'ascending',ascending:'none'}[modePnlSort[selectedMode]];
+  renderTable();
+}
+
+function finishLocate(job) {
+  if (!locatePending || job?.jobId !== locatePending.jobId || job.state === 'running') return;
+  const mode = locatePending.mode;
+  locateMessages[mode] = job.state === 'done'
+    ? `#${job.id} 已定位 · ${job.result.symbol} · ${job.result.markRes} · ${fmtTime(job.result.time)}`
+    : `#${job.id} 定位失败：${job.error || '未知错误'}`;
+  locatePending = null;
+  clearTimeout(locatePoll);
+  updateMarkButtons();
+  renderTable();
+}
+
+async function pollLocate() {
+  if (!locatePending?.jobId) return;
+  const pending = locatePending;
+  try {
+    const response = await fetch('/api/signals/locate');
+    if (!response.ok) throw Error('状态查询失败');
+    const data = await response.json();
+    if (locatePending !== pending) return;
+    if (!data.job || data.job.jobId !== pending.jobId) {
+      finishLocate({...pending,state:'error',error:'定位状态已失效，服务可能已重启，请重试'});
+    } else finishLocate(data.job);
+  } catch (e) {
+    if (locatePending === pending) {
+      locateMessages[pending.mode] = `#${pending.id} 定位状态连接中断，正在重新查询…`;
+      renderTable();
+    }
+  }
+  if (locatePending === pending) locatePoll = setTimeout(pollLocate, 2000);
+}
+
+async function locateRow(id) {
+  if (locatePending) return;
+  const mode = selectedMode;
+  if (!sigRows.some(r=>r.id===id&&r.mode===mode)) return;
+  selectedSignal[mode] = id;
+  if (markBusy || isAnyModeRunning()) {
+    locateMessages[mode] = '图表正被任务占用，请结束运行或暂停中的任务，并等待图表操作完成后再定位';
+    renderTable();
+    return;
+  }
+  const pending = {mode,id};
+  locatePending = pending;
+  locateMessages[mode] = `#${id} 定位中…（历史数据加载最多等待360秒）`;
+  renderTable();
+  updateMarkButtons();
+  try {
+    const response = await fetch('/api/signals/locate', {
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode,id})
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw Error(data.error || '定位请求失败');
+    pending.jobId = data.job.jobId;
+    // Query immediately too: a fast completion event may precede the POST response.
+    pollLocate();
+  } catch (e) {
+    locateMessages[mode] = `#${id} 定位失败：${e.message}`;
+    locatePending = null;
+    updateMarkButtons();
+    renderTable();
+  }
+}
+
+function bindSignalRows() {
+  const activate = event => {
+    if (event.type === 'keydown' && !['Enter',' '].includes(event.key)) return;
+    const row = event.target.closest('tr[data-signal-id]');
+    if (!row) return;
+    if (event.type === 'keydown') event.preventDefault();
+    locateRow(Number(row.dataset.signalId));
+  };
+  el('sig-body').onclick = activate;
+  el('sig-body').onkeydown = activate;
 }
 
 // ---------- 状态更新 ----------
@@ -419,6 +574,7 @@ function collectCfg(m) {
     const v = inp.value;
     cfg[inp.dataset.cfg] = v === 'true' ? true : v === 'false' ? false : v;
   });
+  if (m === 'backtest') cfg.signal_mode = 'realtime';
   cfg.periods = cfg.periods.split(',').map(s => s.trim()).filter(Boolean);
   // 30秒级别开关：开启时向 periods 追加 30S（只落盘最近3天数据，供 3 分钟进场背驰检测）
   if (cfg.with_30s === true && !cfg.periods.includes('30S')) cfg.periods.push('30S');
@@ -441,6 +597,7 @@ function bindCard(m) {
 // ---------- SSE ----------
 function connectSSE() {
   const es = new EventSource('/api/stream');
+  es.addEventListener('locate_done', e => finishLocate(JSON.parse(e.data)));
   es.onopen = () => console.log('SSE 已连接');
   es.onerror = () => { /* 自动重连 */ };
   es.addEventListener('init', e => applyStatus(JSON.parse(e.data)));
@@ -484,19 +641,25 @@ function connectSSE() {
     const bar = el(`bar-${d.mode}`);
     if (d.pct != null) { bar.style.width = d.pct + '%'; el(`plabel-${d.mode}`).textContent = `${d.current}/${d.total} (${d.pct}%)`; }
   });
-  es.addEventListener('signals_cleared', () => { sigRows = []; renderTable(); });
+  es.addEventListener('signals_cleared', e => { const d=JSON.parse(e.data);sigRows=d.mode?sigRows.filter(r=>r.mode!==d.mode):[];renderTable(); });
 }
 
 // ---------- 初始化 ----------
 async function init() {
   el('cards').innerHTML = MODES.map(buildCard).join('');
   MODES.forEach(m => bindCard(m.id));
+  selectMode(selectedMode);
+  el('mode-nav').onclick=e=>{const b=e.target.closest('[data-mode]');if(b)selectMode(b.dataset.mode)};
+  if(parent!==window)parent.postMessage({type:'modes-ready'},location.origin);
   el('btn-clear').onclick = async () => {
-    const r = await api('/api/signals/clear');
-    if (r) sigRows = [];
+    const clearedMode=selectedMode;
+    const r = await api('/api/signals/clear',{mode:clearedMode});
+    if (r) sigRows = sigRows.filter(row=>row.mode!==clearedMode);
     renderTable();
   };
   el('filter-status').onchange = () => renderTable();
+  el('sort-pnl').onclick = togglePnlSort;
+  bindSignalRows();
   el('btn-mark-draw').onclick = async () => {
     if (markBusy || isAnyModeRunning()) return;
     markBusy = true;
@@ -505,7 +668,7 @@ async function init() {
     startMarkWatchdog();
     const colors = { buy: el('mark-color-buy').value, sell: el('mark-color-sell').value,
                      exit: el('mark-color-exit').value };
-    const r = await api('/api/marks/draw', { colors });
+    const r = await api('/api/marks/draw', { colors,mode:selectedMode });
     if (!r) { markBusy = false; stopMarkWatchdog(); updateMarkButtons(); setMarkStatus('标记请求失败', true); }
   };
   el('btn-sr-draw').onclick = async () => {
@@ -514,7 +677,7 @@ async function init() {
     updateMarkButtons();
     setMarkStatus('支阻标记中...');
     startMarkWatchdog();
-    const r = await api('/api/marks/sr_draw', { colors: { sr: el('mark-color-sr').value } });
+    const r = await api('/api/marks/sr_draw', { mode:selectedMode, colors: { sr: el('mark-color-sr').value } });
     if (!r) { markBusy = false; stopMarkWatchdog(); updateMarkButtons(); setMarkStatus('支阻标记请求失败', true); }
   };
   el('btn-mark-clear').onclick = async () => {
@@ -532,11 +695,13 @@ async function init() {
   applyStatus(status);
   renderTable();
   connectSSE();
+  reportModes();
+  setInterval(reportModes,1000);
 }
 init();
 </script>
 <script>
-if (new URLSearchParams(location.search).has("embed")) { document.querySelectorAll("h1 a").forEach(a => a.hidden = true); }
+if (new URLSearchParams(location.search).has("embed")) { document.body.classList.add("embedded"); }
 </script>
 </body>
 </html>
