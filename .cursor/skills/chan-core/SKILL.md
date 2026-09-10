@@ -51,7 +51,7 @@ let bis = core.buildBi(fractals, merged, atr, macdArr); // ③ 笔构建
 | `findFractals(merged)` | 顶/底分型识别，`time` 取极值所在原始K线时间 |
 | `countRaw(merged, aIdx, bIdx)` | 统计 (aIdx, bIdx] 覆盖的原始K线数 |
 | `hasGapBetween(merged, aIdx, bIdx, atr, gapFilter)` | 区间内是否存在跳空缺口 |
-| `buildBi(fractals, merged, atr, macdArr)` | 笔构建（交替分型 + 回溯 + 跳空/MACD成笔 + 前顶前底作废 + 分型范围脱离 + 极值规则） |
+| `buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lowerContext)` | 笔构建（交替分型 + 回溯 + 跳空/MACD成笔 + 前顶前底作废 + 分型范围脱离 + 极值规则） |
 | `calcATR(rawBars, period=14)` | ATR（平均真实波幅） |
 | `calcMACD(rawBars)` | MACD（返回 `{time, macd, dif, dea}`，macd>0 红柱 / <0 绿柱） |
 | `hasMacdCrossBetween(macdArr, merged, aIdx, bIdx, aTime, bTime)` | 区间内 MACD 红绿转换检测（用分型极值时间作边界） |
@@ -106,3 +106,14 @@ let bis = core.buildBi(fractals, merged, atr, macdArr); // ③ 笔构建
 - 修改算法规则时（如笔构建、中枢、背驰判定、买卖点定义），**只改本模块**，`chan-bi`、`chan-zs` 与 `mark-buy-sell` 会自动生效；
 - 修改后建议用各 SKILL 的 `--dry` 模式回归验证输出与预期一致；
 - `keepRecentEach` 为历史保留函数，主流程已不再调用；现行保留策略为 `keepRecentAll`（每周期不分类只保留最近 10 个标记，`--keep=N` 可调）。
+
+
+## 一小时近等端点补充确认（2026-09-10）
+
+原阈值 max(0.3×ATR, 0.001×价格) 保持。仅60分钟价差超过原阈值但不超过1.5倍时，可由15分钟双动能确认：后段同色柱峰值与同侧DIF极值绝对值均不超过前段50%，两段柱峰值均非零，双底DIF均负、双顶均正。保留平台间隔、原阈值反向波动、锁定端点和单次替换保护；数据不足不走补充分支，不改变买卖点创新极值背驰定义。
+
+JS/Python的`buildBi`增加可选末参`lowerContext`；用`makeBiLowerContext(res,bars,cutoff,macd)`准备15分钟数据和MACD索引，缺省参数保持旧行为。新增配置`nearDoubleLowerRelax=1.5`、`nearDoubleLowerRatio=0.5`。
+
+画笔构建60分钟前需要完整15分钟历史（最近30天仅限显示）；回测、回放和监控仅使用当前决策时刻已收盘数据，先更新低周期。目标小时K线为8月7日08:00、4229.875，15分钟精确极值为08:45；固定样本仅目标相邻两笔变化，实际全量影响需回归检查。
+
+完整条件、接口、保护和测试见[现行补充规范](../../../spec/plans/SPEC_near_double_lower_confirmation.md)。早期章节中原阈值的说明描述基础分支，与本补充分支共同适用。
