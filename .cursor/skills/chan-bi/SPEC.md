@@ -80,9 +80,9 @@
 
 ### 3.3 笔计算（每周期）
 
-1. `mergeBars`（包含合并）→ `findFractals`（分型）；
+1. `markWickBars`（长影压平）→ `mergeBars`（包含合并）→ `findFractals`（分型）；
 2. `calcATR(rawBars, 14)`（供跳空判定）→ `calcMACD(rawBars)`（供 MACD 变色成笔）；
-3. `lockedPivotsOf(prevBis)` 取上级笔端点作为锁定端点 → `buildBi(fractals, merged, atr, macdArr, lockedPivots)`（区间套强制对齐）；
+3. `lockedPivotsOf(prevBis)` 取上级笔端点作为锁定端点 → `buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lowerContext)`（区间套强制对齐）；
 4. `fixBiExtremes(bis, merged)`（端点极值修正）；
 5. **ATR 过滤**：`span < 稳定ATR×ATR_FILTER` 的笔剔除（`ATR_FILTER` 默认 0.5）。**阈值基准用全窗口 TR 均值（稳定ATR），不用 `calcATR` 的尾部 14 根**——9-4 行情急涨使 15m 尾部 ATR 从 ~17.4 涨到 21+，把 9-3 06:06→07:36 的结构性下跌笔（幅度 10.59）误判为噪音剔除、06:06 顶 4391.835 随之消失（连续同向坏笔的源头）。笔结构与行情无关，阈值不应随局部行情漂移；与 chan-core `markWickBars` 的稳定基准同理（见 chan-core SPEC §2.0）。
 6. `extendLastBi`（未完成笔延伸）；
@@ -150,3 +150,14 @@
 | `mark-buy-sell`（买卖点） | **强制读取**本脚本落盘笔数据 |
 | `mark-sr-flip`（支阻位） | **强制读取**本脚本落盘笔数据 |
 | `mark-entry`（进出场） | **强制读取**本脚本落盘笔数据 |
+
+
+## 一小时近等端点补充确认（2026-09-10）
+
+原阈值 max(0.3×ATR, 0.001×价格) 保持。仅60分钟价差超过原阈值但不超过1.5倍时，可由15分钟双动能确认：后段同色柱峰值与同侧DIF极值绝对值均不超过前段50%，两段柱峰值均非零，双底DIF均负、双顶均正。保留平台间隔、原阈值反向波动、锁定端点和单次替换保护；数据不足不走补充分支，不改变买卖点创新极值背驰定义。
+
+JS/Python的`buildBi`增加可选末参`lowerContext`；用`makeBiLowerContext(res,bars,cutoff,macd)`准备15分钟数据和MACD索引，缺省参数保持旧行为。新增配置`nearDoubleLowerRelax=1.5`、`nearDoubleLowerRatio=0.5`。
+
+画笔构建60分钟前需要完整15分钟历史（最近30天仅限显示）；回测、回放和监控仅使用当前决策时刻已收盘数据，先更新低周期。目标小时K线为8月7日08:00、4229.875，15分钟精确极值为08:45；固定样本仅目标相邻两笔变化，实际全量影响需回归检查。
+
+完整条件、接口、保护和测试见[现行补充规范](../../../spec/plans/SPEC_near_double_lower_confirmation.md)。早期章节中原阈值的说明描述基础分支，与本补充分支共同适用。
