@@ -1,5 +1,7 @@
 # 支阻位体系改造方案：三类型可配置 + 统一管线 + 按周期显示（SPEC_sr_unified_types）
 
+> **已废止（部分）**：本文档中「三类同池合并」「跨周期合并」相关章节已于 **2026-09-12 随跨周期合并的取消而失效**——合并函数 `mergeFlipsAcrossPeriods` 已移除，`merged` 改为不合并的全量候选池（展平），显示改为各周期独立选取。现行口径以 `.cursor/skills/mark-sr-flip/SPEC.md` 为准；本文其余部分（三类来源识别、截断豁免、按周期显示骨架）仍有效。
+>
 > 状态：**待确认**（用户确认后实施；实施完成后本文件移入 spec/results 并补充实测结果）
 > 日期：2026-09-08
 > 范围：`.cursor/skills/mark-sr-flip/`（JS 实盘标记）与 `py_chain/sr_flip.py`（Python 回测）双端同步；下游 `mark-entry` 只读 `merged.price`，消费口径不变。

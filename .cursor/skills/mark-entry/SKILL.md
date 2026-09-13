@@ -20,7 +20,7 @@ disable-model-invocation: true
 >
 > **强制依赖三个前置数据**：
 > 1. **画笔**（chan-bi）落盘的笔数据 `.cursor/cache/bis_<品种>.json`；
-> 2. **支阻互换位**（mark-sr-flip）落盘的支阻位数据 `.cursor/cache/srflip_<品种>.json`（读取其 `merged` 合并后支阻位）；
+> 2. **支阻互换位**（mark-sr-flip）落盘的支阻位数据 `.cursor/cache/srflip_<品种>.json`（读取其 `merged` 全量候选池支阻位）；
 > 3. **交易计划**（trading-plan）落盘的计划数据 `.cursor/cache/plan_<品种>.json`（读取各周期 `strategy` 判定进场状态）。
 >
 > 任一数据文件缺失、或品种不匹配，脚本会**报错退出**。**运行依赖链**（依序执行）：**画笔（chan-bi）→ 标记买卖点（mark-buy-sell）→ 支阻互换位（mark-sr-flip）→ 交易计划（trading-plan）→ 本脚本**。
@@ -45,7 +45,7 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30
 node .cursor/skills/mark-entry/scripts/mark_entry.js --dry --from=2026-06-30
 
 # 调整靠近支阻位阈值（×状态所在周期ATR）
-node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=1.0
+node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 ```
 
 > `--from` 起始日期应与画笔/支阻位/交易计划时一致。
@@ -57,7 +57,7 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=1.
 | `--from=YYYY-MM-DD` | **必填**：起始日期，与画笔/支阻位/交易计划一致 | 无（缺少时报错退出） |
 | `--periods=...` | 检测周期列表（逗号分隔，从大到小） | `240,60,15,3` |
 | `--with-30s` | 启用 30 秒级别：ALL_RES 追加 30S（需先用 `chan-bi --with-30s` 落盘 30S 笔数据），3 分钟状态可用 30S 背驰产生进场信号，箭头画在 30S 级别；30S 数据只取最近 3 天。检测周期列表本身**不变**（30S 无更低级别，不作检测周期） | 关闭 |
-| `--near=K` | 靠近支阻位阈值（×状态所在周期ATR） | `1.0` |
+| `--near=K` | 靠近支阻位阈值（**绝对价差**，2026-09-13 起不乘 ATR） | `10` |
 | `--lots=N` | 每笔进场手数（仅落盘记录；盈亏口径 = 价格差×方向×手数，JS 端不算盈亏） | `4` |
 | `--slip-stop=K` | 止损位滑点（绝对价格：正确侧支阻位外侧偏移，short +/long −） | `3` |
 | `--slip-fallback=K` | 兜底止损滑点（无正确侧支阻位 → 止损 = 进场价±该值；止损位永不为 null） | `10` |
@@ -95,7 +95,7 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=1.
 
 1. **够笔**：最后一笔方向符合预期（空头→最后一笔为 up「反弹够笔」、多头→最后一笔为 down「回调够笔」）；
 2. **以下级别出现背驰**：在所有更低周期（如 60 的更低级别为 15/3）中，存在方向匹配的背驰点（做多→底背驰、做空→顶背驰），取**时间最新**的背驰点；
-3. **在支阻位附近**：背驰点价与任一支阻位（`srflip.merged`）价差 ≤ `--near × 状态所在周期ATR`。
+3. **在支阻位附近**：背驰点价与任一支阻位（`srflip.merged`）价差 ≤ `--near`（绝对价差，默认 10，不乘 ATR）。
 
 **各策略专属条件**：
 

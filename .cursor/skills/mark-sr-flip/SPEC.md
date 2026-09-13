@@ -1,7 +1,7 @@
 # 支阻位标记功能规格（mark-sr-flip）
 
 > 文档用途：作为 mark-sr-flip 脚本的**规格说明（spec）**，描述输入、处理规则、判定逻辑、输出与边界情况，使实现与使用有唯一共识。
-> 对应脚本：`.cursor/skills/mark-sr-flip/scripts/mark_sr_flip.js`（2026-09-08 三类型可配置 + 统一管线 + 按周期显示版本：密集区/黄金分割/BOLL 三类同池合并，`drawn`/`drawnFib` 改为 `drawnByPeriod`）。
+> 对应脚本：`.cursor/skills/mark-sr-flip/scripts/mark_sr_flip.js`（2026-09-12 取消跨周期合并版本：三类候选不合并、逐条展平为全量候选池，显示改为各周期独立选取；此前为 2026-09-08 三类同池合并 + 按周期显示版本）。
 
 ## 1. 输入
 
@@ -19,27 +19,33 @@
 |------|--------|------|
 | `--from=YYYY-MM-DD` | 无（必填） | 起始日期，与画笔 chan-bi 一致 |
 | `--periods` | `D,240,60,15,3` | 要标记的周期列表 |
-| `--sr-types` | `cluster,boll` | 支阻位类型开关（逗号分隔，可选 `cluster`=密集区 / `fib`=黄金分割 / `boll`=布林带；全关报错退出） |
+| `--sr-types` | `cluster,boll` | **叠加层**开关（逗号分隔，可选 `cluster`=密集区 / `fib`=黄金分割 / `boll`=布林带；全关报错退出）。2026-09-13 起 fib/boll 为独立叠加层，勾选即叠加到支阻位上，人工周期照样叠加 |
+| `--manual` | 空 | **人工支阻位**（分号分周期、冒号后价位表：`60:4450,4460.5;D:1900`）：键存在 = 该周期支阻位来源=人工——替换该周期密集区、全部画出；**空价位 = 该周期没有支阻位**（不回退系统计算）；叠加层不受影响 |
 | `--fib-levels` | `0.382,0.5,0.618` | 黄金分割比率（逗号分隔，须在 (0,1) 内，去重升序；全非法回退默认；仅 fib 开启时生效） |
 | `--boll-length` | `26` | BOLL SMA 周期（已收盘K线口径） |
 | `--boll-mult` | `2` | BOLL 标准差倍数 |
 | `--side-count` | `2` | 每周期图每侧条数（2 → 每图最多 4 条） |
 | `--cluster` | `0.5` | 强支阻位聚类容差（×ATR） |
-| `--merge` | `0.5` | 跨周期合并容差（×最小周期ATR；三类同池合并） |
 | `--recent-cluster` | `1.0` | 近期极值位聚类容差（×ATR） |
 | `--min-touch` | 按级别（D/240/60=4，15=3，3=8） | 强支阻位最少触及次数；显式指定则全局覆盖 |
-| `--max-dist` | `3.0` | 选取距离上限（×线自身级别ATR） |
+| `--max-dist` | `3.0` | 选取距离上限（×本周期ATR） |
 | `--max-per-period` | `50` | 每周期候选数量上限（超出按强度评分降序截断；仅约束密集区，fib/boll 豁免） |
 | `--dry` | 关闭 | 只计算不绘图 |
 | `--debug` | 关闭 | 打印调试信息 |
 
 ## 2. 候选识别（每个周期独立）
 
-支阻位分三类来源，`--sr-types` 分别开关，可共存：
+**支阻位来源按周期二选一**（2026-09-13 起）：
 
-- **密集区（cluster）**：基于价格聚类的两类来源（§2.1 强支阻互换位、§2.2 近期极值位），走评分/截断，随后与 fib/boll 同池跨周期合并（§4）、按显示周期选取（§5.1）；
-- **黄金分割（fib）**：非一类买卖点参照笔的回撤分割位（§2.4），豁免评分/截断，但**参与统一合并池**（§4）；
-- **BOLL 布林带（boll）**：末根已收盘K线的布林带三轨（§2.6），豁免评分/截断，**参与统一合并池**（§4）。
+- **系统计算（默认）= 密集区（cluster）**：基于价格聚类的两类来源（§2.1 强支阻互换位、§2.2 近期极值位），走评分/截断；
+- **人工输入（manual，`--manual` / Web `manualLevels`）**：手动价位直接作为该周期支阻位（§2.7），替换密集区、全部画出。
+
+**叠加层**（`--sr-types` 开关，独立于支阻位来源、人工周期照样叠加、仍进候选池供 nearSr/止损参考）：
+
+- **黄金分割（fib）**：非一类买卖点参照笔的回撤分割位（§2.4），豁免评分/截断，直接进全量候选池（§4）；
+- **BOLL 布林带（boll）**：末根已收盘K线的布林带三轨（§2.6），豁免评分/截断，直接进全量候选池（§4）。
+
+全部候选（密集区截断后 + fib + boll + manual）进全量候选池（§4）、按显示周期独立选取（§5.1）。
 
 ### 2.1 强支阻互换位（密集区）
 
@@ -66,7 +72,7 @@
 - 评分沿用 `flipScore`，以该周期全部候选为归一化集（与选取阶段一致）；
 - **fib / boll 豁免截断**（结构性豁免：根本不进截断输入）——fib 由结构点派生、boll 为当前带宽值，评分语义不适用；
 - **只约束「标记/落盘」的数据层**（`periods`），**不影响显示层**（按显示周期就近选取，见 §5.1）；
-- 跨周期合并后的 `merged` 不设上限（三类同池合并后保留全部，供 `mark-entry` 读取判断靠近支阻位）。
+- 全量候选池 `merged` 不设上限（三类候选全部展平保留，供 `mark-entry` 读取判断靠近支阻位）。
 
 ### 2.4 黄金分割支阻位（`fib`）
 
@@ -90,12 +96,12 @@
 5. **候选字段**：`{ price, type: SUP|RES, fib: true, ratio, fromPoint: {type,time,price}, referBi: {startTime,endTime,startPrice,endPrice}, touchCount: 1, firstTouch: refer.startTime, lastTouch: breakTime: point.time, barsPassed }`
    （`touchCount=1` 仅为数据形状对齐；fib 不进任何评分组。绘线锚点 = 信号点时间）。
 
-**统一合并池口径**（fib 参与 §4 跨周期合并，与 cluster/boll 同池同规则）：
+**候选池口径**（fib 直接进 §4 全量候选池，与 cluster/boll 同池、不合并）：
 
 - **豁免 capPerPeriod**：见 §2.3；
-- **参与跨周期合并**：三类候选全部进 `mergeFlipsAcrossPeriods`——价差 ≤ 合并容差并成一条**位置线**；纯单来源 fib 独立线保留 `fib: true`、`ratio`、`fromPoint`、`referBi` 标记；与其它来源并簇的**混合线删除 fib/pending/boll 标记**，统一按「位置线」口径（来源标注文字 `位置线`）；
-- **不走 pickByLevel 上下各1**：三条比率位是围绕同一信号点的成组结构，按上下各1选取会拆散；改为按显示周期就近选取（见 §5.1）；
-- 同一买卖点的各比率位**互不聚类**（0.382/0.5/0.618 语义不同，不可平均）——除非与其它来源并簇（此时按位置线口径）。
+- **不合并**：fib 候选独立成线，保留 `fib: true`、`ratio`、`fromPoint`、`referBi` 标记，价格=原始分割位（同价位的 cluster/boll 候选也各自保留，不并条、不平均）；
+- **不走按级别评分选取**：三条比率位是围绕同一信号点的成组结构，按上下各1评分选取会拆散；改为按显示周期就近选取（见 §5.1）；
+- 同一买卖点的各比率位**互不聚类**（0.382/0.5/0.618 语义不同，不可平均）。
 
 ### 2.5 预期回退（pending，2026-09-07 新增）
 
@@ -120,9 +126,23 @@ fib 锚定「上一个已确认点」属**滞后锚定**——对「等待2卖/2
 3. **候选字段**：`{ price, type, boll: "upper"|"mid"|"lower", touchCount: 1, barsPassed: 0, firstTouch/lastTouch/breakTime = 末根已收盘K线 time }`；
 4. **边界**：bars < boll-length 的周期无布林位（正常降级，如日线窗口 13 根）；无 pending 概念；带宽值随每次重跑的最新已收盘K线刷新。
 
+### 2.7 人工支阻位（`manual`，2026-09-13 新增）
+
+**Web `/sr` 调试页**：周期表「支阻来源」列逐周期选 系统计算/人工输入，选人工展开价位输入（逗号/空格分隔，配置键 `manualLevels = {周期: 价位文本}`，服务端解析）；**JS CLI**：`--manual=60:4450,4460.5;D:1900`。
+
+- **键存在 = 该周期支阻位来源=人工**：替换该周期密集区计算（`buildManualCandidates`）；
+  **叠加层（fib/BOLL）独立**，人工周期照样生成并按就近选取叠加；
+- **全部画出**：人工候选不受 `sideCount` 与距离上限限制，输入几条画几条（就近选取池不含人工候选）；
+- **type 按现价侧推导**（`buildManualCandidates`，仿 boll 中轨）：现价 ≥ 价位 → `SUP`，否则 → `RES`；currentPrice 未知时统一 `RES`；
+- **空列表 = 该周期没有支阻位**（不画线、不进候选池，**不回退**系统计算——选了人工就是人工）；
+- 人工周期**不要求 bis≥3**（无笔也能用），但仍需 K线（ATR/末收盘价/锚点）；
+- 候选字段：`{ price, type, manual: true, touchCount: 1, barsPassed: 0, firstTouch/lastTouch/breakTime = 末根已收盘K线 time }`；`srcType="manual"`，标注 `手动位+<周期中文名>`；
+- 豁免 `capPerPeriod`（无密集区可截）；进 `merged` 供 mark-entry nearSr/止损参考（下游只读 `price`）；
+- 校验（Web `normalize_sr_cfg`）：周期键别名归一（1H→60 等）；未勾选周期键丢弃；字符串/列表 → 正有限 float 去重升序，上限 50 条；空值归一为空列表（不报错）。
+
 ## 3. 强度评分（仅密集区）
 
-每个密集区候选（含合并后）计算强度评分，用于 `capPerPeriod` 截断；**fib/boll 不参与评分**（由结构点/带宽派生，非市场测试强度）：
+每个密集区候选计算强度评分，用于 `capPerPeriod` 截断；**fib/boll 不参与评分**（由结构点/带宽派生，非市场测试强度）：
 
 ```
 score = 0.6 × norm(touchCount) + 0.4 × norm(barsPassed)
@@ -133,29 +153,27 @@ score = 0.6 × norm(touchCount) + 0.4 × norm(barsPassed)
 - `norm()` = 同一级别候选集内 min-max 归一化，消除量纲差异；
 - 权重常量：`TOUCH_WEIGHT = 0.6`、`BARS_WEIGHT = 0.4`。
 
-## 4. 跨周期合并（三类同池）
+## 4. 全量候选池（不合并）
 
-- 三类候选（密集区截断后 + fib + boll）**全部**进 `mergeFlipsAcrossPeriods`，同一池、同一规则（不再有 fib 并行双轨）；
-- 合并容差：`merge × 最小有数据周期 ATR`（默认 `0.5 × minAtr`）；
-- 价差 ≤ 容差的候选合并：
-  - 价格按触及次数加权平均；
-  - `touchCount`、`barsPassed` 累加；
-  - `sources` 记录来源周期；
-  - `firstTouch` 取更早、`breakTime` 取更晚；
-  - 类型冲突时以触及次数更多者为准；
-- **多来源混合线**（`_kinds` 含 >1 种）删除 `fib/pending/ratio/fromPoint/referBi/boll` 标记，置 `srcType="mixed"`（来源标注文字 `位置线`）；**纯单来源独立线**保留标记，置 `srcType="cluster"|"fib"|"boll"`；
-- `level`（主要来源级别）= 来源中**最大的级别**（大级别支阻位更重要，决定颜色与可见范围，不被小级别「淹没」）。
+2026-09-12 起取消跨周期合并（原 `mergeFlipsAcrossPeriods` 移除），改为逐条展平：
+
+- 全部候选（密集区截断后 + fib + boll + manual）进 `flattenCandidates` 展平为全量候选池 `merged`：每条候选独立成线，**价格=原始识别价**（不做任何加权平均）；
+- **同价位不并条**：不同周期、不同来源识别出的同/近价位候选各自保留为独立条目（`touchCount`/`barsPassed` 不累加，无 `sources` 聚合）；
+- 每项附加两个字段：`level`（候选自身周期）与 `srcType`（`"cluster"|"fib"|"boll"|"manual"`，由自身标记反推；不再有 `"mixed"`）；
+- fib/boll 标记**永不清理**（原混合线删标记的规则随合并一并移除）；
+- 排序：先按 `LEVEL_ORDER` 级别序（大→小，未知键落尾），再按 `price` 升序（确定性输出）。
 
 ## 5. 选取与绘制
 
-### 5.1 选取（`pickNearestForDisplay`，按显示周期）
+### 5.1 选取（`pickNearestForDisplay`，按显示周期，各周期独立）
 
-对每个显示周期 L，候选池 = **该级别及以上级别的合并线**（`LEVEL_ORDER.indexOf(line.level) ≤ LEVEL_ORDER.indexOf(L)`，高级别线继承到低周期图），
+对每个显示周期 L，候选池 = **仅 L 自身周期的非人工候选**（`merged` 中 `line.level === L && !line.manual`，不继承其它周期线），
 取「距现价最近的上方 `sideCount` 条 + 下方 `sideCount` 条」（`--side-count` 默认 2 → 每图最多 4 条）：
 
-1. **距离范围限制**：每条线距现价 ≤ `max-dist × 线自身级别ATR`（默认 `3.0 × ATR`；`periodAtrs[line.level]` 缺失时 `Infinity` 不限距），避免远古强位挤掉当前价附近支阻位；
-2. **就近排序**：上方按 `price` 升序、下方按 `price` 降序各取前 `sideCount` 条（**纯距离最近**，不再按强度评分）；
-3. **允许上下不对称**：一侧不足 `sideCount` 条时不补。
+1. **距离范围限制**：每条线距现价 ≤ `max-dist × 本周期ATR`（默认 `3.0 × ATR`；`periodAtrs[L]` 缺失时 `Infinity` 不限距），避免远古强位挤掉当前价附近支阻位；
+2. **就近排序**：上方按 `price` 升序、下方按 `price` 降序各取前 `sideCount` 条（**纯距离最近**，不按强度评分）；
+3. **允许上下不对称**：一侧不足 `sideCount` 条时不补；本周期无候选则该图不画线；
+4. **人工周期覆写**：`drawnByPeriod[L] = 全部人工候选（不受条数/距离限制）+ 叠加层就近结果`；currentPrice 未知时不画（与 boll 中轨降级口径一致）。
 
 选取结果落盘为 `drawnByPeriod = { 周期: [line,...] }`（每条附 `label` 来源标注）。
 
@@ -167,9 +185,8 @@ score = 0.6 × norm(touchCount) + 0.4 × norm(barsPassed)
   - boll → `BOLL上轨`/`BOLL中轨`/`BOLL下轨`（如 `BOLL上轨+4小时`）；
   - fib 已形成 → `黄金分割<ratio>`（如 `黄金分割0.5+1小时`）；pending → `预期2卖`/`预期2买`（如 `预期2卖+240`）；
   - cluster → `密集区`（如 `密集区+15分钟`）；
-  - mixed → `位置线`（如 `位置线+60`）；
 - **周期中文名**：`D→日线、240→4小时、60→1小时、15→15分钟、3→3分钟、W→周线`；
-- **可见范围**：每条线只在**其显示周期**可见（`srVisibilitySingle`，仅该周期），高级别线继承到低周期图时为各周期生成独立实例，互不重叠；
+- **可见范围**：每条线只在**其显示周期**可见（`srVisibilitySingle`，仅该周期），各周期图互不重叠；
 - 绘制前先清除所有 title 前缀为 `SR_` 的旧横线（兼容历史 `SR_FLIP`/`SR_FIB`）；
 - 绘制后切回原周期。
 
@@ -177,27 +194,29 @@ score = 0.6 × norm(touchCount) + 0.4 × norm(barsPassed)
 
 1. **图上绘制**：按上述规则的 `horizontal_line`（统一灰色实线 + 来源标注）；
 2. **缓存落盘** `.cursor/cache/srflip_<品种>.json`：
-   - `periods`：各周期原始候选（含 `price`/`type`/`breakTime`/`touchCount`/`barsPassed`/`firstTouch`/`lastTouch`/`recent`；**密集区截断后 + fib + boll**，fib 候选额外含 `fib`/`ratio`/`fromPoint`/`referBi`，boll 候选含 `boll`）；
-   - `merged`：**三类统一跨周期合并结果**（含 `sources`/`level`/`srcType`；下游 `mark-entry` 只读 `price`）；
-   - `drawnByPeriod`：各显示周期选中的 ≤2×`sideCount` 条线（含 `label` 来源标注）；
-   - 元信息：`from`/`currentPrice`/`minTouch`/`sideCount`/`recentBiCount`/`scoreWeights`/`maxDistAtr`/`maxPerPeriod`/`srTypes`/`fibLevels`/`bollCfg:{length,mult}` 等。
+   - `periods`：各周期原始候选（含 `price`/`type`/`breakTime`/`touchCount`/`barsPassed`/`firstTouch`/`lastTouch`/`recent`；**密集区截断后 + fib + boll + manual**，fib 候选额外含 `fib`/`ratio`/`fromPoint`/`referBi`，boll 候选含 `boll`，人工候选含 `manual`）；
+   - `merged`：**全量候选池（展平不合并）**（每项含 `level`/`srcType`，价格=原始识别价；下游 `mark-entry` 只读 `price`）；
+   - `drawnByPeriod`：各显示周期选中的 ≤2×`sideCount` 条线（人工周期=全部人工候选+叠加层就近结果，含 `label` 来源标注）；
+   - 元信息：`from`/`currentPrice`/`minTouch`/`sideCount`/`recentBiCount`/`scoreWeights`/`maxDistAtr`/`maxPerPeriod`/`srTypes`/`manualLevels`/`fibLevels`/`bollCfg:{length,mult}` 等。
 
 ## 7. 边界情况
 
 | 场景 | 处理 |
 |------|------|
 | 笔数据文件不存在或品种不符 | 报错退出，提示先运行「画笔」 |
-| 某周期笔数 < 3 | 跳过该周期 |
+| 某周期笔数 < 3 | 系统周期跳过；**人工周期不受此限**（仍需 K线） |
 | K 线读取失败 | 跳过该周期 |
 | 数据未覆盖 `--from` 起始日期 | 自动滚动加载完整历史（`scrollToFirstBar`）重试 |
-| 当前价未知 | 不生成 `drawnByPeriod`（无绘制） |
+| 当前价未知 | 不生成 `drawnByPeriod`（无绘制，人工周期同样不画） |
 | 某周期 bars < boll-length | 该周期无 BOLL 位（正常降级） |
 | 某级别某侧无候选 | 该侧不画（允许上下不对称） |
-| 近期极值位与强支阻位同价位 | 跨周期/同级别合并时按价格并簇 |
+| 某周期无候选 | 该图不画线（各周期独立，不继承其它周期线） |
 | 某周期/某方向无非一类买卖点 | 该方向走预期回退（§2.5）生成 pending 预期位；结构不满足（末笔方向不符/首笔/脏数据/次高点破坏）则无，正常降级不报错 |
 | 最新非一类点匹配不到参照笔（首笔/脏数据） | 该方向跳过，**不回退**更早点 |
-| fib/boll 与密集区同价位 | **并簇为混合位置线**：merged 中合并为一条 `srcType="mixed"`（删除 fib/boll 标记，见 §4） |
+| fib/boll 与密集区（或其它周期）同/近价位 | **不并条**：各自独立成线进 merged（价格原样，见 §4） |
 | pending 预期结构被后续行情否定（形成笔突破前方笔起点） | 预期位条件失效，下次重算自动消失；已确认点形成后已形成 fib 接管 |
+| 人工输入未填价位（空列表） | **该周期没有支阻位**（不画线、不进候选池，不回退系统计算；叠加层照常） |
+| Web manualLevels 值非法（非数字/超 50 条） | 400 报错（错误信息含周期名）；未勾选周期的键静默丢弃 |
 | `--sr-types` 全部关闭或全部非法 | 报错退出 |
 | `--fib-levels` 全部非法 | 警告并回退默认 0.382/0.5/0.618 |
 
@@ -207,8 +226,8 @@ score = 0.6 × norm(touchCount) + 0.4 × norm(barsPassed)
 |------|------|
 | `chan-bi`（画笔） | **强制依赖**：读取其落盘笔数据；无笔数据不运行 |
 | `chan-core` | 密集区仅复用 `calcATR` 等工具函数；黄金分割另复用 `findBuyPoints`/`findSellPoints`/`calcMACD`/`intervalSecOf`（现算非一类买卖点） |
-| `mark-entry`（进出场） | **读取本脚本落盘 `srflip_<品种>.json` 的 `merged` 字段**判断「靠近支阻位」（三类来源，下游只读 `price` 自动兼容）；本脚本字段变更需保持 `merged` 结构兼容 |
-| `py_chain/sr_flip.py` | Python 回测移植版，`compute_srflip` 同口径支持三类（`srTypes`/`fibLevels`/`bollLength`/`bollMult` 参数），保持回测与图表一致 |
+| `mark-entry`（进出场） | **读取本脚本落盘 `srflip_<品种>.json` 的 `merged` 字段**判断「靠近支阻位」（全量候选池，下游只读 `price`）；本脚本字段变更需保持 `merged` 为「含 `price` 的列表」形态 |
+| `py_chain/sr_flip.py` | Python 回测移植版，`compute_srflip` 同口径支持三类系统来源 + 人工位（`srTypes`/`fibLevels`/`bollLength`/`bollMult`/`manualLevels` 参数，同样不合并、各周期独立选取、人工全部画出），保持回测与图表一致；Web `/sr` 调试页的「支阻来源」列与预设（`manualLevels`）走 `normalize_sr_cfg`+`engine_kwargs_of` 同一链路 |
 
 **运行依赖链**（完整执行顺序，各技能依序运行）：
 

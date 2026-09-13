@@ -28,6 +28,28 @@ from .chan_core import intervalSecOf, fmtT
 DEFAULT_PERIODS = ["D", "240", "60", "15", "3"]
 
 
+def _load_sr_preset(name):
+    """按名读取支阻位预设 cfg（与 /sr 调试页、工作台共享 py_chain/web/sr_presets.json，
+    同一存储结构 [{name, saved_at, cfg}]）。
+    @raises SystemExit 预设不存在 / 文件不可读（列出可用名便于纠正）"""
+    import json
+    import os
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "sr_presets.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            entries = json.load(f)
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"支阻位预设文件不可读：{path}（{e}）")
+    names = []
+    for p in entries if isinstance(entries, list) else []:
+        if not isinstance(p, dict):
+            continue
+        names.append(str(p.get("name")))
+        if p.get("name") == name and isinstance(p.get("cfg"), dict):
+            return dict(p["cfg"])
+    raise SystemExit(f"未找到支阻位预设「{name}」（可用：{names or '无'}）")
+
+
 def parse_from(s):
     """'YYYY-MM-DD' → UTC 时间戳（当天 00:00 UTC）。"""
     y, m, d = (int(x) for x in s.split("-"))
@@ -146,6 +168,11 @@ def main(argv=None):
                     help="兜底止损滑点（无正确侧支阻位时 止损 = 进场价 ± 该值），默认 10")
     ap.add_argument("--slip-be", type=float, default=3.0,
                     help="保本滑点（beStop = 进场成交K线极值 ± 该值），默认 3")
+    ap.add_argument("--near", type=float, default=10.0,
+                    help="近支阻阈值（绝对价差，不乘 ATR；|背驰点价−支阻位价| ≤ near），默认 10")
+    ap.add_argument("--sr-preset", default=None,
+                    help="支阻位预设名称（读 py_chain/web/sr_presets.json，与 /sr、工作台共享；"
+                         "载入识别参数+人工位，优先于 --sr-types 等独立参数）")
     args = ap.parse_args(argv)
 
     periods = [p.strip() for p in args.periods.split(",") if p.strip()]
@@ -176,7 +203,18 @@ def main(argv=None):
                              boll_length=args.boll_length, boll_mult=args.boll_mult)
     print_chain(chain, periods)
 
-    # 3. 点状回测
+    # 3. 点状回测（--sr-preset：载入支阻预设（含人工位）→ normalize → engine_kwargs）
+    sr_kwargs = None
+    if args.sr_preset:
+        from .webapp import ControlApp
+        from .sr_service import engine_kwargs_of
+        preset_cfg = _load_sr_preset(args.sr_preset)
+        preset_cfg.update(periods=periods, symbol=args.symbol,
+                          **{"from": args.from_date})
+        preset_cfg = ControlApp.normalize_sr_cfg(preset_cfg)
+        sr_kwargs = engine_kwargs_of(preset_cfg)
+        print(f"支阻位预设「{args.sr_preset}」已载入：srTypes={preset_cfg['srTypes']}"
+              + (f" 人工周期={list(preset_cfg.get('manualLevels') or {})}" if preset_cfg.get("manualLevels") else ""))
     print("\n回测中（逐根K线重放整条链路）...")
     result = run_backtest(bars_by_period, periods=periods,
                           warmup_bars=args.warmup, with_marks=not args.no_marks,
@@ -184,6 +222,7 @@ def main(argv=None):
                           boll_length=args.boll_length, boll_mult=args.boll_mult,
                           lots=args.lots, slip_stop=args.slip_stop,
                           slip_fallback=args.slip_fallback, slip_be=args.slip_be,
+                          near=args.near, sr_kwargs=sr_kwargs,
                           log=lambda *a: print(*a) if a and a[0].startswith("回测") else None)
 
     # 4. 打印统计

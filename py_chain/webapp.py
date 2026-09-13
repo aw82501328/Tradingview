@@ -17,6 +17,8 @@
 """
 
 import argparse
+import collections
+import copy
 import math
 import json
 import os
@@ -25,6 +27,7 @@ import sys
 import threading
 import tempfile
 import time
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse, quote
 
@@ -36,7 +39,7 @@ from .main import parse_from
 from .chan_core import fmtT
 from .monitor import LiveMonitor, ReplayMonitor, clear_rt_markers
 from .marks import draw_signal_marks, draw_sr_marks, clear_signal_marks, clear_all_marks
-from . import td_launcher, sr_service, sr_draw, sr_tune, sr_tune_api, sr_preset_excel, analysis_service, analysis_api
+from . import data_store, td_launcher, sr_service, sr_draw, sr_tune, sr_tune_api, sr_preset_excel, analysis_service, analysis_api, bt_runs
 
 # ============================================================
 # 全局互斥：三种模式同一时间最多运行一种
@@ -80,6 +83,36 @@ _sr_result_lock = threading.Lock()
 # 参数预设存储（web/sr_presets.json，UTF-8）
 SR_PRESETS_FILE = os.path.join(os.path.dirname(__file__), "web", "sr_presets.json")
 _presets_lock = threading.Lock()
+
+# 基础数据模块状态：busy 为 None 或 "fetch"；日志环形缓冲 + 进度文案供页面刷新后回放
+_data_busy = None
+_data_busy_lock = threading.Lock()
+_data_logs = collections.deque(maxlen=200)
+_data_progress = ""
+_data_stop_evt = threading.Event()
+
+
+def _make_data_callbacks(app):
+    """构造基础数据模块的 log/progress 回调（闭包持有 ControlApp）。
+
+    log：环形缓冲 + SSE log 事件（mode='data'，三模式页的监听会过滤掉）；
+    progress：进度文案缓存 + SSE progress 事件（label 文案，pct 可选）。
+    """
+    def log(msg):
+        with _data_busy_lock:
+            _data_logs.append(f"{time.strftime('%H:%M:%S')} {msg}")
+        app.broadcaster.emit("log", {"mode": "data", "msg": msg})
+
+    def progress(label, pct=None):
+        global _data_progress
+        with _data_busy_lock:
+            _data_progress = label
+        payload = {"mode": "data", "label": label}
+        if pct is not None:
+            payload["pct"] = pct
+        app.broadcaster.emit("progress", payload)
+
+    return log, progress
 
 
 def acquire_active(mode):
@@ -166,6 +199,12 @@ class SignalLog:
                 "markRes": s.get("markRes"),
                 "price": s.get("price"),
                 "nearSr": s.get("nearSr"),
+                # M1/M2/M4 候选标记（SPEC_divergence_fallback）：fallback=下沉链回退候选、
+                # nearEqual=创新低近等容差候选、expectBi=检测周期预期够笔口径；
+                # 前端据此在策略列加角标
+                "fallback": bool(s.get("fallback", False)),
+                "nearEqual": bool(s.get("nearEqual", False)),
+                "expectBi": bool(s.get("expectBi", False)),
                 "status": "信号",
                 "entryTime": None,
                 "entryPrice": None,
@@ -202,6 +241,9 @@ class SignalLog:
                     "markRes": tr.get("markRes"),
                     "price": tr.get("signalPrice"),
                     "nearSr": tr.get("nearSr"),
+                    "fallback": bool(tr.get("fallback", False)),
+                    "nearEqual": bool(tr.get("nearEqual", False)),
+                    "expectBi": bool(tr.get("expectBi", False)),
                     "status": "持仓中",
                     "entryTime": tr.get("entryTime"),
                     "entryPrice": tr.get("entryPrice"),
@@ -264,6 +306,17 @@ class SignalLog:
         if limit:
             rows = rows[-int(limit):]
         return rows
+
+    def max_id(self):
+        """当前最大行 id（_id 单调递增、clear 不复用，可作"本轮新增行"的基线）。"""
+        with self.lock:
+            return self._id
+
+    def snapshot(self, mode, min_id=0):
+        """深拷贝指定模式 id>min_id 的行（回测方案保存用，避免持引用序列化）。"""
+        with self.lock:
+            return copy.deepcopy([r for r in self.rows
+                                  if r.get("mode") == mode and r.get("id", 0) > min_id])
 
     def get(self, row_id, mode):
         with self.lock:
@@ -328,6 +381,9 @@ class ModeWorker:
         self.thread = None
         self.cfg = {}
         self.state = "idle"
+        # 本次运行开始前的信号表最大行 id：start 不清信号表（连跑多次行会混叠），
+        # 保存回测方案时按 id>_row_base 过滤出"本次运行新增行"，保证 cfg 与行配对
+        self._row_base = 0
         self.error = None
         self.progress = {"current": 0, "total": 0, "pct": 0}
         self._pause_evt = threading.Event()
@@ -387,6 +443,7 @@ class ModeWorker:
         if holder is not True:
             return {"ok": False, "error": f"当前有 {holder} 模式运行中，请先停止"}
         self.cfg = dict(cfg)
+        self._row_base = self.signals.max_id()
         self.error = None
         self._pause_evt = threading.Event()
         self._stop_evt = threading.Event()
@@ -440,14 +497,47 @@ class BacktestWorker(ModeWorker):
 
     MODE = "backtest"
 
+    @staticmethod
+    def _sr_preset_kwargs(cfg, periods):
+        """回测「支阻预设」下拉：载入与 /sr、工作台共享的预设（识别参数+叠加开关+人工位），
+        以回测周期 ∩ 支阻级别过滤后映射为 compute_srflip kwargs（engine_kwargs_of）；
+        30S 是回测时间轴/背驰次级别，不属于支阻级别（白名单刻意拒收），不透传。
+        未选预设（空）→ None（走引擎默认：密集区+BOLL；叠加开关只存在于预设的 srTypes）。
+        兼容：旧 cfg 里的 overlay_fib/overlay_boll 键不再读取（2026-09-13 移除回测页叠加开关）。"""
+        name = str(cfg.get("sr_preset") or "").strip()
+        if not name:
+            return None
+        from .sr_service import engine_kwargs_of
+        preset = next((p for p in _presets_load()
+                       if isinstance(p, dict) and p.get("name") == name), None)
+        if preset is None or not isinstance(preset.get("cfg"), dict):
+            raise ValueError(f"未找到支阻预设「{name}」，请刷新预设列表后重选")
+        sr_periods = ([p for p in periods
+                       if str(p).strip().upper() in sr_service.CANONICAL_LEVELS]
+                      or list(sr_service.DEFAULT_LEVELS))
+        pcfg = dict(preset["cfg"])
+        pcfg.update(periods=sr_periods, symbol=cfg.get("symbol") or pcfg.get("symbol"),
+                    **{"from": cfg.get("from") or pcfg.get("from") or "2026-06-30"})
+        pcfg = ControlApp.normalize_sr_cfg(pcfg)   # 校验 + manualLevels 按支阻周期过滤
+        return engine_kwargs_of(pcfg)
+
     def _run(self):
         cfg = self.cfg
         periods = cfg.get("periods") or DEFAULT_PERIODS
-        self.log(f"取数：symbol={cfg.get('symbol')} periods={periods} "
-                 f"use_cache={cfg.get('use_cache')}")
-        bars = load_bars(periods=periods, from_ts=cfg.get("from_ts", 0),
-                         use_cache=cfg.get("use_cache", False),
-                         symbol=cfg.get("symbol"), log=self.log)
+        # 数据源：store=本地SQLite存储（不连CDP，TV关闭可跑）；cache=bars_all_tf.json；live=CDP实时
+        src = cfg.get("data_source") or ("cache" if cfg.get("use_cache") else "live")
+        if src == "store":
+            self.log(f"取数：数据源=本地存储 symbol={cfg.get('symbol')} "
+                     f"periods={periods} from_ts={cfg.get('from_ts', 0)}")
+            bars = data_store.load_store(cfg.get("symbol"), periods=periods,
+                                         from_ts=cfg.get("from_ts", 0))
+        else:
+            self.log(f"取数：数据源={'本地缓存' if src == 'cache' else 'CDP实时'} "
+                     f"symbol={cfg.get('symbol')} periods={periods} "
+                     f"use_cache={cfg.get('use_cache')}")
+            bars = load_bars(periods=periods, from_ts=cfg.get("from_ts", 0),
+                             use_cache=cfg.get("use_cache", False),
+                             symbol=cfg.get("symbol"), log=self.log)
         for res in periods:
             n = len(bars.get(res, []) or [])
             if n:
@@ -460,9 +550,15 @@ class BacktestWorker(ModeWorker):
                                 lots=cfg.get("lots", 4),
                                 slip_stop=cfg.get("slip_stop", 3.0),
                                 slip_fallback=cfg.get("slip_fallback", 10.0),
-                                slip_be=cfg.get("slip_be", 3.0))
+                                slip_be=cfg.get("slip_be", 3.0),
+                                near=cfg.get("near", 10.0),
+                                sr_kwargs=self._sr_preset_kwargs(cfg, periods),
+                                diverge_confirm=cfg.get("diverge_confirm", False),
+                                expect_bi=cfg.get("expect_bi", True))
         self.log(f"回测开始（最小周期 {engine.fine_res}，成交口径 {engine.fill_mode}，"
-                 f"信号模式 {'当下背驰' if engine.signal_mode == 'realtime' else '确认制'}）...")
+                 f"信号模式 {'当下背驰' if engine.signal_mode == 'realtime' else '确认制'}，"
+                 f"背驰进场 {'分型确认后下一根开盘' if engine.diverge_confirm else '当下'}，"
+                 f"检测周期够笔 {'预期' if engine.expect_bi else '分型确认'}）...")
         result = engine.run(
             log=self.log,
             on_progress=self._on_progress,
@@ -620,6 +716,8 @@ class ControlApp:
         }
         # 支阻位调试模块：最近一次计算结果槽（cfg 快照 / computed_at / result / meta）
         self.sr = {"cfg": None, "computed_at": None, "result": None, "meta": None}
+        # 全量回测历史方案存储（bt_runs/bt_signals 表，建在基础数据库 bars.db 里）
+        self.bt_runs = bt_runs.BtRunStore()
         self.sr_tune = sr_tune.TuneManager(store=tune_store, emit=self.broadcaster.emit)
         self.td_launcher = td_launcher.TDLauncher(acquire_active, release_active)
         self.analysis = analysis_service.AnalysisManager(
@@ -679,7 +777,7 @@ class ControlApp:
         cfg["clusterParts"] = parts
         # 数字字段（非法直接 400）
         floats = {k: float(cfg[k]) for k in
-                  ("clusterAtr", "mergeAtr", "recentClusterAtr", "maxDistAtr",
+                  ("clusterAtr", "recentClusterAtr", "maxDistAtr",
                    "touchWeight", "barsWeight", "bollMult")
                   if k in cfg and cfg[k] not in (None, "")}
         for k in ("clusterAtr", "recentClusterAtr", "maxDistAtr"):
@@ -722,6 +820,32 @@ class ControlApp:
         if not fibs or len(fibs) > 6:
             raise ValueError("黄金分割比率须为 1~6 项")
         cfg["fibLevels"] = fibs
+        # 人工支阻位：{ 周期: 价位文本/列表 } → { 周期: [float,...] }
+        # 键存在 = 该周期支阻位来源=人工（替换密集区；空列表 = 该周期无支阻位）；
+        # 未勾选周期的键丢弃不报错（预设移植：载入后临时取消勾选不应报错）
+        raw_ml = cfg.get("manualLevels") or {}
+        if not isinstance(raw_ml, dict):
+            raise ValueError("manualLevels 须为 周期→价位 对象")
+        alias = {"1W": "W", "1D": "D", "4H": "240", "1H": "60"}
+        ml = {}
+        for res, v in raw_ml.items():
+            r = alias.get(str(res).strip().upper(), str(res).strip().upper())
+            if r not in periods:
+                continue
+            if isinstance(v, str) and not v.strip():
+                ml[r] = []            # 空 = 该周期无支阻位（不回退系统计算）
+                continue
+            if isinstance(v, (list, tuple)) and not v:
+                ml[r] = []
+                continue
+            try:
+                prices = sr_tune.price_list(v)
+            except ValueError as e:
+                raise ValueError(f"{r} 的人工价位非法：{e}")
+            if len(prices) > 50:
+                raise ValueError(f"{r} 的人工价位最多 50 条")
+            ml[r] = prices
+        cfg["manualLevels"] = ml
         # 透传默认值（draw 相关：color/draw_text/draw_raw/clear_first）
         cfg.setdefault("color", "#787B86")
         cfg.setdefault("draw_text", True)
@@ -739,15 +863,20 @@ class ControlApp:
                     out[k] = int(out[k])
                 except (TypeError, ValueError):
                     pass
-        for k in ("interval", "hold", "slip_stop", "slip_fallback", "slip_be"):
+        for k in ("interval", "hold", "slip_stop", "slip_fallback", "slip_be", "near"):
             if k in out and out[k] not in (None, ""):
                 try:
                     out[k] = float(out[k])
                 except (TypeError, ValueError):
                     pass
+        # 支阻预设名（回测「支阻预设」下拉；空 = 不用预设）——仅字符串清洗
+        if "sr_preset" in out:
+            out["sr_preset"] = str(out["sr_preset"] or "").strip()
         if "use_cache" in out:
             v = out["use_cache"]
             out["use_cache"] = v in (True, "true", "True", "1", 1)
+        if out.get("data_source") not in ("live", "cache", "store"):
+            out["data_source"] = "live"
         if "periods" in out and isinstance(out["periods"], str):
             out["periods"] = [p.strip() for p in out["periods"].split(",") if p.strip()]
         if "from" in out and out.get("from"):
@@ -847,6 +976,8 @@ def make_handler(app):
                 return
             if analysis_api.handle(self, app, "GET"):
                 return
+            if bt_runs.handle(self, app, "GET"):
+                return
             if self._tune("GET"):
                 return
             if path in ("/sr-tune.js", "/sr-tune.css"):
@@ -904,10 +1035,28 @@ def make_handler(app):
                 with _presets_lock:
                     self._send_json({"ok": True, "presets": _presets_load()})
                 return
+            if path == "/data" or path == "/data.html":
+                self._serve_file("data.html", "text/html; charset=utf-8")
+                return
+            if path == "/api/data/list":
+                self._send_json({"ok": True, "stores": data_store.list_stores()})
+                return
+            if path == "/api/data/status":
+                with _data_busy_lock:
+                    self._send_json({"ok": True, "busy": _data_busy,
+                                     "progress": _data_progress,
+                                     "logs": list(_data_logs)})
+                return
+            if path == "/api/data/stats":
+                self._send_json({"ok": True, "stats": data_store.stats()})
+                return
+            if path == "/api/data/bars":
+                self._serve_data_bars(parsed)
+                return
             self._send_json({"ok": False, "error": f"未知路径 {path}"}, 404)
 
         def do_POST(self):
-            global _service_restarting
+            global _service_restarting, _data_busy, _data_progress
             path = urlparse(self.path).path
             if path == '/api/service/restart':
                 self._read_body()
@@ -939,6 +1088,8 @@ def make_handler(app):
                 return
             if analysis_api.handle(self, app, "POST"):
                 return
+            if bt_runs.handle(self, app, "POST"):
+                return
             if self._tune("POST"):
                 return
             if path == '/api/signals/locate':
@@ -947,8 +1098,12 @@ def make_handler(app):
                         or type(body.get('id')) is not int or body['id'] <= 0):
                     self._send_json({'ok': False, 'error': '无效的模式或记录ID'}, 400)
                     return
+                # 单行标记颜色（可选）：非 dict 视为缺省，由后端默认色兜底
+                colors = body.get('colors')
+                if not isinstance(colors, dict):
+                    colors = None
                 try:
-                    job = app.locator.start(body['mode'], body['id'])
+                    job = app.locator.start(body['mode'], body['id'], colors=colors)
                 except ValueError as exc:
                     self._send_json({'ok': False, 'error': str(exc)}, 400)
                 except LookupError as exc:
@@ -1217,7 +1372,7 @@ def make_handler(app):
                         prog("compute", 1, 1)
                         prog("done", 1, 1)
                         log(f"计算完成：当前价 {result.get('currentPrice')}，"
-                            f"合并线 {len(result.get('merged') or [])} 条，"
+                            f"候选池 {len(result.get('merged') or [])} 条，"
                             f"图上 {sum(len(v) for v in (result.get('drawnByPeriod') or {}).values())} 条")
                     except Exception as e:  # 含 CDPError——原样透出给前端
                         err = str(e)
@@ -1319,6 +1474,91 @@ def make_handler(app):
                 threading.Thread(target=_job, daemon=True, name="sr-clear").start()
                 self._send_json({"ok": True, "started": True})
                 return
+            if path == "/api/data/fetch":
+                body = self._read_body()
+                symbol = str(body.get("symbol") or "").strip()
+                periods = body.get("periods") or list(DEFAULT_PERIODS)
+                if isinstance(periods, str):
+                    periods = [p.strip() for p in periods.split(",") if p.strip()]
+                mode = body.get("mode") or "auto"
+                if not symbol:
+                    self._send_json({"ok": False, "error": "缺少品种 symbol"}, 400)
+                    return
+                if mode not in ("auto", "live"):
+                    self._send_json({"ok": False, "error": f"非法拉取方式 {mode}"}, 400)
+                    return
+                if not periods:
+                    self._send_json({"ok": False, "error": "缺少周期 periods"}, 400)
+                    return
+                try:
+                    from_ts = parse_from(str(body.get("from") or "")) if body.get("from") else 0
+                except Exception:
+                    self._send_json({"ok": False, "error": "起始日期非法（YYYY-MM-DD）"}, 400)
+                    return
+                try:
+                    to_ts = parse_from(str(body.get("to"))) if body.get("to") else None
+                except Exception:
+                    self._send_json({"ok": False, "error": "结束日期非法（YYYY-MM-DD）"}, 400)
+                    return
+                if to_ts and to_ts <= from_ts:
+                    self._send_json({"ok": False, "error": "结束日期须晚于起始日期"}, 400)
+                    return
+                # 互斥：与三模式/分析/标记互斥（sr-tune 双锁先例——active 挡模式启动，
+                # marks lock 挡图表操作；data 拉取全程驱动共享图表）
+                with _data_busy_lock:
+                    if _data_busy:
+                        self._send_json(
+                            {"ok": False, "error": f"数据拉取进行中（{_data_busy}）"}, 409)
+                        return
+                holder = acquire_active("data")
+                if holder is not True:
+                    self._send_json(
+                        {"ok": False, "error": f"当前有 {holder} 模式运行中，请先停止"}, 409)
+                    return
+                if not _marks_lock.acquire(blocking=False):
+                    release_active("data")
+                    self._send_json(
+                        {"ok": False, "error": "已有标记/支阻操作进行中，请稍后再试"}, 409)
+                    return
+                with _data_busy_lock:
+                    _data_busy = "fetch"
+                    _data_progress = ""
+                _data_stop_evt.clear()
+                log, progress = _make_data_callbacks(app)
+
+                def _fetch_job():
+                    global _data_busy, _data_progress
+                    err = None
+                    summary = None
+                    try:
+                        summary = data_store.fetch_and_store(
+                            symbol, periods, from_ts, to_ts=to_ts, mode=mode,
+                            log=log, progress=progress, stop_evt=_data_stop_evt)
+                    except Exception as e:
+                        err = str(e)
+                        log(f"拉取失败：{e}")
+                    finally:
+                        with _data_busy_lock:
+                            _data_busy = None
+                            _data_progress = ""
+                        _marks_lock.release()
+                        release_active("data")
+                        app.broadcaster.emit("data_fetch_done", {
+                            "error": err, "symbol": symbol, "summary": summary})
+
+                threading.Thread(target=_fetch_job, daemon=True,
+                                 name="data-fetch").start()
+                self._send_json({"ok": True, "started": True})
+                return
+            if path == "/api/data/stop":
+                with _data_busy_lock:
+                    busy = _data_busy
+                if not busy:
+                    self._send_json({"ok": False, "error": "当前没有进行中的拉取"}, 409)
+                    return
+                _data_stop_evt.set()
+                self._send_json({"ok": True})
+                return
             # /api/{mode}/start|pause|resume|stop
             parts = [p for p in path.split("/") if p]
             if len(parts) == 3 and parts[0] == "api" and parts[1] in app.workers:
@@ -1344,7 +1584,32 @@ def make_handler(app):
 
         def do_DELETE(self):
             path = urlparse(self.path).path
+            if bt_runs.handle(self, app, "DELETE"):
+                return
             if self._tune("DELETE"):
+                return
+            if path == "/api/data":
+                qs = parse_qs(urlparse(self.path).query)
+                symbol = str(qs.get("symbol", [""])[0]).strip()
+                res = str(qs.get("res", [""])[0]).strip()
+                if not symbol:
+                    self._send_json({"ok": False, "error": "缺少品种 symbol"}, 400)
+                    return
+                with _data_busy_lock:
+                    if _data_busy:
+                        self._send_json(
+                            {"ok": False, "error": "数据拉取进行中，请先停止"}, 409)
+                        return
+                if res:  # 行级：只删该品种此周期
+                    if not data_store.delete_res(symbol, res):
+                        self._send_json(
+                            {"ok": False,
+                             "error": f"存储中没有 {symbol} 的 {res} 周期"}, 404)
+                        return
+                elif not data_store.delete_store(symbol):
+                    self._send_json({"ok": False, "error": f"存储中没有品种 {symbol}"}, 404)
+                    return
+                self._send_json({"ok": True})
                 return
             if path == "/api/sr/presets":
                 qs = parse_qs(urlparse(self.path).query)
@@ -1376,6 +1641,69 @@ def make_handler(app):
                 "acquire_active": acquire_active, "release_active": release_active,
                 "marks_lock": _marks_lock, "set_busy": _set_sr_busy,
                 "normalize_cfg": ControlApp.normalize_sr_cfg})
+
+        def _serve_data_bars(self, parsed):
+            """明细查询：JSON 分页（默认）或 CSV 全量导出（format=csv）。"""
+            import csv
+            import io
+            qs = parse_qs(parsed.query)
+            symbol = str(qs.get("symbol", [""])[0]).strip()
+            res = str(qs.get("res", [""])[0]).strip()
+            if not symbol or not res:
+                self._send_json({"ok": False, "error": "缺少 symbol/res 参数"}, 400)
+                return
+
+            def _ts(key):
+                v = str(qs.get(key, [""])[0]).strip()
+                if not v:
+                    return None
+                try:
+                    return parse_from(v)
+                except Exception:
+                    raise ValueError(f"{key} 日期非法（YYYY-MM-DD）")
+
+            try:
+                from_ts = _ts("from") or 0
+                to_ts = _ts("to")
+                offset = max(0, int(qs.get("offset", ["0"])[0]))
+                limit = min(1000, max(1, int(qs.get("limit", ["100"])[0])))
+            except ValueError as e:
+                self._send_json({"ok": False, "error": str(e)}, 400)
+                return
+            order = qs.get("order", ["asc"])[0]
+            if order not in ("asc", "desc"):
+                order = "asc"
+            try:
+                if qs.get("format", [""])[0] == "csv":
+                    # 全量导出（不分页），UTF-8 BOM 供 Excel 直开
+                    q = data_store.query_bars(symbol, res, from_ts, to_ts,
+                                              offset=0, limit=10 ** 9, order=order)
+                    buf = io.StringIO()
+                    buf.write("﻿")
+                    w = csv.writer(buf)
+                    w.writerow(["time", "datetime", "open", "high", "low", "close"])
+                    for r in q["rows"]:
+                        dt = datetime.fromtimestamp(r["time"] + 8 * 3600, tz=timezone.utc)
+                        w.writerow([r["time"],
+                                    dt.strftime("%Y-%m-%d %H:%M:%S"),
+                                    r["open"], r["high"], r["low"], r["close"]])
+                    body = buf.getvalue().encode("utf-8")
+                    safe = "".join(c if c.isalnum() or c in "._-" else "_"
+                                   for c in symbol)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/csv; charset=utf-8")
+                    self.send_header(
+                        "Content-Disposition",
+                        f'attachment; filename="bars_{safe}_{res}.csv"')
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                q = data_store.query_bars(symbol, res, from_ts, to_ts,
+                                          offset=offset, limit=limit, order=order)
+                self._send_json({"ok": True, **q})
+            except ValueError as e:
+                self._send_json({"ok": False, "error": str(e)}, 404)
 
         def _serve_file(self, name, content_type="text/html; charset=utf-8"):
             """服务 py_chain/web/ 下静态文件（index.html / sr.html）。"""

@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>基础数据 · 历史K线存储</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    padding: 20px;
+    font-size: 14px;
+  }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 20px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 10px;
+    margin-bottom: 20px;
+  }
+  .card h2 { font-size: 15px; display: flex; align-items: center; justify-content: space-between; }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 10px;
+           background: #2a2f3a; color: var(--muted); }
+  .badge.running { background: #0d3b31; color: var(--ok, #7fe0b0); }
+  .field { display: flex; flex-direction: column; gap: 3px; }
+  .field label { font-size: 11px; color: var(--muted); }
+  input, select {
+    background: var(--card-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 5px 8px; font-size: 13px; width: 100%;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  html { color-scheme: dark; }  /* 原生日期选择器/下拉弹层用深色 */
+  /* 下拉多选（checkbox 弹层） */
+  .ddcheck { position: relative; }
+  .ddcheck-btn { width: 100%; text-align: left; padding: 5px 26px 5px 8px; position: relative; }
+  .ddcheck-btn::after { content: '▾'; position: absolute; right: 9px; top: 50%;
+    transform: translateY(-50%); color: var(--muted); font-size: 11px; pointer-events: none; }
+  .ddcheck-btn.empty { color: var(--muted); }
+  .ddcheck-panel {
+    position: absolute; top: calc(100% + 4px); left: 0; min-width: 100%;
+    background: var(--card-2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px; z-index: 50; box-shadow: 0 8px 24px rgba(0,0,0,.45);
+  }
+  .ddcheck-item { display: flex; align-items: center; gap: 8px; padding: 5px 8px;
+    border-radius: 4px; cursor: pointer; font-size: 13px; white-space: nowrap; }
+  .ddcheck-item:hover { background: #2b313d; }
+  .ddcheck-item input[type="checkbox"] { width: auto; accent-color: var(--accent); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .row .field { flex: 1; min-width: 140px; }
+  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    background: var(--card-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 6px 14px; font-size: 13px; cursor: pointer;
+    transition: background .15s;
+  }
+  button:hover:not(:disabled) { background: #2b313d; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.start { background: #123; border-color: #1d4ed8; color: #7cb0ff; }
+  button.danger { background: #2a1014; border-color: #8f1d2a; color: #ff8fa3; }
+  .progress { height: 6px; background: var(--card-2); border-radius: 3px; overflow: hidden; }
+  .progress > div { height: 100%; width: 0%; background: var(--accent); transition: width .3s; }
+  .progress-label { font-size: 11px; color: var(--muted); }
+  .log-box {
+    background: #0b0d11; border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px; font-family: Consolas, monospace; font-size: 11px;
+    height: 160px; overflow-y: auto; color: var(--muted); white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .table-wrap { background: var(--card); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .table-wrap .head { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; gap: 8px; flex-wrap: wrap; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 8px 10px; text-align: left; border-top: 1px solid var(--border); white-space: nowrap; }
+  th { background: var(--card-2); color: var(--muted); font-weight: 600; position: sticky; top: 0; }
+  td.dim { color: var(--muted); }
+  .scroll { max-height: 420px; overflow-y: auto; }
+  .hint { font-size: 11px; color: var(--muted); line-height: 1.7; }
+  /* 汇总统计：指标块 + 月度覆盖条 */
+  .tiles { display: flex; gap: 8px; flex-wrap: wrap; }
+  .tile { background: var(--card-2); border: 1px solid var(--border); border-radius: 8px;
+          padding: 8px 14px; min-width: 120px; }
+  .tile .caption { font-size: 11px; color: var(--muted); }
+  .tile .value { font-size: 16px; font-weight: 600; margin-top: 2px; }
+  .tile .value small { font-size: 11px; font-weight: 400; color: var(--muted); }
+  .month-strip { display: flex; gap: 2px; overflow-x: auto; max-width: 360px; padding: 2px 0; }
+  .month-cell { width: 12px; height: 14px; border-radius: 2px; flex: 0 0 auto;
+                background: var(--accent); opacity: .85; }
+  .month-cell.sparse { background: var(--sell); }
+  .month-cell.empty { background: transparent; border: 1px dashed var(--border); opacity: 1; }
+  th.link, td.link { cursor: pointer; }
+  td.link:hover { color: var(--accent); }
+  .gap-list { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .gap-list div { padding: 1px 0; }
+  /* 明细查询 */
+  a.btn-like { display: inline-block; background: #101c12; border: 1px solid #1d8f3a;
+               color: #7fe0b0; border-radius: 6px; padding: 6px 14px; font-size: 13px;
+               cursor: pointer; text-decoration: none; }
+  a.btn-like:hover { background: #14241a; }
+  #q-pageinfo { align-self: center; font-size: 11px; color: var(--muted); }
+</style>
+<link rel="stylesheet" href="/theme.css">
+<link rel="stylesheet" href="/legacy-theme.css">
+</head>
+<body>
+<h1>基础数据 · 历史K线存储</h1>
+<div class="sub">按品种合并累积入 SQLite（data/bars.db，冲突取新值）— 供回测页「本地数据存储」离线取数</div>
+
+<div class="card" id="fetch-card">
+  <h2><span>拉取入库</span><span class="badge" id="fetch-badge">idle</span></h2>
+  <div class="row">
+    <div class="field"><label>品种</label>
+      <select id="symbol"><option>OANDA:XAUUSD</option></select></div>
+    <div class="field"><label>起始日期</label><input type="date" id="from" value="2026-01-02"></div>
+    <div class="field"><label>结束日期（空=到最新）</label><input type="date" id="to"></div>
+  </div>
+  <div class="row">
+    <div class="field"><label>周期（多选）</label>
+      <div class="ddcheck" id="periods-dd">
+        <button type="button" class="ddcheck-btn" id="periods-btn">D,240,60,15,3</button>
+        <div class="ddcheck-panel" id="periods-panel" hidden>
+          <label class="ddcheck-item"><input type="checkbox" value="W">W 周</label>
+          <label class="ddcheck-item"><input type="checkbox" value="D" checked>D 日</label>
+          <label class="ddcheck-item"><input type="checkbox" value="240" checked>240 4小时</label>
+          <label class="ddcheck-item"><input type="checkbox" value="60" checked>60 1小时</label>
+          <label class="ddcheck-item"><input type="checkbox" value="15" checked>15 分钟</label>
+          <label class="ddcheck-item"><input type="checkbox" value="3" checked>3 分钟</label>
+          <label class="ddcheck-item"><input type="checkbox" value="30S">30S 30秒（实时约7天，回放补深至更早）</label>
+        </div>
+      </div>
+    </div>
+    <div class="field"><label>拉取方式</label>
+      <select id="mode">
+        <option value="auto">自动：实时拉取 + 小周期覆盖不足回放补深（推荐）</option>
+        <option value="live">仅实时图表（快；60/15/3 只有约10个月深度）</option>
+      </select>
+    </div>
+  </div>
+  <div class="btn-row">
+    <button class="start" id="btn-fetch">拉取并入库</button>
+    <button class="danger" id="btn-stop" disabled>停止</button>
+  </div>
+  <div class="progress"><div id="bar"></div></div>
+  <div class="progress-label" id="plabel"></div>
+  <div class="log-box" id="log">等待开始。</div>
+  <p class="hint">
+    · 拉取驱动 TradingView 图表（需 TD 运行），与三模式/标记操作互斥，期间它们的启动会被拒绝<br>
+    · 回放补深：定位到目标日期往回拉，可拿到实时图表没有的多年小周期（3m 实测可回放至 2006-03）；每块即时入库，停止/失败后已拉部分保留，可断点续拉<br>
+    · 结束日期可只拉历史中段窗口（如 2024-01-01 ~ 2024-06-30）；30S 实时约 7 天，auto 模式回放补深同样适用（深度以数据源为准，实测 2025-01 起）
+  </p>
+</div>
+
+<div class="card" id="stats-card">
+  <h2><span>存储汇总</span><button id="btn-stats">刷新</button></h2>
+  <div class="tiles" id="stats-tiles"></div>
+  <div class="scroll">
+    <table>
+      <thead><tr>
+        <th>品种</th><th class="link" title="点击进入明细查询">周期</th><th>根数</th><th>跨度(天)</th>
+        <th>首根</th><th>末根</th><th>最近更新</th><th>月度覆盖</th><th>缺口(&gt;5天)</th><th>操作</th>
+      </tr></thead>
+      <tbody id="stats-body"></tbody>
+    </table>
+  </div>
+  <p class="hint">月度格子：每格一个月（悬停看根数），红=稀疏月（低于该周期月度中位数30%），虚线空格=无数据月份；缺口列出相邻K线间隔超5天的空档（与自动补拉阈值一致；周末/假日休市不计入）。</p>
+</div>
+
+<div class="card" id="query-card">
+  <h2><span>明细查询</span></h2>
+  <div class="row">
+    <div class="field"><label>品种</label><select id="q-symbol"></select></div>
+    <div class="field"><label>周期</label><select id="q-res"></select></div>
+    <div class="field"><label>起始日期（空=最早）</label><input type="date" id="q-from"></div>
+    <div class="field"><label>结束日期（空=最新）</label><input type="date" id="q-to"></div>
+    <div class="field" style="max-width:110px;"><label>每页</label>
+      <select id="q-limit"><option>50</option><option selected>100</option><option>200</option><option>500</option></select></div>
+    <div class="field" style="max-width:110px;"><label>排序</label>
+      <select id="q-order"><option value="asc">升序</option><option value="desc">降序</option></select></div>
+  </div>
+  <div class="btn-row">
+    <button class="start" id="btn-query">查询</button>
+    <a class="btn-like" id="q-csv" href="#" hidden>导出 CSV</a>
+  </div>
+  <div class="progress-label" id="q-label">选择品种与周期后查询。</div>
+  <div class="scroll" style="max-height:340px;">
+    <table>
+      <thead><tr><th>时间(UTC+8)</th><th>最高价</th><th>最低价</th><th>收盘价</th><th>开盘价</th></tr></thead>
+      <tbody id="q-body"></tbody>
+    </table>
+  </div>
+  <div class="btn-row" id="q-pager" hidden>
+    <button id="q-first">首页</button>
+    <button id="q-prev">上一页</button>
+    <span id="q-pageinfo"></span>
+    <button id="q-next">下一页</button>
+    <button id="q-last">末页</button>
+  </div>
+</div>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+
+function fmtTime(t) {
+  if (!t) return '-';
+  const d = new Date((t + 8 * 3600) * 1000);  // UTC+8 显示
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth()+1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+}
+function addLog(msg) {
+  const box = $('log');
+  if (box.textContent === '等待开始。') box.textContent = '';
+  const line = `${new Date().toLocaleTimeString('zh-CN', {hour12:false})} ${msg}`;
+  box.textContent += line + '\n';
+  box.scrollTop = box.scrollHeight;
+}
+
+// ---------- 拉取 ----------
+async function api(path, body, method) {
+  const r = await fetch(path, {
+    method: method || (body === undefined ? 'GET' : 'POST'),
+    headers: body === undefined ? {} : {'Content-Type': 'application/json'},
+    body: body === undefined ? undefined : JSON.stringify(body || {}),
+  });
+  const data = await r.json();
+  if (!r.ok || data.ok === false) { alert(data.error || `请求失败 ${r.status}`); return null; }
+  return data;
+}
+function setBusy(busy) {
+  $('btn-fetch').disabled = busy;
+  $('btn-stop').disabled = !busy;
+  $('fetch-badge').textContent = busy ? 'running' : 'idle';
+  $('fetch-badge').className = busy ? 'badge running' : 'badge';
+}
+// ---------- 周期下拉多选（checkbox 弹层） ----------
+function ddValues() {
+  return [...$('periods-panel').querySelectorAll('input:checked')].map(i => i.value);
+}
+function ddSync() {
+  const vals = ddValues();
+  $('periods-btn').textContent = vals.join(',') || '（未选周期）';
+  $('periods-btn').classList.toggle('empty', !vals.length);
+}
+// 程序化设置勾选集合（「更新」按钮按已存周期回填用）
+function setPeriodsChecked(values) {
+  $('periods-panel').querySelectorAll('input[type="checkbox"]').forEach(cb => {
+    cb.checked = values.includes(cb.value);
+  });
+  ddSync();
+}
+$('periods-btn').onclick = () => { $('periods-panel').hidden = !$('periods-panel').hidden; };
+$('periods-panel').addEventListener('change', ddSync);
+document.addEventListener('click', e => {
+  if (!e.target.closest('.ddcheck')) $('periods-panel').hidden = true;
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') $('periods-panel').hidden = true;
+});
+ddSync();
+
+async function startFetch() {
+  const body = {
+    symbol: $('symbol').value,
+    periods: ddValues().join(','),
+    from: $('from').value.trim(),
+    to: $('to').value.trim(),
+    mode: $('mode').value,
+  };
+  if (!body.symbol) { alert('请选择品种'); return; }
+  if (!body.periods) { alert('请至少选择一个周期'); return; }
+  if (!body.from) { alert('请填写起始日期（YYYY-MM-DD）'); return; }
+  const r = await api('/api/data/fetch', body);
+  if (r) { setBusy(true); $('log').textContent = ''; addLog('启动请求已发送'); }
+}
+$('btn-fetch').onclick = startFetch;
+$('btn-stop').onclick = async () => {
+  if (!confirm('停止拉取？已入库部分保留，下次可断点续拉。')) return;
+  const r = await api('/api/data/stop', {});
+  if (r) addLog('已请求停止（当前块完成后结束）');
+};
+
+// ---------- 存储汇总（原存储列表+汇总统计合并，单一数据源 /api/data/stats） ----------
+let storesData = [];
+
+// ---------- 汇总统计 ----------
+function monthStrip(months) {
+  if (!months || !months.length) return '<span class="dim">—</span>';
+  const byYm = Object.fromEntries(months.map(m => [m.ym, m]));
+  const range = [];
+  let [y, m] = months[0].ym.split('-').map(Number);
+  const [ly, lm] = months[months.length - 1].ym.split('-').map(Number);
+  while (y * 12 + m <= ly * 12 + lm) {
+    range.push(`${y}-${String(m).padStart(2, '0')}`);
+    m += 1; if (m > 12) { m = 1; y += 1; }
+  }
+  return `<div class="month-strip">` + range.map(ym => {
+    const it = byYm[ym];
+    if (!it) return `<span class="month-cell empty" title="${ym} 无数据"></span>`;
+    const flag = it.sparse ? ' sparse' : '';
+    return `<span class="month-cell${flag}" title="${ym} · ${it.count} 根${it.sparse ? '（稀疏月）' : ''}"></span>`;
+  }).join('') + `</div>`;
+}
+function gapCell(gaps) {
+  if (!gaps || !gaps.length) return '<span class="dim">无</span>';
+  const items = gaps.map(g =>
+    `<div>${fmtTime(g.from)} → ${fmtTime(g.to)}（${g.days}天）</div>`).join('');
+  return `<details><summary>${gaps.length} 处</summary><div class="gap-list">${items}</div></details>`;
+}
+async function loadStats() {
+  const d = await api('/api/data/stats');
+  if (!d) return;
+  const s = d.stats || {};
+  // 明细查询下拉的数据源也从 stats 顺带填充（页面不再单独调 /api/data/list）
+  storesData = (s.symbols || []).map(sym => ({
+    symbol: sym.symbol, updated_at: sym.updated_at, periods: sym.periods}));
+  refreshQuerySelectors();
+  refreshFetchSymbol();
+  const allFirst = [], allLast = [];
+  const rows = [];
+  const mn = () => allFirst.length ? fmtTime(Math.min(...allFirst)) : '—';
+  const mx = () => allLast.length ? fmtTime(Math.max(...allLast)) : '—';
+  const ord = r => { const n = parseInt(r, 10); return isNaN(n) ? 1e9 : n; };
+  for (const sym of (s.symbols || [])) {
+    const resList = Object.keys(sym.periods || {}).sort((a, b) => ord(b) - ord(a));
+    for (const res of resList) {
+      const p = sym.periods[res];
+      allFirst.push(p.first); allLast.push(p.last);
+      rows.push(`<tr>
+        <td>${sym.symbol}</td>
+        <td class="link" data-q="${sym.symbol}|${res}" title="点击查询明细">${res}</td>
+        <td>${p.count}</td><td>${p.span_days}</td>
+        <td>${fmtTime(p.first)}</td><td>${fmtTime(p.last)}</td>
+        <td>${sym.updated_at ? fmtTime(sym.updated_at) : ''}</td>
+        <td>${monthStrip(p.months)}</td><td>${gapCell(p.gaps)}</td>
+        <td><button data-upd="${sym.symbol}|${res}" title="从该周期末根增量拉取到最新">更新</button> <button class="danger" data-del="${sym.symbol}|${res}" title="删除该品种此周期的存储">删除</button></td>
+      </tr>`);
+    }
+    if (!resList.length) {
+      rows.push(`<tr>
+        <td>${sym.symbol}</td>
+        <td colspan="5" class="dim">空</td>
+        <td>${sym.updated_at ? fmtTime(sym.updated_at) : ''}</td>
+        <td colspan="2"></td>
+        <td><button class="danger" data-del="${sym.symbol}" title="删除该品种的空存储记录">删除</button></td>
+      </tr>`);
+    }
+  }
+  $('stats-tiles').innerHTML = `
+    <div class="tile"><div class="caption">品种</div><div class="value">${s.symbol_count || 0}</div></div>
+    <div class="tile"><div class="caption">总K线数</div><div class="value">${(s.total_bars || 0).toLocaleString()}</div></div>
+    <div class="tile"><div class="caption">最早</div><div class="value">${mn()}<small> UTC+8</small></div></div>
+    <div class="tile"><div class="caption">最新</div><div class="value">${mx()}<small> UTC+8</small></div></div>`;
+  $('stats-body').innerHTML = rows.join('') ||
+    '<tr><td colspan="10" class="dim" style="text-align:center;padding:20px;">暂无存储，先在上方拉取</td></tr>';
+  document.querySelectorAll('#stats-card [data-q]').forEach(td => {
+    td.onclick = () => { const [sym, res] = td.dataset.q.split('|'); prefillQuery(sym, res); };
+  });
+  document.querySelectorAll('#stats-card [data-del]').forEach(btn => {
+    btn.onclick = async () => {
+      const [sym, res] = btn.dataset.del.split('|');
+      if (!confirm(res ? `删除 ${sym} 的 ${res} 周期存储？`
+                       : `删除 ${sym} 的全部存储数据？`)) return;
+      const p = new URLSearchParams({ symbol: sym });
+      if (res) p.set('res', res);
+      const r = await api(`/api/data?${p.toString()}`, undefined, 'DELETE');
+      if (r) { addLog(`已删除 ${sym}${res ? ` 的 ${res} 周期` : ''} 存储`); loadStats(); }
+    };
+  });
+  // 更新：该行周期 末根 → 最新 增量拉取（填好拉取卡后直接启动）
+  document.querySelectorAll('#stats-card [data-upd]').forEach(btn => {
+    btn.onclick = () => {
+      const [sym, res] = btn.dataset.upd.split('|');
+      const p = storesData.find(s => s.symbol === sym)?.periods?.[res];
+      if (!p || !p.last) return;
+      // from 取末根 UTC 日期再往前一天：parse_from 解析为当日 00:00 UTC，
+      // 回退一天确保仍在形成中的末根也被重刷（upsert 冲突取新值）
+      $('symbol').value = sym;
+      setPeriodsChecked([res]);
+      $('from').value = new Date((p.last - 86400) * 1000).toISOString().slice(0, 10);
+      $('to').value = '';
+      $('fetch-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      startFetch();
+    };
+  });
+}
+$('btn-stats').onclick = () => loadStats();
+
+// ---------- 明细查询 ----------
+let qPage = 0, qTotal = 0;
+// 拉取品种下拉：默认品种 + 已入库品种（去重），保留当前选择
+function refreshFetchSymbol() {
+  const symbols = [...new Set(['OANDA:XAUUSD', ...storesData.map(s => s.symbol)])];
+  const cur = $('symbol').value;
+  $('symbol').innerHTML = symbols.map(x => `<option>${x}</option>`).join('');
+  if (symbols.includes(cur)) $('symbol').value = cur;
+}
+function refreshQuerySelectors() {
+  const symbols = storesData.map(s => s.symbol);
+  const curSym = $('q-symbol').value;
+  $('q-symbol').innerHTML = symbols.map(x => `<option>${x}</option>`).join('') ||
+    '<option value="">（暂无存储）</option>';
+  if (symbols.includes(curSym)) $('q-symbol').value = curSym;
+  refreshResOptions();
+}
+function refreshResOptions() {
+  const sym = storesData.find(s => s.symbol === $('q-symbol').value);
+  const ord = r => { const n = parseInt(r, 10); return isNaN(n) ? 1e9 : n; };
+  const resList = sym ? Object.keys(sym.periods || {}).sort((a, b) => ord(b) - ord(a)) : [];
+  const cur = $('q-res').value;
+  $('q-res').innerHTML = resList.map(x => `<option>${x}</option>`).join('') ||
+    '<option value="">（无周期）</option>';
+  if (resList.includes(cur)) $('q-res').value = cur;
+}
+$('q-symbol').onchange = refreshResOptions;
+function queryUrl(page) {
+  const p = new URLSearchParams({
+    symbol: $('q-symbol').value, res: $('q-res').value,
+    from: $('q-from').value.trim(), to: $('q-to').value.trim(),
+    limit: $('q-limit').value, order: $('q-order').value,
+    offset: (page || 0) * Number($('q-limit').value),
+  });
+  return `/api/data/bars?${p.toString()}`;
+}
+async function runQuery(page) {
+  if (!$('q-symbol').value || !$('q-res').value) { alert('请先拉取数据入库'); return; }
+  const d = await api(queryUrl(page));
+  if (!d) return;
+  qPage = page || 0;
+  qTotal = d.total;
+  $('q-body').innerHTML = d.rows.map(r =>
+    `<tr><td>${fmtTime(r.time)}</td><td>${r.high}</td><td>${r.low}</td><td>${r.close}</td><td>${r.open}</td></tr>`).join('');
+  const pages = Math.max(1, Math.ceil(qTotal / Number($('q-limit').value)));
+  $('q-label').textContent = `共 ${qTotal.toLocaleString()} 根`;
+  $('q-pager').hidden = false;
+  $('q-pageinfo').textContent = `第 ${qPage + 1}/${pages} 页`;
+  $('q-first').disabled = $('q-prev').disabled = qPage === 0;
+  $('q-next').disabled = $('q-last').disabled = qPage >= pages - 1;
+  $('q-csv').hidden = false;
+  $('q-csv').href = queryUrl(0).replace('offset=0', 'format=csv');
+}
+$('btn-query').onclick = () => runQuery(0);
+$('q-first').onclick = () => runQuery(0);
+$('q-prev').onclick = () => qPage > 0 && runQuery(qPage - 1);
+$('q-next').onclick = () => runQuery(qPage + 1);
+$('q-last').onclick = () => runQuery(Math.max(0, Math.ceil(qTotal / Number($('q-limit').value)) - 1));
+function prefillQuery(sym, res) {
+  $('q-symbol').value = sym;
+  refreshResOptions();
+  if (res) $('q-res').value = res;
+  $('query-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  runQuery(0);
+}
+
+// ---------- SSE ----------
+function connectSSE() {
+  const es = new EventSource('/api/stream');
+  es.addEventListener('log', e => {
+    const d = JSON.parse(e.data);
+    if (d.mode === 'data') addLog(d.msg);
+  });
+  es.addEventListener('progress', e => {
+    const d = JSON.parse(e.data);
+    if (d.mode !== 'data') return;
+    $('plabel').textContent = d.label || '';
+    if (typeof d.pct === 'number') $('bar').style.width = d.pct + '%';
+  });
+  es.addEventListener('data_fetch_done', e => {
+    const d = JSON.parse(e.data);
+    setBusy(false);
+    $('bar').style.width = d.error ? '0%' : '100%';
+    addLog(d.error ? `拉取失败：${d.error}` : `拉取完成：${d.symbol}`);
+    loadStats();
+  });
+}
+
+// ---------- 初始化：先恢复状态再订阅（页面刷新场景） ----------
+(async function init() {
+  const d = await api('/api/data/status');
+  if (d && d.busy) {
+    setBusy(true);
+    $('log').textContent = (d.logs || []).join('\n') || '';
+    $('log').scrollTop = $('log').scrollHeight;
+    $('plabel').textContent = d.progress || '';
+  }
+  await loadStats();
+  connectSSE();
+})();
+</script>
+<script>
+if (new URLSearchParams(location.search).has("embed")) { document.body.classList.add("embedded"); }
+</script>
+</body>
+</html>

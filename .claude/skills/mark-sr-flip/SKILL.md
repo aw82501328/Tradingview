@@ -59,8 +59,8 @@ node .cursor/skills/mark-sr-flip/scripts/mark_sr_flip.js --from=2026-06-30
 # 只计算并打印，不绘图（先验证再标）
 node .cursor/skills/mark-sr-flip/scripts/mark_sr_flip.js --dry --from=2026-06-30
 
-# 调整聚类阈值（×ATR）、跨周期合并阈值与最少触及次数
-node .cursor/skills/mark-sr-flip/scripts/mark_sr_flip.js --from=2026-06-30 --cluster=0.5 --merge=0.5 --min-touch=4
+# 调整聚类阈值（×ATR）与最少触及次数
+node .cursor/skills/mark-sr-flip/scripts/mark_sr_flip.js --from=2026-06-30 --cluster=0.5 --min-touch=4
 ```
 
 > `--from` 起始日期应与画笔时一致（脚本读取该日期之后的笔数据来计算）。
@@ -72,7 +72,6 @@ node .cursor/skills/mark-sr-flip/scripts/mark_sr_flip.js --from=2026-06-30 --clu
 | `--from=YYYY-MM-DD` | **必填**：起始日期，与画笔 chan-bi 一致 | 无（缺少时报错退出） |
 | `--periods=...` | 要标记的周期列表（逗号分隔） | `D,240,60,15,3` |
 | `--cluster=K` | 价位聚类阈值（×ATR，相近价位合并为同一支阻位） | `0.5` |
-| `--merge=K` | 跨周期合并阈值（×最小周期ATR，价格相近的支阻位合并为一条） | `0.5` |
 | `--recent-cluster=K` | 近期极值位聚类阈值（×ATR，同一天密集高低点聚成一条） | `1.0` |
 | `--min-touch=N` | 最少触及次数（仅强支阻互换位用；可选，不传则按级别：D/240/60=4，15=3，3=8） | 按级别 |
 | `--max-dist=K` | 选取时距离上限（×本级别ATR，距现价更远的候选不参与选取） | `3.0` |
@@ -92,7 +91,7 @@ node .cursor/skills/mark-sr-flip/scripts/mark_sr_flip.js --from=2026-06-30 --clu
 
 ## 支阻位强度评分
 
-识别出的每个支阻位（含跨周期合并后）都会计算一个**强度评分**，用于「上下各 1 个」的选取：
+识别出的每个支阻位都会计算一个**强度评分**，用于每周期候选上限截断（`--max-per-period`）：
 
 ```
 score = 0.6 × norm(触及次数) + 0.4 × norm(经过K线数量)
@@ -102,7 +101,7 @@ score = 0.6 × norm(触及次数) + 0.4 × norm(经过K线数量)
 - **经过 K 线数量**（`barsPassed`，权重 40%）：该价位带 `price ± 聚类容差` 被多少根 K 线覆盖/穿越（含影线，`low ≤ price+tol && high ≥ price-tol`），衡量价格在该价位停留/穿越的时长；
 - 两者在**同一级别候选集内 min-max 归一化**到 [0,1] 后再加权，消除量纲差异。
 
-跨周期合并时 `touchCount` 与 `barsPassed` 均累加（同一价位带的强度合并）。
+不合并：候选各自计分，`touchCount`/`barsPassed` 不跨候选累加。
 
 ## 显示规则
 
@@ -129,23 +128,19 @@ score = 0.6 × norm(触及次数) + 0.4 × norm(经过K线数量)
 - **同一侧按强度评分取最高**：距离范围内同侧仍有多个候选时，选评分最高的 1 个（而非纯距离最近）；
 - title = `SR_FLIP_<级别>`（如 `SR_FLIP_60`），再次标记时按前缀 `SR_FLIP` 清除全部旧横线。
 
-## 跨周期合并
+## 全量候选池（不合并）
 
-不同级别可能在同一价位各自识别出互换位（如 1小时 4440.88 与 3分钟 4443.45 实为同一阻力位），
-为避免图上画出多条近乎重叠的线，识别完成后会对所有周期的互换位做一次**跨周期合并**：
-
-- 按价格排序，价差 ≤ `--merge × 最小周期ATR`（默认 `0.5 × 最小周期ATR`）的互换位合并为一条；
-- 合并后价格按触及次数加权平均、触及次数累加、`sources` 记录来源周期（如 `60+3`）、
-  互换时间取更晚者、类型冲突时以触及次数更多者为准；
-- **主要来源级别（`level`）= 来源中最大的级别**：大级别识别的支阻位是更长期的价位，
-  优先保留其归属（决定颜色与可见范围），不被触及次数更多的小级别「淹没」。
+2026-09-12 起**取消跨周期合并**：不同级别/来源在同一价位各自识别出的候选**不再并条**，
+逐条展平为全量候选池（`merged`），每条价格=原始识别价，附 `level`（自身周期）与 `srcType`
+（来源类型）；不做加权平均、`touchCount`/`barsPassed` 不累加。显示层各周期独立就近选取，
+同/近价位多条线是预期行为（详见 `.cursor/skills/mark-sr-flip/SPEC.md` §4/§5.1）。
 
 ## 落盘
 
 每次标记（含 `--dry`）都会把识别结果写入 **`.cursor/cache/srflip_<品种>.json`**：
 
 - `periods`：各周期的原始互换位列表（字段：`price` 代表价、`type` 互换类型、`breakTime` 互换时间、`touchCount` 触及次数、`barsPassed` 经过K线数量、`firstTouch`/`lastTouch` 首末触及时间、`recent` 是否近期极值位；**每周期最多 `maxPerPeriod` 个**）；
-- `merged`：跨周期合并后的完整互换位列表（额外含 `sources` 来源周期、`level` 主要来源级别）；
+- `merged`：**全量候选池**（展平不合并）：每条候选独立成线、价格=原始识别价，附 `level`（自身周期）与 `srcType`（来源类型）；下游 `mark-entry` 只读 `price`；
 - `drawn`：每个级别「上下各取 1 个」后的最终绘制列表（含 `level`、`score` 强度评分）。
 
 ## 常见问题排查
@@ -156,7 +151,7 @@ score = 0.6 × norm(触及次数) + 0.4 × norm(经过K线数量)
 | 未找到页面 | 图表标签未打开 | 打开一张图表即可 |
 | **报错「未找到 XX 的笔数据文件」** | 未先运行「画笔」SKILL（chan-bi） | 先对当前品种运行画笔，再运行本脚本 |
 | 某周期无互换位 | 该周期笔数不足（如日线/4小时笔少），或聚类阈值不合适 | 用更早的 `--from` 重新画笔，或调整 `--cluster` |
-| 相近价位画了多条线 | 跨周期合并阈值太小 | 调大 `--merge`（如 1.0）让相近支阻位合并 |
+| 同/近价位画了多条线 | 各周期/来源独立识别、互不合并（预期行为） | 无需处理；详细规则见 `.cursor/skills/mark-sr-flip/SPEC.md` |
 
 ## 注意事项
 

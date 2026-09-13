@@ -36,6 +36,11 @@ Thumbs.db
 py_chain/.after/
 py_chain/.baseline/
 
+# 基础数据存储（SQLite，按品种累积的K线库，不入库）
+data/bars.db
+data/bars.db-wal
+data/bars.db-shm
+
 # 调试残留：probe/shot/截屏/中间 dump（一次性脚本与产物，不入库）
 _probe*.py
 _shot*.py
@@ -46,3 +51,10 @@ _dbg*.txt
 _redraw*.txt
 _*.png
 bis_front*.json
+
+# 调试残留：临时画笔/截图脚本与重启前信号快照（一次性产物，不入库）
+tmp_*
+webapp-signals-before-restart.json
+
+# JS 对齐试验工作区（chan_core 对拍用，正式版在 py_chain/）
+chan_strategy/

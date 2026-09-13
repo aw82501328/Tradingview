@@ -2,8 +2,8 @@
  * mark-sr-flip 支阻互换位标记单元测试
  *
  * 依据 SPEC.md（`.cursor/skills/mark-sr-flip/SPEC.md`）的行为契约编写，
- * 覆盖支阻互换位识别、强度评分、每周期候选上限截断、跨周期合并与按级别选取
- * 的纯函数逻辑（本脚本已模块化导出，require 时不连接 CDP）。
+ * 覆盖支阻互换位识别、强度评分、每周期候选上限截断、全量候选池展平（不合并）
+ * 与按周期独立选取的纯函数逻辑（本脚本已模块化导出，require 时不连接 CDP）。
  *
  * 运行：node --test .cursor/skills/mark-sr-flip/scripts/mark_sr_flip.test.js
  */
@@ -266,111 +266,45 @@ describe("capPerPeriod 每周期候选上限截断", () => {
 });
 
 // ============================================================
-// 6. 跨周期合并（SPEC 4）
+// 6. 全量候选池展平（SPEC 4：不合并）
 // ============================================================
 
-describe("mergeFlipsAcrossPeriods 跨周期合并", () => {
-  test("价差 ≤ tol 的候选合并，价格按触及次数加权平均", () => {
-    const allFlips = {
-      "60": [flip(100, 4, 20)],
-      "15": [flip(103, 6, 30)],
-    };
-    const merged = sr.mergeFlipsAcrossPeriods(allFlips, 5);
-    assert.equal(merged.length, 1);
-    // 加权平均：(100×4 + 103×6) / 10 = (400+618)/10 = 101.8
-    assert.equal(merged[0].price, 101.8);
-    assert.equal(merged[0].touchCount, 10);
-    assert.equal(merged[0].barsPassed, 50);
-    assert.equal(merged[0].sources.join("+"), "60+15"); // 价格排序：60(100) 先入，15(103) 后并入
-  });
-
-  test("主要来源级别 = 来源中最大的级别", () => {
-    const allFlips = {
-      "3": [flip(100, 9, 40)],
-      "60": [flip(103, 3, 10)],
-    };
-    const merged = sr.mergeFlipsAcrossPeriods(allFlips, 5);
-    assert.equal(merged.length, 1);
-    assert.equal(merged[0].level, "60"); // 小级别触及次数多但主级别取大
-  });
-
-  test("价差超过容差的不合并", () => {
-    const allFlips = {
-      "60": [flip(100, 4, 20)],
-      "15": [flip(110, 6, 30)],
-    };
-    const merged = sr.mergeFlipsAcrossPeriods(allFlips, 5);
+describe("flattenCandidates 全量候选池展平（不合并）", () => {
+  test("同价位不同周期/类型不合并：两条独立线、价格原样", () => {
+    const fibCand = { ...flip(100, 1, 5), fib: true, ratio: 0.5, fromPoint: { type: "2买", time: 1, price: 1 }, referBi: {} };
+    const clusterCand = flip(100.2, 4, 20);  // 价差 0.2，旧合并容差内也不并条
+    const merged = sr.flattenCandidates({ "60": [fibCand], "15": [clusterCand] });
     assert.equal(merged.length, 2);
-  });
-});
-
-describe("dominantLevel 主要来源级别", () => {
-  test("取 LEVEL_ORDER 中最靠前（最大）的级别", () => {
-    assert.equal(sr.dominantLevel(["3", "60", "15"]), "60");
-    assert.equal(sr.dominantLevel(["15", "3"]), "15");
-    assert.equal(sr.dominantLevel(["D", "240"]), "D");
-  });
-});
-
-// ============================================================
-// 7. 按级别选取（SPEC 5.1）
-// ============================================================
-
-describe("pickByLevel 每级别上下各 1 个", () => {
-  const periodAtrs = { "60": 10, "15": 5, "3": 2 };
-
-  test("同侧多个候选按评分取最高，且限定距离范围", () => {
-    const merged = [
-      { ...flip(101, 2, 10), level: "60" },   // 上方，低分
-      { ...flip(105, 8, 20), level: "60" },   // 上方，高分
-      { ...flip(96, 9, 25), level: "60" },    // 下方
-    ];
-    const picked = sr.pickByLevel(merged, 100, 1, 3.0, periodAtrs);
-    assert.equal(picked.length, 2);
-    const above = picked.filter(f => f.price >= 100);
-    const below = picked.filter(f => f.price < 100);
-    assert.equal(above.length, 1);
-    assert.equal(above[0].price, 105);  // 评分高的上方位
-    assert.equal(below.length, 1);
-    assert.equal(below[0].price, 96);   // 唯一的下方位
+    const bySrc = Object.fromEntries(merged.map(f => [f.srcType, f]));
+    assert.equal(bySrc.fib.price, 100);        // 价格=原始识别价，无加权平均
+    assert.equal(bySrc.fib.ratio, 0.5);        // fib 标记保留
+    assert.equal(bySrc.cluster.price, 100.2);
+    assert.equal(bySrc.cluster.touchCount, 4); // touchCount 不累加
+    assert.ok(merged.every(f => f.sources === undefined)); // 无合并字段
   });
 
-  test("距离超出 maxDistAtr×本级别ATR 的候选被排除", () => {
-    const merged = [
-      { ...flip(160, 9, 30), level: "60" },  // 距现价 60 > 3.0×10=30 → 排除
-      { ...flip(120, 3, 10), level: "60" },  // 距现价 20 ≤ 30 → 保留
-    ];
-    const picked = sr.pickByLevel(merged, 100, 1, 3.0, periodAtrs);
-    assert.equal(picked.length, 1);
-    assert.equal(picked[0].price, 120);
+  test("附 level（自身周期）与 srcType（cluster/fib/boll）", () => {
+    const bollCand = { ...flip(100, 1, 0), boll: "upper" };
+    const merged = sr.flattenCandidates({ "60": [bollCand], "3": [flip(90, 2, 3)] });
+    const b60 = merged.find(f => f.level === "60");
+    const c3 = merged.find(f => f.level === "3");
+    assert.equal(b60.srcType, "boll");
+    assert.equal(b60.boll, "upper");
+    assert.equal(c3.srcType, "cluster");
   });
 
-  test("按级别分组，每级别上下各 1 个", () => {
-    const merged = [
-      { ...flip(105, 8, 20), level: "60" },
-      { ...flip(95, 9, 25), level: "60" },
-      { ...flip(102, 6, 15), level: "15" },
-      { ...flip(97, 7, 18), level: "15" },
-    ];
-    const picked = sr.pickByLevel(merged, 100, 1, 3.0, periodAtrs);
-    assert.equal(picked.length, 4); // 每个级别上下各 1
-    const lv60 = picked.filter(f => f.level === "60");
-    const lv15 = picked.filter(f => f.level === "15");
-    assert.equal(lv60.length, 2);
-    assert.equal(lv15.length, 2);
-  });
-
-  test("无该级别 ATR 时不限距离（Infinity）", () => {
-    const merged = [
-      { ...flip(105, 8, 20), level: "60" },
-    ];
-    const picked = sr.pickByLevel(merged, 100, 1, 3.0, {});
-    assert.equal(picked.length, 1);
+  test("排序：先按 LEVEL_ORDER 级别序（大→小），再按 price 升序", () => {
+    const merged = sr.flattenCandidates({
+      "3": [flip(101, 1, 1), flip(100, 1, 1)],
+      "60": [flip(105, 1, 1)],
+    });
+    assert.deepEqual(merged.map(f => [f.level, f.price]),
+      [["60", 105], ["3", 100], ["3", 101]]);
   });
 });
 
 // ============================================================
-// 8. 颜色 / 可见范围 / 最少触及次数
+// 7. 颜色 / 可见范围 / 最少触及次数
 // ============================================================
 
 describe("srColor 按级别颜色", () => {
@@ -772,18 +706,25 @@ describe("buildBollCandidates 布林带候选组装（SPEC 一）", () => {
 // 11. 按显示周期选取（SPEC 三）
 // ============================================================
 
-describe("pickNearestForDisplay 按周期显示选取（SPEC 三）", () => {
+describe("pickNearestForDisplay 按周期显示选取（SPEC 三：各周期独立）", () => {
   const periodAtrs = { "240": 10, "60": 10, "3": 2 };
 
-  test("高级别线继承到低周期图（候选池=该级别及以上）", () => {
+  test("各周期独立：不继承其它周期线（候选池=仅本周期）", () => {
     const merged = [
-      { ...flip(105, 8, 20), level: "240" },   // 高级别线
-      { ...flip(50, 3, 5), level: "3" },        // 低级别远位（距现价 50 > 3×ATR3=6 → 排除）
+      { ...flip(105, 8, 20), level: "240" },   // 高级别线只进 240 图
+      { ...flip(98, 3, 5), level: "3" },
     ];
     const drawn = sr.pickNearestForDisplay(merged, ["240", "3"], 100, 1, 3.0, periodAtrs);
     assert.equal(drawn["3"].length, 1);
-    assert.equal(drawn["3"][0].level, "240"); // 继承自 240
+    assert.equal(drawn["3"][0].level, "3");   // 不再继承 240 线
     assert.equal(drawn["240"][0].level, "240");
+  });
+
+  test("本周期无候选 → 该图空（即使其它周期线在距离内也不继承）", () => {
+    const merged = [{ ...flip(105, 8, 20), level: "240" }];
+    const drawn = sr.pickNearestForDisplay(merged, ["240", "3"], 100, 1, 3.0, periodAtrs);
+    assert.equal(drawn["240"].length, 1);
+    assert.equal(drawn["3"].length, 0);
   });
 
   test("每周期就近上下各 N（sideCount=2）", () => {
@@ -843,9 +784,8 @@ describe("periodNameOf/sourceLabelOf/labelOf 来源标注（SPEC 三）", () => 
     assert.equal(sr.sourceLabelOf({ fib: true, pending: true, fromPoint: { type: "预期2卖" } }), "预期2卖");
   });
 
-  test("cluster / mixed 标签", () => {
+  test("cluster 标签", () => {
     assert.equal(sr.sourceLabelOf({ type: "R2S" }), "密集区");
-    assert.equal(sr.sourceLabelOf({ srcType: "mixed" }), "位置线");
   });
 
   test("labelOf 组合 `<类型>+<周期中文名>`", () => {
@@ -855,9 +795,8 @@ describe("periodNameOf/sourceLabelOf/labelOf 来源标注（SPEC 三）", () => 
     assert.equal(sr.labelOf({ fib: true, pending: true, fromPoint: { type: "预期2卖" }, level: "240" }), "预期2卖+4小时");
   });
 
-  test("typeNameOf boll/mixed 标签", () => {
+  test("typeNameOf boll 标签", () => {
     assert.equal(sr.typeNameOf({ boll: "upper" }), "BOLL上轨");
-    assert.equal(sr.typeNameOf({ srcType: "mixed" }), "位置线");
   });
 });
 
@@ -888,36 +827,74 @@ describe("srVisibilitySingle 单周期可见性（SPEC 三）", () => {
 });
 
 // ============================================================
-// 13. 统一合并池：混合来源标记清理（SPEC 二）
+// 13. 全量候选池：标记保留（SPEC 2.4/2.6：不合并，标记永不清理）
 // ============================================================
 
-describe("mergeFlipsAcrossPeriods 混合来源标记清理（SPEC 二）", () => {
-  test("cluster+fib 混合合并 → srcType=mixed，删 fib 标记", () => {
+describe("flattenCandidates 独立线标记保留（SPEC 二）", () => {
+  test("fib 独立线保留 fib/ratio 标记", () => {
     const fibCand = { ...flip(100, 1, 5), fib: true, ratio: 0.5, fromPoint: { type: "2买", time: 1, price: 1 }, referBi: {} };
-    const clusterCand = flip(102, 4, 20);
-    const merged = sr.mergeFlipsAcrossPeriods({ "60": [fibCand], "15": [clusterCand] }, 5);
-    assert.equal(merged.length, 1);
-    assert.equal(merged[0].srcType, "mixed");
-    assert.equal(merged[0].fib, undefined);
-    assert.equal(merged[0].ratio, undefined);
-    assert.equal(merged[0].fromPoint, undefined);
-    assert.equal(merged[0].boll, undefined);
-  });
-
-  test("纯单来源 fib 独立线保留 fib 标记", () => {
-    const fibCand = { ...flip(100, 1, 5), fib: true, ratio: 0.5, fromPoint: { type: "2买", time: 1, price: 1 }, referBi: {} };
-    const merged = sr.mergeFlipsAcrossPeriods({ "60": [fibCand] }, 5);
+    const merged = sr.flattenCandidates({ "60": [fibCand] });
     assert.equal(merged.length, 1);
     assert.equal(merged[0].srcType, "fib");
     assert.equal(merged[0].fib, true);
     assert.equal(merged[0].ratio, 0.5);
   });
 
-  test("纯单来源 boll 独立线保留 boll 标记", () => {
+  test("boll 独立线保留 boll 标记", () => {
     const bollCand = { ...flip(100, 1, 0), boll: "upper" };
-    const merged = sr.mergeFlipsAcrossPeriods({ "60": [bollCand] }, 5);
+    const merged = sr.flattenCandidates({ "60": [bollCand] });
     assert.equal(merged.length, 1);
     assert.equal(merged[0].srcType, "boll");
     assert.equal(merged[0].boll, "upper");
+  });
+});
+
+// ============================================================
+// 14. 人工支阻位（--manual，与 py buildManualCandidates/manualLevels 逐行对齐）
+// ============================================================
+
+describe("buildManualCandidates 人工支阻位", () => {
+  const bars = [{ time: 1 }, { time: 2 }, { time: 9 }];
+
+  test("type 按现价侧推导：现价 ≥ 价位 → SUP，否则 → RES", () => {
+    const cands = sr.buildManualCandidates([4400, 4450], bars, 4420);
+    assert.deepEqual(cands.map(c => c.type), ["SUP", "RES"]);
+    assert.ok(cands.every(c => c.manual === true));
+  });
+
+  test("currentPrice 未知 → 统一 RES；锚点=末根已收盘K线 time（单根回退末根）", () => {
+    const cands = sr.buildManualCandidates([4400], bars, null);
+    assert.equal(cands[0].type, "RES");
+    assert.equal(cands[0].breakTime, 2);
+    assert.equal(cands[0].touchCount, 1);
+    assert.equal(cands[0].barsPassed, 0);
+    const single = sr.buildManualCandidates([1], [{ time: 5 }], null);
+    assert.equal(single[0].breakTime, 5);
+  });
+
+  test("flattenCandidates：人工候选 srcType=manual", () => {
+    const merged = sr.flattenCandidates({ "60": sr.buildManualCandidates([4400], bars, 4420) });
+    assert.equal(merged[0].srcType, "manual");
+    assert.equal(merged[0].level, "60");
+  });
+});
+
+describe("parseManualArg --manual 解析", () => {
+  test("分号分周期、逗号/空格分价位、去重升序、周期大写归一", () => {
+    const parsed = sr.parseManualArg("60:4450, 4460.5;1h:4440 4440;d:");
+    assert.deepEqual(parsed["60"], [4450, 4460.5]);
+    assert.deepEqual(parsed["1H"], [4440]);       // 1h → 大写归一
+    assert.deepEqual(parsed["D"], []);            // 空价位 = 该周期没有支阻位
+  });
+
+  test("缺周期前缀的段忽略（容错不中断）", () => {
+    const parsed = sr.parseManualArg("60:4450;bad");
+    assert.deepEqual(Object.keys(parsed), ["60"]);
+  });
+
+  test("手动位标注 sourceLabelOf/labelOf", () => {
+    assert.equal(sr.sourceLabelOf({ manual: true }), "手动位");
+    assert.equal(sr.labelOf({ manual: true, level: "60" }), "手动位+1小时");
+    assert.equal(sr.typeNameOf({ manual: true }), "手动位");
   });
 });

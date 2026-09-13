@@ -2,7 +2,9 @@
 """
 支阻互换位逻辑（Python 移植版，与 .cursor/skills/mark-sr-flip/scripts/mark_sr_flip.js 对齐）
 
-纯函数模块：基于各周期笔与K线识别「支阻位」并跨周期合并，三类来源（srTypes 可分别开关）：
+纯函数模块：基于各周期笔与K线识别「支阻位」，各周期独立成线、不合并。支阻位来源按周期
+二选一：系统计算（密集区 cluster）或人工输入（manualLevels）；黄金分割与 BOLL 为独立
+「叠加层」（srTypes 开关），独立于支阻位来源、照常叠加、仍进候选池：
   - 密集区（cluster，默认开）：
     - 强支阻互换位：价位被反复测试（触及次数 >= minTouch），之后价格突破该价位，角色互换
       （R2S 阻力转支撑 / S2R 支撑转阻力）
@@ -16,9 +18,12 @@
   - BOLL 布林带（boll，默认开）：每周期最后一根已收盘K线的布林带上/中/下轨
     （26 周期 SMA ± 2σ，总体标准差 ÷N），上轨=阻力 RES、下轨=支撑 SUP、中轨按现价侧
 
-三类同池合并（mergeFlipsAcrossPeriods）：三类候选全部进同一池、同一规则；多来源混合线
-删除 fib/pending/boll 标记，纯单来源独立线保留标记；显示模型改为「按周期」选取
-（pickNearestForDisplay：每周期图就近上下各 sideCount，高级别线继承到低周期图）。
+不合并（2026-09-12 起取消跨周期合并）：候选逐条展平为全量候选池（merged），
+价格=原始识别价（不做任何加权平均），每项附 level（自身周期）与 srcType
+（cluster/fib/boll/manual）；显示模型为「各周期独立」选取（pickNearestForDisplay：
+每周期图就近上下各 sideCount，仅本周期候选，不继承其它周期线）；人工输入周期
+（manualLevels 键存在）替换该周期密集区、全部画出（不受 sideCount/距离上限，就近选取池
+不含人工候选），叠加层照常就近叠加（2026-09-13 新增：fib/BOLL 拆为独立叠加层）。
 
 不连接 CDP、不绘图；回测链路通过 compute_srflip 直接调用。
 """
@@ -63,7 +68,6 @@ def _barsArrays(bars):
 
 # 参数（与 JS 默认值一致）
 CLUSTER_ATR = 0.5        # 价位聚类阈值（×ATR）
-MERGE_ATR = 0.5          # 跨周期合并阈值（×最小周期ATR）
 RECENT_CLUSTER_ATR = 1.0  # 近期极值位聚类容差（×ATR）
 TOUCH_WEIGHT = 0.6       # 强度评分：触及次数权重
 BARS_WEIGHT = 0.4        # 强度评分：经过K线数量权重
@@ -86,7 +90,7 @@ FIB_SELL_TYPES = ["2卖", "类2卖", "3卖"]
 # 上级周期映射（现算买卖点的区间套用；D 及未收录周期无上级，走结构底分支）
 UPPER_OF = {"240": "D", "60": "240", "15": "60", "3": "15"}
 
-# 级别大小顺序（从大到小），用于取「最大级别」与可见范围判断
+# 级别大小顺序（从大到小），用于候选池排序与可见范围判断
 LEVEL_ORDER = ["1W", "W", "1D", "D", "240", "4H", "60", "1H", "15", "3"]
 
 # 最少触及次数（按级别）：--min-touch 显式指定时全局覆盖
@@ -219,8 +223,8 @@ def detectRecentFlip(cluster):
 # ============================================================
 # 黄金分割支阻位（fib，与 JS 逐行对齐）
 # 对每方向「最新的非一类买卖点」，取其回调笔紧邻前方的顺势笔为参照笔，
-# 画经典回撤分割位。fib 走「并行双轨」：不进 capPerPeriod / mergeFlipsAcrossPeriods /
-# pickByLevel（三条比率位是成组结构，并簇均价会破坏比例位几何语义）。
+# 画经典回撤分割位。fib 豁免 capPerPeriod 截断与评分（由结构点派生，评分语义不适用）；
+# 直接进全量候选池（不合并，保留自身标记与原始价位）。
 # ============================================================
 
 
@@ -365,7 +369,7 @@ def buildFibCandidates(fullBis, buyPts, sellPts, fibLevels, bars, tol, barArrays
 # BOLL 布林带支阻位（boll，与 JS 逐行对齐）
 # 每周期取「最后一根已收盘K线」的布林带上/中/下轨（BOLL_LENGTH 周期 SMA ± BOLL_MULT×σ，
 # 总体标准差 ÷N，与 TradingView 同口径），上轨=阻力 RES、下轨=支撑 SUP、中轨按现价侧。
-# boll 同 fib 一样豁免截断与评分（评分语义不适用），但**参与**跨周期合并（三类同池）。
+# boll 同 fib 一样豁免截断与评分（评分语义不适用）；直接进全量候选池（不合并）。
 # ============================================================
 
 
@@ -411,6 +415,35 @@ def buildBollCandidates(bars, length, mult, currentPrice):
 
 
 # ============================================================
+# 人工支阻位（manual，与 JS buildManualCandidates 逐行对齐）
+# 配置键 manualLevels = { 周期: [价位,...] }：键存在 = 该周期支阻位来源=人工，
+# 替换该周期密集区计算（叠加层 fib/BOLL 独立照常）；type 按现价侧推导；
+# 全部画出（不受 sideCount/距离上限）。
+# ============================================================
+
+
+def buildManualCandidates(prices, bars, currentPrice):
+    """人工价位候选：替换该周期的密集区支阻位（叠加层独立）。type 按现价侧推导（现价 >= 价位 → SUP，
+    否则 → RES，仿 buildBollCandidates 中轨口径；currentPrice 未知时统一 RES）；
+    锚点 = 该周期末根已收盘K线时间（单根K线回退末根，避免 breakTime=0）。
+    全部候选豁免 capPerPeriod、pickNearestForDisplay 的 sideCount 与距离上限
+    （由 compute_srflip 覆写 drawnByPeriod 实现「输入几条画几条」）。
+    @param prices 人工价位列表（已由校验层去重升序）
+    @returns [{ price, type, manual: True, touchCount: 1, barsPassed: 0,
+               firstTouch/lastTouch/breakTime: 末根已收盘K线 time }]
+    """
+    closed = bars[:-1]
+    anchorTime = closed[-1]["time"] if closed else bars[-1]["time"]
+    out = []
+    for p in prices:
+        typ = "SUP" if (currentPrice is not None and currentPrice >= p) else "RES"
+        out.append({"price": float(p), "type": typ, "manual": True,
+                    "touchCount": 1, "barsPassed": 0,
+                    "firstTouch": anchorTime, "lastTouch": anchorTime, "breakTime": anchorTime})
+    return out
+
+
+# ============================================================
 # 来源标注（与 JS sourceLabelOf/labelOf/periodNameOf 逐行对齐）
 # ============================================================
 
@@ -430,11 +463,11 @@ def periodNameOf(res):
 
 def sourceLabelOf(f):
     """支阻位来源类型的中文标注（落盘 drawnByPeriod 的 label 用）。
-    混合合并线（srcType=mixed）→ 位置线；boll → BOLL上轨/中轨/下轨；
-    fib → 预期<N>（pending）/ 黄金分割<ratio>（已形成）；cluster → 密集区。
+    manual → 手动位；boll → BOLL上轨/中轨/下轨；fib → 预期<N>（pending）/
+    黄金分割<ratio>（已形成）；cluster → 密集区。
     """
-    if f.get("srcType") == "mixed":
-        return "位置线"
+    if f.get("manual"):
+        return "手动位"
     if f.get("boll"):
         b = f["boll"]
         return "BOLL上轨" if b == "upper" else "BOLL中轨" if b == "mid" else "BOLL下轨"
@@ -483,7 +516,9 @@ def flipScore(f, group, touchWeight=TOUCH_WEIGHT, barsWeight=BARS_WEIGHT):
 
 
 def _kindOf(f):
-    """候选来源类型：boll/fib/cluster（由标记反推，与 JS 一致）。"""
+    """候选来源类型：manual/boll/fib/cluster（由标记反推，与 JS 一致）。"""
+    if f.get("manual"):
+        return "manual"
     if f.get("boll"):
         return "boll"
     if f.get("fib"):
@@ -491,138 +526,43 @@ def _kindOf(f):
     return "cluster"
 
 
-def _memberSnapshot(item):
-    """合并成员快照（mergeDetail 用）：记录并入前的原始价/来源/类型等字段。
-    price 必须在加权平均【之前】取值——成员原价与合并价的差是判断合并是否合理的关键依据。"""
-    m = {"source": item["source"], "kind": item["_kinds"][0], "type": item["type"],
-         "price": item["price"], "touchCount": item["touchCount"],
-         "barsPassed": item.get("barsPassed", 0), "breakTime": item["breakTime"],
-         "recent": bool(item.get("recent"))}
-    if item.get("fib"):
-        m["ratio"] = item.get("ratio")
-    if item.get("boll"):
-        m["boll"] = item.get("boll")
-    if item.get("pending"):
-        m["pending"] = True
-    return m
-
-
-def mergeFlipsAcrossPeriods(allFlips, tol, detail=False):
-    """跨周期合并：三类候选（密集区/fib/boll）同一池、同一规则。
-    合并后确定「主要来源级别」= 来源中最大的级别；多来源混合线删除 fib/pending/boll
-    标记（统一按「位置线」口径），纯单来源独立线保留标记。
-    @param detail  True 时每条合并项附 members 快照（成员原始价/来源/类型，供调试页展示合并前状态）
-    @returns [{ price, type, touchCount, firstTouch, breakTime, sources:[...], level, srcType[, members] }]
+def flatten_candidates(combined):
+    """展平各周期候选为全量候选池（不合并，与 JS flattenCandidates 逐行对齐）：
+    每条候选独立成线，价格=原始识别价（不做任何加权平均），同价位不同周期/不同类型
+    的候选也各自保留；附 level（自身周期）与 srcType（cluster/fib/boll，由自身标记反推）。
+    排序：先按 LEVEL_ORDER 级别序（大→小，未知键落尾），再按 price 升序（确定性输出）。
+    @param combined { 周期: [候选,...] }（密集区截断后 + fib + boll）
+    @returns [{ ...原候选字段, level, srcType }]
     """
-    all_ = []
-    for res, flips in allFlips.items():
+    def levelIdx(res):
+        r = str(res).upper()
+        return LEVEL_ORDER.index(r) if r in LEVEL_ORDER else len(LEVEL_ORDER)
+
+    out = []
+    for res, flips in combined.items():
         for f in flips:
-            item = dict(f)
-            item["source"] = res
-            item["_kinds"] = [_kindOf(f)]
-            all_.append(item)
-    all_.sort(key=lambda f: f["price"])
-    merged = []
-    for f in all_:
-        last = merged[-1] if merged else None
-        if last is not None and f["price"] - last["price"] <= tol:
-            prevTouch = last["touchCount"]
-            if detail:
-                last["members"].append(_memberSnapshot(f))
-            totalTouch = prevTouch + f["touchCount"]
-            # 价格按触及次数加权平均
-            last["price"] = (last["price"] * prevTouch + f["price"] * f["touchCount"]) / totalTouch
-            last["touchCount"] = totalTouch
-            # 经过 K 线数量同样累加
-            last["barsPassed"] = last.get("barsPassed", 0) + f.get("barsPassed", 0)
-            if f["source"] not in last["sources"]:
-                last["sources"].append(f["source"])
-            last["firstTouch"] = min(last["firstTouch"], f["firstTouch"])
-            last["breakTime"] = max(last["breakTime"], f["breakTime"])
-            # 类型冲突（罕见）：以触及次数更多者为准
-            if f["touchCount"] > prevTouch:
-                last["type"] = f["type"]
-            if f["_kinds"][0] not in last["_kinds"]:
-                last["_kinds"].append(f["_kinds"][0])
-        else:
-            item = dict(f, sources=[f["source"]])
-            if detail:
-                item["members"] = [_memberSnapshot(item)]
-            merged.append(item)
-    # 确定每个合并项的主要来源级别 = 来源中最大的级别（大级别优先）
-    for m in merged:
-        m["level"] = dominantLevel(m["sources"])
-        m.pop("source", None)
-        kinds = m.pop("_kinds", [])
-        # 多来源混合线：删除 fib/pending/boll 等具体来源标记，统一按「位置线」口径
-        if len(kinds) > 1:
-            m["srcType"] = "mixed"
-            for k in ("fib", "pending", "ratio", "fromPoint", "referBi", "boll"):
-                m.pop(k, None)
-        elif len(kinds) == 1:
-            m["srcType"] = kinds[0]
-    return merged
-
-
-def dominantLevel(sources):
-    """从来源周期列表确定主要来源级别：取最大的级别（LEVEL_ORDER 中更靠前）。"""
-    best = None
-    for res in sources:
-        if best is None or LEVEL_ORDER.index(res) < LEVEL_ORDER.index(best):
-            best = res
-    return best
-
-
-def pickByLevel(merged, currentPrice, sideCount, maxDistAtr, periodAtrs,
-                touchWeight=TOUCH_WEIGHT, barsWeight=BARS_WEIGHT):
-    """每个级别只保留「当前价格上方最近的 N 个 + 下方最近的 N 个」支阻位。
-    先限定距离范围（距当前价 ≤ maxDistAtr×本级别ATR），同一侧仍存在多个候选时，
-    选「强度评分最高」的 N 个。"""
-    byLevel = {}
-    for f in merged:
-        byLevel.setdefault(f["level"], []).append(f)
-    result = []
-    for level, group in byLevel.items():
-        # 本级别距离上限 = maxDistAtr × 本级别ATR（无ATR时退回与当前价最近）
-        levelAtr = periodAtrs.get(level)
-        maxDist = maxDistAtr * levelAtr if levelAtr else float("inf")
-        # 距离范围内先给同级别候选集计算强度评分（min-max 归一化）
-        for f in group:
-            f["score"] = flipScore(f, group, touchWeight, barsWeight)
-        # 上方：>= 当前价 且在距离范围内，评分降序取前 sideCount
-        above = sorted(
-            [f for f in group if f["price"] >= currentPrice and f["price"] - currentPrice <= maxDist],
-            key=lambda f: f["score"], reverse=True)[:sideCount]
-        # 下方：< 当前价 且在距离范围内，评分降序取前 sideCount
-        below = sorted(
-            [f for f in group if f["price"] < currentPrice and currentPrice - f["price"] <= maxDist],
-            key=lambda f: f["score"], reverse=True)[:sideCount]
-        result.extend(above)
-        result.extend(below)
-    return result
+            out.append(dict(f, level=res, srcType=_kindOf(f)))
+    out.sort(key=lambda f: (levelIdx(f["level"]), f["price"]))
+    return out
 
 
 def pickNearestForDisplay(merged, displayPeriods, currentPrice, sideCount, maxDistAtr, periodAtrs):
-    """按显示周期选取（新显示模型，与 JS 逐行对齐）：每个显示周期图最多 2×sideCount 条线。
-    候选池 = 该级别及以上级别的合并线（高级别线继承到低周期图，如 3m 图候选池含 3/15/60/240/D
-    全部位置线），取「距现价最近的上方 sideCount 条 + 下方 sideCount 条」，每条仍受
-    ≤ maxDistAtr×线自身级别ATR 距离上限（periodAtrs[line.level] 缺失时 Infinity），允许上下不对称。
+    """按显示周期选取（各周期独立，与 JS 逐行对齐）：每个显示周期图最多 2×sideCount 条线。
+    候选池 = 仅该周期自身的候选（merged 中 level == L，不继承其它周期线），
+    取「距现价最近的上方 sideCount 条 + 下方 sideCount 条」，每条受
+    ≤ maxDistAtr×本周期ATR 距离上限（periodAtrs[L] 缺失时 Infinity），允许上下不对称。
     @returns { 周期: [line,...] }
     """
     out = {}
     for L in displayPeriods:
-        li = LEVEL_ORDER.index(L)
-        pool = [f for f in merged if LEVEL_ORDER.index(f["level"]) <= li]
-
-        def maxDistOf(f):
-            levelAtr = periodAtrs.get(f["level"])
-            return maxDistAtr * levelAtr if levelAtr else float("inf")
-
+        atrL = periodAtrs.get(L)
+        maxDist = maxDistAtr * atrL if atrL else float("inf")
+        pool = [f for f in merged if f["level"] == L]
         above = sorted(
-            [f for f in pool if f["price"] >= currentPrice and f["price"] - currentPrice <= maxDistOf(f)],
+            [f for f in pool if f["price"] >= currentPrice and f["price"] - currentPrice <= maxDist],
             key=lambda f: f["price"])[:sideCount]
         below = sorted(
-            [f for f in pool if f["price"] < currentPrice and currentPrice - f["price"] <= maxDistOf(f)],
+            [f for f in pool if f["price"] < currentPrice and currentPrice - f["price"] <= maxDist],
             key=lambda f: f["price"], reverse=True)[:sideCount]
         out[L] = above + below
     return out
@@ -684,8 +624,7 @@ def cluster_candidates(bis, bars, atr, *, clusterAtr=CLUSTER_ATR,
 
 
 def compute_srflip(periodBis, barsByPeriod, periods,
-                   clusterAtr=CLUSTER_ATR, mergeAtr=MERGE_ATR,
-                   recentClusterAtr=RECENT_CLUSTER_ATR,
+                   clusterAtr=CLUSTER_ATR, recentClusterAtr=RECENT_CLUSTER_ATR,
                    maxDistAtr=MAX_DIST_ATR, maxPerPeriod=MAX_PER_PERIOD,
                    minTouchOverride=None, periodAtrsIn=None,
                    srTypes=DEFAULT_SR_TYPES, fibLevels=FIB_LEVELS, periodMacdIn=None,
@@ -693,10 +632,10 @@ def compute_srflip(periodBis, barsByPeriod, periods,
                    clusterParts=("flip", "recent"), minTouchsIn=None,
                    recentBiCount=RECENT_BI_COUNT,
                    touchWeight=TOUCH_WEIGHT, barsWeight=BARS_WEIGHT,
-                   sideCount=SIDE_COUNT, mergeDetail=False,
-                   clusterParamsByPeriod=None, periodBarTimesIn=None,
+                   sideCount=SIDE_COUNT,
+                   clusterParamsByPeriod=None, manualLevels=None, periodBarTimesIn=None,
                    periodBarArraysIn=None):
-    """逐周期识别支阻位（密集区 + 黄金分割 + BOLL）并跨周期合并、按周期选取。
+    """逐周期识别支阻位（密集区 + 黄金分割 + BOLL + 人工输入），展平为全量候选池、各周期独立选取。
 
     @param periodBis    各周期笔 { 周期: [bis] }
     @param barsByPeriod 各周期原始K线 { 周期: [bars] }
@@ -712,9 +651,14 @@ def compute_srflip(periodBis, barsByPeriod, periods,
     @param recentBiCount 近期极值位取最近 N 根笔
     @param touchWeight/barsWeight 强度评分权重（仅 capPerPeriod 截断与 score 字段，显示选取纯按价就近）
     @param sideCount    每周期图每侧条数（总 ≤ 2×sideCount）
-    @param mergeDetail  True 时 merged 各项附 members 成员快照（默认 False，输出与旧版逐键一致）
-    @returns { periods: 各周期候选(密集区截断后+fib+boll), merged: 三类统一合并结果,
-               drawnByPeriod: 各显示周期选中的 ≤2×sideCount 条(含来源标注),
+    @param manualLevels 人工支阻位 { 周期: [价位,...] }：键存在即该周期支阻位来源=人工——
+                        替换该周期密集区计算（不要求 bis≥3，仍需 bars），人工候选全部画出
+                        （不受 sideCount/距离上限），type 按现价侧推导，srcType="manual"；
+                        空列表 = 该周期无支阻位（不画线、不进候选池，不回退系统计算）；
+                        叠加层（fib/BOLL）独立于支阻位来源，人工周期照常生成并叠加
+    @returns { periods: 各周期候选(密集区截断后+fib+boll+manual), merged: 全量候选池（展平不合并，
+               每项附 level/srcType；下游 mark-entry/回测只读 price）,
+               drawnByPeriod: 各显示周期选中的 ≤2×sideCount 条(人工周期=全部候选),
                currentPrice: 当前价, periodAtrs: 各周期ATR }
     """
     # 可选加速输入：时间索引与 bars 同序；价格数组仅含当前可见前缀。
@@ -722,16 +666,21 @@ def compute_srflip(periodBis, barsByPeriod, periods,
     periodMacdIn = periodMacdIn or {}
     periodBarTimesIn = periodBarTimesIn or {}
     periodBarArraysIn = periodBarArraysIn or {}
+    # 人工支阻位：周期键大写归一（别名 1H/4H 已在服务层归一，此处兜底）
+    manualLevels = {str(k).upper(): list(v) for k, v in (manualLevels or {}).items()}
     allFlips = {}
     allFibs = {}
     allBolls = {}
+    allManuals = {}
     periodAtrs = {}
     lastCloseByRes = {}
     for res in periods:
+        manual = manualLevels.get(str(res).upper())
         bis = periodBis.get(res, []) or []
-        if not bis or len(bis) < 3:
-            continue
         bars = barsByPeriod.get(res, []) or []
+        # 人工周期不要求 bis≥3（无笔也能用）；系统周期保留原门槛
+        if manual is None and (not bis or len(bis) < 3):
+            continue
         if not bars:
             continue
         lastCloseByRes[res] = bars[-1]["close"]
@@ -739,21 +688,22 @@ def compute_srflip(periodBis, barsByPeriod, periods,
         if atr is None:
             atr = calcATR(bars, 14)
         periodAtrs[res] = atr
-        pcfg = (clusterParamsByPeriod or {}).get(str(res).upper(), {})
-        localCluster = pcfg.get("clusterAtr", clusterAtr)
-        tol = localCluster * atr
-        minTouch = (minTouchsIn or {}).get(str(res).upper()) or minTouchFor(res, minTouchOverride)
-        allFlips[res] = cluster_candidates(
-            bis, bars, atr, clusterAtr=localCluster,
-            recentClusterAtr=pcfg.get("recentClusterAtr", recentClusterAtr),
-            recentBiCount=pcfg.get("recentBiCount", recentBiCount),
-            minTouch=minTouch, clusterParts=clusterParts,
-            barTimes=periodBarTimesIn.get(res),
-            barArrays=periodBarArraysIn.get(res)) if "cluster" in srTypes else []
+        if manual is None:
+            # 系统计算支阻位 = 密集区（人工周期跳过，支阻位由人工价位提供）
+            pcfg = (clusterParamsByPeriod or {}).get(str(res).upper(), {})
+            localCluster = pcfg.get("clusterAtr", clusterAtr)
+            tol = localCluster * atr
+            minTouch = (minTouchsIn or {}).get(str(res).upper()) or minTouchFor(res, minTouchOverride)
+            allFlips[res] = cluster_candidates(
+                bis, bars, atr, clusterAtr=localCluster,
+                recentClusterAtr=pcfg.get("recentClusterAtr", recentClusterAtr),
+                recentBiCount=pcfg.get("recentBiCount", recentBiCount),
+                minTouch=minTouch, clusterParts=clusterParts,
+                barTimes=periodBarTimesIn.get(res),
+                barArrays=periodBarArraysIn.get(res)) if "cluster" in srTypes else []
 
-        # 黄金分割支阻位：现算非一类买卖点（本函数无 fromTs 概念，窗口由调用方决定），
-        # 每方向只取最新点，参照笔=回调前顺势笔（在全量笔上定位）
-        if "fib" in srTypes:
+        # 黄金分割叠加层：独立于支阻位来源，人工周期照常生成（需笔：bis≥3）
+        if "fib" in srTypes and bis and len(bis) >= 3:
             macd = periodMacdIn.get(res) or calcMACD(bars)
             upperRes = UPPER_OF.get(str(res).upper())
             upperBis = periodBis.get(upperRes) if upperRes else None
@@ -772,7 +722,8 @@ def compute_srflip(periodBis, barsByPeriod, periods,
             currentPrice = lastCloseByRes[k]
             break
 
-    # BOLL 布林带候选：中轨按现价侧，需 currentPrice 已知后生成（逐周期独立，三轨一组）
+    # BOLL 布林带叠加层：独立于支阻位来源，人工周期照常生成（中轨按现价侧，
+    # 需 currentPrice 已知后生成，逐周期独立三轨一组）
     if "boll" in srTypes:
         for res in periods:
             if res not in periodAtrs:
@@ -781,36 +732,54 @@ def compute_srflip(periodBis, barsByPeriod, periods,
             if bars:
                 allBolls[res] = buildBollCandidates(bars, bollLength, bollMult, currentPrice)
 
-    # 统一合并池：三类候选（密集区截断后 + fib + boll）全部进 mergeFlipsAcrossPeriods（同一池、同一规则）。
-    # 合并容差按「最小有数据的周期 ATR」缩放：小级别价位密集，按最小周期ATR只合并真正的「同一价位」。
+    # 人工支阻位候选：type 按现价侧推导，需 currentPrice 已知后生成（键存在即完全替换该周期系统计算）
+    for res in periods:
+        manual = manualLevels.get(str(res).upper())
+        if manual is None or res not in periodAtrs:
+            continue
+        bars = barsByPeriod.get(res, []) or []
+        if bars:
+            allManuals[res] = buildManualCandidates(manual, bars, currentPrice)
+
+    # 全量候选池（不合并）：候选（密集区截断后 + fib + boll + manual）逐条展平，
+    # 每条附自身周期 level 与来源 srcType，价格=原始识别价（不做任何加权平均）。
     combined = {}
     for res in periods:
-        arr = (allFlipsCapped.get(res, []) or []) + (allFibs.get(res, []) or []) + (allBolls.get(res, []) or [])
+        arr = (allFlipsCapped.get(res, []) or []) + (allFibs.get(res, []) or []) \
+            + (allBolls.get(res, []) or []) + (allManuals.get(res, []) or [])
         if arr:
             combined[res] = arr
-    atrValues = [periodAtrs[r] for r in periods
-                 if r in combined and combined[r] and r in periodAtrs]
-    minAtr = min(atrValues) if atrValues else 0
-    mergeTol = mergeAtr * minAtr
-    mergedOut = mergeFlipsAcrossPeriods(combined, mergeTol, detail=mergeDetail)
+    mergedOut = flatten_candidates(combined)
 
-    # 按显示周期选取：每周期图 ≤ 2×sideCount 条（就近上下各 N，高级别线继承到低周期图）。
+    # 按显示周期选取：每周期图 ≤ 2×sideCount 条（就近上下各 N，各周期独立、不继承其它周期线）。
+    # 就近选取池 = 非人工候选（密集区+fib+boll）——人工支阻位不走就近，全部画出。
     # 显示周期 = 成功处理（有 ATR/K线）的周期，顺序沿 periods（从大到小）。
     displayPeriods = [r for r in periods if r in periodAtrs]
-    drawnByPeriod = pickNearestForDisplay(mergedOut, displayPeriods, currentPrice,
+    overlayPool = [f for f in mergedOut if not f.get("manual")]
+    drawnByPeriod = pickNearestForDisplay(overlayPool, displayPeriods, currentPrice,
                                           sideCount, maxDistAtr, periodAtrs) \
         if currentPrice is not None else {}
+    # 人工周期：支阻位全部画出（不受 sideCount 与距离上限）+ 叠加层就近结果照常叠加；
+    # 取 merged 池中该周期的人工条目（已附 level/srcType，labelOf 需要 level）；
+    # currentPrice 未知时维持空（与 boll 中轨降级口径一致）
+    if currentPrice is not None:
+        for L in displayPeriods:
+            if L in allManuals:
+                drawnByPeriod[L] = [f for f in mergedOut
+                                    if f["level"] == L and f.get("manual")] \
+                    + drawnByPeriod.get(L, [])
     for L, lines in drawnByPeriod.items():
         for f in lines:
             f["label"] = labelOf(f)
 
     periodsOut = {}
     for res, group in allFlipsCapped.items():
-        periodsOut[res] = group + (allFibs.get(res, []) or []) + (allBolls.get(res, []) or [])
-    # 纯 boll/fib 周期可能未进 allFlipsCapped（cluster 关闭时），补齐
+        periodsOut[res] = group + (allFibs.get(res, []) or []) + (allBolls.get(res, []) or []) \
+            + (allManuals.get(res, []) or [])
+    # 纯 boll/fib/manual 周期可能未进 allFlipsCapped（cluster 关闭/人工替换时），补齐
     for res in periods:
         if res not in periodsOut:
-            arr = (allFibs.get(res, []) or []) + (allBolls.get(res, []) or [])
+            arr = (allFibs.get(res, []) or []) + (allBolls.get(res, []) or []) + (allManuals.get(res, []) or [])
             if arr:
                 periodsOut[res] = arr
 

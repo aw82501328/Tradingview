@@ -103,11 +103,39 @@ class SignalLocatorTests(unittest.TestCase):
                 {'time': 100, 'index': 9}]
             with patch.object(locator, 'CDPClient') as cls:
                 cls.return_value.__enter__.return_value = client
-                if valid:
-                    self.assertEqual(locator.locate_signal({**self.row, 'time': stamp})['time'], 100)
-                else:
-                    with self.assertRaises(locator.CDPError):
-                        locator.locate_signal({**self.row, 'time': stamp})
+                with patch.object(locator, 'draw_single_mark', return_value={'drawn': 2, 'cleared': 1}) as draw:
+                    if valid:
+                        result = locator.locate_signal({**self.row, 'time': stamp})
+                        self.assertEqual(result['time'], 100)
+                        self.assertEqual(result['mark']['drawn'], 2)
+                        draw.assert_called_once()
+                    else:
+                        with self.assertRaises(locator.CDPError):
+                            locator.locate_signal({**self.row, 'time': stamp})
+                        draw.assert_not_called()
+
+    def test_locate_marks_row_after_centering_and_tolerates_draw_failure(self):
+        def make_client():
+            client = Mock()
+            client.evaluate.side_effect = [None, None,
+                {'bar': {'time': 100, 'index': 9}, 'last': 100, 'barEnd': 280},
+                {'time': 100, 'index': 9, 'symbol': 'OANDA:XAUUSD', 'markRes': '3'}]
+            return client
+        colors = {'buy': '#123456'}
+        with patch.object(locator, 'CDPClient') as cls:
+            client = make_client()
+            cls.return_value.__enter__.return_value = client
+            with patch.object(locator, 'draw_single_mark') as draw:
+                draw.return_value = {'drawn': 3, 'cleared': 0}
+                result = locator.locate_signal(self.row, colors=colors)
+                draw.assert_called_once_with(client, self.row, colors=colors)
+                self.assertEqual(result['mark'], {'drawn': 3, 'cleared': 0})
+                # 标记失败不否定定位本身：错误进 result['mark']['error']
+                cls.return_value.__enter__.return_value = make_client()
+                draw.side_effect = RuntimeError('cdp down')
+                result = locator.locate_signal(self.row, colors=None)
+                self.assertEqual(result['mark']['drawn'], 0)
+                self.assertIn('cdp down', result['mark']['error'])
 
     def test_api_validates_input_and_uses_server_record(self):
         app = SimpleNamespace(locator=self.manager)
@@ -124,6 +152,14 @@ class SignalLocatorTests(unittest.TestCase):
         with patch.object(locator.threading, 'Thread', ImmediateThread), patch.object(locator, 'locate_signal') as locate:
             self.assertEqual(request({'mode': 'backtest', 'id': 1, 'symbol': 'EVIL', 'time': 999})[1], 202)
             self.assertEqual(locate.call_args.args[0], self.row)
+            # 使用服务端记录，忽略客户端多余字段；colors 缺省 → None
+            self.assertIsNone(locate.call_args.kwargs['colors'])
+            colors = {'buy': '#111111', 'sr': '#222222'}
+            self.assertEqual(request({'mode': 'backtest', 'id': 1, 'colors': colors})[1], 202)
+            self.assertEqual(locate.call_args.kwargs['colors'], colors)
+            # colors 非法类型 → 后端默认色兜底（None）
+            self.assertEqual(request({'mode': 'backtest', 'id': 1, 'colors': 'bad'})[1], 202)
+            self.assertIsNone(locate.call_args.kwargs['colors'])
 
 
 if __name__ == '__main__':

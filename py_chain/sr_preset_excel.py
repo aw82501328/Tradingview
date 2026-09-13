@@ -19,9 +19,10 @@ LIMIT = 2 * 1024 * 1024
 HEADERS = ['参数路径', '参数说明', '数据类型', '参数值']
 LABELS = dict(symbol='品种', **{'from': '计算起始日期'}, periods='参与计算的周期',
               minTouchs='各周期触及次数', clusterParamsByPeriod='周期独立参数',
+              manualLevels='人工支阻位（周期→价位）',
               clusterAtr='flip 聚类容差 × ATR', recentClusterAtr='recent 聚类容差 × ATR',
-              recentBiCount='recent 最近笔数', srTypes='类型开关', clusterParts='密集区子类型',
-              mergeAtr='跨周期合并容差', maxDistAtr='距离上限 × ATR',
+              recentBiCount='recent 最近笔数', srTypes='类型开关（cluster 恒开 + 叠加层）', clusterParts='密集区子类型',
+              maxDistAtr='距离上限 × ATR',
               maxPerPeriod='每周期候选上限', sideCount='每侧显示条数',
               touchWeight='触及次数权重', barsWeight='经过 K 线权重',
               fibLevels='黄金分割比率', bollLength='BOLL 周期', bollMult='BOLL 标准差倍数',
@@ -72,6 +73,8 @@ def export_preset(name, cfg):
             label = path.split('.')[1] + ' 周期 / ' + label
         elif path.startswith('minTouchs.'):
             label = path.split('.')[-1] + ' 周期 / minTouch'
+        elif path.startswith('manualLevels.'):
+            label = path.split('.')[1] + ' 周期 / 人工支阻位'
         rows.append([path, label, kind, json.dumps(value, ensure_ascii=False, allow_nan=False) if kind == 'json' else value])
     data = ''.join('<row r="%s" ht="24" customHeight="1">%s</row>' %
                    (i, ''.join(_cell(f'{chr(65+j)}{i}', v, 1 if i in (1, 3) else 0) for j, v in enumerate(row)))

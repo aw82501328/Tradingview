@@ -14,7 +14,7 @@ description: Mark entry signals (进出场) on the TradingView Desktop chart via
 >
 > **强制依赖三个前置数据**：
 > 1. **画笔**（chan-bi）落盘的笔数据 `.cursor/cache/bis_<品种>.json`；
-> 2. **支阻互换位**（mark-sr-flip）落盘的支阻位数据 `.cursor/cache/srflip_<品种>.json`（读取其 `merged` 合并后支阻位）；
+> 2. **支阻互换位**（mark-sr-flip）落盘的支阻位数据 `.cursor/cache/srflip_<品种>.json`（读取其 `merged` 全量候选池支阻位）；
 > 3. **交易计划**（trading-plan）落盘的计划数据 `.cursor/cache/plan_<品种>.json`（读取各周期 `strategy` 判定进场状态）。
 >
 > 任一数据文件缺失、或品种不匹配，脚本会**报错退出**。**运行依赖链**（依序执行）：**画笔（chan-bi）→ 标记买卖点（mark-buy-sell）→ 支阻互换位（mark-sr-flip）→ 交易计划（trading-plan）→ 本脚本**。

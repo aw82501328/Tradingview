@@ -423,7 +423,7 @@ class Evaluator:
 def signature(samples, cfg, period, ranges):
     # Display-only options and unrelated cycles can change without invalidating a job.
     keys = ("symbol", "from", "srTypes", "clusterParts", "maxPerPeriod", "touchWeight",
-            "barsWeight", "mergeAtr", "maxDistAtr", "sideCount", "fibLevels", "bollLength", "bollMult")
+            "barsWeight", "maxDistAtr", "sideCount", "fibLevels", "bollLength", "bollMult")
     return digest({"version": VERSION, "samples": sorted((s["id"], s["version"]) for s in samples),
                    "cfg": {k: cfg.get(k) for k in keys}, "params": effective_params(cfg, period),
                    "period": period, "ranges": ranges})

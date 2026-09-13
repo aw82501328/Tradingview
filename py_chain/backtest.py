@@ -52,12 +52,14 @@ from .chan_core import (
     MacdAccumulator, AtrAccumulator, extendLastBi, extendLastBiFrom,
 )
 from .mark_buy_sell import compute_all_marks
+from .bi_inc import BiIncBuilder
 from .sr_flip import compute_srflip, prepare_bar_arrays
 from .trading_plan import compute_plan
 from .mark_entry import (
     compute_entries, stop_ref_of, find_bi_event, filterDetectPeriods,
     trend_following_of, forming_seg_ready,
     DEFAULT_LOTS, DEFAULT_SLIP_STOP, DEFAULT_SLIP_FALLBACK, DEFAULT_SLIP_BE,
+    NEAR as DEFAULT_NEAR,
 )
 
 DEFAULT_PERIODS = ["D", "240", "60", "15", "3"]
@@ -175,7 +177,9 @@ class BacktestEngine:
                  with_marks=False, cfg=None, fill_mode="anchor", signal_mode="realtime",
                  sr_types=None, fib_levels=None, boll_length=None, boll_mult=None,
                  lots=DEFAULT_LOTS, slip_stop=DEFAULT_SLIP_STOP,
-                 slip_fallback=DEFAULT_SLIP_FALLBACK, slip_be=DEFAULT_SLIP_BE):
+                 slip_fallback=DEFAULT_SLIP_FALLBACK, slip_be=DEFAULT_SLIP_BE,
+                 near=DEFAULT_NEAR, sr_kwargs=None,
+                 diverge_confirm=None, expect_bi=None):
         self.periods = list(periods or DEFAULT_PERIODS)
         # 各周期按时间升序整理 + 缓存时间数组
         self.bars = {}
@@ -185,9 +189,9 @@ class BacktestEngine:
             self.bars[res] = {"_list": bl, "_times": [b["time"] for b in bl]}
             self._times[res] = self.bars[res]["_times"]
         # 最小周期（细分周期）逐根推进：覆盖感知——按周期间隔从细到粗取第一个
-        # 「数据跨度 ≥ 全部周期最大跨度 × 0.9」的周期。30S 等历史深度有限的周期
-        # （实测仅约 6 小时/最近3天）不承担回测时间轴，只作低级别背驰候选；
-        # 若回测区间就在其覆盖内（如只测最近几小时），它仍会成为时间轴保持细粒度。
+        # 「数据跨度 ≥ 全部周期最大跨度 × 0.9」的周期。30S 不承担回测时间轴
+        # （深度回补后 30S 可达百万根，逐根推进会把各 O(n) 热点放大成 O(n²)），
+        # 只作低级别背驰候选；仅当非 30S 周期全不满足跨度时才由 30S 兜底时间轴。
         spans = {}
         for res in self.periods:
             bl = self.bars[res]["_list"]
@@ -195,9 +199,14 @@ class BacktestEngine:
                 spans[res] = bl[-1]["time"] - bl[0]["time"]
         max_span = max(spans.values()) if spans else 0
         fine_res = None
-        for res in sorted(self.periods, key=lambda r: intervalSecOf(r) or 0):
-            if spans.get(res, 0) >= max_span * 0.9:
-                fine_res = res
+        for allow_30s in (False, True):
+            for res in sorted(self.periods, key=lambda r: intervalSecOf(r) or 0):
+                if not allow_30s and str(res).upper() == "30S":
+                    continue
+                if spans.get(res, 0) >= max_span * 0.9:
+                    fine_res = res
+                    break
+            if fine_res is not None:
                 break
         if fine_res is None:
             fine_res = min(self.periods, key=lambda r: intervalSecOf(r) or 0)
@@ -219,6 +228,13 @@ class BacktestEngine:
         #   "realtime"（当下背驰，默认）：每根 fine 收盘评估——低级别形成中段创新低/新高
         #     + 当拍 MACD 对比弱于参照笔即出信号（背驰判断不等反向笔确认，交易基于当下）。
         #     ①够笔③支阻位所需的交易计划/支阻位仍在笔结构变化时重算并缓存（控性能）。
+        #     M1 扩展（CHAN_CFG.sinkFallback/sinkFallbackRearm，SPEC_divergence_fallback）：
+        #     下沉停止级无候选时沿链向上一级回退评估（信号带 fallback=True）；同向持仓
+        #     终局后重置该 (periodX,strategyKey,markRes) 段去重，同段可再进一次。
+        #     M4 扩展（expectBiEnough 固定 / diverge_confirm 页面可选）：检测周期末笔反向
+        #     且端点后 ≥expectBiMinBars 根K线即视为回调/反弹中（预期够笔，信号带
+        #     expectBi=True，不等反向分型右邻收盘）；diverge_confirm=True 时背驰候选须
+        #     等极值右邻K收盘后才出信号（分型确认后下一根 fine 开盘进场）。
         if signal_mode not in ("confirm", "realtime"):
             raise ValueError(f"未知 signal_mode: {signal_mode}")
         self.signal_mode = signal_mode
@@ -241,6 +257,18 @@ class BacktestEngine:
         self.slip_stop = slip_stop
         self.slip_fallback = slip_fallback
         self.slip_be = slip_be
+        self.near = near  # 近支阻阈值（绝对价差，mark_entry near 同口径）
+        # 支阻位预设 kwargs（Web 回测「支阻预设」下拉 / CLI --sr-preset 载入后经
+        # normalize_sr_cfg + engine_kwargs_of 映射；优先于 sr_types 等独立形参）
+        self.sr_kwargs = dict(sr_kwargs or {})
+        # M4 背驰进场时机（回测页面可选）：None → 读 CHAN_CFG 一次固化为本轮值。
+        # True = 极值K线右邻K收盘后才出信号（分型确认后下一根 fine 开盘进场）。
+        self.diverge_confirm = (bool(CHAN_CFG.get("divergeConfirm"))
+                                if diverge_confirm is None else bool(diverge_confirm))
+        # M4 检测周期够笔口径（回测页面可选）：True（默认）= 预期够笔（末笔反向 + 端点后
+        # ≥expectBiMinBars 根K线即视为回调/反弹中）；False = 旧口径（末笔须已是确认的反向笔）。
+        self.expect_bi = (bool(CHAN_CFG.get("expectBiEnough"))
+                          if expect_bi is None else bool(expect_bi))
 
         # 增量状态
         self._cut = {res: 0 for res in self.periods}
@@ -252,6 +280,10 @@ class BacktestEngine:
         self._merge_dir = {res: 0 for res in self.periods}
         self._fractals = {res: [] for res in self.periods}
         self._bis = {res: [] for res in self.periods}
+        # 30S 增量笔构建器（bi_inc：分型尾部变化只续算尾部，避免 O(全窗口) 全量重建
+        # 的平方级放大；其余周期维持全量重建口径，行为不变）。重同步时 invalidate。
+        self._bi_inc = {res: BiIncBuilder(res) for res in self.periods
+                        if str(res).upper() == "30S"}
         self._macd = {res: MacdAccumulator() for res in self.periods}
         self._macd_times = {res: [] for res in self.periods}  # 与 macd.entries 一一对应（切片二分用）
         self._atr = {res: AtrAccumulator(14) for res in self.periods}
@@ -362,14 +394,21 @@ class BacktestEngine:
             self._macd_times[res].append(bar["time"])
             atr.append(bar)
         self._merge_dir[res] = direction
+        # updateFractalsTail 原地更新（返回同一列表）：先捕获旧长度/末分型再判变化
         old_f = self._fractals[res]
+        old_len = len(old_f)
+        old_last = old_f[-1] if old_f else None
         new_f = updateFractalsTail(old_f, merged)
         self._fractals[res] = new_f
         bis_changed = False
-        if len(new_f) != len(old_f) or (new_f and old_f and new_f[-1] != old_f[-1]):
+        if len(new_f) != old_len or (new_f and old_last is not None and new_f[-1] != old_last):
             bis_changed = True
         if bis_changed:
-            self._bis[res] = self._build_bis(res, merged, new_f, macd.to_list(), atr.value)
+            inc = self._bi_inc.get(res)
+            if inc is not None:
+                self._bis[res] = inc.update(new_f, merged, macd.to_list(), atr.value)
+            else:
+                self._bis[res] = self._build_bis(res, merged, new_f, macd.to_list(), atr.value)
         if self._extend_last(res):
             bis_changed = True
         return bis_changed
@@ -398,6 +437,9 @@ class BacktestEngine:
         （见 RESYNC_EVERY 注释）。wick 运行状态（TR 均值/邻居/pending _topCand）同步重建，
         重同步后增量从该前缀无缝继续。"""
         from .chan_core import _mergeStep, markWickBars, findFractals
+        inc = self._bi_inc.get(res)
+        if inc is not None:
+            inc.invalidate()  # 增量笔构建器状态已过期：下次 update 走全量重建
         cut = self._cut[res]
         raw = self.bars[res]["_list"][:cut]
         trimmed = markWickBars(raw)
@@ -625,6 +667,7 @@ class BacktestEngine:
                         st["stats"]["closed"] += 1
                         if str(closed_trade.get("exitType", "")).startswith("stop"):
                             st["stats"]["stopped"] = st["stats"].get("stopped", 0) + 1
+                        self._rearm_fired(closed_trade)
                         out["exits"].append(closed_trade)
                 nb = len(st["trades"])
                 self._fill_pending(st["trades"], st["pending"],
@@ -781,6 +824,7 @@ class BacktestEngine:
                         stats["closed"] += 1
                         if str(closed_trade.get("exitType", "")).startswith("stop"):
                             stats["stopped"] = stats.get("stopped", 0) + 1
+                        self._rearm_fired(closed_trade)
                         _emit_exit(closed_trade)
                 n_trades_before = len(trades)
                 self._fill_pending(trades, pending, fine[i + 1]["open"], fine[i + 1]["time"], stats,
@@ -846,10 +890,17 @@ class BacktestEngine:
         """
         periodBis = self._bis
         core = [p for p in self.periods if str(p).upper() != "30S"]
+        # barsByPeriod 切片只为消费方构造：compute_srflip/compute_plan 只遍历 core 键，
+        # evaluateRealtimeEntries 不读 bars——realtime 全量回测（include_entries=False）
+        # 跳过 30S 的 O(n_30S) 前缀切片；确认式 compute_entries(with_30s) 需要 30S bars，
+        # 由 include_entries=True 的路径（step_to/实时监控）补上。
+        slice_res = list(core)
+        if include_entries:
+            slice_res += [p for p in self.periods if str(p).upper() == "30S"]
         barsByPeriod = {}
         periodMacd = {res: self._macd[res].to_list() for res in self.periods}
         periodAtr = {res: self._atr[res].value for res in self.periods}
-        for res in self.periods:
+        for res in slice_res:
             barsByPeriod[res] = self.bars[res]["_list"][: self._cut[res]]
         # 1. 买卖点（全链路完整性；默认关闭以提速，可由 --with-marks 开启）
         if self.with_marks:
@@ -872,10 +923,15 @@ class BacktestEngine:
         if bar_times is not None:
             srKw["periodBarTimesIn"] = bar_times
         if price_arrays is not None:
+            core_set = set(core)
+            # compute_srflip 只按 core 键取用（sr_flip 内 for res in periods），
+            # 30S 的 numpy 前缀切片纯属浪费（每次链路重算 O(n_30S)）
             srKw["periodBarArraysIn"] = {
                 res: (arrays[0][:self._cut[res]], arrays[1][:self._cut[res]])
-                for res, arrays in price_arrays.items() if arrays is not None
+                for res, arrays in price_arrays.items()
+                if arrays is not None and res in core_set
             }
+        srKw.update(self.sr_kwargs)  # 预设 kwargs（含 manualLevels）优先于独立形参
         try:
             self._sr = compute_srflip(periodBis, barsByPeriod, core,
                                       periodAtrsIn=periodAtr, periodMacdIn=periodMacd, **srKw)
@@ -898,7 +954,7 @@ class BacktestEngine:
         detectPeriods = filterDetectPeriods(self.periods)
         try:
             self._entries = compute_entries(periodBis, barsByPeriod, self._plan, srLevels,
-                                            detectPeriods=detectPeriods,
+                                            detectPeriods=detectPeriods, near=self.near,
                                             periodMacd=periodMacd, periodAtr=periodAtr,
                                             with_30s=any(str(p).upper() == "30S" for p in self.periods))
         except Exception:
@@ -922,6 +978,17 @@ class BacktestEngine:
                 newSigs.append(s)
         return newSigs
 
+    def _rearm_fired(self, tr):
+        """M1 配套（CHAN_CFG.sinkFallbackRearm）：同向持仓终局后，重置该
+        (periodX, strategyKey, markRes) 组合的当下背驰去重——同一形成段允许在
+        上一单终局后再发一次信号（近等双底二底再进场场景：首单止损/保本离场后，
+        回退候选不至于被首单的 fired 键永久吞掉）。同向互斥持仓期间不重置。"""
+        if not CHAN_CFG.get("sinkFallbackRearm"):
+            return
+        x, k, m = tr.get("periodX"), tr.get("strategyKey"), tr.get("markRes")
+        self._rt_fired = {key for key in self._rt_fired
+                          if not (key[0] == x and key[1] == k and key[2] == m)}
+
     def _collect_realtime(self, allSignals, stats, t):
         """当下背驰模式：用当前增量状态（bis 延伸到当下极值 + MACD 增量 + 缓存的计划/支阻位）
         评估进场信号（每根 fine 收盘调用）。去重按 (periodX, strategyKey, markRes, 段起点)，
@@ -934,8 +1001,10 @@ class BacktestEngine:
             {res: self._macd[res].entries for res in self.periods},
             {res: self._atr[res].value for res in self.periods},
             self._plan, srLevels, detectPeriods,
-            tCut=t, fired=self._rt_fired,
+            near=self.near, tCut=t, fired=self._rt_fired,
             periodTimes=self._times, periodMacdTimes=self._macd_times,
+            divergeConfirm=self.diverge_confirm,
+            expectBiEnabled=self.expect_bi,
         )
         newSigs = []
         for s in sigs:
@@ -1019,6 +1088,9 @@ class BacktestEngine:
                 "fillMode": fillMode,
                 "nearSr": s.get("nearSr"),
                 "planDirection": s.get("planDirection"),
+                "fallback": s.get("fallback", False),   # M1 回退候选标记（透传自信号）
+                "nearEqual": s.get("nearEqual", False), # M2 近等候选标记
+                "expectBi": s.get("expectBi", False),   # M4 检测周期预期够笔口径标记
                 "lots": self.lots,
                 # 出场状态机字段（advance_exit_decision/execute_pending_exit 增量维护）
                 "stopRef": stopRef,
@@ -1076,20 +1148,26 @@ def run_backtest(bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
                  signal_mode="realtime", sr_types=None, fib_levels=None,
                  boll_length=None, boll_mult=None,
                  lots=DEFAULT_LOTS, slip_stop=DEFAULT_SLIP_STOP,
-                 slip_fallback=DEFAULT_SLIP_FALLBACK, slip_be=DEFAULT_SLIP_BE):
+                 slip_fallback=DEFAULT_SLIP_FALLBACK, slip_be=DEFAULT_SLIP_BE,
+                 near=DEFAULT_NEAR, sr_kwargs=None,
+                 diverge_confirm=None, expect_bi=None):
     """便捷入口：构建引擎并运行。fill_mode 见 BacktestEngine（anchor=锚点当拍成交，confirm=确认成交）；
     signal_mode：realtime=当下背驰（每拍评估形成中段，默认），confirm=确认制（结构变化时收集）；
     sr_types/fib_levels 透传支阻位类型开关与黄金分割比率（None → compute_srflip 默认）；
     boll_length/boll_mult 透传 BOLL 布林带周期与标准差倍数（None → compute_srflip 默认 26/2）；
     lots/slip_stop/slip_fallback/slip_be 透传出场参数（手数/止损滑点/兜底止损滑点/保本滑点，
-    默认 4 / 3 / 10 / 3，绝对价格单位）。"""
+    默认 4 / 3 / 10 / 3，绝对价格单位）；near 近支阻阈值（绝对价差，默认 10）；
+    sr_kwargs 支阻位预设 kwargs（Web 回测预设下拉/CLI --sr-preset 载入，含 manualLevels，
+    优先于 sr_types 等独立形参）。"""
     engine = BacktestEngine(bars_by_period, periods=periods, warmup_bars=warmup_bars,
                             with_marks=with_marks, fill_mode=fill_mode,
                             signal_mode=signal_mode,
                             sr_types=sr_types, fib_levels=fib_levels,
                             boll_length=boll_length, boll_mult=boll_mult,
                             lots=lots, slip_stop=slip_stop,
-                            slip_fallback=slip_fallback, slip_be=slip_be)
+                            slip_fallback=slip_fallback, slip_be=slip_be,
+                            near=near, sr_kwargs=sr_kwargs,
+                            diverge_confirm=diverge_confirm, expect_bi=expect_bi)
     return engine.run(to_ts=to_ts, log=log)
 
 

@@ -39,8 +39,114 @@
    "fibLevels": "0.382,0.5,0.618",
    "bollLength": "26",
    "bollMult": "2",
-   "mergeAtr": "0.5",
    "maxDistAtr": "3",
+   "sideCount": "2",
+   "color": "#787b86",
+   "draw_text": true,
+   "draw_raw": false
+  }
+ },
+ {
+  "name": "test001",
+  "saved_at": 1789270174,
+  "cfg": {
+   "symbol": "OANDA:XAUUSD",
+   "from": "2026-07-02",
+   "periods": [
+    "D",
+    "240",
+    "60",
+    "15",
+    "3"
+   ],
+   "minTouchs": {
+    "3": 8,
+    "15": 3,
+    "60": 3,
+    "240": 4,
+    "W": 4,
+    "D": 4
+   },
+   "clusterAtr": "0.5",
+   "recentClusterAtr": "1.0",
+   "recentBiCount": "20",
+   "clusterParamsByPeriod": {},
+   "srTypes": [
+    "cluster",
+    "boll"
+   ],
+   "clusterParts": [
+    "flip",
+    "recent"
+   ],
+   "manualLevels": {
+    "3": "",
+    "15": "",
+    "60": "4615,4450,4305",
+    "240": "",
+    "W": "",
+    "D": ""
+   },
+   "maxPerPeriod": "50",
+   "touchWeight": "0.6",
+   "barsWeight": "0.4",
+   "fibLevels": "0.382,0.5,0.618",
+   "bollLength": "26",
+   "bollMult": "2.0",
+   "maxDistAtr": "3.0",
+   "sideCount": "2",
+   "color": "#787b86",
+   "draw_text": true,
+   "draw_raw": false
+  }
+ },
+ {
+  "name": "test002",
+  "saved_at": 1789285532,
+  "cfg": {
+   "symbol": "OANDA:XAUUSD",
+   "from": "2026-07-02",
+   "periods": [
+    "D",
+    "240",
+    "60",
+    "15",
+    "3"
+   ],
+   "minTouchs": {
+    "3": 8,
+    "15": 3,
+    "60": 3,
+    "240": 4,
+    "W": 4,
+    "D": 4
+   },
+   "clusterAtr": "0.5",
+   "recentClusterAtr": "1.0",
+   "recentBiCount": "20",
+   "clusterParamsByPeriod": {},
+   "srTypes": [
+    "cluster"
+   ],
+   "clusterParts": [
+    "flip",
+    "recent"
+   ],
+   "manualLevels": {
+    "3": "",
+    "15": "",
+    "60": "4615,4450,4305",
+    "240": "",
+    "W": "",
+    "D": ""
+   },
+   "maxPerPeriod": "50",
+   "touchWeight": "0.6",
+   "barsWeight": "0.4",
+   "fibLevels": "0.382,0.5,0.618",
+   "bollLength": "26",
+   "bollMult": "2.0",
+   "maxDistAtr": "3.0",
    "sideCount": "2",
    "color": "#787b86",
    "draw_text": true,

@@ -7,9 +7,9 @@ compute_srflip 集成行为：
   - fib：pickLatestFibPoint / referBiOfPoint / fibLevelsOf / buildFibCandidates
     （逻辑未动，纯函数用例保持原样作回归证明）
   - boll：calcBOLL / buildBollCandidates
-  - 统一合并池：mergeFlipsAcrossPeriods 多来源标记清理
-  - 按显示周期选取：pickNearestForDisplay 与来源标注 sourceLabelOf/labelOf
-  - compute_srflip 集成：三类同池合并、drawnByPeriod 取代 drawn/drawnFib
+  - 全量候选池：flatten_candidates 展平（不合并，同价位各自独立、保留标记）
+  - 按显示周期选取：pickNearestForDisplay（各周期独立）与来源标注 sourceLabelOf/labelOf
+  - compute_srflip 集成：不合并候选池、drawnByPeriod 取代 drawn/drawnFib
 
 运行：python -m unittest py_chain.test_sr_flip -v
 """
@@ -20,12 +20,13 @@ from py_chain.sr_flip import (
     FIB_SELL_TYPES,
     buildBollCandidates,
     buildFibCandidates,
+    buildManualCandidates,
     calcBOLL,
     compute_srflip,
     fibLevelsOf,
+    flatten_candidates,
     flipScore,
     labelOf,
-    mergeFlipsAcrossPeriods,
     pendingReferOf,
     periodNameOf,
     pickLatestFibPoint,
@@ -301,7 +302,7 @@ class TestBuildFibPendingFallback(unittest.TestCase):
 
 
 class TestComputeSrflipFib(unittest.TestCase):
-    """compute_srflip 集成：fib 进统一合并池（单来源独立线保留标记），drawnByPeriod 取代 drawn/drawnFib。"""
+    """compute_srflip 集成：fib 进全量候选池（保留自身标记），drawnByPeriod 取代 drawn/drawnFib。"""
 
     def setUp(self):
         # 同 TestBuildFibCandidates 夹具；无上级笔 → findBuyPoints/findSellPoints
@@ -321,7 +322,7 @@ class TestComputeSrflipFib(unittest.TestCase):
         self.barsByPeriod = {"3": [bar(t, 115, 105, 110) for t in range(1000, 2050, 50)]}
 
     def test_fib_only_merged(self):
-        # periodAtrsIn 控合并容差：ATR=1 → mergeTol=0.5 < 最小比率间距 1.74，6 条 fib 线不并簇
+        # 不合并：6 条 fib 线各自独立进候选池（比率间距 1.74 无并簇概念）
         out = compute_srflip(self.periodBis, self.barsByPeriod, ["3"],
                              srTypes=("fib",), periodAtrsIn={"3": 1})
         fibs = [f for f in out["merged"] if f.get("fib")]
@@ -340,8 +341,9 @@ class TestComputeSrflipFib(unittest.TestCase):
         self.assertAlmostEqual(sells[0], 116.46, places=9)
         self.assertAlmostEqual(sells[1], 120.0, places=9)
         self.assertAlmostEqual(sells[2], 123.54, places=9)
-        # level/sources 与落盘口径一致
-        self.assertTrue(all(f["level"] == "3" and f["sources"] == ["3"] for f in fibs))
+        # level 与落盘口径一致（无 sources 合并字段）
+        self.assertTrue(all(f["level"] == "3" for f in fibs))
+        self.assertTrue(all("sources" not in f for f in fibs))
         # periods 含 fib 追加条目
         self.assertEqual(len(out["periods"]["3"]), 6)
 
@@ -421,8 +423,8 @@ class TestBuildBollCandidates(unittest.TestCase):
         self.assertEqual(buildBollCandidates([bar(t, 100, 100, 100) for t in range(10)], 26, 2, 100), [])
 
 
-class TestMergeMixedSource(unittest.TestCase):
-    """统一合并池：多来源混合线删 fib/boll 标记，单来源独立线保留。"""
+class TestFlattenCandidates(unittest.TestCase):
+    """全量候选池：flatten_candidates 展平不合并——同价位不同周期/类型各自独立、保留标记。"""
 
     @staticmethod
     def _flip(price, touch, bars, **kw):
@@ -431,35 +433,41 @@ class TestMergeMixedSource(unittest.TestCase):
         f.update(kw)
         return f
 
-    def test_cluster_fib_mixed_cleans_markers(self):
-        fibCand = self._flip(100, 1, 5, fib=True, ratio=0.5,
+    def test_same_price_no_merge_keeps_markers(self):
+        # 同价位（价差 0.2 < 旧合并容差 5）的 fib 与 cluster 不合并：两条独立线、价格原样
+        fibCand = self._flip(100.0, 1, 5, fib=True, ratio=0.5,
                              fromPoint={"type": "2买", "time": 1, "price": 1}, referBi={})
-        clusterCand = self._flip(102, 4, 20)
-        merged = mergeFlipsAcrossPeriods({"60": [fibCand], "15": [clusterCand]}, 5)
-        self.assertEqual(len(merged), 1)
-        self.assertEqual(merged[0]["srcType"], "mixed")
-        self.assertNotIn("fib", merged[0])
-        self.assertNotIn("ratio", merged[0])
-        self.assertNotIn("fromPoint", merged[0])
-        self.assertNotIn("boll", merged[0])
+        clusterCand = self._flip(100.2, 4, 20)
+        merged = flatten_candidates({"60": [fibCand], "15": [clusterCand]})
+        self.assertEqual(len(merged), 2)
+        bySrc = {f["srcType"]: f for f in merged}
+        self.assertEqual(bySrc["fib"]["price"], 100.0)      # 价格=原始识别价，无加权平均
+        self.assertEqual(bySrc["fib"]["ratio"], 0.5)        # fib 标记保留
+        self.assertEqual(bySrc["cluster"]["price"], 100.2)
+        self.assertEqual(bySrc["cluster"]["touchCount"], 4)  # touchCount 不累加
+        self.assertTrue(all("sources" not in f for f in merged))  # 无合并字段
 
-    def test_pure_fib_keeps_markers(self):
-        fibCand = self._flip(100, 1, 5, fib=True, ratio=0.5,
-                             fromPoint={"type": "2买", "time": 1, "price": 1}, referBi={})
-        merged = mergeFlipsAcrossPeriods({"60": [fibCand]}, 5)
-        self.assertEqual(merged[0]["srcType"], "fib")
-        self.assertEqual(merged[0]["fib"], True)
-        self.assertEqual(merged[0]["ratio"], 0.5)
-
-    def test_pure_boll_keeps_markers(self):
+    def test_level_and_srctype_attached(self):
         bollCand = self._flip(100, 1, 0, boll="upper")
-        merged = mergeFlipsAcrossPeriods({"60": [bollCand]}, 5)
-        self.assertEqual(merged[0]["srcType"], "boll")
-        self.assertEqual(merged[0]["boll"], "upper")
+        merged = flatten_candidates({"60": [bollCand], "3": [self._flip(90, 2, 3)]})
+        b60 = [f for f in merged if f["level"] == "60"][0]
+        c3 = [f for f in merged if f["level"] == "3"][0]
+        self.assertEqual(b60["srcType"], "boll")
+        self.assertEqual(b60["boll"], "upper")
+        self.assertEqual(c3["srcType"], "cluster")
+
+    def test_sort_level_then_price(self):
+        # 排序：LEVEL_ORDER 级别序（大→小）优先，同级别按 price 升序
+        merged = flatten_candidates({
+            "3": [self._flip(101, 1, 1), self._flip(100, 1, 1)],
+            "60": [self._flip(105, 1, 1)],
+        })
+        self.assertEqual([(f["level"], f["price"]) for f in merged],
+                         [("60", 105), ("3", 100), ("3", 101)])
 
 
 class TestPickNearestForDisplay(unittest.TestCase):
-    """按显示周期选取：高级别继承 / 就近上下各 N / 距离上限 / 不对称。"""
+    """按显示周期选取：各周期独立（不继承）/ 就近上下各 N / 距离上限 / 不对称。"""
 
     @staticmethod
     def _flip(price, touch, bars, **kw):
@@ -468,12 +476,19 @@ class TestPickNearestForDisplay(unittest.TestCase):
         f.update(kw)
         return f
 
-    def test_higher_level_inherits_to_lower(self):
-        merged = [self._flip(105, 8, 20, level="240"), self._flip(50, 3, 5, level="3")]
-        periodAtrs = {"240": 10, "3": 2}
-        drawn = pickNearestForDisplay(merged, ["240", "3"], 100, 1, 3.0, periodAtrs)
-        self.assertEqual(len(drawn["3"]), 1)
-        self.assertEqual(drawn["3"][0]["level"], "240")  # 继承自 240
+    def test_no_cross_period_inheritance(self):
+        # 各周期独立：240 线只进 240 图，3 图只看 3 自己的线（不再继承高级别线）
+        merged = [self._flip(105, 8, 20, level="240"), self._flip(98, 3, 5, level="3")]
+        drawn = pickNearestForDisplay(merged, ["240", "3"], 100, 1, 3.0, {"240": 10, "3": 2})
+        self.assertEqual(drawn["240"][0]["level"], "240")
+        self.assertEqual(drawn["3"][0]["level"], "3")
+
+    def test_own_period_empty_draws_nothing(self):
+        # 本周期无候选 → 该图空（即使其它周期线在距离内也不继承）
+        merged = [self._flip(105, 8, 20, level="240")]
+        drawn = pickNearestForDisplay(merged, ["240", "3"], 100, 1, 3.0, {"240": 10, "3": 2})
+        self.assertEqual(len(drawn["240"]), 1)
+        self.assertEqual(drawn["3"], [])
 
     def test_nearest_above_below_n(self):
         merged = [self._flip(102, 1, 5, level="60"), self._flip(105, 1, 5, level="60"),
@@ -517,9 +532,8 @@ class TestSourceLabel(unittest.TestCase):
         self.assertEqual(sourceLabelOf({"fib": True, "ratio": 0.5}), "黄金分割0.5")
         self.assertEqual(sourceLabelOf({"fib": True, "pending": True, "fromPoint": {"type": "预期2卖"}}), "预期2卖")
 
-    def test_cluster_mixed_labels(self):
+    def test_cluster_label(self):
         self.assertEqual(sourceLabelOf({"type": "R2S"}), "密集区")
-        self.assertEqual(sourceLabelOf({"srcType": "mixed"}), "位置线")
 
     def test_label_of(self):
         self.assertEqual(labelOf({"boll": "upper", "level": "240"}), "BOLL上轨+4小时")
@@ -528,7 +542,7 @@ class TestSourceLabel(unittest.TestCase):
 
 
 class TestComputeSrflipBoll(unittest.TestCase):
-    """compute_srflip 集成：boll 进统一合并池与 drawnByPeriod。"""
+    """compute_srflip 集成：boll 进全量候选池与 drawnByPeriod。"""
 
     def setUp(self):
         # 上升趋势K线（30 根，26 已收盘 + 末根形成中）；3 周期单周期夹具（cluster/fib 关闭）
@@ -560,7 +574,7 @@ class TestComputeSrflipBoll(unittest.TestCase):
 
 class TestSrParamExtension(unittest.TestCase):
     """调试页引擎扩展：clusterParts / minTouchsIn / recentBiCount / 评分权重 /
-    sideCount / mergeDetail（成员追溯）。默认路径输出与扩展前逐键一致。"""
+    sideCount。默认路径输出与扩展前逐键一致。"""
 
     # ---- 夹具 ----
     def _bars_simple(self, last_t, hi=112, lo=88, tail=1):
@@ -652,44 +666,6 @@ class TestSrParamExtension(unittest.TestCase):
         self.assertAlmostEqual(touch, 0.5)
         self.assertGreater(bars_w, touch)
 
-    def test_merge_detail_members(self):
-        flips = {
-            "15": [{"price": 100.0, "type": "R2S", "touchCount": 4, "barsPassed": 50,
-                    "firstTouch": 1, "breakTime": 30}],
-            "60": [{"price": 100.4, "type": "R2S", "touchCount": 2, "barsPassed": 10,
-                    "firstTouch": 5, "breakTime": 40}],
-            "3": [{"price": 100.2, "type": "2卖", "touchCount": 1, "barsPassed": 3,
-                   "firstTouch": 9, "breakTime": 45, "fib": 0.5, "ratio": 0.5,
-                   "pending": True}],
-        }
-        merged = mergeFlipsAcrossPeriods(flips, tol=0.5, detail=True)
-        self.assertEqual(len(merged), 1)
-        m = merged[0]
-        self.assertEqual(len(m["members"]), 3)
-        # 成员记录并入前原价（排序展开后依次 100.0/100.2/100.4）
-        self.assertEqual([x["price"] for x in m["members"]], [100.0, 100.2, 100.4])
-        self.assertEqual(m["members"][0]["kind"], "cluster")
-        self.assertEqual(m["members"][1]["kind"], "fib")
-        self.assertEqual(m["members"][1]["ratio"], 0.5)
-        self.assertTrue(m["members"][1]["pending"])
-        self.assertEqual(m["members"][2]["source"], "60")
-        # 多来源混合线本身丢 fib/pending 标记（标 position 线口径），members 保留原字段
-        self.assertEqual(m["srcType"], "mixed")
-        self.assertNotIn("fib", m)
-        self.assertNotIn("pending", m)
-        # 加权平均价 = (100×4 + 100.2×1)×... 逐步加权：先 100&100.2 → ×5，再并 100.4×2
-        self.assertAlmostEqual(m["price"], (100.0 * 4 + 100.2 + 100.4 * 2) / 7)
-
-    def test_merge_detail_default_off(self):
-        flips = {
-            "15": [{"price": 100.0, "type": "R2S", "touchCount": 4, "barsPassed": 50,
-                    "firstTouch": 1, "breakTime": 30}],
-            "60": [{"price": 100.4, "type": "S2R", "touchCount": 2, "barsPassed": 10,
-                    "firstTouch": 5, "breakTime": 40}],
-        }
-        merged = mergeFlipsAcrossPeriods(flips, tol=0.5, detail=False)
-        self.assertNotIn("members", merged[0])
-
     def test_default_kwargs_keep_old_output(self):
         bis = self._zigzag_bis()
         bars = self._bars_simple(len(bis) * 20)
@@ -698,8 +674,110 @@ class TestSrParamExtension(unittest.TestCase):
         a = compute_srflip(**kw)
         b = compute_srflip(**kw, clusterParts=("flip", "recent"), minTouchsIn=None,
                            recentBiCount=20, touchWeight=0.6, barsWeight=0.4,
-                           sideCount=2, mergeDetail=False)
+                           sideCount=2)
         self.assertEqual(a, b)
+
+
+class TestManualLevels(unittest.TestCase):
+    """人工支阻位：键存在 = 该周期支阻位来源=人工——替换密集区、全部画出；
+    叠加层（fib/BOLL）独立照常；空列表 = 该周期没有支阻位（不回退系统计算）。"""
+
+    # ---- 夹具 ----
+    def _bis(self, cycles=4, base=100, top=105):
+        bis, t = [], 0
+        for _ in range(cycles):
+            bis.append(bi("up", t, t + 10, base, top))
+            bis.append(bi("down", t + 10, t + 20, top, base))
+            t += 20
+        return bis
+
+    def _bars(self, n=80):
+        return [bar(t, 108, 92, 100 + (i % 3)) for i, t in enumerate(range(0, n * 5, 5))]
+
+    def _run(self, manualLevels=None, srTypes=("cluster", "boll")):
+        bis = {"15": self._bis(), "60": self._bis(3)}
+        return compute_srflip(bis, {"15": self._bars(), "60": self._bars()},
+                              ["60", "15"], srTypes=srTypes,
+                              periodAtrsIn={"60": 1.0, "15": 0.5},
+                              manualLevels=manualLevels)
+
+    # ---- 用例 ----
+    def test_manual_replaces_cluster_only(self):
+        # 60 人工：无密集区候选，srcType=manual；叠加层 BOLL 照常生成
+        out = self._run(manualLevels={"60": [4418, 4440, 4462.5]})
+        m60 = [f for f in out["merged"] if f["level"] == "60"]
+        self.assertTrue(m60)
+        self.assertTrue(all(f["srcType"] == "manual" and f.get("manual") for f in m60
+                            if f["srcType"] == "manual"))
+        self.assertFalse(any(f["srcType"] == "cluster" for f in m60))
+        self.assertTrue(any(f["srcType"] == "boll" for f in m60), "叠加层照常")
+        self.assertTrue(any(f["srcType"] == "cluster" for f in out["merged"]
+                            if f["level"] == "15"), "系统周期密集区不变")
+
+    def test_candidate_fields_and_type_by_current_price(self):
+        # 现价 = 15 周期末收盘（≈101）< 全部人工价（价位在现价上方 → 阻力 RES）；
+        # 锚点 = 末根已收盘K线 time
+        bars = self._bars()
+        out = self._run(manualLevels={"60": [4400, 4420]})
+        cands = [f for f in out["periods"]["60"] if f.get("manual")]
+        self.assertEqual(sorted(c["price"] for c in cands), [4400.0, 4420.0])
+        anchor = bars[-2]["time"]
+        for c in cands:
+            self.assertEqual(c["type"], "RES")
+            self.assertEqual(c["touchCount"], 1)
+            self.assertEqual(c["barsPassed"], 0)
+            self.assertEqual(c["breakTime"], anchor)
+            self.assertEqual(c["firstTouch"], anchor)
+        # 纯函数：现价 ≥ 价位 → SUP（价位在现价下方=支撑）；currentPrice 未知 → 统一 RES
+        below = buildManualCandidates([4400, 4420], bars, 4450)
+        self.assertEqual([c["type"] for c in below], ["SUP", "SUP"])
+        none_ = buildManualCandidates([4400], bars, None)
+        self.assertEqual(none_[0]["type"], "RES")
+
+    def test_draw_all_ignores_sidecount_and_distance(self):
+        # 7 个价位横跨远超 maxDistAtr×ATR（1.0×3=3）与 sideCount=2，drawnByPeriod 全画
+        prices = [4400 + i * 20 for i in range(7)]
+        out = self._run(manualLevels={"60": prices})
+        d60 = [f for f in out["drawnByPeriod"]["60"] if f.get("manual")]
+        self.assertEqual(len(d60), 7)
+        self.assertTrue(all(f["label"].startswith("手动位+1小时") for f in d60))
+
+    def test_mixed_periods_system_untouched(self):
+        # 60 人工 + 15 系统：15 的 merged 切片与不带 manualLevels 的运行逐项相等
+        with_m = self._run(manualLevels={"60": [4400]})
+        without = self._run()
+        self.assertEqual([f for f in with_m["merged"] if f["level"] == "15"],
+                         [f for f in without["merged"] if f["level"] == "15"])
+        self.assertEqual(with_m["drawnByPeriod"]["15"], without["drawnByPeriod"]["15"])
+
+    def test_manual_period_without_bis(self):
+        # 人工周期不要求 bis≥3：60 无笔仍出人工候选与 ATR（进 displayPeriods）
+        out = compute_srflip({"15": self._bis()}, {"15": self._bars(), "60": self._bars()},
+                             ["60", "15"], srTypes=("cluster", "fib", "boll"),
+                             periodAtrsIn={"60": 1.0, "15": 0.5},
+                             manualLevels={"60": [4400, 4420]})
+        m60 = [f for f in out["merged"] if f["level"] == "60"]
+        self.assertEqual({f["price"] for f in m60 if f.get("manual")}, {4400.0, 4420.0})
+        self.assertFalse(any(f["srcType"] == "fib" for f in m60), "无笔周期 fib 不生成")
+        self.assertIn("60", out["drawnByPeriod"])
+
+    def test_empty_list_means_no_levels(self):
+        # 空列表 = 该周期没有支阻位：无 manual/cluster 候选、不画线；叠加层照常
+        out = self._run(manualLevels={"60": []})
+        m60 = [f for f in out["merged"] if f["level"] == "60"]
+        self.assertFalse(any(f["srcType"] in ("manual", "cluster") for f in m60))
+        self.assertTrue(any(f["srcType"] == "boll" for f in m60))
+        self.assertFalse(any(f.get("manual") for f in out["drawnByPeriod"]["60"]))
+
+    def test_current_price_none_no_draw(self):
+        # 全部周期无 bars：currentPrice=None → drawnByPeriod={}（人工也不画，与 boll 中轨降级一致）
+        bis = {"15": self._bis()}
+        out = compute_srflip(bis, {}, ["60", "15"], manualLevels={"60": [4400]})
+        self.assertEqual(out["drawnByPeriod"], {})
+
+    def test_manual_label(self):
+        self.assertEqual(labelOf({"manual": True, "level": "15"}), "手动位+15分钟")
+        self.assertEqual(sourceLabelOf({"manual": True}), "手动位")
 
 
 if __name__ == "__main__":

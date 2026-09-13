@@ -29,7 +29,7 @@
  * 参数：
  *   --from=YYYY-MM-DD   起始日期（应与画笔/支阻位/交易计划一致）
  *   --periods=...       检测周期（逗号分隔，默认 240,60,15,3）
- *   --near=K            靠近支阻位阈值（×状态所在周期ATR，默认 1.0）
+ *   --near=K            靠近支阻位阈值（绝对价差，默认 10；2026-09-13 起不乘 ATR）
  *   --lots=N            每笔进场手数（仅落盘记录，默认 4；盈亏口径 = 价格差×方向×手数）
  *   --slip-stop=K       止损位滑点（绝对价格，默认 3）
  *   --slip-fallback=K   兜底止损滑点（无正确侧支阻位 → 进场价±该值，默认 10）
@@ -63,7 +63,7 @@ const getStrArg = (name, def) => {
   return a ? a.split("=")[1] : def;
 };
 // 靠近支阻位阈值（×当前周期ATR）
-const NEAR_ATR = Math.max(parseFloat(getArg("near", 1.0)) || 1.0, 0.01);
+const NEAR = Math.max(parseFloat(getArg("near", 10)) || 10, 0.01);  // 绝对价差（2026-09-13 起不乘 ATR）
 // ---- 出场参数（2026-09-09 出场阶梯重构；与 py_chain / CLI / Web 回测界面同名，绝对价格单位） ----
 // 进场手数（仅落盘记录；盈亏口径 = 价格差 × 方向 × 手数，JS 端不算盈亏）
 const LOTS = Math.max(1, Math.round(getArg("lots", 4) || 4));
@@ -528,7 +528,7 @@ function lowerDiverge(periodData, X, wantDir) {
 /**
  * 在支阻位附近：背驰点价与任一 srLevels 支阻位价差 ≤ nearTol。
  * @param {number} price     背驰点价格
- * @param {Array} srLevels   支阻位列表（srflip.merged，每项含 price）
+ * @param {Array} srLevels   支阻位列表（srflip.merged 全量候选池，每项含 price）
  * @param {number} nearTol   靠近阈值
  * @returns {null|{sr:object, dist:number}} 最近命中的支阻位
  */
@@ -545,13 +545,13 @@ function nearSr(price, srLevels, nearTol) {
 /**
  * 校验某个进场策略的全部条件（在检测周期 X 上）。
  * 公共条件：够笔 + 以下级别背驰 + 在支阻位附近；按策略附加专属条件。
- * @param {object} ctx {res, bis, upperBis, macdArr, atr, barSec, nearAtr, srLevels, periodData}
+ * @param {object} ctx {res, bis, upperBis, macdArr, atr, barSec, near, srLevels, periodData}
  * @param {object} strategy entryStrategyOf 返回值
  * @returns {{ok:boolean, reason?:string, markRes?:string, point?:object, nearSr?:number}}
  *   ok=true 时 markRes=背驰所在更低周期、point=背驰点、nearSr=命中支阻位价格
  */
 function evaluateEntry(ctx, strategy) {
-  const { res, bis, upperBis, macdArr, atr, barSec, nearAtr, srLevels, periodData } = ctx;
+  const { res, bis, upperBis, macdArr, atr, barSec, near, srLevels, periodData } = ctx;
   const { key, direction } = strategy;
   const wantType = direction === "short" ? "up" : "down"; // 空头等反弹(up)，多头等回调(down)
   const divergeDir = direction;                            // 空头→顶背驰(short)，多头→底背驰(long)
@@ -591,7 +591,7 @@ function evaluateEntry(ctx, strategy) {
   const cands = lowerDiverge(periodData, res, divergeDir);
   if (cands.length === 0) return { ok: false, reason: "以下级别无匹配方向背驰" };
 
-  const nearTol = nearAtr * atr; // 用背驰点价 vs 检测周期 ATR
+  const nearTol = near; // 绝对价差（2026-09-13 起不乘 ATR）
   for (const c of cands) {
     const near = nearSr(c.point.price, srLevels, nearTol);
     if (near) return { ok: true, markRes: c.res, point: c.point, nearSr: near.sr.price };
@@ -1172,7 +1172,7 @@ async function main() {
         macdArr: pd.macdArr,
         atr: pd.atr,
         barSec: intervalSecOf(res),
-        nearAtr: NEAR_ATR,
+        near: NEAR,
         srLevels,
         periodData,
       };
@@ -1265,7 +1265,7 @@ async function main() {
         from: FROM_DATE || null,
         fromTs: FROM_TS,
         generatedAt: new Date().toISOString(),
-        nearAtr: NEAR_ATR,
+        near: NEAR,
         lots: LOTS,
         slipStop: SLIP_STOP,
         slipFallback: SLIP_FALLBACK,

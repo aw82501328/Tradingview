@@ -90,7 +90,8 @@ class AnalysisManager:
         self.auto = False
         self.next_at = None
         self.cfg = {"from": "2026-06-30", "intervalMinutes": 5, "port": 9222,
-                    "with30s": False, "keep": 10, "near": 1.0}
+                    "with30s": False, "keep": 10,
+                    "near": 10.0, "slip_stop": 3.0, "slip_fallback": 10.0, "slip_be": 3.0}
         self.job = None
         self.last_success = None
         self.waiting = None
@@ -141,9 +142,15 @@ class AnalysisManager:
         if not re.fullmatch(r"[A-Za-z0-9_:.!/-]{1,100}", str(candidate.get("symbol", ""))):
             raise ValueError("缺少或无效品种")
         candidate["keep"] = int(candidate.get("keep", 10))
-        candidate["near"] = float(candidate.get("near", 1))
+        candidate["near"] = float(candidate.get("near", 10))
         if not 1 <= candidate["keep"] <= 100 or not math.isfinite(candidate["near"]) or candidate["near"] <= 0:
             raise ValueError("标记数量须为1至100；近支阻阈值须大于0")
+        # 进出场支阻使用参数（绝对价差；entry 子进程 --slip-* 透传，与回测界面同名）
+        for k, label in (("slip_stop", "止损滑点"), ("slip_fallback", "兜底止损滑点"),
+                         ("slip_be", "保本滑点")):
+            candidate[k] = float(candidate.get(k, 3.0 if k != "slip_fallback" else 10.0))
+            if not math.isfinite(candidate[k]) or candidate[k] <= 0:
+                raise ValueError(f"{label}须大于0")
         candidate["with30s"] = candidate.get("with30s") is True
         sr = copy.deepcopy(candidate.get("sr") or {"srTypes": ["cluster", "boll"]})
         sr.update(symbol=candidate["symbol"], **{"from": candidate["from"]})
@@ -337,6 +344,9 @@ class AnalysisManager:
             command.append("--keep=" + str(cfg["keep"]))
         if stage == "entry":
             command.append("--near=" + str(cfg["near"]))
+            command.append("--slip-stop=" + str(cfg.get("slip_stop", 3.0)))
+            command.append("--slip-fallback=" + str(cfg.get("slip_fallback", 10.0)))
+            command.append("--slip-be=" + str(cfg.get("slip_be", 3.0)))
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         # Output is drained in a separate reader so a hung CDP cannot defeat timeout.
         with subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

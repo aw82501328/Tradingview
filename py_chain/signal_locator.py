@@ -1,4 +1,9 @@
-"""Locate a signal on the shared TradingView chart without changing drawings."""
+"""Locate a signal on the shared TradingView chart and mark that row's entries/exits.
+
+定位本身只切品种/周期并居中目标K线；居中完成后在同一 CDP 会话内画该行的
+单行标记（进场+出场箭头+近支阻全宽横线，见 marks.draw_single_mark）——
+标记失败不否定定位结果（result['mark'] 带 error 说明）。
+"""
 import json
 import math
 import re
@@ -7,6 +12,7 @@ import time
 import uuid
 
 from .data_loader import CDPClient, CDPError, _set_symbol, _set_resolution
+from .marks import draw_single_mark
 
 
 def validate_signal(row):
@@ -21,7 +27,7 @@ def validate_signal(row):
     return row['symbol'].strip(), res, stamp
 
 
-def locate_signal(row, cfg=None, timeout=360):
+def locate_signal(row, cfg=None, timeout=360, colors=None):
     symbol, res, stamp = validate_signal(row)
     with CDPClient(cfg, log=lambda *_: None) as c:
         _set_symbol(c, symbol)
@@ -88,6 +94,12 @@ def locate_signal(row, cfg=None, timeout=360):
           return {symbol:c.symbol(),markRes:String(c.resolution()),time:bar.value[0],
                   index:bar.index,fromIndex:range.firstBar(),toIndex:range.lastBar()};
         })()""".replace('TARGET', target))
+        # 视口已居中：同一 CDP 会话内画该行的单行标记（替换语义，见
+        # marks.draw_single_mark）。失败不否定定位本身，只把错误带回 result['mark']。
+        try:
+            result['mark'] = draw_single_mark(c, row, colors=colors)
+        except Exception as exc:
+            result['mark'] = {'drawn': 0, 'cleared': 0, 'error': str(exc)}
         return result
 
 
@@ -101,7 +113,7 @@ class LocateManager:
         with self.lock:
             return dict(self.job) if self.job else None
 
-    def start(self, mode, row_id):
+    def start(self, mode, row_id, colors=None):
         row = self.signals.get(row_id, mode)
         if row is None:
             raise LookupError('记录已清空或不存在，请刷新列表')
@@ -117,7 +129,7 @@ class LocateManager:
             try:
                 if self.signals.get(row_id, mode) is None:
                     raise LookupError('记录已清空，请刷新列表')
-                result = locate_signal(row)
+                result = locate_signal(row, colors=colors)
             except Exception as exc:
                 error = str(exc)
             finally:

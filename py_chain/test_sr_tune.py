@@ -33,6 +33,48 @@ def config():
         "minTouchs": {"60": 3}, "clusterAtr": .5, "recentClusterAtr": 1., "recentBiCount": 20})
 
 
+class ManualLevelsNormalizeTests(unittest.TestCase):
+    """normalize_sr_cfg 的 manualLevels 段 + engine_kwargs_of 透传
+    （键存在=该周期支阻位来源=人工；空值=该周期无支阻位，不报错不回退）。"""
+
+    BASE = {"symbol": "TEST:FUT", "from": "2023-11-14",
+            "periods": ["60", "15"], "srTypes": ["cluster", "boll"]}
+
+    def test_string_parse_alias_and_unchecked_drop(self):
+        cfg = webapp.ControlApp.normalize_sr_cfg({**self.BASE,
+            "manualLevels": {"1H": "4450, 4460.5，4470 4450", "3": "4300", "W": "1900"}})
+        # 别名 1H→60 归一；未勾选周期（3/W）丢弃不报错；文本去重排序
+        self.assertEqual(cfg["manualLevels"], {"60": [4450.0, 4460.5, 4470.0]})
+
+    def test_empty_value_normalized_to_empty_list(self):
+        cfg = webapp.ControlApp.normalize_sr_cfg({**self.BASE,
+            "manualLevels": {"60": "  ", "15": []}})
+        self.assertEqual(cfg["manualLevels"], {"60": [], "15": []})
+
+    def test_invalid_number_raises_with_period(self):
+        with self.assertRaises(ValueError) as cm:
+            webapp.ControlApp.normalize_sr_cfg({**self.BASE, "manualLevels": {"60": "4450,abc"}})
+        self.assertIn("60", str(cm.exception))
+
+    def test_over_50_prices_rejected(self):
+        many = ",".join(str(4000 + i) for i in range(51))
+        with self.assertRaises(ValueError):
+            webapp.ControlApp.normalize_sr_cfg({**self.BASE, "manualLevels": {"60": many}})
+
+    def test_absent_key_yields_empty_dict(self):
+        cfg = webapp.ControlApp.normalize_sr_cfg(dict(self.BASE))
+        self.assertEqual(cfg["manualLevels"], {})
+
+    def test_engine_kwargs_passthrough(self):
+        from .sr_service import engine_kwargs_of
+        cfg = webapp.ControlApp.normalize_sr_cfg({**self.BASE,
+            "manualLevels": {"60": "4450,4460"}})
+        kw = engine_kwargs_of(cfg)
+        self.assertEqual(kw["manualLevels"], {"60": [4450.0, 4460.0]})
+        self.assertIn("manualLevels",
+                      compute_srflip.__code__.co_varnames, "引擎须有同名形参")
+
+
 class MatchingTests(unittest.TestCase):
     def test_no_duplicate_match_and_unlabelled_extra_penalty_is_small(self):
         r = tune.match_prices([100, 101], [{"price":100.5}, {"price":100.5}], 1)

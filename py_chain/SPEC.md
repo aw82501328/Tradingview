@@ -126,7 +126,7 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 
 1. **够笔** `lastBiOk`——检测周期最后一笔方向要「对着来」：做空要等一段反弹（up 笔），做多要等一段回调（down 笔）。
 2. **以下级别出现背驰** `lowerDiverge` / `realtimeLowerDiverge`——在更低周期里找同向背驰点（做空找顶背驰、做多找底背驰），且该点必须通过**下沉链**校验（见 §2.1.2.3）。
-3. **在支阻位附近** `nearSr`——背驰点价格与任一合并支阻位（`srflip.merged`，含密集区 / 黄金分割 / BOLL 三类）的价差 ≤ 检测周期 ATR × `NEAR_ATR`（默认 1.0，CLI `--near`）。
+3. **在支阻位附近** `nearSr`——背驰点价格与任一支阻位（`srflip.merged` 全量候选池，含密集区 / 黄金分割 / BOLL / 人工位）的价差 ≤ `near`（**绝对价差**，默认 10.0，CLI `--near`；2026-09-13 起 ×检测周期ATR 语义改为直接输入，与滑点同单位——`compute_entries(near=)`/`evaluateRealtimeEntries(near=)`/`BacktestEngine(near=)` 形参同名，Web 工作台与回测界面同参）。
 
 #### 2.1.2.3 背驰属于哪个级别（下沉链 / 区间套，2026-09-08 实现）
 
@@ -229,13 +229,14 @@ run() 批量路径成交 bar 当拍未收盘，存在 ≤1 根 fine bar 的微�
 
 | 类别 | 参数 | 默认 | 含义 |
 |------|------|------|------|
-| 进场 | `--near` / `NEAR_ATR` | 1.0 | 靠近支阻位阈值（× 检测周期 ATR） |
+| 进场 | `--near` / `NEAR` | 10.0 | 靠近支阻位阈值（**绝对价差**，2026-09-13 起不乘 ATR；Web 工作台分析配置与回测卡片同参同名同默认；回测 `BacktestEngine(near=)`/`run_backtest(near=)` 透传） |
 | 进场 | `--lots` | 4 | 每笔进场手数 |
-| 出场 | `--slip-stop` | 3.0 | 止损位滑点（支阻位外侧偏移，绝对价格） |
+| 出场 | `--slip-stop` | 3.0 | 止损位滑点（支阻位外侧偏移，绝对价格；工作台分析配置同步可配并传 `--slip-stop` 给 entry 子进程） |
 | 出场 | `--slip-fallback` | 10.0 | 兜底止损滑点（无正确侧支阻位时） |
 | 出场 | `--slip-be` | 3.0 | 保本滑点（beStop = 进场K线极值 ± 该值） |
 | 出场 | `EXIT_MIN_MERGED` | 5 | 形成段成笔预期门槛（合并后 K 线块数） |
 | 进场（当下制） | `REALTIME_MIN_BARS` | 5 | 检测周期形成中回调段的够笔门槛（段长 ≥5 根 K） |
+| 支阻位 | `--sr-preset` / `manualLevels` | 空 | 回测支阻预设（与 /sr、工作台共享 sr_presets.json；载入识别参数+叠加开关+人工位 → `engine_kwargs_of` → `BacktestEngine(sr_kwargs=)`，优先于 `--sr-types` 等独立参数）；未选预设 = 引擎默认（密集区+BOLL）——叠加开关只存在于预设的 srTypes，回测页不再单独提供 |
 
 ### 2.1.5 附注：全仓库的实现分布 / 为什么会有「口径差异」
 
@@ -314,11 +315,33 @@ run() 批量路径成交 bar 当拍未收盘，存在 ≤1 根 fine bar 的微�
 - **Web 控制台**：信号行状态流转 `信号→持仓中→已平仓`（或 `同向过滤`），含出场时间/出场价/出场类型/盈亏/手数列；「标记进出场」按钮画箭头 + 黄色出场标记（`marks.py`：终局 `xcross` / 平一半 `circle`，默认色 `DEFAULT_EXIT_COLOR = #FFEB3B`）。
   - 注：`marks.py` 的模块 docstring（L11、L57）仍写着「统一灰 `#787B86`」，与常量和实际行为不符，属陈旧注释（本次未改代码）。
 
-## 2.2 支阻位三类来源（2026-09-08 新增 BOLL 并统一合并管线，与 mark_sr_flip.js 对齐）
+## 2.2 支阻位三类来源（2026-09-12 取消跨周期合并，与 mark_sr_flip.js 对齐）
 
-支阻位（`sr_flip.py` `compute_srflip`）分三大类，`srTypes` 参数分别开关（默认 `cluster,boll`，fib 默认关）：
+支阻位（`sr_flip.py` `compute_srflip`）= **支阻位来源（逐周期二选一）+ 独立叠加层**（2026-09-13 拆分）：
 
-- **密集区（cluster）**：强支阻互换位 + 近期极值位（原逻辑不变），走评分截断/跨周期合并/选取管线；
+- **支阻位来源·系统计算（默认）= 密集区（cluster）**：强支阻互换位 + 近期极值位（原逻辑不变），走评分截断/候选池/独立选取管线；
+- **支阻位来源·人工输入（manual，`manualLevels` 参数）**：手动价位直接作为该周期支阻位
+  （`buildManualCandidates`）——**替换该周期密集区**、**全部画出**（不受 sideCount/距离上限，
+  就近选取池不含人工候选）；**空列表 = 该周期没有支阻位**（不回退系统计算）；不要求 bis≥3
+  （仍需 bars）；type 按现价侧（现价 ≥ 价位 → SUP），`srcType="manual"`（「手动位+1小时」式）；
+  进 merged 供 nearSr/止损参考。Web `/sr` 页周期表「支阻来源」列 + 价位输入（`normalize_sr_cfg`
+  校验：别名归一/未勾选周期丢弃/空值归一空列表/上限 50 条），预设与 Excel 往返自动携带；
+  三链路（/sr 计算、工作台分析、回测 `sr_kwargs`）共用同一 `engine_kwargs_of` 映射。JS CLI 镜像
+  `--manual=60:4450,4460.5;D:1900`；
+- **叠加层·黄金分割（fib，默认关）**：对每周期每方向**最新的非一类买卖点**（2买/类2买/3买、2卖/类2卖/3卖，
+  现算 `findBuyPoints`/`findSellPoints`），取其回调笔**紧邻前方的顺势笔**为参照笔画经典回撤
+  分割位（买 `H-r×(H-L)` 支撑 / 卖 `L+r×(H-L)` 阻力，`fibLevels` 默认 0.382/0.5/0.618）；
+  **预期回退（pending）**：该方向无已形成点时，用「形成中回调笔 + 其前方
+  顺势笔」生成预期位（等待2卖/2买 的预期形成区；卖向需形成笔现高点 < 前方下跌笔起点，
+  买向对称；次高点结构被否定自动失效），带 `pending:True` 同样进 merged
+  （实盘口径：预期位置 + 够笔/小级别背驰确认；增量重放中随结构演变消失/重生，无未来函数）；
+- **叠加层·BOLL 布林带（boll，默认开）**：每周期取**最后一根已收盘K线**的布林带上/中/下轨
+  （剔除取数末根形成中K线后，末 `bollLength`（默认 26）根收盘价的 SMA ± `bollMult`（默认 2）×
+  **总体标准差（÷N）**，与 TradingView 同口径）：上轨=阻力 `RES`、下轨=支撑 `SUP`、
+  中轨按现价侧（现价 ≥ 中轨 → 支撑，否则阻力）；bars < 26 的周期无布林位（正常降级）。
+
+叠加层独立于支阻位来源（`srTypes` 开关即叠加操作，Web ③「类型开关」= 叠加开关、cluster 恒开），
+人工周期照样叠加、仍进候选池（nearSr/止损参考可命中）。
 - **黄金分割（fib，默认关）**：对每周期每方向**最新的非一类买卖点**（2买/类2买/3买、2卖/类2卖/3卖，
   现算 `findBuyPoints`/`findSellPoints`），取其回调笔**紧邻前方的顺势笔**为参照笔画经典回撤
   分割位（买 `H-r×(H-L)` 支撑 / 卖 `L+r×(H-L)` 阻力，`fibLevels` 默认 0.382/0.5/0.618）；
@@ -331,20 +354,25 @@ run() 批量路径成交 bar 当拍未收盘，存在 ≤1 根 fine bar 的微�
   **总体标准差（÷N）**，与 TradingView 同口径）：上轨=阻力 `RES`、下轨=支撑 `SUP`、
   中轨按现价侧（现价 ≥ 中轨 → 支撑，否则阻力）；bars < 26 的周期无布林位（正常降级）。
 
-**统一合并管线（2026-09-08）**：三类候选（密集区截断后 + fib + boll）进**同一个**
-`mergeFlipsAcrossPeriods` 池（不再有 fib「并行双轨」）。合并时维护每条 `srcType` 集合：
-多来源混合线置 `srcType="mixed"` 并**删除** `fib/pending/ratio/fromPoint/referBi/boll` 标记
-（统一按「位置线」口径）；纯单来源 fib/boll 独立线保留标记。显示模型改为「每周期图 ≤
-2×`sideCount`（默认上下各 2 → ≤4 条）、高级别线继承到低周期图、仅该周期可见」，
-`pickNearestForDisplay` 按与现价的价差就近选取（距离上限 ≤ `maxDistAtr` × 线自身级别 ATR），
-输出 `drawnByPeriod`（替代旧的 `drawn`/`drawnFib`）。
+**全量候选池（2026-09-12 取消跨周期合并）**：全部候选（密集区截断后 + fib + boll + manual）逐条
+展平进全量候选池（`flatten_candidates`，替代原 `mergeFlipsAcrossPeriods`）——**不并条、
+无加权平均**，每条价格=原始识别价，附 `level`（自身周期）与 `srcType`
+（`cluster`/`fib`/`boll`/`manual`，不再有 `mixed`；fib/boll/manual 标记永不清理）。显示模型为
+「各周期独立」：每周期图 ≤ 2×`sideCount`（默认上下各 2 → ≤4 条），候选池 = **仅本周期非人工候选**
+（不继承其它周期线），`pickNearestForDisplay` 按与现价的价差就近选取（距离上限 ≤ `maxDistAtr` ×
+本周期 ATR）；**人工周期覆写为全部人工候选 + 叠加层就近结果**，输出 `drawnByPeriod`
+（替代旧的 `drawn`/`drawnFib`）。
 
 - 透传链路：`BacktestEngine`/`run_backtest` 新增 `sr_types`/`fib_levels`/`boll_length`/`boll_mult` 参数
-  （`_rebuild_chain` 同时传 `periodMacdIn` 复用增量 MACD 缓存）；`main.py` 新增
-  `--sr-types`/`--fib-levels`/`--boll-length`/`--boll-mult` CLI 参数（全链路摘要与回测两段同口径透传）。
-- **回测口径影响**：三类候选进入 `merged` 后 `nearSr`/`stop_ref_of` 命中集变大，部分信号的
-  近支阻/止损参考位会落在 fib/boll 位上（预期行为）；`--sr-types=cluster` 可复现纯密集区旧结果，
-  `--sr-types=cluster,fib` 可复现旧黄金分割行为。
+  （`_rebuild_chain` 同时传 `periodMacdIn` 复用增量 MACD 缓存）；2026-09-13 新增 `sr_kwargs`
+  （Web 回测「支阻预设」下拉 / CLI `--sr-preset` → `normalize_sr_cfg`+`engine_kwargs_of`，含
+  `manualLevels`，优先于独立参数）与 `near`（绝对价差）；`main.py` 新增
+  `--sr-types`/`--fib-levels`/`--boll-length`/`--boll-mult`/`--near`/`--sr-preset` CLI 参数。
+- **回测口径影响**：① 三类候选进入 `merged` 后 `nearSr`/`stop_ref_of` 命中集变大，部分信号的
+  近支阻/止损参考位会落在 fib/boll 位上；② 2026-09-12 取消合并后同价位不再并条（`merged`
+  条目进一步增多，`nearSr` 命中集相应变大）；③ 2026-09-13 人工位进 `merged` 与 near 改绝对价差
+  （默认 10）进一步改变命中集——均为预期行为；`--sr-types=cluster` 可复现
+  纯密集区来源，`--sr-types=cluster,fib` 可复现旧黄金分割行为。
 - py 侧不做 fromTs 过滤（窗口由调用方决定，与 JS「买卖点在 from 过滤笔上算」的最终
   最新点结果一致）。
 
@@ -352,13 +380,14 @@ run() 批量路径成交 bar 当拍未收盘，存在 ≤1 根 fine bar 的微�
 
 | 文件 | 状态 | 说明 |
 |------|------|------|
-| `py_chain/chan_core.py` | ✅ 已完成 | 以 `vnpy/chan_core.py` 为基线补齐 `fixBiExtremes`/`buildZS`/`buildZSByUpper`；另**新增增量原语**：`_mergeStep`、`fractalAt`、`updateFractalsTail`、`MacdAccumulator`、`AtrAccumulator`（供增量回测）。 |
+| `py_chain/chan_core.py` | ✅ 已完成 | 以 `vnpy/chan_core.py` 为基线补齐 `fixBiExtremes`/`buildZS`/`buildZSByUpper`；另**新增增量原语**：`_mergeStep`、`fractalAt`、`updateFractalsTail`、`MacdAccumulator`、`AtrAccumulator`（供增量回测）。**2026-09-13 buildBi 重构为单步组合**（`biSeqStep`/`biStep`/`biPair` + 规则上下文 `BiBuildCtx`，阶段二结果为不可变栈 `(elem, prev, depth)`）——批量与 bi_inc 增量共用同一规则源；`fixBiExtremes` 支持可选 `count_raw` 前缀和回调。 |
 | `py_chain/mark_buy_sell.py` | ✅ 已完成 | 移植 JS `mark_buy_sell.js`；`compute_all_marks` 支持可选 `periodMacd`/`periodAtr` 预计算参数。 |
-| `py_chain/sr_flip.py` | ✅ 已完成 | 移植 JS `mark_sr_flip.js`；`compute_srflip` 支持可选 `periodAtrsIn`/`periodMacdIn`；**2026-09-08 支持三类来源统一管线**：密集区（cluster）+ 黄金分割（fib，非一类买卖点参照笔回撤）+ BOLL（boll，末根已收盘K线 ±2σ），`srTypes`/`fibLevels`/`bollLength`/`bollMult` 参数，见 §2.2。 |
+| `py_chain/sr_flip.py` | ✅ 已完成 | 移植 JS `mark_sr_flip.js`；`compute_srflip` 支持可选 `periodAtrsIn`/`periodMacdIn`；**2026-09-08 支持三类来源统一管线**、**2026-09-12 取消跨周期合并**（候选不合并展平为全量候选池、各周期独立选取）、**2026-09-13 支持人工支阻位与叠加层拆分**（`manualLevels`：逐周期替换密集区、全部画出、空=无支阻位；fib/BOLL 独立叠加）：`srTypes`/`fibLevels`/`bollLength`/`bollMult`/`manualLevels` 参数，见 §2.2。 |
 | `py_chain/trading_plan.py` | ✅ 已完成 | 移植 JS `trading_plan.js`（含复制自 chan-status 的 `isRangeBound`）；`compute_plan` 支持 `periodMacd`/`periodAtr`。 |
 | `py_chain/mark_entry.py` | ✅ 已完成 | 移植 JS `mark_entry.js`（6 种策略 + `findDivergePoints`/`evaluateEntry`）；`compute_entries` 支持 `periodMacd`/`periodAtr`；**出场纯函数** `stop_ref_of`（方向感知止损参考位）/`find_bi_event`（够笔/破高低点事件源，与 JS `stopRefOf`/`findBiEvent` 对齐）。 |
 | `py_chain/data_loader.py` | ✅ 已完成 | `CDPClient`（HTTP 找 target + websocket `Runtime.evaluate`）、`fetch_bars`/`load_bars`/`load_cached`、`align_periods`；与 `load_all_tf.js` 对齐。 |
-| `py_chain/backtest.py` | ✅ 已完成 | 增量点状回测引擎 `BacktestEngine` + `run_backtest` + `build_bis` + `summarize`；`_append_bars` 用 `extendLastBiFrom` 增量延伸 + 笔结构变化才重算链路（短路）；**出场状态机**（`_advance_exit`/`_close_pos`：止损+三档止盈+同向互斥，见 §2.1）。 |
+| `py_chain/backtest.py` | ✅ 已完成 | 增量点状回测引擎 `BacktestEngine` + `run_backtest` + `build_bis` + `summarize`；`_append_bars` 用 `extendLastBiFrom` 增量延伸 + 笔结构变化才重算链路（短路）；**出场状态机**（`_advance_exit`/`_close_pos`：止损+三档止盈+同向互斥，见 §2.1）。**2026-09-13 30S 性能修复**：`fine_res` 候选排除 30S（深度回补后 30S 跨度全窗口，曾误当回测时间轴引发平方级放大；时间轴恒为 3m，30S 仅作背驰级别）；30S 笔列表改走 `bi_inc` 增量构建；`_rebuild_chain` 不再为 30S 构造无人消费的前缀切片。 |
+| `py_chain/bi_inc.py` | ✅ 已完成 | **30S 增量笔构建器 `BiIncBuilder`**（2026-09-13）：阶段一同型合并尾部重折叠 + 阶段二不可变栈快照续算（`biStep` 共用规则源）+ 阶段三/端点修正尾部重建（接缝首笔原始 biPair 起点回填）；跳空判定用逐对差值区间扫描、原始K线数用前缀和 O(1)。固定 ATR 差分测试 24210 步 0 差异；ATR ±20%/步压力测试 0 差异。 |
 | `py_chain/tv_draw.py` | ✅ 已完成 | `draw_trades` 通过 CDP `createShape` 回画进场箭头（多红空绿、文本 `BT·BUY/SELL + 价`），画前清除旧 `BT·` 标记。 |
 | `py_chain/main.py` | ✅ 已完成 | CLI：`--symbol/--periods/--from/--port/--use-cache/--warmup/--no-draw/--no-marks/--sr-types/--fib-levels/--boll-length/--boll-mult`；串起取数→全链路→回测→回画→统计。 |
 | `py_chain/test_sr_flip.py` | ✅ 已完成 | sr_flip 三类来源（密集区/黄金分割/BOLL）纯函数 + `compute_srflip` 集成单测（unittest，`python -m unittest py_chain.test_sr_flip -v`）。 |

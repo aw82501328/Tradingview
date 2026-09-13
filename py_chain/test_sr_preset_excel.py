@@ -20,7 +20,8 @@ def config():
                 clusterParamsByPeriod={'W':{'clusterAtr':2.1},'60':{'clusterAtr':.5,'recentClusterAtr':1,'recentBiCount':20}},
                 srTypes=['cluster'], clusterParts=['flip','recent'], clusterAtr='0.5', recentClusterAtr='1',
                 recentBiCount='20', maxPerPeriod='50', touchWeight='0.6', barsWeight='0.4',
-                fibLevels='0.382,0.5,0.618', bollLength='26', bollMult='2', mergeAtr='0.5',
+                fibLevels='0.382,0.5,0.618', bollLength='26', bollMult='2',
+                manualLevels={'60': '4450,4460', 'W': [1900]},
                 maxDistAtr='3', sideCount='2', color='#787b86', draw_text=True, draw_raw=False)
 
 

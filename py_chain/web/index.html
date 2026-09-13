@@ -36,6 +36,26 @@
     border-radius: 6px; padding: 5px 8px; font-size: 13px; width: 100%;
   }
   input:focus, select:focus { outline: none; border-color: var(--accent); }
+  /* 周期多选下拉：按钮显示已选周期，面板内 checkbox 多选 */
+  .ms { position: relative; }
+  .ms-toggle {
+    width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 6px;
+    background: var(--card-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 5px 8px; font-size: 13px; cursor: pointer; text-align: left;
+  }
+  .ms-toggle .ms-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ms-toggle .ms-caret { font-size: 10px; color: var(--muted); }
+  .ms-panel {
+    position: absolute; z-index: 40; top: calc(100% + 4px); left: 0; min-width: 100%;
+    background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 6px;
+    box-shadow: 0 10px 28px rgba(0,0,0,.45); display: flex; flex-direction: column; gap: 2px;
+  }
+  .ms-opt {
+    display: flex; align-items: center; gap: 8px; padding: 4px 6px;
+    border-radius: 4px; font-size: 13px; cursor: pointer; white-space: nowrap;
+  }
+  .ms-opt:hover { background: var(--card-2); }
+  .ms-opt input[type="checkbox"] { width: auto; accent-color: var(--accent); }
   .row { display: flex; gap: 8px; }
   .row .field { flex: 1; }
   .btn-row { display: flex; gap: 8px; margin-top: auto; flex-wrap: wrap; }
@@ -82,6 +102,8 @@
   .mode-tag.replay   { color: #c9a0ff; }
   .mode-tag.live     { color: #7fe0b0; }
   .status-tag { font-size: 11px; padding: 1px 7px; border-radius: 8px; }
+  .mini-badge { font-size: 10px; padding: 0 4px; margin-left: 3px; border-radius: 6px;
+    background: #2a2340; color: #b39ddb; border: 1px solid #4a3b6b; cursor: help; }
   .status-tag.sig { background: #123; color: #7cb0ff; }
   .status-tag.filled { background: #0d3b31; color: var(--ok); }
   .status-tag.open { background: #3d3208; color: var(--warn); }
@@ -98,6 +120,49 @@
   #sig-body tr.exit-continuation td { border-top-style: dashed; }
   #sig-body tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   #locate-status { padding: 8px 14px; color: var(--muted); font-size: 12px; }
+  /* ---------- 记录区 TAB（进场信号记录 / 历史回测方案） ---------- */
+  .record-tabs {
+    display: flex; gap: 4px; padding: 6px 10px 0;
+    border-bottom: 1px solid var(--border); background: var(--card-2);
+  }
+  .record-tab {
+    background: transparent; color: var(--muted);
+    border: 1px solid transparent; border-bottom: 0;
+    border-radius: 8px 8px 0 0; padding: 7px 16px; font-size: 13px;
+  }
+  .record-tab:hover:not(:disabled) { background: var(--card); color: var(--text); }
+  .record-tab.active {
+    background: var(--card); border-color: var(--border);
+    color: var(--text); font-weight: 600;
+  }
+  /* ---------- 历史回测方案面板 / 明细弹窗 / 对比 ---------- */
+  .bt-actions button { padding: 2px 8px; font-size: 12px; }
+  #bt-compare-view { border-top: 1px solid var(--border); padding: 10px 14px 14px; overflow-x: auto; }
+  #bt-compare-view table { font-size: 12px; margin-bottom: 8px; }
+  #bt-compare-view th:first-child, #bt-compare-view td:first-child {
+    position: sticky; left: 0; background: var(--card-2); z-index: 1;
+  }
+  .bt-diff { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, var(--card));
+    border-radius: 4px; padding: 1px 6px; }
+  #bt-detail-modal { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.55);
+    display: flex; align-items: center; justify-content: center; padding: 24px; }
+  #bt-detail-modal[hidden] { display: none; }
+  .bt-modal-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    max-width: 96vw; width: min(1200px, 96vw); max-height: 90vh; display: flex;
+    flex-direction: column; overflow: hidden; }
+  .bt-modal-head { display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  #bt-detail-body { overflow: auto; }
+  .bt-params { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    gap: 6px 14px; padding: 10px 16px; font-size: 12px; }
+  .bt-params .k { color: var(--muted); margin-right: 4px; }
+  .bt-summary { display: flex; gap: 14px; flex-wrap: wrap; padding: 8px 16px;
+    border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+    background: var(--card-2); font-size: 12px; color: var(--muted); }
+  .bt-summary b { color: var(--text); font-weight: 600; }
+  .bt-summary .pnl-pos { color: var(--buy); }
+  .bt-summary .pnl-neg { color: var(--sell); }
+  #bt-detail-body .scroll { max-height: 44vh; }
 </style>
 <link rel="stylesheet" href="/theme.css">
 <link rel="stylesheet" href="/legacy-theme.css">
@@ -110,7 +175,36 @@
 <div class="grid single-mode" id="cards"></div>
 <p class="sub">记录和汇总仅属于当前功能。标记操作使用当前功能全部记录；绘制会替换共享 TD 图表上的对应标记，删除标记作用于共享图表。</p>
 
+<!-- 记录区 TAB：进场信号记录（三模式共用）/ 历史回测方案（仅全量回测），切换显示不堆叠 -->
 <div class="table-wrap">
+  <div class="record-tabs" role="tablist" aria-label="记录区">
+    <button class="record-tab active" role="tab" aria-selected="true" data-record-tab="signals">进场信号记录</button>
+    <button class="record-tab" role="tab" aria-selected="false" data-record-tab="bt" id="tab-btn-bt" hidden
+            title="仅全量回测：保存的参数+信号+固化汇总，支持明细/对比/载参数">历史回测方案</button>
+  </div>
+  <section id="record-bt" role="tabpanel" aria-label="历史回测方案" hidden>
+    <div class="head">
+      <strong>历史回测方案</strong>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <span id="bt-runs-status" style="color:var(--muted);font-size:12px;margin-right:10px;"></span>
+        <button id="btn-bt-refresh">刷新</button>
+        <button id="btn-bt-compare" disabled title="勾选两个及以上方案后对比汇总结果与参数差异">对比选中 (0)</button>
+      </div>
+    </div>
+    <div class="scroll" style="max-height:340px;">
+      <table>
+        <thead>
+          <tr>
+            <th>对比</th><th>名称</th><th>保存时间</th><th>品种</th><th>周期</th><th>起始</th>
+            <th>已平仓</th><th>胜率</th><th>盈亏比</th><th>合计</th><th>信号数</th><th>运行</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="bt-runs-body"></tbody>
+      </table>
+    </div>
+    <div id="bt-compare-view" hidden></div>
+  </section>
+  <section id="record-signals" role="tabpanel" aria-label="进场信号记录">
   <div class="head">
     <strong>进场信号记录</strong>
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
@@ -129,7 +223,7 @@
       <span style="color:var(--muted);font-size:12px;">出场</span>
       <input type="color" id="mark-color-exit" value="#FFEB3B" title="出场箭头颜色（黄：平多 ↓ / 平空 ↑，可调）">
       <span style="color:var(--muted);font-size:12px;">支阻</span>
-      <input type="color" id="mark-color-sr" value="#787B86" title="支阻横线颜色（灰：近支阻价位 11 根K线宽，可调）">
+      <input type="color" id="mark-color-sr" value="#787B86" title="支阻横线颜色（灰：近支阻价位全宽横线，可调）">
       <button id="btn-mark-draw">标记进出场</button>
       <button id="btn-sr-draw" class="mark">标记支阻位</button>
       <button id="btn-mark-clear" title="清除图上所有系统标记（进出场箭头 + 支阻横线）">删除标记</button>
@@ -138,7 +232,7 @@
     </div>
   </div>
   <div id="pnl-summary"></div>
-  <div id="locate-status" role="status" aria-live="polite">点击记录，定位到 TradingView 的信号K线</div>
+  <div id="locate-status" role="status" aria-live="polite">点击记录，定位到 TradingView 的信号K线并标记该行进出场与支阻位</div>
   <div class="scroll">
     <table>
       <thead>
@@ -151,6 +245,18 @@
       <tbody id="sig-body"></tbody>
     </table>
   </div>
+  </section>
+</div>
+
+<!-- 历史方案明细弹窗：参数 + 固化汇总 + 信号表（静态快照，不可定位） -->
+<div id="bt-detail-modal" hidden role="dialog" aria-modal="true" aria-labelledby="bt-detail-title">
+  <div class="bt-modal-card">
+    <div class="bt-modal-head">
+      <strong id="bt-detail-title"></strong>
+      <button id="bt-detail-close">关闭</button>
+    </div>
+    <div id="bt-detail-body"></div>
+  </div>
 </div>
 
 <script>
@@ -159,6 +265,8 @@ const MODES = [
   { id: 'replay', name: 'K线回放', color: '#c9a0ff', desc: '驱动软件 Bar Replay 自动播放，信号触发切周期标记' },
   { id: 'live', name: '实时监控', color: '#7fe0b0', desc: '固定 3m，新收盘 bar 全周期刷新' },
 ];
+// 周期多选下拉的可选项；30S 不在此列，仍由「30秒级别」开关单独追加
+const PERIOD_OPTIONS = ['D', '240', '60', '15', '3'];
 
 const state = { active: null, modes: {} };
 let sigRows = [];
@@ -180,6 +288,9 @@ function selectMode(mode){
   selectedMode=mode;
   el('filter-status').value=modeFilters[mode];
   MODES.forEach(m=>el('card-'+m.id).hidden=m.id!==mode);
+  // 历史方案 TAB 只属于全量回测；切到回放/实时时隐藏该 TAB 并回到信号表
+  el('tab-btn-bt').hidden = mode !== 'backtest';
+  if(mode !== 'backtest' && activeRecordTab === 'bt') showRecordTab('signals');
   el('mode-nav').innerHTML=MODES.map(m=>`<button data-mode="${m.id}" aria-pressed="${m.id===mode}">${m.name}</button>`).join('');
   document.querySelector('h1').firstChild.textContent=modeName(mode)+' ';
   renderTable();
@@ -238,6 +349,18 @@ function buildCard(m) {
       { k: 'slip_stop', label: '止损滑点', type: 'text', def: '3' },
       { k: 'slip_fallback', label: '兜底止损滑点', type: 'text', def: '10' },
       { k: 'slip_be', label: '保本滑点', type: 'text', def: '3' },
+      { k: 'near', label: '近支阻阈值·绝对价差', type: 'text', def: '10' },
+      { k: 'sr_preset', label: '支阻预设', type: 'select', def: '', options: [
+        ['', '默认（引擎参数：密集区+BOLL）'],
+      ] },
+      { k: 'diverge_confirm', label: '背驰进场', type: 'select', def: 'false', options: [
+        ['false', '当下（默认）'],
+        ['true', '分型确认后下一根开盘'],
+      ] },
+      { k: 'expect_bi', label: '检测周期够笔', type: 'select', def: 'true', options: [
+        ['true', '预期够笔（默认）'],
+        ['false', '分型确认'],
+      ] },
     ],
     replay: [
       { k: 'start', label: '回放起点', type: 'text', def: '2026-08-01' },
@@ -249,9 +372,18 @@ function buildCard(m) {
     ],
   };
   const rows = [];
+  const periodsHtml = `<div class="field"><label>周期</label><div class="ms">
+    <button type="button" class="ms-toggle" data-ms-toggle aria-expanded="false" title="勾选一个或多个周期">
+      <span class="ms-value">${PERIOD_OPTIONS.join(',')}</span><span class="ms-caret">▾</span>
+    </button>
+    <div class="ms-panel" hidden>${PERIOD_OPTIONS.map(p =>
+      `<label class="ms-opt"><input type="checkbox" data-ms-opt value="${p}" checked>${p}</label>`).join('')}
+    </div>
+    <input type="hidden" data-cfg="periods" value="${PERIOD_OPTIONS.join(',')}">
+  </div></div>`;
   rows.push(`<div class="row">
     <div class="field"><label>品种</label><input data-cfg="symbol" value="OANDA:XAUUSD"></div>
-    <div class="field"><label>周期</label><input data-cfg="periods" value="D,240,60,15,3"></div>
+    ${periodsHtml}
     <div class="field"><label>${m.id === 'replay' ? '起始日期' : '起始日期'}</label><input data-cfg="from" value="2026-07-02"></div>
   </div>`);
   const extraHtml = (extras[m.id] || []).map(f => {
@@ -261,9 +393,17 @@ function buildCard(m) {
       : `<input data-cfg="${f.k}" value="${f.def}">`;
     return `<div class="field"><label>${f.label}</label>${ctrl}</div>`;
   }).join('');
+  // 回测卡片：数据源三选，默认 store=本地SQLite存储（无需 TradingView）；回放/实时沿用缓存开关
+  const sourceField = m.id === 'backtest'
+    ? `<div class="field"><label>数据源</label><select data-cfg="data_source">
+         <option value="store" selected>本地数据存储（无需TV，默认）</option>
+         <option value="live">实时拉取（CDP）</option>
+         <option value="cache">本地缓存 bars_all_tf.json</option>
+       </select></div>`
+    : `<div class="field"><label>缓存</label><select data-cfg="use_cache"><option value="false">不读缓存</option><option value="true">读缓存</option></select></div>`;
   rows.push(`<div class="row">${extraHtml}
-    <div class="field"><label>缓存</label><select data-cfg="use_cache"><option value="false">不读缓存</option><option value="true">读缓存</option></select></div>
-    <div class="field"><label>30秒级别</label><select data-cfg="with_30s"><option value="false">关闭</option><option value="true">开启（仅背驰级别；30S数据只覆盖最近~7天，其余日期无30S信号；时间轴仍为3m）</option></select></div>
+    ${sourceField}
+    <div class="field"><label>30秒级别</label><select data-cfg="with_30s"><option value="false">关闭</option><option value="true">开启（仅作背驰级别，时间轴仍为3m；30S数据量大，回测明显慢于关闭时）</option></select></div>
   </div>`);
   return `
   <div class="card" id="card-${m.id}">
@@ -278,6 +418,8 @@ function buildCard(m) {
       <button id="btn-pause-${m.id}" disabled>暂停</button>
       <button id="btn-resume-${m.id}" disabled>继续</button>
       <button class="danger" id="btn-stop-${m.id}" disabled>停止</button>
+      ${m.id === 'backtest' ? `
+      <button id="btn-bt-save" disabled title="把最近一次完成的全量回测（参数+本轮信号+固化汇总）保存为历史方案">保存方案</button>` : ''}
     </div>
   </div>`;
 }
@@ -297,6 +439,14 @@ function signalDirectionName(r) {
   // 旧记录未保存 planDirection，按 trading_plan.strategyOf / entryStrategyOf 的固定对应关系显示。
   return {wait2Buy:'多头多',waitBuy:'多头多',wait2Sell:'空头空',waitSell:'空头空',
     wait1Sell:'多头空',wait1Buy:'空头多'}[r.strategyKey] || '-';
+}
+// 信号候选角标（SPEC_divergence_fallback）：回退/近等/预期够笔口径标记
+function candidateBadges(r) {
+  const b = [];
+  if (r.fallback) b.push(['回退', '下沉停止级无候选，沿链上一级回退命中（M1）']);
+  if (r.nearEqual) b.push(['近等', '未严格创新极值、近等容差+三判据AND命中（M2）']);
+  if (r.expectBi) b.push(['预期', '检测周期末笔反向、按预期够笔口径放行（M4）']);
+  return b.map(([t, tip]) => `<span class="mini-badge" title="${tip}">${t}</span>`).join('');
 }
 // 出场类型：stopSr=支阻位止损（支阻位±止损滑点；无正确侧位兜底 进场价±兜底滑点）
 //          | stopBe=保本止损（beStop=进场K线极值±保本滑点）| close=全平（顺势=有利方向破前高/低；
@@ -339,46 +489,116 @@ function filteredRows() {
   const f = el('filter-status').value;
   return sigRows.filter(r=>r.mode===selectedMode&&(!f||r.status===f));
 }
-// 盈亏汇总（对过滤后的行实时聚合）：已平仓胜率/盈亏、浮盈、合计、出场分布。
+// 盈亏汇总：统计（summaryStats，对过滤后的行实时聚合）与展示（summaryHtml）分离，
+// 展示函数同时吃后端保存时固化的 summary（bt_runs.compute_summary 同口径），
+// 保证当前表格 / 历史明细 / 对比三处数字一致。
 // pnl 为 null 的行（信号/同向过滤）不参与任何盈亏合计；pnl=0 不计盈亏（保本单）。
-function renderSummary(rows) {
+function summaryStats(rows) {
   const closed = rows.filter(r => r.status === '已平仓' && r.pnl != null);
   const openP = rows.filter(r => r.status === '持仓中' && r.pnl != null);
   const win = closed.filter(r => r.pnl > 0);
   const lose = closed.filter(r => r.pnl < 0);
-  const realized = closed.reduce((s, r) => s + r.pnl, 0);
-  const floating = openP.reduce((s, r) => s + r.pnl, 0);
-  const total = realized + floating;
-  const fmtV = v => (v > 0 ? '+' : '') + v.toFixed(2);
-  const cls = v => (v > 0 ? 'pnl-pos' : v < 0 ? 'pnl-neg' : '');
-  const winRate = (win.length + lose.length) ? Math.round(100 * win.length / (win.length + lose.length)) : null;
   // 已平仓平均盈利 / 平均亏损绝对值；保本单和持仓浮盈不参与。
   const avgWin = win.length ? win.reduce((s, r) => s + r.pnl, 0) / win.length : 0;
   const avgLoss = lose.length ? -lose.reduce((s, r) => s + r.pnl, 0) / lose.length : 0;
-  const payoffRatio = avgLoss ? (avgWin / avgLoss).toFixed(2) : win.length ? '∞' : '—';
   const ex = { stopBe: 0, stopSr: 0, close: 0, half: 0 };
   for (const r of rows) {
     if (r.exitType && r.exitType in ex) ex[r.exitType]++;
     ex.half += (r.exits || []).filter(e => e.type === 'half').length;
   }
-  const nameMap = { stopBe: '保损', stopSr: '止损', close: '全平' };
-  const parts = [
-    `已平仓 <b>${closed.length}</b>（盈 ${win.length} / 亏 ${lose.length}${winRate != null ? ' · 胜率 ' + winRate + '%' : ''}）`,
-    `<span title="已平仓平均盈利 ÷ 平均亏损绝对值；不含保本单和持仓浮盈。仅盈利显示∞，仅亏损显示0.00，无盈亏样本显示—。">盈亏比 <b>${payoffRatio}</b></span>`,
-    `已平仓盈亏 <b class="${cls(realized)}">${fmtV(realized)}</b>`,
-    `浮盈 <b class="${cls(floating)}">${fmtV(floating)}</b>`,
-    `合计 <b class="${cls(total)}">${fmtV(total)}</b>`,
-    `出场：保损 ${ex.stopBe} · 止损 ${ex.stopSr} · 全平 ${ex.close}${ex.half ? ' · 半平 ' + ex.half : ''}`,
-  ];
-  el('pnl-summary').innerHTML = parts.map(p => `<span>${p}</span>`).join('');
+  return {
+    closed: closed.length, win: win.length, lose: lose.length,
+    win_rate: (win.length + lose.length) ? Math.round(100 * win.length / (win.length + lose.length)) : null,
+    avg_win: avgWin, avg_loss: avgLoss,
+    payoff_ratio: avgLoss ? avgWin / avgLoss : null,  // null=无亏损样本（展示为 ∞/—）
+    realized: closed.reduce((s, r) => s + r.pnl, 0),
+    floating: openP.reduce((s, r) => s + r.pnl, 0),
+    exits: ex,
+  };
 }
+function summaryHtml(s) {
+  const total = (s.realized || 0) + (s.floating || 0);
+  const fmtV = v => (v > 0 ? '+' : '') + v.toFixed(2);
+  const cls = v => (v > 0 ? 'pnl-pos' : v < 0 ? 'pnl-neg' : '');
+  const payoff = s.payoff_ratio != null ? s.payoff_ratio.toFixed(2) : (s.win ? '∞' : '—');
+  const parts = [
+    `已平仓 <b>${s.closed}</b>（盈 ${s.win} / 亏 ${s.lose}${s.win_rate != null ? ' · 胜率 ' + s.win_rate + '%' : ''}）`,
+    `<span title="已平仓平均盈利 ÷ 平均亏损绝对值；不含保本单和持仓浮盈。仅盈利显示∞，仅亏损显示0.00，无盈亏样本显示—。">盈亏比 <b>${payoff}</b></span>`,
+    `已平仓盈亏 <b class="${cls(s.realized)}">${fmtV(s.realized)}</b>`,
+    `浮盈 <b class="${cls(s.floating)}">${fmtV(s.floating)}</b>`,
+    `合计 <b class="${cls(total)}">${fmtV(total)}</b>`,
+    `出场：保损 ${s.exits.stopBe} · 止损 ${s.exits.stopSr} · 全平 ${s.exits.close}${s.exits.half ? ' · 半平 ' + s.exits.half : ''}`,
+  ];
+  return parts.map(p => `<span>${p}</span>`).join('');
+}
+function renderSummary(rows) {
+  el('pnl-summary').innerHTML = summaryHtml(summaryStats(rows));
+}
+// # 列显示序号：当前会话内该模式记录的到达顺序（1 起，清空表格/重新启动回测后重新从 1 计）；
+// 内部 id 不变，定位与方案保存仍按 id 精确匹配。不在当前会话的行（如弹窗快照）退回内部 id。
+function displayNo(row) {
+  let n = 0;
+  for (const r of sigRows) {
+    if (r.mode !== row.mode) continue;
+    n++;
+    if (r.id === row.id) return n;
+  }
+  return row.id;
+}
+// 定位提示文案用的序号：能解析到会话内行则显示序号，否则显示内部 id
+function locateLabel(mode, id) {
+  const row = sigRows.find(r => r.id === id && r.mode === mode);
+  return `#${row ? displayNo(row) : id}`;
+}
+// 行 → <tr> HTML：实时表格与历史方案明细弹窗共用。
+// interactive=false（已保存方案明细）不绑定定位点击/选中态——定位依赖内存
+// SignalLog，对落库快照无意义。
+function signalRowsHtml(rows, opts = {}) {
+  const interactive = opts.interactive !== false;
+  return rows.map(r => {
+    const exits = exitDisplayRows(r);
+    const shared = `
+      ${interactive ? `<td title="内部记录 id：${r.id}">${displayNo(r)}</td>` : `<td title="内部记录 id">${r.id}</td>`}
+      <td>${fmtTime(r.time)}</td>
+      <td class="${r.direction === 'long' ? 'long' : 'short'}">${signalDirectionName(r)}</td>
+      <td>${r.periodX || '-'}</td>
+      <td>${r.strategyKey || '-'}${candidateBadges(r)}</td>
+      <td>${r.markRes || '-'}</td>
+      <td>${r.price != null ? Number(r.price).toFixed(2) : '-'}</td>
+      <td>${r.nearSr != null ? Number(r.nearSr).toFixed(2) : '-'}</td>
+      <td><span class="status-tag ${statusClass(r.status)}">${r.status}</span></td>
+      <td>${fmtTime(r.entryTime)}</td>
+      <td>${r.entryPrice != null ? Number(r.entryPrice).toFixed(2) : '-'}</td>
+    `.replace(/<td(?=[ >])/g, `<td rowspan="${exits.length}"`);
+    return exits.map((exit, i) => {
+      const pnl = exit.pnl;
+      const pnlCls = pnl == null || pnl === 0 ? '' : (pnl > 0 ? 'pnl-pos' : 'pnl-neg');
+      const pnlTxt = pnl == null ? '-' : (pnl > 0 ? '+' : '') + pnl.toFixed(2);
+      const totalTxt = r.pnl == null ? '-' : Number(r.pnl).toFixed(2);
+      const selected = interactive && selectedSignal[selectedMode] === r.id;
+      const classes = [selected ? 'selected' : '', i ? 'exit-continuation' : ''].filter(Boolean).join(' ');
+      const attrs = interactive
+        ? ` data-signal-id="${r.id}" tabindex="0" aria-selected="${selected}" title="点击定位信号K线并标记该行进出场"`
+        : '';
+      return `<tr${attrs}${classes ? ` class="${classes}"` : ''}>
+        ${i === 0 ? shared : ''}
+        <td>${fmtTime(exit.time)}</td>
+        <td>${exit.price != null ? Number(exit.price).toFixed(2) : '-'}</td>
+        <td title="${exitEventsDesc(r)}">${exit.label}</td>
+        <td>${exit.lots != null ? exit.lots : '-'}</td>
+        <td class="${pnlCls}" title="${exits.length > 1 ? (exit.type ? '本次出场盈亏' : '剩余持仓浮盈') + '；整笔交易合计：' + totalTxt : '整笔交易盈亏'}">${pnlTxt}</td>
+      </tr>`;
+    }).join('');
+  }).join('');
+}
+
 function renderTable() {
   const rows = filteredRows();
   if (!sigRows.some(r=>r.mode===selectedMode&&r.id===selectedSignal[selectedMode])) {
     selectedSignal[selectedMode] = null;
     locateMessages[selectedMode] = '';
   }
-  el('locate-status').textContent = locateMessages[selectedMode] || '点击记录，定位到 TradingView 的信号K线';
+  el('locate-status').textContent = locateMessages[selectedMode] || '点击记录，定位到 TradingView 的信号K线并标记该行进出场与支阻位';
   // 仅排列展示副本；无盈亏的记录始终置后，相同盈亏保持原始顺序。
   const sort = modePnlSort[selectedMode];
   el('pnl-header').ariaSort = sort;
@@ -394,43 +614,12 @@ function renderTable() {
       return sort === 'ascending' ? aValue - bValue : bValue - aValue;
     });
   }
-  const body = el('sig-body');
-  body.innerHTML = rows.map(r => {
-    const exits = exitDisplayRows(r);
-    const shared = `
-      <td>${r.id}</td>
-      <td>${fmtTime(r.time)}</td>
-      <td class="${r.direction === 'long' ? 'long' : 'short'}">${signalDirectionName(r)}</td>
-      <td>${r.periodX || '-'}</td>
-      <td>${r.strategyKey || '-'}</td>
-      <td>${r.markRes || '-'}</td>
-      <td>${r.price != null ? Number(r.price).toFixed(2) : '-'}</td>
-      <td>${r.nearSr != null ? Number(r.nearSr).toFixed(2) : '-'}</td>
-      <td><span class="status-tag ${statusClass(r.status)}">${r.status}</span></td>
-      <td>${fmtTime(r.entryTime)}</td>
-      <td>${r.entryPrice != null ? Number(r.entryPrice).toFixed(2) : '-'}</td>
-    `.replace(/<td(?=[ >])/g, `<td rowspan="${exits.length}"`);
-    return exits.map((exit, i) => {
-      const pnl = exit.pnl;
-      const pnlCls = pnl == null || pnl === 0 ? '' : (pnl > 0 ? 'pnl-pos' : 'pnl-neg');
-      const pnlTxt = pnl == null ? '-' : (pnl > 0 ? '+' : '') + pnl.toFixed(2);
-      const totalTxt = r.pnl == null ? '-' : Number(r.pnl).toFixed(2);
-      const selected = selectedSignal[selectedMode] === r.id;
-      const classes = [selected ? 'selected' : '', i ? 'exit-continuation' : ''].filter(Boolean).join(' ');
-      return `<tr data-signal-id="${r.id}" tabindex="0" class="${classes}" aria-selected="${selected}" title="点击定位信号K线">
-        ${i === 0 ? shared : ''}
-        <td>${fmtTime(exit.time)}</td>
-        <td>${exit.price != null ? Number(exit.price).toFixed(2) : '-'}</td>
-        <td title="${exitEventsDesc(r)}">${exit.label}</td>
-        <td>${exit.lots != null ? exit.lots : '-'}</td>
-        <td class="${pnlCls}" title="${exits.length > 1 ? (exit.type ? '本次出场盈亏' : '剩余持仓浮盈') + '；整笔交易合计：' + totalTxt : '整笔交易盈亏'}">${pnlTxt}</td>
-      </tr>`;
-    }).join('');
-  }).join('');
+  el('sig-body').innerHTML = signalRowsHtml(rows);
   const modeCount=sigRows.filter(r=>r.mode===selectedMode).length;
   el('count').textContent = rows.length === modeCount
     ? `共 ${modeCount} 条`
     : `筛选 ${rows.length} / 共 ${modeCount} 条`;
+  updateBtSaveButton();
 }
 
 function togglePnlSort() {
@@ -441,9 +630,16 @@ function togglePnlSort() {
 function finishLocate(job) {
   if (!locatePending || job?.jobId !== locatePending.jobId || job.state === 'running') return;
   const mode = locatePending.mode;
-  locateMessages[mode] = job.state === 'done'
-    ? `#${job.id} 已定位 · ${job.result.symbol} · ${job.result.markRes} · ${fmtTime(job.result.time)}`
-    : `#${job.id} 定位失败：${job.error || '未知错误'}`;
+  if (job.state === 'done') {
+    // 单行标记结果：定位成功后同一任务内已画该行进出场箭头+支阻横线
+    const mk = job.result.mark;
+    const markTxt = mk?.error ? `（标记未画：${mk.error}）`
+      : mk?.skipped ? `（${mk.skipped}，不画标记）`
+      : mk ? `并标记 ${mk.drawn} 个` : '';
+    locateMessages[mode] = `${locateLabel(mode, job.id)} 已定位${markTxt} · ${job.result.symbol} · ${job.result.markRes} · ${fmtTime(job.result.time)}`;
+  } else {
+    locateMessages[mode] = `${locateLabel(mode, job.id)} 定位失败：${job.error || '未知错误'}`;
+  }
   locatePending = null;
   clearTimeout(locatePoll);
   updateMarkButtons();
@@ -463,7 +659,7 @@ async function pollLocate() {
     } else finishLocate(data.job);
   } catch (e) {
     if (locatePending === pending) {
-      locateMessages[pending.mode] = `#${pending.id} 定位状态连接中断，正在重新查询…`;
+      locateMessages[pending.mode] = `${locateLabel(pending.mode, pending.id)} 定位状态连接中断，正在重新查询…`;
       renderTable();
     }
   }
@@ -482,12 +678,16 @@ async function locateRow(id) {
   }
   const pending = {mode,id};
   locatePending = pending;
-  locateMessages[mode] = `#${id} 定位中…（历史数据加载最多等待360秒）`;
+  locateMessages[mode] = `${locateLabel(mode, id)} 定位并标记中…（历史数据加载最多等待360秒）`;
   renderTable();
   updateMarkButtons();
   try {
+    // 单行标记颜色随工具条取色器（与「标记进出场」按钮同源）
     const response = await fetch('/api/signals/locate', {
-      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode,id})
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode,id,colors:{
+        buy:el('mark-color-buy').value, sell:el('mark-color-sell').value,
+        exit:el('mark-color-exit').value, sr:el('mark-color-sr').value
+      }})
     });
     const data = await response.json();
     if (!response.ok || !data.ok) throw Error(data.error || '定位请求失败');
@@ -495,7 +695,7 @@ async function locateRow(id) {
     // Query immediately too: a fast completion event may precede the POST response.
     pollLocate();
   } catch (e) {
-    locateMessages[mode] = `#${id} 定位失败：${e.message}`;
+    locateMessages[mode] = `${locateLabel(mode, id)} 定位失败：${e.message}`;
     locatePending = null;
     updateMarkButtons();
     renderTable();
@@ -528,6 +728,7 @@ function setBadge(m, s) {
   if (state.active && state.active !== m) {
     el(`btn-start-${m}`).disabled = true;
   }
+  if (m === 'backtest') updateBtSaveButton();
 }
 
 function applyStatus(status) {
@@ -574,18 +775,49 @@ function collectCfg(m) {
     const v = inp.value;
     cfg[inp.dataset.cfg] = v === 'true' ? true : v === 'false' ? false : v;
   });
-  if (m === 'backtest') cfg.signal_mode = 'realtime';
-  cfg.periods = cfg.periods.split(',').map(s => s.trim()).filter(Boolean);
+  if (m === 'backtest') {
+    cfg.signal_mode = 'realtime';
+    // data_source 三选映射回后端旧语义：cache → use_cache=true（store/live 走新字段）
+    cfg.use_cache = (cfg.data_source === 'cache');
+  }
+  cfg.periods = String(cfg.periods || '').split(',').map(s => s.trim()).filter(Boolean);
   // 30秒级别开关：开启时向 periods 追加 30S（只落盘最近3天数据，供 3 分钟进场背驰检测）
   if (cfg.with_30s === true && !cfg.periods.includes('30S')) cfg.periods.push('30S');
   if (cfg.with_30s === false) cfg.periods = cfg.periods.filter(p => p !== '30S');
   return cfg;
 }
 
+// ---------- 周期多选下拉 ----------
+// 勾选变化 → 按 PERIOD_OPTIONS 固定顺序同步隐藏 input（data-cfg="periods"）与按钮文案
+function syncMs(ms) {
+  const checked = [...ms.querySelectorAll('[data-ms-opt]')]
+    .filter(c => c.checked).map(c => c.value);
+  const values = PERIOD_OPTIONS.filter(p => checked.includes(p));
+  ms.querySelector('.ms-value').textContent = values.length ? values.join(',') : '请选择周期';
+  ms.querySelector('input[data-cfg="periods"]').value = values.join(',');
+}
+function closeAllMsPanels(except) {
+  document.querySelectorAll('.ms-panel').forEach(p => {
+    const ms = p.closest('.ms');
+    if (ms === except || p.hidden) return;
+    p.hidden = true;
+    ms.querySelector('[data-ms-toggle]').setAttribute('aria-expanded', 'false');
+  });
+}
+
 // ---------- 绑定 ----------
+// 清空指定功能的信号记录：服务端删除 + 本地过滤；历史方案不受影响
+async function clearModeRows(mode) {
+  const r = await api('/api/signals/clear', { mode });
+  if (r) sigRows = sigRows.filter(row => row.mode !== mode);
+  renderTable();
+}
 function bindCard(m) {
   el(`btn-start-${m}`).onclick = async () => {
     const cfg = collectCfg(m);
+    if (!cfg.periods.length) { alert('请至少选择一个周期'); return; }
+    // 全量回测启动前自动清空本轮信号表格，避免新旧行混在一起
+    if (m === 'backtest') await clearModeRows('backtest');
     const r = await api(`/api/${m}/start`, { cfg });
     if (r) { addLog(m, '启动请求已发送'); }
   };
@@ -603,6 +835,8 @@ function connectSSE() {
   es.addEventListener('init', e => applyStatus(JSON.parse(e.data)));
   es.addEventListener('status', e => {
     const d = JSON.parse(e.data);
+    // 守卫：只认三模式自身的 status（其他模块如 data 拉取可能占用 active，但不发本事件）
+    if (!MODES.some(x => x.id === d.mode)) return;
     applyStatus({ active: state.active, modes: { [d.mode]: { ...state.modes[d.mode], state: d.state } } });
   });
   es.addEventListener('log', e => {
@@ -644,22 +878,313 @@ function connectSSE() {
   es.addEventListener('signals_cleared', e => { const d=JSON.parse(e.data);sigRows=d.mode?sigRows.filter(r=>r.mode!==d.mode):[];renderTable(); });
 }
 
+// ---------- 历史回测方案（仅全量回测：保存/列表/明细/对比/载参数） ----------
+let btRuns = [];                 // 列表缓存（/api/bt/runs，不含信号行）
+const btCompareSel = new Set();  // 对比勾选的方案 id
+
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const pnlClass = v => (v > 0 ? 'pnl-pos' : v < 0 ? 'pnl-neg' : '');
+const fmtPnlText = v => v == null ? '-' : (v > 0 ? '+' : '') + Number(v).toFixed(2);
+
+// 保存按钮：仅最近一次回测结束（done/stopped）且信号表有回测行时可点；
+// 实际可保存性（本轮是否有新增行）由后端在保存时校验
+function updateBtSaveButton() {
+  const btn = el('btn-bt-save');
+  if (!btn) return;
+  const st = state.modes.backtest?.state;
+  btn.disabled = !['done', 'stopped'].includes(st) || !sigRows.some(r => r.mode === 'backtest');
+}
+
+// 表单默认名与服务端 default_name 同式：品种 + 起始日期 + 保存时刻
+function btDefaultName() {
+  const card = el('card-backtest');
+  const sym = card.querySelector('[data-cfg="symbol"]')?.value || '';
+  const from = card.querySelector('[data-cfg="from"]')?.value || '';
+  const p = n => String(n).padStart(2, '0');
+  const d = new Date();
+  return `${sym} ${from}·${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+}
+
+async function saveBtRun() {
+  if (el('btn-bt-save').disabled) return;
+  const name = prompt('方案名称（参数 + 本轮信号记录 + 汇总将一起保存）：', btDefaultName());
+  if (name === null) return;
+  const r = await api('/api/bt/runs/save', { name: name.trim() });
+  if (r) {
+    showRecordTab('bt');            // 保存成功后切到历史方案 TAB 直见结果（内部已刷新列表）
+  }
+}
+
+// ---------- 记录区 TAB 切换（进场信号记录 / 历史回测方案） ----------
+let activeRecordTab = 'signals';
+function showRecordTab(tab) {
+  activeRecordTab = tab;
+  const bt = tab === 'bt';
+  el('record-signals').hidden = bt;
+  el('record-bt').hidden = !bt;
+  document.querySelectorAll('[data-record-tab]').forEach(b => {
+    const on = b.dataset.recordTab === tab;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', String(on));
+  });
+  if (bt) refreshBtRuns();
+}
+
+async function refreshBtRuns() {
+  try {
+    const d = await (await fetch('/api/bt/runs')).json();
+    if (!d.ok) throw Error(d.error || '未知错误');
+    btRuns = d.runs || [];
+    [...btCompareSel].forEach(id => { if (!btRuns.some(r => r.id === id)) btCompareSel.delete(id); });
+    renderBtRuns();
+  } catch (e) {
+    el('bt-runs-status').textContent = '列表加载失败：' + e.message;
+  }
+}
+
+function renderBtRuns() {
+  el('bt-runs-status').textContent = btRuns.length
+    ? `${btRuns.length} 个方案 · 保存于本地数据库（data/bars.db），不受清空表格与服务重启影响`
+    : '暂无保存的方案';
+  const body = el('bt-runs-body');
+  if (!btRuns.length) {
+    body.innerHTML = `<tr><td colspan="13" style="color:var(--muted);white-space:normal;">回测完成后点卡片上的「保存方案」；已保存方案与当前信号表格互不影响</td></tr>`;
+  } else {
+    body.innerHTML = btRuns.map(r => {
+      const s = r.summary || {};
+      return `<tr data-id="${r.id}">
+        <td><input type="checkbox" data-bt-check="${r.id}"${btCompareSel.has(r.id) ? ' checked' : ''} aria-label="对比勾选 ${esc(r.name)}"></td>
+        <td title="${esc(r.name)}">${esc(r.name)}</td>
+        <td>${fmtTime(r.saved_at)}</td>
+        <td>${esc(r.cfg_summary?.symbol || '-')}</td>
+        <td>${esc(r.cfg_summary?.periods || '-')}</td>
+        <td>${esc(r.cfg_summary?.from || '-')}</td>
+        <td>${s.closed ?? '-'}</td>
+        <td>${s.win_rate != null ? s.win_rate + '%' : '—'}</td>
+        <td>${s.payoff_ratio != null ? s.payoff_ratio.toFixed(2) : '—'}</td>
+        <td class="${pnlClass(s.total)}">${fmtPnlText(s.total)}</td>
+        <td>${r.signal_count}</td>
+        <td>${r.worker_state === 'stopped' ? '中途停止' : '完整'}</td>
+        <td class="bt-actions">
+          <button data-bt-act="detail">明细</button>
+          <button data-bt-act="load" title="把该方案的参数回填到表单（不自动启动）">载参数</button>
+          <button data-bt-act="rename">重命名</button>
+          <button data-bt-act="delete" class="danger">删除</button>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+  updateBtCompareButton();
+  if (!el('bt-compare-view').hidden) renderBtCompare();
+}
+
+function onBtRunsClick(e) {
+  const btn = e.target.closest('button[data-bt-act]');
+  if (!btn) return;
+  const id = btn.closest('tr[data-id]')?.dataset.id;
+  const run = btRuns.find(r => r.id === id);
+  if (!run) return;
+  const act = btn.dataset.btAct;
+  if (act === 'detail') openBtDetail(run.id);
+  else if (act === 'load') loadBtCfg(run);
+  else if (act === 'rename') renameBtRun(run);
+  else if (act === 'delete') deleteBtRun(run);
+}
+
+function onBtRunsCheck(e) {
+  const c = e.target.closest('input[data-bt-check]');
+  if (!c) return;
+  if (c.checked) btCompareSel.add(c.dataset.btCheck); else btCompareSel.delete(c.dataset.btCheck);
+  updateBtCompareButton();
+  if (!el('bt-compare-view').hidden) renderBtCompare();
+}
+
+function updateBtCompareButton() {
+  const n = btCompareSel.size;
+  el('btn-bt-compare').textContent = `对比选中 (${n})`;
+  el('btn-bt-compare').disabled = n < 2;
+  if (n < 2) el('bt-compare-view').hidden = true;
+}
+
+// ---------- 对比矩阵（数据全部来自列表缓存里的固化 summary，无额外请求） ----------
+const BT_METRICS = [
+  ['已平仓数', s => s.closed ?? '-'],
+  ['盈 / 亏', s => `${s.win ?? '-'} / ${s.lose ?? '-'}`],
+  ['胜率', s => s.win_rate != null ? s.win_rate + '%' : '—'],
+  ['盈亏比', s => s.payoff_ratio != null ? s.payoff_ratio.toFixed(2) : (s.win ? '∞' : '—')],
+  ['已平仓盈亏', s => `<span class="${pnlClass(s.realized)}">${fmtPnlText(s.realized)}</span>`],
+  ['浮盈', s => `<span class="${pnlClass(s.floating)}">${fmtPnlText(s.floating)}</span>`],
+  ['合计', s => `<b class="${pnlClass(s.total)}">${fmtPnlText(s.total)}</b>`],
+  ['出场分布', s => `保损 ${s.exits?.stopBe ?? 0} · 止损 ${s.exits?.stopSr ?? 0} · 全平 ${s.exits?.close ?? 0}${s.exits?.half ? ' · 半平 ' + s.exits.half : ''}`],
+  ['信号总数', s => s.rows_total ?? '-'],
+  ['未成交信号', s => s.cnt_signal ?? '-'],
+  ['持仓中', s => s.cnt_open ?? '-'],
+  ['同向过滤', s => s.cnt_filtered ?? '-'],
+];
+// 参数对比展示顺序与汉化（键为保存的规范化 cfg 字段名）
+const BT_CFG_KEYS = ['symbol', 'from', 'periods', 'data_source', 'warmup', 'lots',
+                     'slip_stop', 'slip_fallback', 'slip_be', 'near', 'sr_preset',
+                     'diverge_confirm', 'expect_bi', 'with_30s'];
+const BT_CFG_LABELS = { symbol: '品种', from: '起始日期', periods: '周期', data_source: '数据源',
+                        warmup: '预热根数', lots: '手数', slip_stop: '止损滑点', slip_fallback: '兜底止损滑点',
+                        slip_be: '保本滑点', near: '近支阻阈值', sr_preset: '支阻预设', diverge_confirm: '背驰进场', expect_bi: '检测周期够笔', with_30s: '30秒级别' };
+function btCfgVal(k, v) {
+  if (k === 'periods') return Array.isArray(v) ? v.join('+') : (v ?? '—');
+  if (k === 'data_source') return { store: '本地数据存储', live: '实时拉取', cache: '本地缓存' }[v] || v || '—';
+  if (typeof v === 'boolean') return v ? '开' : '关';
+  return v ?? '—';
+}
+
+function renderBtCompare() {
+  const view = el('bt-compare-view');
+  const runs = [...btCompareSel].map(id => btRuns.find(r => r.id === id)).filter(Boolean);
+  if (runs.length < 2) { view.innerHTML = ''; view.hidden = true; return; }
+  const head = runs.map(r => `<th title="保存于 ${fmtTime(r.saved_at)}">${esc(r.name)}</th>`).join('');
+  const metricsHtml = BT_METRICS.map(([label, get]) =>
+    `<tr><th>${label}</th>${runs.map(r => `<td>${get(r.summary || {})}</td>`).join('')}</tr>`).join('');
+  const keys = BT_CFG_KEYS.filter(k => runs.some(r => r.cfg && k in r.cfg));
+  const cfgHtml = keys.map(k => {
+    const base = runs.map(r => btCfgVal(k, (r.cfg || {})[k]));
+    return `<tr><th>${BT_CFG_LABELS[k] || k}</th>${base.map(v =>
+      `<td${String(v) !== String(base[0]) ? ' class="bt-diff"' : ''}>${esc(v)}</td>`).join('')}</tr>`;
+  }).join('');
+  view.innerHTML = `
+    <div style="padding:6px 0 6px;"><strong>汇总对比</strong><span style="color:var(--muted);font-size:12px;">（数值为保存时固化的统计）</span></div>
+    <table><thead><tr><th>指标</th>${head}</tr></thead><tbody>${metricsHtml}</tbody></table>
+    <div style="padding:8px 0 6px;"><strong>参数对比</strong><span style="color:var(--muted);font-size:12px;">（与第一个选中方案不同的高亮）</span></div>
+    <table><thead><tr><th>参数</th>${head}</tr></thead><tbody>${cfgHtml}</tbody></table>`;
+}
+
+// ---------- 明细弹窗 ----------
+// 信号表列与主表 thead 保持一致（此处为纯文本表头，盈亏列无排序按钮）
+const SIG_TABLE_HEADERS = `<th>#</th><th>信号时间</th><th>方向</th><th>检测周期</th>
+  <th>策略</th><th>背驰级别</th><th>价格</th><th>近支阻</th><th>状态</th><th>成交时间</th><th>成交价</th>
+  <th>出场时间</th><th>出场价</th><th>出场类型</th><th title="分批出场时分别显示本次出场或剩余持仓手数">手数</th><th>盈亏</th>`;
+
+async function openBtDetail(id) {
+  let run;
+  try {
+    const resp = await fetch(`/api/bt/runs/detail?id=${encodeURIComponent(id)}`);
+    const d = await resp.json();
+    if (!resp.ok || !d.ok) throw Error(d.error || `请求失败 ${resp.status}`);
+    run = d.run;
+  } catch (e) { alert('明细加载失败：' + e.message); return; }
+  const cfg = run.cfg || {};
+  const paramsHtml = BT_CFG_KEYS.filter(k => k in cfg).map(k =>
+    `<div><span class="k">${BT_CFG_LABELS[k] || k}</span>${esc(btCfgVal(k, cfg[k]))}</div>`).join('');
+  el('bt-detail-title').textContent =
+    `${run.name}（保存于 ${fmtTime(run.saved_at)}${run.worker_state === 'stopped' ? ' · 中途停止' : ''}）`;
+  el('bt-detail-body').innerHTML = `
+    <div class="bt-params">${paramsHtml}</div>
+    <div class="bt-summary">${summaryHtml(run.summary || {})}</div>
+    <div class="scroll"><table>
+      <thead><tr>${SIG_TABLE_HEADERS}</tr></thead>
+      <tbody>${signalRowsHtml(run.signals || [], { interactive: false })}</tbody>
+    </table></div>`;
+  el('bt-detail-modal').hidden = false;
+}
+
+function closeBtDetail() { el('bt-detail-modal').hidden = true; }
+
+// ---------- 载参数：collectCfg 的逆映射（只回填表单，不自动启动） ----------
+function loadBtCfg(run) {
+  const cfg = run.cfg || {};
+  const card = el('card-backtest');
+  card.querySelectorAll('[data-cfg]').forEach(inp => {
+    const k = inp.dataset.cfg;
+    if (k === 'periods' || k === 'with_30s' || !(k in cfg)) return;  // 这两项由 periods 推导
+    inp.value = typeof cfg[k] === 'boolean' ? String(cfg[k]) : cfg[k];
+  });
+  const periods = Array.isArray(cfg.periods) ? cfg.periods : [];
+  card.querySelectorAll('[data-ms-opt]').forEach(c => { c.checked = periods.includes(c.value); });
+  syncMs(card.querySelector('.ms'));
+  card.querySelector('[data-cfg="with_30s"]').value = String(periods.includes('30S'));
+  addLog('backtest', `已载入方案参数：${run.name}（未自动启动，确认后点「启动」）`);
+}
+
+async function renameBtRun(run) {
+  const name = prompt('新的方案名称：', run.name);
+  if (name === null || !name.trim()) return;
+  const r = await api('/api/bt/runs/rename', { id: run.id, name: name.trim() });
+  if (r) refreshBtRuns();
+}
+
+async function deleteBtRun(run) {
+  if (!confirm(`删除方案「${run.name}」？不可恢复；不影响当前信号表格。`)) return;
+  try {
+    const resp = await fetch(`/api/bt/runs?id=${encodeURIComponent(run.id)}`, { method: 'DELETE' });
+    const d = await resp.json();
+    if (!resp.ok || !d.ok) throw Error(d.error || `请求失败 ${resp.status}`);
+  } catch (e) { alert(e.message); return; }
+  refreshBtRuns();
+}
+
+function bindBtRuns() {
+  el('btn-bt-save').onclick = saveBtRun;
+  el('btn-bt-refresh').onclick = refreshBtRuns;
+  el('btn-bt-compare').onclick = () => {
+    const v = el('bt-compare-view');
+    v.hidden = !v.hidden;
+    if (!v.hidden) renderBtCompare();
+  };
+  el('bt-runs-body').onclick = onBtRunsClick;
+  el('bt-runs-body').onchange = onBtRunsCheck;
+  el('bt-detail-close').onclick = closeBtDetail;
+  el('bt-detail-modal').onclick = e => { if (e.target === el('bt-detail-modal')) closeBtDetail(); };
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !el('bt-detail-modal').hidden) closeBtDetail();
+  });
+}
+
 // ---------- 初始化 ----------
+// 支阻预设下拉：选项来自 /api/sr/presets（与 /sr 调试页、工作台共享同一预设源）。
+// 叠加层（fib/BOLL）开关只存在于 /sr 预设里（srTypes）——回测页不再单独提供叠加开关：
+// 选预设 = 预设的 srTypes；默认 = 引擎默认（密集区+BOLL）。
+async function loadSrPresetOptions() {
+  const sel = document.querySelector('#card-backtest [data-cfg="sr_preset"]');
+  if (!sel) return;
+  try {
+    const r = await fetch('/api/sr/presets').then(x => x.json());
+    (r.presets || []).forEach(p => {
+      const o = document.createElement('option');
+      o.value = p.name; o.textContent = p.name;
+      sel.appendChild(o);
+    });
+  } catch (e) { /* 预设列表拉取失败：保留「默认」选项，不影响回测 */ }
+}
+
 async function init() {
   el('cards').innerHTML = MODES.map(buildCard).join('');
   MODES.forEach(m => bindCard(m.id));
+  // 周期多选下拉：点击按钮开合，点击面板外收起；勾选变化即同步隐藏 input
+  document.addEventListener('click', e => {
+    const toggle = e.target.closest('[data-ms-toggle]');
+    if (toggle) {
+      const ms = toggle.closest('.ms');
+      const open = ms.querySelector('.ms-panel').hidden;
+      closeAllMsPanels(ms);
+      ms.querySelector('.ms-panel').hidden = !open;
+      toggle.setAttribute('aria-expanded', String(open));
+      return;
+    }
+    if (!e.target.closest('.ms')) closeAllMsPanels(null);
+  });
+  document.addEventListener('change', e => {
+    if (e.target.matches?.('[data-ms-opt]')) syncMs(e.target.closest('.ms'));
+  });
   selectMode(selectedMode);
+  loadSrPresetOptions();
   el('mode-nav').onclick=e=>{const b=e.target.closest('[data-mode]');if(b)selectMode(b.dataset.mode)};
   if(parent!==window)parent.postMessage({type:'modes-ready'},location.origin);
-  el('btn-clear').onclick = async () => {
-    const clearedMode=selectedMode;
-    const r = await api('/api/signals/clear',{mode:clearedMode});
-    if (r) sigRows = sigRows.filter(row=>row.mode!==clearedMode);
-    renderTable();
-  };
+  el('btn-clear').onclick = () => clearModeRows(selectedMode);
   el('filter-status').onchange = () => renderTable();
   el('sort-pnl').onclick = togglePnlSort;
+  // 记录区 TAB：进场信号记录 / 历史回测方案
+  document.querySelectorAll('[data-record-tab]').forEach(b => {
+    b.onclick = () => showRecordTab(b.dataset.recordTab);
+  });
   bindSignalRows();
+  bindBtRuns();
   el('btn-mark-draw').onclick = async () => {
     if (markBusy || isAnyModeRunning()) return;
     markBusy = true;

@@ -8,7 +8,12 @@ TradingView 图表对应周期K线上（箭头锚点为背驰点 time，已对�
   - 做空 = 向下箭头（arrow_down，文本 ML·SELL + 价）
 颜色可由调用方指定（默认买红 #F23645、卖绿 #089981）。
 
-出场标记（行内带 exits 出场事件时追加，统一灰 #787B86，只在本背驰周期显示）：
+标记的周期可见性（intervalsVisibilities）= 背驰周期（markRes）+ 检测周期
+（periodX）的并集：同一箭头/横线在两个周期的图表上同时显示（同类周期合并为
+连续区间时，中间周期也会显示，如 3m+15m → 5m/10m 可见）；无法识别周期时
+保持默认不限。
+
+出场标记（行内带 exits 出场事件时追加，统一灰 #787B86，同款双周期显示）：
   - 与进场同款箭头，方向=平仓方向：多头出场（平多）= 向下箭头 ↓、空头出场（平空）= 向上箭头 ↑
     （文本 ML·止损/保损/全平/半平 + 价；与进场红/绿箭头用灰色区分）
   - 保本/仍持仓不画图；同向过滤（status=同向过滤）的信号不画箭头。
@@ -18,13 +23,19 @@ TradingView 图表对应周期K线上（箭头锚点为背驰点 time，已对�
 删除时只删自己创建的标记，不影响用户图形与其它标记。
 
 支阻横线（「标记支阻位」按钮，draw_sr_marks）：把信号列表「近支阻」（nearSr）
-画成 11 根K线宽的 1px 线段（shape='trend_line' 两点锚定，中心=进场点K线、左右各 5 根，
-默认灰可调，只在背驰周期显示）。前缀 ML·SR 与独立键 mark_sr_ids —— 重画横线只清
+画成全宽横线（shape='horizontal_line' 单点锚定，天然横贯全图、不限长度，锚=进场点
+K线），默认灰可调，双周期显示。前缀 ML·SR 与独立键 mark_sr_ids —— 重画横线只清
 上次的横线，重画箭头（ML·）只清箭头，两个标记按钮互不清除。「删除标记」按钮
 （clear_all_marks）则把 ML·（含横线）/BT·/RT· 全部系统标记一次清空。
+
+单行标记（点击信号行随定位一起画，draw_single_mark）：该行的进场箭头 + 出场
+箭头 + 近支阻全宽横线，前缀 ML·单 / ML·单SR、独立键 mark_single_ids；替换
+语义——每次点击先清上一次的单行标记，始终只保留最近点击一行。「标记进出场」
+「删除标记」会一并清掉单行标记（前缀同属 ML· 族）。
 """
 
 import json
+import math
 import time
 
 from .chan_core import intervalSecOf, fmtT
@@ -37,14 +48,20 @@ IDS_KEY = "mark_list_ids"
 CHUNK = 50
 
 # 支阻横线（「标记支阻位」按钮）：独立前缀/键，与箭头按钮互不清除。
-# 横线 = 近支阻价位（nearSr）的 11 根K线宽线段（shape='trend_line' 两点锚定，
-# horizontal_line 是全宽线无法限定宽度），以进场点K线为中心左右各 SR_SPAN 根，
-# 只在背驰周期（markRes）显示，1px 默认灰（可调）。
+# 横线 = 近支阻价位（nearSr）的全宽横线（shape='horizontal_line' 单点锚定，
+# 天然横贯全图、不限长度），锚=进场点K线，双周期（markRes+periodX）显示，
+# 1px 默认灰（可调）。
 SR_PREFIX = "ML·SR"
 SR_IDS_KEY = "mark_sr_ids"
-SR_SPAN = 5
 SR_CHUNK = 50
 DEFAULT_SR_COLOR = "#787B86"
+
+# 单行标记（点击信号行随定位一起画，draw_single_mark）：前缀 ML·单 仍属 ML·
+# 前缀族——「标记进出场」重画（_clear_marks 兜底扫 ML·）与「删除标记」
+# （clear_all_marks 前缀 ML·）都会一并清掉；替换清除只扫 ML·单（含 ML·单SR
+# 支阻横线），不碰批量 ML· 箭头与 ML·SR 横线（ML·单SR 不以 ML·SR 开头）。
+SINGLE_PREFIX = "ML·单"
+SINGLE_IDS_KEY = "mark_single_ids"
 
 # 默认颜色：做多红、做空绿（与 tv_draw / monitor 约定一致）；出场默认黄（可调，
 # 与进场红/绿箭头区分：平多 ↓ / 平空 ↑）
@@ -71,33 +88,29 @@ def _colors(colors=None):
     }
 
 
-def _interval_visibility_js(res):
-    """生成「箭头只在背驰周期显示」的 intervalsVisibilities JS 对象字面量。
+_IV_CATEGORIES = ("seconds", "minutes", "hours", "days", "weeks", "months")
 
-    TradingView 图形可通过 intervalsVisibilities 控制其显示的周期范围，
-    每一类周期（seconds/minutes/hours/days/weeks/months）独立开关并可用
-    from/to 限定精确范围。这里把箭头限制为只在信号自己的背驰周期
-    （markRes）上显示，避免背驰点在更细周期（如 3m）上命中、却跑到
-    检测周期（如 60m）等高周期图上叠加箭头。
 
-    返回 JS 对象字面量字符串；无法识别周期时返回 None（保持默认不限制）。
+def _iv_descriptor(res):
+    """单个周期 → (category, from, to)；无法限定时 → None。
+
+    category ∈ seconds/minutes/hours/days；from/to 为该类周期数值范围
+    （日线 days 不带范围 → (None, None)，与旧输出「days: true 不带 From/To」一致）；
+    W/M/空/无法识别 → None（保持默认不限）。
     """
     res = str(res or "").strip()
     if not res:
         return None
     up = res.upper()
     if up in ("D", "1D"):
-        return ("{ seconds: false, minutes: false, hours: false, "
-                "days: true, weeks: false, months: false }")
+        return ("days", None, None)
     if up in ("W", "1W", "M", "1M"):
         # 周/月线暂无对应范围字段约定，保持默认不限
         return None
     if "S" in up and up[:-1].isdigit():
         # 秒级周期（如 30S）：仅显示在该秒级图表上（minutes=0 会误返回 None 导致全周期可见）
         s = int(up[:-1])
-        return ("{ seconds: true, "
-                f"secondsFrom: {s}, secondsTo: {s}, "
-                "minutes: false, hours: false, days: false, weeks: false, months: false }")
+        return ("seconds", s, s)
     if res.isdigit():
         minutes = int(res)
     else:
@@ -106,72 +119,93 @@ def _interval_visibility_js(res):
     if minutes <= 0:
         return None
     if minutes < 60:
-        # 分钟级周期：仅显示在该分钟图表上（如 3m/5m/15m/30m）
-        return ("{ seconds: false, minutes: true, "
-                f"minutesFrom: {minutes}, minutesTo: {minutes}, "
-                "hours: false, days: false, weeks: false, months: false }")
+        # 分钟级周期（如 3m/5m/15m/30m）
+        return ("minutes", minutes, minutes)
     if minutes < 1440:
-        # 小时级周期（TV 将 60m/240m 归入 hours 类）：仅显示在该小时图表
-        h = minutes // 60
-        return ("{ seconds: false, minutes: false, hours: true, "
-                f"hoursFrom: {h}, hoursTo: {h}, "
-                "days: false, weeks: false, months: false }")
-    # 日线及以上：仅日线级显示
-    return ("{ seconds: false, minutes: false, hours: false, "
-            "days: true, weeks: false, months: false }")
+        # 小时级周期（TV 将 60m/240m 归入 hours 类）
+        return ("hours", minutes // 60, minutes // 60)
+    # 日线及以上
+    return ("days", None, None)
 
 
-def _iv_cfg_js(res):
-    """生成 applyIV 用的「全字段」intervalsVisibilities 配置字面量。
+def _iv_merged(res):
+    """周期并集计算：[markRes, periodX] → {category: (from, to)}；无法限定 → None。
 
-    与 _interval_visibility_js（只含启用的开关，供 createShape overrides 使用）不同：
-    多点图形（支阻横线）的周期可见性走「创建后逐字段 setValue」的 applyIV 权威路径
-    （与 mark-entry/mark-buy-sell/mark-sr-flip 三个 multipoint 先例一致，overrides
-    传嵌套 IV 对象未经生产验证），applyIV 需要覆盖全部字段——未启用的类别也要给出
-    From/To 与 ticks/ranges 显式值（残留默认值可能造成意外显示）。
-
-    返回 JS 对象字面量字符串；无法识别周期时返回 None（保持默认不限制）。
+    首个周期（markRes，锚定周期）无法识别 → None（保持默认不限，绝不退化成
+    只限后面的 periodX）；后续项无法识别（如缺 periodX）则丢弃，退化为单周期。
+    同类周期合并：from=min、to=max；任一侧不带范围（如日线 days）→ 合并后仍不限。
     """
-    def lit(cfg):
-        return "{ " + ", ".join(f"{k}: {v}" for k, v in cfg.items()) + " }"
-
-    def base(**enabled):
-        cfg = {
-            "ticks": "false",
-            "seconds": "false", "secondsFrom": "1", "secondsTo": "59",
-            "minutes": "false", "minutesFrom": "1", "minutesTo": "59",
-            "hours": "false", "hoursFrom": "1", "hoursTo": "24",
-            "days": "false", "daysFrom": "1", "daysTo": "366",
-            "weeks": "false", "weeksFrom": "1", "weeksTo": "52",
-            "months": "false", "monthsFrom": "1", "monthsTo": "12",
-        }
-        cfg.update(enabled)
-        return cfg
-
-    res = str(res or "").strip()
-    if not res:
-        return None
-    up = res.upper()
-    if up in ("D", "1D"):
-        return lit(base(days="true", daysFrom="1", daysTo="1"))
-    if "S" in up and up[:-1].isdigit():
-        s = int(up[:-1])
-        return lit(base(seconds="true", secondsFrom=str(s), secondsTo=str(s)))
-    if res.isdigit():
-        minutes = int(res)
+    if isinstance(res, (list, tuple)):
+        res_list = list(res)
     else:
-        sec = intervalSecOf(res) or 0
-        minutes = sec // 60 if sec else 0
-    if minutes <= 0:
+        res_list = [res]
+    descs = [_iv_descriptor(r) for r in res_list if str(r or "").strip()]
+    if not descs or descs[0] is None:
         return None
-    if minutes < 60:
-        return lit(base(minutes="true", minutesFrom=str(minutes), minutesTo=str(minutes)))
-    if minutes < 1440:
-        h = minutes // 60
-        return lit(base(hours="true", hoursFrom=str(h), hoursTo=str(h)))
-    # 1440 分钟 = 1 日，按日线处理
-    return lit(base(days="true", daysFrom="1", daysTo="1"))
+    merged = {}
+    for d in descs:
+        if d is None:
+            continue
+        cat, f, t = d
+        if cat not in merged:
+            merged[cat] = (f, t)
+            continue
+        pf, pt = merged[cat]
+        nf = None if (pf is None or f is None) else min(pf, f)
+        nt = None if (pt is None or t is None) else max(pt, t)
+        merged[cat] = (nf, nt)
+    return merged
 
+
+def _interval_visibility_js(res):
+    """生成「标记在背驰周期+检测周期同时显示」的 intervalsVisibilities 字面量。
+
+    TradingView 图形可通过 intervalsVisibilities 控制其显示的周期范围，
+    每一类周期（seconds/minutes/hours/days/weeks/months）独立开关并可用
+    from/to 限定精确范围。这里接受单个周期或周期列表（[markRes, periodX]），
+    取并集：同一箭头/横线在背驰周期与检测周期图表上同时显示；同类周期
+    合并为连续区间（from=min、to=max，中间周期也会显示，与 chan-bi 的
+    intervalVisibility 并集先例一致）。
+
+    单周期输入的输出与旧实现逐字节一致；整体无法识别时返回 None（保持默认不限制）。
+    """
+    merged = _iv_merged(res)
+    if merged is None:
+        return None
+    parts = []
+    for cat in _IV_CATEGORIES:
+        if cat not in merged:
+            parts.append(f"{cat}: false")
+            continue
+        f, t = merged[cat]
+        if f is None or t is None:
+            parts.append(f"{cat}: true")
+        else:
+            parts.append(f"{cat}: true, {cat}From: {f}, {cat}To: {t}")
+    return "{ " + ", ".join(parts) + " }"
+
+
+def _iv_json(res):
+    """同 _interval_visibility_js 的并集，但返回可 json.dumps 的 dict（供 JS 内引用）。
+
+    支阻横线按行把 IV 放进 items 数组（json.dumps 后是真正的 JS 对象，
+    可直接赋给 overrides.intervalsVisibilities），而不是内嵌源码字面量。
+    """
+    merged = _iv_merged(res)
+    if merged is None:
+        return None
+    out = {}
+    for cat in _IV_CATEGORIES:
+        if cat not in merged:
+            out[cat] = False
+            continue
+        out[cat] = True
+        f, t = merged[cat]
+        if f is not None:
+            out[cat + "From"] = f
+        if t is not None:
+            out[cat + "To"] = t
+    return out
 
 
 def _clear_marks(c):
@@ -185,6 +219,8 @@ def _clear_marks(c):
 
     返回删除数量；不误删用户图形与 BT·/RT·/CHAN_BI/买卖点/支阻位/ENTRY_ 等标记，
     也不删本模块的 ML·SR 支阻横线（见 _clear_sr_marks，两个标记按钮互不清除）。
+    单行标记（ML·单，前缀同属 ML·）会被前缀兜底一并删除——重画箭头时清掉
+    单行标记，其键 mark_single_ids 同步置空（避免留下死 id）。
     """
     expr = (
         "(async () => { "
@@ -202,6 +238,8 @@ def _clear_marks(c):
         "  } catch (err) {} "
         "} "
         "try { localStorage.setItem('" + IDS_KEY + "', '[]'); } catch (e) {} "
+        # 前缀兜底会删掉 ML·单 单行标记（同属 ML· 前缀），其键一并置空避免死 id
+        "try { localStorage.setItem('" + SINGLE_IDS_KEY + "', '[]'); } catch (e) {} "
         "const readPrefix = (id) => { "
         "  try { "
         "    const sh = chart.getShapeById(id); "
@@ -273,10 +311,124 @@ def _clear_sr_marks(c):
     return c.evaluate(expr)
 
 
-def _draw_chunk(c, chunk, colors):
-    """一次 CDP 执行画出一批 ML· 箭头 + 出场标记，并把新 shape id 累积记录到 localStorage。
+def _clear_single_marks(c):
+    """清除上一次点击行画的单行标记（ML·单 / ML·单SR）：id 精删 + 前缀兜底。
+
+    与 _clear_marks 同款双保险（图表重载后 id 失效靠前缀兜底），但只扫 ML·单
+    前缀——绝不触碰批量 ML· 箭头 / ML·SR 横线 / 用户图形。替换语义：每次
+    draw_single_mark 先调它，图上始终只保留最近点击一行的单行标记。
+
+    返回删除数量。
+    """
+    expr = (
+        "(async () => { "
+        "const chart = TradingViewApi.activeChart(); "
+        "if (!chart) return -1; "
+        "const cm = chart.chartModel(); "
+        "const PREFIX = '" + SINGLE_PREFIX + "'; "
+        "let removed = 0; "
+        "let ids = []; "
+        "try { ids = JSON.parse(localStorage.getItem('" + SINGLE_IDS_KEY + "') || '[]'); } catch (e) {} "
+        "for (const id of ids) { "
+        "  try { "
+        "    const ds = cm.dataSourceForId(id); "
+        "    if (ds) { cm.removeSource(ds); removed++; } "
+        "  } catch (err) {} "
+        "} "
+        "try { localStorage.setItem('" + SINGLE_IDS_KEY + "', '[]'); } catch (e) {} "
+        "const readPrefix = (id) => { "
+        "  try { "
+        "    const sh = chart.getShapeById(id); "
+        "    const props = sh && sh._source && sh._source._properties; "
+        "    if (!props) return ''; "
+        "    if (props.text && props.text._value) return String(props.text._value); "
+        "    if (props.title && props.title._value) return String(props.title._value); "
+        "    return ''; "
+        "  } catch (e) { return ''; } "
+        "}; "
+        "try { "
+        "  for (const s of chart.getAllShapes()) { "
+        "    if (readPrefix(s.id).startsWith(PREFIX)) { "
+        "      try { chart.removeEntity(s.id); removed++; } catch (e) {} "
+        "    } "
+        "  } "
+        "} catch (e) {} "
+        "return removed; })()"
+    )
+    return c.evaluate(expr)
+
+
+def draw_single_mark(c, row, colors=None, log=None):
+    """点击信号行后，在已定位到该行的图表上画单行标记（替换语义）。
+
+    画：该行进场箭头 + exits 出场箭头（_draw_chunk 同款视觉，背驰+检测双周期
+    可见）+ 近支阻（nearSr）全宽横线（ML·单SR）。先 _clear_single_marks 清上
+    一次点击留下的单行标记——始终只保留最近点击一行；「同向过滤」或缺价格/
+    方向的行只清不画（与「标记进出场」按钮的批量口径一致）。
+
+    必须在定位完成的图表上调用（当前周期=row['markRes']、目标K线已居中、与
+    定位同一 CDP 会话）：锚点 time 需已在当前数据源内，且不能像
+    draw_signal_marks 那样切周期/清全部/滚回实时（会破坏定位视口）。
+
+    @param c      已连接的 CDPClient（定位所用会话）
+    @param row    信号行（SignalLog 记录）
+    @param colors {'buy','sell','exit','sr'}（可选，缺省 _colors()）
+    @param log    日志回调
+    @returns {'drawn': n, 'cleared': n[, 'skipped': 原因]}（各步失败降级不抛出）
+    """
+    log = log or (lambda *a, **k: None)
+    colors = _colors(colors)
+    # 替换语义：无论本行是否可画，先清掉上一次的单行标记
+    cleared = 0
+    try:
+        cleared = int(_clear_single_marks(c) or 0)
+    except Exception as e:
+        log(f"清除上次单行标记失败（忽略）：{e}")
+    if row.get("status") == "同向过滤":
+        return {"drawn": 0, "cleared": cleared, "skipped": "同向过滤"}
+    if row.get("price") is None or not row.get("direction") or not row.get("time"):
+        return {"drawn": 0, "cleared": cleared, "skipped": "缺价格/方向/时间"}
+    ids = []
+    # 进场 + 出场箭头（与批量标记同款视觉，双周期可见，id 记入单行键）
+    try:
+        r = _draw_chunk(c, [row], colors, prefix=SINGLE_PREFIX,
+                        ids_key=SINGLE_IDS_KEY, dual_tf=True)
+        ids += list(r) if isinstance(r, list) else []
+    except Exception as e:
+        log(f"画单行进出场箭头失败：{e}")
+    # 近支阻全宽横线（nearSr 缺失/非法则跳过）
+    near_sr = row.get("nearSr")
+    try:
+        near_sr = float(near_sr) if near_sr is not None else None
+    except (TypeError, ValueError):
+        near_sr = None
+    if near_sr is not None and math.isfinite(near_sr):
+        try:
+            r = _draw_sr_chunk(c, [row], colors["sr"],
+                               prefix=SINGLE_PREFIX + "SR", ids_key=SINGLE_IDS_KEY)
+            if isinstance(r, dict):
+                ids += list(r.get("ids") or [])
+        except Exception as e:
+            log(f"画单行支阻横线失败：{e}")
+    # 清理锚点为空的半成品（当前周期=markRes，在 IV 并集内，满足 purge 的周期约束）
+    n_broken = 0
+    try:
+        n_broken = int(_purge_broken_marks(c, ids) or 0)
+    except Exception:
+        n_broken = 0
+    if n_broken:
+        log(f"清理锚点异常的单行标记 {n_broken} 个")
+    return {"drawn": max(0, len(ids) - n_broken), "cleared": cleared}
+
+
+def _draw_chunk(c, chunk, colors, prefix=MARK_PREFIX, ids_key=IDS_KEY, dual_tf=False):
+    """一次 CDP 执行画出一批箭头 + 出场标记，并把新 shape id 累积记录到 localStorage。
 
     @param colors  {'buy': '#..', 'sell': '#..', 'exit': '#..'} 做多/做空/出场颜色
+    @param prefix  文本前缀（批量 ML· / 单行 ML·单），清除按前缀扫
+    @param ids_key localStorage 记录 shape id 的键（批量/单行隔离）
+    @param dual_tf True = 可见性取 [markRes, periodX] 并集（背驰+检测双周期显示）；
+                   False = 仅 markRes（旧行为）
     @returns 新画的 shape id 列表
     """
     calls = []
@@ -284,9 +436,10 @@ def _draw_chunk(c, chunk, colors):
         shape = "arrow_up" if s["direction"] == "long" else "arrow_down"
         color = colors["buy"] if s["direction"] == "long" else colors["sell"]
         label = "BUY" if s["direction"] == "long" else "SELL"
-        text = f"{MARK_PREFIX}{label} {s['price']:.2f}"
-        # 箭头只在背驰周期（markRes）显示；无法识别周期时保持默认不限
-        iv = _interval_visibility_js(s.get("markRes"))
+        text = f"{prefix}{label} {s['price']:.2f}"
+        # 箭头可见性：背驰周期（markRes）+ 检测周期（periodX）并集；无法识别时保持默认不限
+        iv = _interval_visibility_js(
+            [s.get("markRes"), s.get("periodX")] if dual_tf else s.get("markRes"))
         iv_part = f", intervalsVisibilities: {iv}" if iv else ""
         calls.append(
             "chart.createShape("
@@ -297,7 +450,7 @@ def _draw_chunk(c, chunk, colors):
             # 不走顶层 color/textColor（否则恒为默认黄 #FFEB3B），必须用 overrides 指定
             f"overrides: {{ arrowColor: '{color}'{iv_part} }} }})"
         )
-        # 出场标记：与进场同款箭头（统一灰，只在本背驰周期显示），方向=平仓方向：
+        # 出场标记：与进场同款箭头（统一灰，同款周期可见性），方向=平仓方向：
         #   多头出场（平多）= 向下箭头 ↓、空头出场（平空）= 向上箭头 ↑，
         #   与进场箭头用颜色区分（进场红/绿、出场灰）——用户要求"出场点也变成箭头"。
         # 保本（breakeven）/ 仍持仓仅落盘不画图（不在 EXIT_SHAPES 中）。
@@ -307,7 +460,7 @@ def _draw_chunk(c, chunk, colors):
             et = ev.get("type")
             if et not in EXIT_SHAPES or ev.get("price") is None or ev.get("time") is None:
                 continue
-            ex_text = f"{MARK_PREFIX}{EXIT_NAMES[et]} {ev['price']:.2f}"
+            ex_text = f"{prefix}{EXIT_NAMES[et]} {ev['price']:.2f}"
             calls.append(
                 "chart.createShape("
                 f"{{ time: {ev['time']}, price: {ev['price']} }}, "
@@ -322,99 +475,50 @@ def _draw_chunk(c, chunk, colors):
         # 只记录有效 id（createShape 偶发返回 undefined 时避免存入死 id）
         + "; ".join(f"{{ const v = await ({call}); if (v) ids.push(v); }}" for call in calls) +
         "; "
-        "try { const old = JSON.parse(localStorage.getItem('" + IDS_KEY + "') || '[]'); "
-        "localStorage.setItem('" + IDS_KEY + "', JSON.stringify(old.concat(ids))); } catch (e) {} "
+        "try { const old = JSON.parse(localStorage.getItem('" + ids_key + "') || '[]'); "
+        "localStorage.setItem('" + ids_key + "', JSON.stringify(old.concat(ids))); } catch (e) {} "
         "; return ids; })()"
     )
     return c.evaluate(expr)
 
 
-def _draw_sr_chunk(c, chunk, color, res):
-    """一次 CDP 画一批 ML·SR 支阻横线（11 根K线宽线段，只在背驰周期显示）。
+def _draw_sr_chunk(c, chunk, color, prefix=SR_PREFIX, ids_key=SR_IDS_KEY):
+    """一次 CDP 画一批支阻横线（全宽 horizontal_line，背驰+检测双周期显示）。
 
-    横线端点不用时间差运算（周末/跳空下 ±5*interval 会错位），而是读取当前周期
-    已加载K线数组（m_bars._items），在 JS 内二分定位「含信号 time 的 bar」索引 i，
-    取 i±SR_SPAN 的实际 bar 时间为两端点；数据源边缘不足时截断到可用范围。
+    每条横线锚在信号 time 的近支阻价位（nearSr）——horizontal_line 单点锚定、
+    天然横贯全图不限长度（不再画限定宽度的 trend_line 线段，无需读取K线数组
+    算端点）。文本走顶层 text（与箭头同款 createShape 生产路径，_clear_sr_marks
+    读 text/title 均可命中）；颜色 1px 走 overrides.linecolor/linewidth。
+    周期可见性 = 每行自己的 [markRes, periodX] 并集，以 JSON 对象随 items
+    传入、赋给 overrides.intervalsVisibilities（单点 createShape 与箭头同
+    路径；无法识别时保持默认不限）。
 
-    shape='trend_line'（两点线段）：horizontal_line 是全宽线，无法限定左右各 5 根的宽度。
-    颜色 1px 走 overrides.linecolor/linewidth；文本走 overrides.text + title 双保险
-    （multipoint 顶层 text 未经生产验证，_clear_sr_marks 读 text 或 title 均可命中）。
-    周期可见性以创建后 applyIV 逐字段 setValue 为准（multipoint 先例均如此），
-    overrides 里同时带 IV 字面量作双保险。
-
-    新 shape id 累积记录到 localStorage（SR_IDS_KEY，与箭头隔离）。
+    新 shape id 累积记录到 localStorage（默认 SR_IDS_KEY 与箭头隔离；单行
+    标记复用时传 prefix=ML·单SR、ids_key=mark_single_ids）。
     @returns {'ids': [...], 'skipped': n} 或 {'error': ...}
     """
-    items = [{"time": int(s["time"]), "price": float(s["nearSr"])} for s in chunk]
-    iv = _iv_cfg_js(res)
-    iv_override = ", intervalsVisibilities: IV_CFG" if iv else ""
-    span = str(SR_SPAN)
+    items = [{"time": int(s["time"]), "price": float(s["nearSr"]),
+              "iv": _iv_json([s.get("markRes"), s.get("periodX")])}
+             for s in chunk]
     expr = (
         "(async () => { const chart = TradingViewApi.activeChart(); "
         "if (!chart) return { error: 'no_chart' }; "
-        # 读取K线与画线必须在同一表达式内：切周期/滚动后数据在变，分开读有竞态
-        "const bars = chart.chartModel().mainSeries().data().m_bars._items; "
-        "if (!bars || !bars.length) return { error: 'no_bars' }; "
-        "const T = bars.map(x => x.value[0]); "
-        # 二分定位：精确命中信号 time → 下标；否则取最后一根 <=time 的 bar（含该时间的bar）；
-        # 早于首根（历史加载不足，正常已被 _ensure_hist_loaded 挡住）钳到 0
-        "const findIdx = (t) => { "
-        "  let lo = 0, hi = T.length - 1, ans = -1; "
-        "  while (lo <= hi) { const m = (lo + hi) >> 1; "
-        "    if (T[m] === t) return m; "
-        "    if (T[m] < t) { ans = m; lo = m + 1; } else { hi = m - 1; } } "
-        "  return ans; "
-        "}; "
-        "const IV_CFG = " + (iv or "null") + "; "
-        # 创建后逐字段 setValue（与 mark_entry applyIV 同款，全字段显式赋值）
-        "const applyIV = (id) => { "
-        "  if (!IV_CFG) return; "
-        "  try { "
-        "    const iv = chart.getShapeById(id)._source._properties.intervalsVisibilities; "
-        "    iv.ticks.setValue(IV_CFG.ticks); "
-        "    iv.seconds.setValue(IV_CFG.seconds); "
-        "    iv.secondsFrom.setValue(IV_CFG.secondsFrom); "
-        "    iv.secondsTo.setValue(IV_CFG.secondsTo); "
-        "    iv.minutes.setValue(IV_CFG.minutes); "
-        "    iv.minutesFrom.setValue(IV_CFG.minutesFrom); "
-        "    iv.minutesTo.setValue(IV_CFG.minutesTo); "
-        "    iv.hours.setValue(IV_CFG.hours); "
-        "    iv.hoursFrom.setValue(IV_CFG.hoursFrom); "
-        "    iv.hoursTo.setValue(IV_CFG.hoursTo); "
-        "    iv.days.setValue(IV_CFG.days); "
-        "    iv.daysFrom.setValue(IV_CFG.daysFrom); "
-        "    iv.daysTo.setValue(IV_CFG.daysTo); "
-        "    iv.weeks.setValue(IV_CFG.weeks); "
-        "    iv.weeksFrom.setValue(IV_CFG.weeksFrom); "
-        "    iv.weeksTo.setValue(IV_CFG.weeksTo); "
-        "    iv.months.setValue(IV_CFG.months); "
-        "    iv.monthsFrom.setValue(IV_CFG.monthsFrom); "
-        "    iv.monthsTo.setValue(IV_CFG.monthsTo); "
-        "    iv.ranges.setValue(false); "
-        "  } catch (e) {} "
-        "}; "
-        "const SR = " + json.dumps(items) + "; "
         "const ids = []; let skipped = 0; "
-        "for (const s of SR) { "
-        "  let i = findIdx(s.time); if (i < 0) i = 0; "
-        "  const i1 = Math.max(0, i - " + span + "); "
-        "  const i2 = Math.min(T.length - 1, i + " + span + "); "
-        # 数据源只剩 1 根bar 的退化情形（零宽线）跳过不画
-        "  if (i2 <= i1) { skipped++; continue; } "
-        "  const label = '" + SR_PREFIX + " ' + s.price.toFixed(2); "
+        "for (const s of " + json.dumps(items) + ") { "
+        "  const label = '" + prefix + " ' + s.price.toFixed(2); "
+        # 横线样式与周期可见性都在 overrides 上（createShape 单点路径，与箭头一致）
+        "  const ov = { linecolor: '" + color + "', linewidth: 1, "
+        "               linestyle: 0, showPriceLabels: false }; "
+        "  if (s.iv) { ov.intervalsVisibilities = s.iv; } "
         "  try { "
-        "    const v = await chart.createMultipointShape( "
-        "      [{ time: T[i1], price: s.price }, { time: T[i2], price: s.price }], "
-        "      { shape: 'trend_line', lock: false, "
-        "        overrides: { linecolor: '" + color + "', linewidth: 1, "
-        "                    linestyle: 0, extendLeft: false, extendRight: false, "
-        "                    leftEnd: 0, rightEnd: 0, showPriceLabels: false, "
-        "                    text: label, title: label" + iv_override + " } }); "
-        "    if (v) { ids.push(v); applyIV(v); } else { skipped++; } "
+        "    const v = await chart.createShape( "
+        "      { time: s.time, price: s.price }, "
+        "      { shape: 'horizontal_line', lock: false, text: label, overrides: ov }); "
+        "    if (v) { ids.push(v); } else { skipped++; } "
         "  } catch (e) { skipped++; } "
         "} "
-        "try { const old = JSON.parse(localStorage.getItem('" + SR_IDS_KEY + "') || '[]'); "
-        "localStorage.setItem('" + SR_IDS_KEY + "', JSON.stringify(old.concat(ids))); } catch (e) {} "
+        "try { const old = JSON.parse(localStorage.getItem('" + ids_key + "') || '[]'); "
+        "localStorage.setItem('" + ids_key + "', JSON.stringify(old.concat(ids))); } catch (e) {} "
         "return { ids: ids, skipped: skipped }; })()"
     )
     return c.evaluate(expr)
@@ -568,20 +672,17 @@ def _dedup_sr_rows(rows):
 
     筛选：近支阻（nearSr）非空且带 markRes 的行——含「同向过滤」的行（用户口径：
     直接用列表近支阻列的数据，过滤行命中的支阻位同样是有效结构）。
-    去重键 =（markRes, 近支阻价, 中心K线起点）：同周期同价位同K线只画一条线；
-    同价位不同中心K线各画一条（不同位置的短横线），符合「以各自进场K线为中心」。
-    按 time 升序，先到先得。
+    去重键 =（markRes, 近支阻价, periodX）：横线是全宽的，同周期同价位画多条
+    完全重叠无意义，只画一条；periodX 参与键（不同检测周期的并集可见性不同，
+    各画各的）。按 time 升序，先到先得。
     """
     seen = set()
     out = []
     for s in sorted(rows, key=lambda x: x.get("time") or 0):
         if s.get("nearSr") is None or not s.get("markRes"):
             continue
-        res = str(s["markRes"])
-        sec = intervalSecOf(res) or 0
-        t = s.get("time") or 0
-        bar_start = (t // sec) * sec if sec else t
-        key = (res, round(float(s["nearSr"]), 4), bar_start)
+        key = (str(s["markRes"]), round(float(s["nearSr"]), 4),
+               str(s.get("periodX") or ""))
         if key in seen:
             continue
         seen.add(key)
@@ -622,12 +723,16 @@ def _purge_broken_marks(c, ids=None):
 
 
 def draw_signal_marks(rows, cfg=None, clear_first=True, colors=None, log=None):
-    """把信号列表全部进场点 + 出场标记按背驰周期画到图表。
+    """把信号列表全部进场点 + 出场标记按背驰周期画到图表（背驰+检测双周期显示）。
+
+    箭头锚在背驰点 time（markRes K线起点），intervalsVisibilities 取
+    [markRes, periodX] 并集——同一箭头在背驰周期与检测周期图表上同时可见
+    （同类周期合并为连续区间时，中间周期也会显示）。
 
     @param rows         信号行列表，每行含 time/price/direction/periodX/markRes，
                         可选 exits=[{type,time,price}]（出场事件）与 status（同向过滤不画箭头）
     @param cfg          CDPConfig
-    @param clear_first  画前先清除上次 ML· 标记
+    @param clear_first  画前先清除上次 ML· 标记（含单行标记 ML·单）
     @param colors       {'buy': '#..', 'sell': '#..', 'exit': '#..'} 做多/做空/出场颜色（可选）
     @param log          日志回调（默认 print）
     @returns { drawn, cleared, errors, skipped }
@@ -705,7 +810,7 @@ def draw_signal_marks(rows, cfg=None, clear_first=True, colors=None, log=None):
                     chunk = chunk_list[i:i + CHUNK]
                     batch_ids = []
                     try:
-                        r = _draw_chunk(c, chunk, colors)
+                        r = _draw_chunk(c, chunk, colors, dual_tf=True)
                         batch_ids = list(r) if isinstance(r, list) else []
                     except Exception as e:
                         # 批量失败时拆单重试一轮（TV _createMultipointShape 偶发
@@ -713,7 +818,7 @@ def draw_signal_marks(rows, cfg=None, clear_first=True, colors=None, log=None):
                         log(f"  {res}: 第 {i + 1}~{i + len(chunk)} 批失败（{e}），拆单重试...")
                         for s in chunk:
                             try:
-                                r = _draw_chunk(c, [s], colors)
+                                r = _draw_chunk(c, [s], colors, dual_tf=True)
                                 batch_ids += list(r) if isinstance(r, list) else []
                             except Exception as e2:
                                 errors += 1
@@ -759,14 +864,15 @@ def clear_signal_marks(cfg=None, log=None):
 
 
 def draw_sr_marks(rows, cfg=None, clear_first=True, colors=None, log=None):
-    """把信号列表「近支阻」画成支阻横线，按背驰周期分组画到图表（「标记支阻位」按钮）。
+    """把信号列表「近支阻」画成全宽支阻横线（「标记支阻位」按钮）。
 
-    横线：近支阻价位的 11 根K线宽线段（中心=进场点K线，左右各 SR_SPAN 根），
-    1px 默认灰（可调），只在背驰周期（markRes）显示；行口径与去重见 _dedup_sr_rows。
-    主流程与 draw_signal_marks 同骨架（切周期→加载历史→分块画→恢复周期），但只清
-    上次的 ML·SR 横线（_clear_sr_marks），不动 ML· 箭头——两个标记按钮互不清除。
+    横线：近支阻价位的 horizontal_line（单点锚定、横贯全图不限长度，锚=进场点
+    K线），1px 默认灰（可调），背驰周期+检测周期（[markRes, periodX] 并集）显示；
+    行口径与去重见 _dedup_sr_rows。主流程与 draw_signal_marks 同骨架（切周期→
+    加载历史→分块画→恢复周期），但只清上次的 ML·SR 横线（_clear_sr_marks），
+    不动 ML· 箭头——两个标记按钮互不清除。
 
-    @param rows         信号行列表（含 time/markRes/nearSr）
+    @param rows         信号行列表（含 time/markRes/nearSr，periodX 参与 IV 并集）
     @param clear_first  画前先清除上次 ML·SR 横线
     @param colors       {'sr': '#..'} 横线颜色（可选）
     @returns { drawn, cleared, errors, skipped }
@@ -814,7 +920,7 @@ def draw_sr_marks(rows, cfg=None, clear_first=True, colors=None, log=None):
                 try:
                     if _ensure_res(c, res):
                         time.sleep(RES_WAIT)
-                    # 与箭头同款：历史加载不到位，线段端点会拿到数据范围外的时间
+                    # 与箭头同款：历史加载不到位，横线锚点会拿到数据范围外的时间
                     # → 锚点丢失（坏 shape），宁可跳过不画坏的
                     min_ts = chunk_list[0].get("time") or 0
                     if not _ensure_hist_loaded(c, res, min_ts, cfg, log):
@@ -830,18 +936,18 @@ def draw_sr_marks(rows, cfg=None, clear_first=True, colors=None, log=None):
                     batch_ids = []
                     batch_skipped = 0
                     try:
-                        r = _draw_sr_chunk(c, chunk, colors["sr"], res)
+                        r = _draw_sr_chunk(c, chunk, colors["sr"])
                         if isinstance(r, dict):
                             batch_ids = list(r.get("ids") or [])
                             batch_skipped = int(r.get("skipped") or 0)
                         else:
                             batch_skipped = len(chunk)
                     except Exception as e:
-                        # 批量失败时拆单重试一轮（TV createMultipointShape 偶发内部错误）
+                        # 批量失败时拆单重试一轮（TV createShape 偶发内部错误）
                         log(f"  {res}: 第 {i + 1}~{i + len(chunk)} 批失败（{e}），拆单重试...")
                         for s in chunk:
                             try:
-                                r = _draw_sr_chunk(c, [s], colors["sr"], res)
+                                r = _draw_sr_chunk(c, [s], colors["sr"])
                                 if isinstance(r, dict):
                                     batch_ids += list(r.get("ids") or [])
                                     batch_skipped += int(r.get("skipped") or 0)
@@ -878,21 +984,21 @@ def draw_sr_marks(rows, cfg=None, clear_first=True, colors=None, log=None):
 
 
 # 「删除标记」按钮：清除全部系统标记的前缀与 localStorage 键
-# （Web 控制台 ML·/ML·SR、回测 BT·、实时 RT·、支阻调试页 SRT·/RAW·；与各模块
-# 自身前缀/键定义保持一致——sr_draw.py 的 SRT_PREFIX/SRT_IDS_KEY/RAW_IDS_KEY 相同值）
+# （Web 控制台 ML·/ML·SR/ML·单、回测 BT·、实时 RT·、支阻调试页 SRT·/RAW·；与各
+# 模块自身前缀/键定义保持一致——sr_draw.py 的 SRT_PREFIX/SRT_IDS_KEY/RAW_IDS_KEY 相同值）
 CLEAR_PREFIXES = ["ML·", "BT·", "RT·", "SRT·", "RAW·"]
-CLEAR_IDS_KEYS = ["mark_list_ids", "mark_sr_ids", "bt_arrow_ids",
+CLEAR_IDS_KEYS = ["mark_list_ids", "mark_sr_ids", "mark_single_ids", "bt_arrow_ids",
                   "rt_arrow_ids", "sr_test_ids", "sr_raw_ids"]
 
 
 def clear_all_marks(cfg=None, log=None):
     """清除图上所有系统画的进出场箭头与支阻横线（「删除标记」按钮）。
 
-    覆盖 ML·（含 ML·SR 支阻横线）/ BT·（回测）/ RT·（实时）三前缀，用户手画的
-    图形不碰。一条 JS 表达式、一次 CDP 连接完成（顺序调各模块清除函数要三次建连，
-    失败面×3 且非原子）：
-      ① 四个 localStorage 键记录的 id 精删（dataSourceForId + removeSource）
-      ② 四键置空
+    覆盖 ML·（含 ML·SR 支阻横线与 ML·单 单行标记）/ BT·（回测）/ RT·（实时）等
+    前缀，用户手画的图形不碰。一条 JS 表达式、一次 CDP 连接完成（顺序调各模块
+    清除函数要多次建连，失败面更大且非原子）：
+      ① CLEAR_IDS_KEYS 各 localStorage 键记录的 id 精删（dataSourceForId + removeSource）
+      ② 各键置空
       ③ getAllShapes 文本/标题前缀兜底（图表重载后 id 全失效，靠前缀删）
     顺带修复 BT·/RT· 此前只有 id 删除、图表重载后残留的历史问题。
 

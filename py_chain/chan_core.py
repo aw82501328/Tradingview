@@ -46,6 +46,21 @@ CHAN_CFG = {
     "nearDoublePct": 0.001,  # 近等双顶/双底平台取后顶/后底：价差下限（价格比例，与 ATR 项取 max）
     "nearDoubleLowerRelax": 1.5,  # 仅60m：15m双动能确认的容差倍数
     "nearDoubleLowerRatio": 0.5,  # 柱峰值和DIF幅度均不超过前段50%
+    # ---- 进场背驰「近等双底二底」扩展（SPEC_divergence_fallback，2026-09-11）----
+    # 全量回测对比（XAUUSD 7-20~9-11）：baseline PF 1.78/+483 → M1+rearm PF 2.19/+863，
+    # 8-7 08:45 型二底由回退候选捕获（+280.5）；代价为再进场磨损簇（8-14 四连小止损 -68）。
+    "sinkFallback": True,        # M1 下沉链回退：停止级无候选时沿链向上一级（仍 < 检测周期）重评
+    "sinkFallbackRearm": True,   # M1 配套：同向持仓终局后重置该 (periodX,strategyKey,markRes) 段去重
+    "nearEqualAtrK": 0.0,        # M2 创新低/新高近等容差 ATR 系数（<=0 且比例项 <=0 时禁用；
+                                  # 实测仅 1 笔且为负贡献，默认关）
+    "nearEqualPct": 0.0,         # M2 近等容差价格比例（与 ATR 项取 max；近等带内要求三判据 AND）
+    "expectBiEnough": True,      # M4 检测周期预期够笔（固定口径）：末笔方向相反且端点后
+                                  # ≥expectBiMinBars 根本级K线即视为回调/反弹中（不等反向分型
+                                  # 确认——分型需右邻收盘，固有 1 根本级K线滞后，如 8-6 10:00 顶
+                                  # 的下跌笔到 21:00 才可见、23:00 才成笔）
+    "expectBiMinBars": 5,        # 预期够笔的K线数门槛（本级原始K线数）
+    "divergeConfirm": False,     # M4 背驰进场时机（回测页面可选，默认当下）：True=极值K线
+                                  # 右邻K收盘（分型可见最早时刻的代理）后的下一根 fine 开盘成交
     "debug": False,    # 调试打印（buildBi / 买卖点识别过程）
 }
 
@@ -248,16 +263,21 @@ def updateFractalsTail(fractals, merged):
     """增量分型更新：仅在 merged 尾部新增/修改一根合并K线后调用。
     只有倒数第二个索引（n-2）的分型可能变化（其右邻 n-1 可能刚更新），
     之前的索引都已冻结。与 findFractals 在最终 merged 上的结果完全一致。
+    **原地**修改：分型按 mergedIdx 升序，仅从尾部弹出 mergedIdx >= n-2 的
+    分型（至多几根）再补算 n-2，O(尾部长度) 而非 O(F)——30S 级 F 可达数万，
+    每根K线全量过滤会平方级放大。返回入参列表本身。
     """
     n = len(merged)
     if n < 3:
-        return []
-    # 去掉尾部可能变化的分型（mergedIdx >= n-2）
-    kept = [f for f in fractals if f["mergedIdx"] < n - 2]
+        del fractals[:]
+        return fractals
+    # 去掉尾部可能变化的分型（mergedIdx >= n-2；升序 → 只从末尾弹出）
+    while fractals and fractals[-1]["mergedIdx"] >= n - 2:
+        fractals.pop()
     f = fractalAt(merged, n - 2)
     if f is not None:
-        kept.append(f)
-    return kept
+        fractals.append(f)
+    return fractals
 
 
 # ============================================================
@@ -345,24 +365,84 @@ def lowerEndpointWeaker(old, end, fractals, context):
                 and b[peak] <= a[peak] * ratio and abs(b[dif]) <= abs(a[dif]) * ratio)
 
 
-def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False, lowerContext=None):
-    """笔构建。与 JS 版 buildBi 对齐。lockedPivots 为上级笔端点（区间套强制对齐，优先级最高）；
-    nearDouble=True 时启用「近等双顶/双底平台取后顶/后底」（≥60m 周期由调用方开启）。
-    lowerContext 为可选15分钟上下文，仅60m补充分支使用；缺省时沿用原阈值。"""
-    gapThreshold = atr * CHAN_CFG["gapFilter"] if atr else 0
+def _stkCons(k, prev):
+    """阶段二结果的不可变栈节点 (elem, prev, depth)；空栈为 None。
+    旧节点永不改动 → 任一位置的栈头即该位置快照（增量续算的基础）。"""
+    return (k, prev, (prev[2] + 1) if prev is not None else 1)
 
-    # ATR 在一次构建内固定，跳空判定只取决于相邻合并K线的原始极值。
-    # 首次需要时建立计数前缀，后续任意 [a,b) 区间直接查询。
-    # 不跨 buildBi 调用缓存，避免 ATR 改变或包含合并回写导致过期。
-    gapCounts = None
 
-    def gapBetween(a, b):
-        nonlocal gapCounts
+def _stkLen(head):
+    return head[2] if head is not None else 0
+
+
+def biListFromHead(head):
+    """栈头 → 元素列表（左侧为栈底）。"""
+    out = []
+    while head is not None:
+        out.append(head[0])
+        head = head[1]
+    out.reverse()
+    return out
+
+
+def biSeqStep(seq, f):
+    """阶段一同型合并单步：f 与 seq 末元素同型时保留更极端者，否则追加。
+    （buildBi 批量与 bi_inc 增量构建共用，保证单一算法源。）"""
+    if len(seq) == 0:
+        seq.append(f)
+        return
+    last = seq[-1]
+    if f["type"] == last["type"]:
+        if f["type"] == "top":
+            if f["high"] >= last["high"]:
+                seq[-1] = f
+        else:
+            if f["low"] <= last["low"]:
+                seq[-1] = f
+    else:
+        seq.append(f)
+
+
+class BiBuildCtx:
+    """笔构建阶段二的规则上下文（buildBi 批量与 bi_inc 增量共用同一规则源）。
+
+    merged/atr/macdArr/lockedPivots/nearDouble/lowerContext 与 buildBi 形参同义。
+    gapDiffs：可选的逐对跳空差值表（下标 p → (nextLow-curHigh, curLow-nextHigh)，
+    raw 口径），提供时 gapBetween 只扫描 [a,b) 区间而不建全量计数前缀——增量路径
+    专用，判定谓词与批量口径逐对一致（块一旦不是末块即不可变，差值与全量构建
+    时计算的相同）。rawCounter：可选的 (a,b)→原始K线数回调（前缀和 O(1) 查询）。"""
+
+    def __init__(self, merged, atr, macdArr, lockedPivots=None, nearDouble=False,
+                 lowerContext=None, fractals=None, gapDiffs=None, rawCounter=None):
+        self.merged = merged
+        self.atr = atr
+        self.macdArr = macdArr
+        self.lockedPivots = lockedPivots
+        self.nearDouble = nearDouble
+        self.lowerContext = lowerContext
+        self.fractals = fractals
+        self.gapDiffs = gapDiffs
+        self.rawCounter = rawCounter
+        self.gapThreshold = atr * CHAN_CFG["gapFilter"] if atr else 0
+        self._gapCounts = None
+
+    def gapBetween(self, a, b):
         if a >= b:
             return False
-        if gapCounts is None:
-            gapCounts = [0]
-            remaining = iter(merged)
+        if self.gapDiffs is not None:
+            th = self.gapThreshold
+            diffs = self.gapDiffs
+            for i in range(a, b):
+                up, dn = diffs[i]
+                if up >= th or dn >= th:
+                    return True
+            return False
+        # ATR 在一次构建内固定，跳空判定只取决于相邻合并K线的原始极值。
+        # 首次需要时建立计数前缀，后续任意 [a,b) 区间直接查询。
+        # 不跨 buildBi 调用缓存，避免 ATR 改变或包含合并回写导致过期。
+        if self._gapCounts is None:
+            gc = [0]
+            remaining = iter(self.merged)
             previous = next(remaining)
             prevHigh = previous.get("rawHigh", previous["high"])
             prevLow = previous.get("rawLow", previous["low"])
@@ -370,65 +450,38 @@ def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False,
             for current in remaining:
                 curHigh = current.get("rawHigh", current["high"])
                 curLow = current.get("rawLow", current["low"])
-                if curLow - prevHigh >= gapThreshold or prevLow - curHigh >= gapThreshold:
+                if curLow - prevHigh >= self.gapThreshold or prevLow - curHigh >= self.gapThreshold:
                     count += 1
-                gapCounts.append(count)
+                gc.append(count)
                 prevHigh, prevLow = curHigh, curLow
-        return gapCounts[b] != gapCounts[a]
+            self._gapCounts = gc
+        return self._gapCounts[b] != self._gapCounts[a]
 
-    def replacementExtremesClear(origin, old, middle, end):
+    def replacementExtremesClear(self, origin, old, middle, end):
         ceiling = origin["high"] if origin["type"] == "top" else end["high"]
         floor = end["low"] if end["type"] == "bottom" else origin["low"]
         for x in (old, middle):
             if x["high"] > ceiling or x["low"] < floor:
                 return False
         for i in range(origin["mergedIdx"] + 1, end["mergedIdx"]):
-            if merged[i]["high"] > ceiling or merged[i]["low"] < floor:
+            if self.merged[i]["high"] > ceiling or self.merged[i]["low"] < floor:
                 return False
         return True
 
-    # 阶段一：严格交替分型序列
-    seq = []
-    for f in fractals:
-        if len(seq) == 0:
-            seq.append(f)
-            continue
-        last = seq[-1]
-        if f["type"] == last["type"]:
-            if f["type"] == "top":
-                if f["high"] >= last["high"]:
-                    seq[-1] = f
-            else:
-                if f["low"] <= last["low"]:
-                    seq[-1] = f
-        else:
-            seq.append(f)
-
-    # 区间套强制对齐（优先级最高）：上级笔端点（lockedPivots）必须在下级笔中被保留为端点，
-    # 不能被阶段二的任何「移除中间分型」逻辑吞掉。在阶段一序列上标记与上级端点方向/价格一致的分型。
-    if lockedPivots:
-        for f in seq:
-            p = f["high"] if f["type"] == "top" else f["low"]
-            for lp in lockedPivots:
-                if lp["dir"] == f["type"] and abs(lp["price"] - p) <= 0.001:
-                    f["locked"] = True
-                    break
-
-    def isValid(a, b):
+    def isValid(self, a, b):
         # 有效笔判断：合并后K线从起点分型到终点分型（含两端分型）至少 5 根即可成笔。
         # gap = b["mergedIdx"] - a["mergedIdx"]，等价于合并K线数 gap+1 >= 5。
-        gap = b["mergedIdx"] - a["mergedIdx"]
-        return gap >= 4
+        return b["mergedIdx"] - a["mergedIdx"] >= 4
 
-    def noMoreExtremeInside(a, b):
+    def noMoreExtremeInside(self, a, b):
         for i in range(a["mergedIdx"] + 1, b["mergedIdx"]):
-            if b["type"] == "bottom" and merged[i]["low"] < b["low"]:
+            if b["type"] == "bottom" and self.merged[i]["low"] < b["low"]:
                 return False
-            if b["type"] == "top" and merged[i]["high"] > b["high"]:
+            if b["type"] == "top" and self.merged[i]["high"] > b["high"]:
                 return False
         return True
 
-    def fractalRangeClear(a, b):
+    def fractalRangeClear(self, a, b):
         # 分型范围脱离检查（双向，与 JS chan-core 对齐）：一笔的两端分型不能互相"包含"。
         # 起点侧：与段同侧的两根（下跌笔顶起点取 [中心, 右] 的最低——不用左 bar，否则
         #   主升前夜/起涨点的旧低点会错误抬高"必须跌破"的阈值，误杀后续健康反弹；
@@ -436,6 +489,7 @@ def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False,
         # 终点侧：分型自身三根范围（防反向吞没）：下跌笔的底分型三根K线最高价不得涨回
         #   起点顶价之上（顶后崩盘 bar 跌回起点之下 = 中继弱反弹，不成笔；中心 bar 的
         #   崩盘低点可能被包含合并抬高，须依赖三根中的右 bar 提供证据）；上涨笔对称。
+        merged = self.merged
         i = a["mergedIdx"]
         j = b["mergedIdx"]
         if a["type"] == "top":
@@ -452,6 +506,251 @@ def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False,
             return b["high"] > range_high and end_low > a["low"]
         return True
 
+    def countRawBetween(self, a, b):
+        if self.rawCounter is not None:
+            return self.rawCounter(a, b)
+        return countRaw(self.merged, a, b)
+
+
+def biStep(ctx, head, k):
+    """阶段二单步（回溯替换）：把分型 k 并入不可变结果栈 head，返回新 head。
+    规则体与原 buildBi 阶段二逐行一致；result[-n] 栈操作映射见 _stkCons 注释。
+    近等双顶块只在 ctx.nearDouble 时激活（增量路径用于 30S，恒 False）。"""
+    if head is None:
+        return _stkCons(k, None)
+    last = head[0]
+    if k["type"] == last["type"]:
+        if last.get("locked", False):
+            # locked 端点（上级笔端点，区间套强制对齐）不可被同类型分型替换
+            return head
+        if not last.get("gapLocked", False):
+            if k["type"] == "top":
+                if k["high"] >= last["high"]:
+                    head = _stkCons(k, head[1])       # result[-1] = k
+            else:
+                if k["low"] <= last["low"]:
+                    head = _stkCons(k, head[1])       # result[-1] = k
+        else:
+            # 跳空锁定的端点：仅当后续同类型分型「突破」锁定价格时才解锁替换
+            if k["type"] == "top":
+                if k["high"] > last["high"]:
+                    head = _stkCons(k, head[1])       # result[-1] = k
+            else:
+                if k["low"] < last["low"]:
+                    head = _stkCons(k, head[1])       # result[-1] = k
+        # 近等双顶/双底平台取后顶/后底（走势终完美；≥60m 周期由调用方开启 nearDouble）：
+        #   后顶/后底 k 与前顶/前底 last 近同价（k 略不极端，差 ≤ max(nearDoubleAtrK×ATR,
+        #   nearDoublePct×价)），且 last→k 间所有相邻分型间隔 <4（拆不出笔的平台/直拉，
+        #   段内无可确认回调结构，走势未完美）；中间确有一次 ≥thr 真实回调。单跳封顶：
+        #   被替换端点打 nearDouble 标记，不二次替换（防平台内累积漂移超阈值）。
+        if (ctx.nearDouble and not last.get("gapLocked", False) and not k.get("locked", False)
+                and not last.get("nearDouble", False)):
+            # locked/gapLocked 不参与；macdCross 不豁免（该端点本就是间隔不足靠 MACD 变色
+            # 凑出的脆弱顶/底，如 1h 8-31 顶 4464.23，与近等平台取后顶语义一致）
+            atr = ctx.atr
+            fractals = ctx.fractals
+            lowerContext = ctx.lowerContext
+            ref_price = last["high"] if k["type"] == "top" else last["low"]
+            thr = max(atr * CHAN_CFG["nearDoubleAtrK"], ref_price * CHAN_CFG["nearDoublePct"])
+            diff = (last["high"] - k["high"]) if k["type"] == "top" else (k["low"] - last["low"])
+            lower_confirmed = (diff > thr and diff <= thr * CHAN_CFG['nearDoubleLowerRelax']
+                               and lowerEndpointWeaker(last, k, fractals, lowerContext))
+            if diff >= 0 and (diff <= thr or lower_confirmed):
+                plateau, pull, prev_f, cnt = True, False, last, 0
+                for f in fractals:
+                    if f["mergedIdx"] <= last["mergedIdx"] or f["mergedIdx"] >= k["mergedIdx"]:
+                        continue
+                    cnt += 1
+                    if f["mergedIdx"] - prev_f["mergedIdx"] >= 4:
+                        plateau = False
+                    if k["type"] == "top" and f["type"] == "bottom" and last["high"] - f["low"] >= thr:
+                        pull = True
+                    if k["type"] == "bottom" and f["type"] == "top" and f["high"] - last["low"] >= thr:
+                        pull = True
+                    prev_f = f
+                if k["mergedIdx"] - prev_f["mergedIdx"] >= 4:
+                    plateau = False
+                if cnt > 0 and plateau and pull:
+                    if CHAN_CFG["debug"]:
+                        print(f"[阶段二] 近等双顶/双底平台取后: {k['type']}@{last['mergedIdx']}({ref_price}) -> "
+                              f"{k['type']}@{k['mergedIdx']}({k['high'] if k['type']=='top' else k['low']}) "
+                              f"（差 {diff:.2f} ≤ {thr * (CHAN_CFG['nearDoubleLowerRelax'] if lower_confirmed else 1):.2f}"
+                              f"{'，15m双动能确认' if lower_confirmed else ''}，平台内无成笔结构）")
+                    k["nearDouble"] = True  # 单跳封顶
+                    head = _stkCons(k, head[1])       # result[-1] = k
+        return head
+    # 异类型
+    # MACD 端点让位必须保住整根候选笔的双向极值（等价允许）。
+    # 中间分型可能携带影线端点价，不能只检查合并K线。
+    if _stkLen(head) >= 3:
+        origin = head[1][1][0]
+        prev2 = head[1][0]
+        topOne = last
+        if prev2.get("macdCross", False) is True and prev2["type"] == k["type"] and \
+           not topOne.get("locked", False) and not prev2.get("locked", False) and \
+           ((k["type"] == "top" and k["high"] > prev2["high"]) or
+            (k["type"] == "bottom" and k["low"] < prev2["low"])) and \
+           ctx.replacementExtremesClear(origin, prev2, topOne, k):
+            if CHAN_CFG["debug"]:
+                print(f"[阶段二] MACD端点让位: {prev2['mergedIdx']} -> {k['mergedIdx']}")
+            k["macdCross"] = True
+            return _stkCons(k, head[1][1])            # result[-2] = k; pop()
+    # 跳空优先
+    hasGap = ctx.gapThreshold > 0 and ctx.gapBetween(last["mergedIdx"], k["mergedIdx"])
+    if hasGap:
+        if CHAN_CFG["debug"]:
+            print(f"[阶段二] 跳空成笔: {last['mergedIdx']} -> {k['mergedIdx']}")
+        k["gapLocked"] = True
+        return _stkCons(k, head)                      # result.append(k)
+    # 前顶/前底作废
+    if _stkLen(head) >= 3:
+        prev3 = head[1][1][0]
+        prev2 = head[1][0]
+        lastMoreExtremeThanPrev3 = \
+            (prev3["type"] == "top" and last["high"] > prev3["high"]) or \
+            (prev3["type"] == "bottom" and last["low"] < prev3["low"])
+        shallow = True
+        if prev2["type"] == "top":
+            rise = prev2["high"] - prev3["low"]
+            pull = prev2["high"] - last["low"]
+            shallow = pull < rise * 0.5
+        else:
+            drop = prev3["high"] - prev2["low"]
+            bounce = last["high"] - prev2["low"]
+            shallow = bounce < drop * 0.5
+        if prev2["type"] == k["type"] and \
+           not ctx.isValid(prev2, last) and \
+           not lastMoreExtremeThanPrev3 and \
+           shallow and \
+           last.get("macdCross", False) is True and last.get("macdRaw", 0) < 5 and \
+           not last.get("locked", False) and not prev2.get("locked", False) and \
+           ((k["type"] == "top" and k["high"] > prev2["high"]) or
+            (k["type"] == "bottom" and k["low"] < prev2["low"])):
+            if CHAN_CFG["debug"]:
+                print(f"[阶段二] 前顶/前底作废: {prev2['mergedIdx']} 被 {k['mergedIdx']} 突破")
+            if prev2.get("macdCross", False) is True:
+                k["macdCross"] = True
+            return _stkCons(k, head[1][1])            # result[-2] = k; pop()
+    if ctx.isValid(last, k) and (ctx.noMoreExtremeInside(last, k) or last.get("gapLocked", False)) and \
+       (ctx.fractalRangeClear(last, k) or last.get("gapLocked", False)):
+        return _stkCons(k, head)                      # result.append(k)
+    elif ctx.isValid(last, k):
+        if CHAN_CFG["debug"]:
+            print(f"[阶段二] 忽略 k: {k['mergedIdx']}")
+        return head
+    else:
+        # 间隔不足：先检查 last→k 是否满足「合并后只有4根K + 方向性 MACD 变色」成笔。
+        # 方向性变色：底到顶(上涨) 柱状体由绿变红；顶到底(下跌) 柱状体由红变绿。
+        gap = k["mergedIdx"] - last["mergedIdx"]
+        direction = "up" if last["type"] == "bottom" else "down"
+        # 只有间隔恰为3才可能走 MACD 成笔；其余间隔无需计算变色。
+        macdCross = gap == 3 and bool(ctx.macdArr) and hasMacdCrossBetween(
+            ctx.macdArr, ctx.merged, last["mergedIdx"], k["mergedIdx"],
+            last["time"], k["time"], direction)
+        if gap == 3 and macdCross and ctx.noMoreExtremeInside(last, k):
+            if CHAN_CFG["debug"]:
+                print(f"[阶段二] MACD变色成笔: {last['mergedIdx']} -> {k['mergedIdx']} (合并4根K, {'绿变红' if direction == 'up' else '红变绿'})")
+            k["macdCross"] = True
+            k["macdRaw"] = ctx.countRawBetween(last["mergedIdx"], k["mergedIdx"])
+            return _stkCons(k, head)                  # result.append(k)
+        else:
+            if _stkLen(head) >= 2 and head[1][0]["type"] == k["type"]:
+                prev = head[1][0]
+                moreExtreme = k["high"] >= prev["high"] if k["type"] == "top" else k["low"] <= prev["low"]
+                gapPrevLast = last["mergedIdx"] - prev["mergedIdx"]
+                if CHAN_CFG["debug"]:
+                    print(f"[阶段二] 间隔不足: {k['mergedIdx']} 与 {last['mergedIdx']}, moreExtreme={moreExtreme}, gapPrevLast={gapPrevLast}")
+                # 前顶/前底作废原则（缠论，与 JS chan-core 一致）：顶被更高顶突破时，
+                # 作废前顶的条件是「前顶右侧是否已有足够K线构成笔」：
+                #   prev→last 构成有效笔（间隔>=4 且 笔内无更极值 且 分型范围脱离）
+                #   → 前顶有效，保留，不能被更高顶作废（如已走出有效下跌笔后，
+                #   更高顶无法与右侧成笔，应作废的是新顶而非前顶）；
+                #   仅当 prev→last 不构成有效笔时，更极端的 k 才能顶替 prev。
+                prev_last_valid_bi = gapPrevLast >= 4 and \
+                    ctx.noMoreExtremeInside(prev, last) and ctx.fractalRangeClear(prev, last)
+                # 最小间隔脆弱笔例外：prev→last 虽构成有效笔，但间隔恰为最小值（4，
+                # 即刚够 5 根合并K线）且回调/反弹浅（< 前段涨跌幅的 50%）时，该笔
+                # 尚未被确认——随后 k 即创更高顶/更低底说明整段仍是同一笔的延伸
+                # （缠论：顶被更高顶突破即作废，上涨笔延伸到新极值），prev 应被 k 顶替。
+                fragile_minimal = False
+                if prev_last_valid_bi and gapPrevLast == 4 and _stkLen(head) >= 3:
+                    p3 = head[1][1][0]
+                    if prev["type"] == "top":
+                        rise = prev["high"] - p3["low"]
+                        fragile_minimal = rise > 0 and (prev["high"] - last["low"]) < rise * 0.5
+                    else:
+                        drop = p3["high"] - prev["low"]
+                        fragile_minimal = drop > 0 and (last["high"] - prev["low"]) < drop * 0.5
+                    if CHAN_CFG["debug"] and fragile_minimal:
+                        print(f"[阶段二] 最小间隔脆弱笔: {'顶' if prev['type']=='top' else '底'}@{prev['mergedIdx']}→"
+                              f"{'顶' if last['type']=='top' else '底'}@{last['mergedIdx']} 间隔恰4且回调浅，"
+                              f"允许被 {'顶' if k['type']=='top' else '底'}@{k['mergedIdx']} 顶替")
+                if moreExtreme and (not prev_last_valid_bi or fragile_minimal):
+                    # 回溯替换保护（区间套一致性）：当 last 比更早的同类型分型 result[-3] 更极端时，
+                    # last 是笔内真实转折点（如插针低点/插针高点），不能无条件 pop 掉——吞掉会导致
+                    # 该笔内部藏着更极值（违反笔内极值原则），且本级别笔端点与上级周期（区间套）不重合。
+                    # 此时保留 last 取代 result[-3]，prev 被更高顶/更低底突破而作废移除，
+                    # k 与 last 间隔不足、暂不接入，等待后续满足最小间隔的分型成笔。
+                    if _stkLen(head) >= 3:
+                        prev3 = head[1][1][0]
+                        last_is_deeper = (
+                            (k["type"] == "top" and last["low"] < prev3["low"])
+                            or (k["type"] == "bottom" and last["high"] > prev3["high"])
+                        )
+                        if last_is_deeper and not prev.get("locked", False) and not prev3.get("locked", False):
+                            if CHAN_CFG["debug"]:
+                                print(f"[阶段二] 回溯替换保护: {'顶' if last['type']=='top' else '底'}@{last['mergedIdx']} 比 "
+                                      f"{'顶' if prev3['type']=='top' else '底'}@{prev3['mergedIdx']} 更极端，保留 last 为端点，作废 prev，暂不接入 k")
+                            return _stkCons(last, head[1][1][1])   # result[-3]=last; pop(); pop()
+                    if not last.get("locked", False) and not prev.get("locked", False):
+                        return _stkCons(k, head[1][1])            # result[-2] = k; pop()
+        return head
+
+
+def biPair(a, b, merged, ctx=None):
+    """阶段三两两连笔单步（buildBi 批量与 bi_inc 增量共用）。"""
+    startPrice = a["high"] if a["type"] == "top" else a["low"]
+    endPrice = b["high"] if b["type"] == "top" else b["low"]
+    isUp = b["type"] == "top"
+    return {
+        "type": "up" if isUp else "down",
+        "startIdx": a["mergedIdx"],
+        "endIdx": b["mergedIdx"],
+        "startTime": a["time"],
+        "endTime": b["time"],
+        "startPrice": startPrice,
+        "endPrice": endPrice,
+        "rawCount": ctx.countRawBetween(a["mergedIdx"], b["mergedIdx"]) if ctx is not None
+                    else countRaw(merged, a["mergedIdx"], b["mergedIdx"]),
+        "span": abs(endPrice - startPrice),
+        "gapLocked": b.get("gapLocked", False) is True,
+        "macdCross": b.get("macdCross", False) is True,
+    }
+
+
+def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False, lowerContext=None):
+    """笔构建。与 JS 版 buildBi 对齐。lockedPivots 为上级笔端点（区间套强制对齐，优先级最高）；
+    nearDouble=True 时启用「近等双顶/双底平台取后顶/后底」（≥60m 周期由调用方开启）。
+    lowerContext 为可选15分钟上下文，仅60m补充分支使用；缺省时沿用原阈值。
+    内部经 biSeqStep/biStep/biPair 单步组合（与 bi_inc 增量构建器共用规则源）。"""
+    ctx = BiBuildCtx(merged, atr, macdArr, lockedPivots=lockedPivots,
+                     nearDouble=nearDouble, lowerContext=lowerContext, fractals=fractals)
+
+    # 阶段一：严格交替分型序列
+    seq = []
+    for f in fractals:
+        biSeqStep(seq, f)
+
+    # 区间套强制对齐（优先级最高）：上级笔端点（lockedPivots）必须在下级笔中被保留为端点，
+    # 不能被阶段二的任何「移除中间分型」逻辑吞掉。在阶段一序列上标记与上级端点方向/价格一致的分型。
+    if lockedPivots:
+        for f in seq:
+            p = f["high"] if f["type"] == "top" else f["low"]
+            for lp in lockedPivots:
+                if lp["dir"] == f["type"] and abs(lp["price"] - p) <= 0.001:
+                    f["locked"] = True
+                    break
+
     if CHAN_CFG["debug"]:
         def ft(s):
             v = s["high"] if s["type"] == "top" else s["low"]
@@ -459,200 +758,11 @@ def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False,
         print("[阶段一] 交替分型序列:", " → ".join(ft(s) for s in seq))
 
     # 阶段二：移除间隔不足的中间分型（回溯替换）
-    result = []
+    head = None
     for k in seq:
-        if len(result) == 0:
-            result.append(k)
-            continue
-        last = result[-1]
-        if k["type"] == last["type"]:
-            if last.get("locked", False):
-                # locked 端点（上级笔端点，区间套强制对齐）不可被同类型分型替换
-                continue
-            if not last.get("gapLocked", False):
-                if k["type"] == "top":
-                    if k["high"] >= last["high"]:
-                        result[-1] = k
-                else:
-                    if k["low"] <= last["low"]:
-                        result[-1] = k
-            else:
-                # 跳空锁定的端点：仅当后续同类型分型「突破」锁定价格时才解锁替换
-                if k["type"] == "top":
-                    if k["high"] > last["high"]:
-                        result[-1] = k
-                else:
-                    if k["low"] < last["low"]:
-                        result[-1] = k
-            # 近等双顶/双底平台取后顶/后底（走势终完美；≥60m 周期由调用方开启 nearDouble）：
-            #   后顶/后底 k 与前顶/前底 last 近同价（k 略不极端，差 ≤ max(nearDoubleAtrK×ATR,
-            #   nearDoublePct×价)），且 last→k 间所有相邻分型间隔 <4（拆不出笔的平台/直拉，
-            #   段内无可确认回调结构，走势未完美）；中间确有一次 ≥thr 真实回调。单跳封顶：
-            #   被替换端点打 nearDouble 标记，不二次替换（防平台内累积漂移超阈值）。
-            if (nearDouble and not last.get("gapLocked", False) and not k.get("locked", False)
-                    and not last.get("nearDouble", False)):
-                # locked/gapLocked 不参与；macdCross 不豁免（该端点本就是间隔不足靠 MACD 变色
-                # 凑出的脆弱顶/底，如 1h 8-31 顶 4464.23，与近等平台取后顶语义一致）
-                ref_price = last["high"] if k["type"] == "top" else last["low"]
-                thr = max(atr * CHAN_CFG["nearDoubleAtrK"], ref_price * CHAN_CFG["nearDoublePct"])
-                diff = (last["high"] - k["high"]) if k["type"] == "top" else (k["low"] - last["low"])
-                lower_confirmed = (diff > thr and diff <= thr * CHAN_CFG['nearDoubleLowerRelax']
-                                   and lowerEndpointWeaker(last, k, fractals, lowerContext))
-                if diff >= 0 and (diff <= thr or lower_confirmed):
-                    plateau, pull, prev_f, cnt = True, False, last, 0
-                    for f in fractals:
-                        if f["mergedIdx"] <= last["mergedIdx"] or f["mergedIdx"] >= k["mergedIdx"]:
-                            continue
-                        cnt += 1
-                        if f["mergedIdx"] - prev_f["mergedIdx"] >= 4:
-                            plateau = False
-                        if k["type"] == "top" and f["type"] == "bottom" and last["high"] - f["low"] >= thr:
-                            pull = True
-                        if k["type"] == "bottom" and f["type"] == "top" and f["high"] - last["low"] >= thr:
-                            pull = True
-                        prev_f = f
-                    if k["mergedIdx"] - prev_f["mergedIdx"] >= 4:
-                        plateau = False
-                    if cnt > 0 and plateau and pull:
-                        if CHAN_CFG["debug"]:
-                            print(f"[阶段二] 近等双顶/双底平台取后: {k['type']}@{last['mergedIdx']}({ref_price}) -> "
-                                  f"{k['type']}@{k['mergedIdx']}({k['high'] if k['type']=='top' else k['low']}) "
-                                  f"（差 {diff:.2f} ≤ {thr * (CHAN_CFG['nearDoubleLowerRelax'] if lower_confirmed else 1):.2f}"
-                                  f"{'，15m双动能确认' if lower_confirmed else ''}，平台内无成笔结构）")
-                        k["nearDouble"] = True  # 单跳封顶
-                        result[-1] = k
-            continue
-        # 异类型
-        # MACD 端点让位必须保住整根候选笔的双向极值（等价允许）。
-        # 中间分型可能携带影线端点价，不能只检查合并K线。
-        if len(result) >= 3:
-            origin = result[-3]
-            prev2 = result[-2]
-            topOne = result[-1]
-            if prev2.get("macdCross", False) is True and prev2["type"] == k["type"] and \
-               not topOne.get("locked", False) and not prev2.get("locked", False) and \
-               ((k["type"] == "top" and k["high"] > prev2["high"]) or
-                (k["type"] == "bottom" and k["low"] < prev2["low"])) and \
-               replacementExtremesClear(origin, prev2, topOne, k):
-                if CHAN_CFG["debug"]:
-                    print(f"[阶段二] MACD端点让位: {prev2['mergedIdx']} -> {k['mergedIdx']}")
-                k["macdCross"] = True
-                result[-2] = k
-                result.pop()
-                continue
-        # 跳空优先
-        hasGap = gapThreshold > 0 and gapBetween(last["mergedIdx"], k["mergedIdx"])
-        if hasGap:
-            if CHAN_CFG["debug"]:
-                print(f"[阶段二] 跳空成笔: {last['mergedIdx']} -> {k['mergedIdx']}")
-            k["gapLocked"] = True
-            result.append(k)
-            continue
-        # 前顶/前底作废
-        if len(result) >= 3:
-            prev3 = result[-3]
-            prev2 = result[-2]
-            lastMoreExtremeThanPrev3 = \
-                (prev3["type"] == "top" and last["high"] > prev3["high"]) or \
-                (prev3["type"] == "bottom" and last["low"] < prev3["low"])
-            shallow = True
-            if prev2["type"] == "top":
-                rise = prev2["high"] - prev3["low"]
-                pull = prev2["high"] - last["low"]
-                shallow = pull < rise * 0.5
-            else:
-                drop = prev3["high"] - prev2["low"]
-                bounce = last["high"] - prev2["low"]
-                shallow = bounce < drop * 0.5
-            if prev2["type"] == k["type"] and \
-               not isValid(prev2, last) and \
-               not lastMoreExtremeThanPrev3 and \
-               shallow and \
-               last.get("macdCross", False) is True and last.get("macdRaw", 0) < 5 and \
-               not last.get("locked", False) and not prev2.get("locked", False) and \
-               ((k["type"] == "top" and k["high"] > prev2["high"]) or
-                (k["type"] == "bottom" and k["low"] < prev2["low"])):
-                if CHAN_CFG["debug"]:
-                    print(f"[阶段二] 前顶/前底作废: {prev2['mergedIdx']} 被 {k['mergedIdx']} 突破")
-                if prev2.get("macdCross", False) is True:
-                    k["macdCross"] = True
-                result[-2] = k
-                result.pop()
-                continue
-        if isValid(last, k) and (noMoreExtremeInside(last, k) or last.get("gapLocked", False)) and \
-           (fractalRangeClear(last, k) or last.get("gapLocked", False)):
-            result.append(k)
-        elif isValid(last, k):
-            if CHAN_CFG["debug"]:
-                print(f"[阶段二] 忽略 k: {k['mergedIdx']}")
-        else:
-            # 间隔不足：先检查 last→k 是否满足「合并后只有4根K + 方向性 MACD 变色」成笔。
-            # 方向性变色：底到顶(上涨) 柱状体由绿变红；顶到底(下跌) 柱状体由红变绿。
-            gap = k["mergedIdx"] - last["mergedIdx"]
-            direction = "up" if last["type"] == "bottom" else "down"
-            # 只有间隔恰为3才可能走 MACD 成笔；其余间隔无需计算变色。
-            macdCross = gap == 3 and bool(macdArr) and hasMacdCrossBetween(macdArr, merged, last["mergedIdx"], k["mergedIdx"], last["time"], k["time"], direction)
-            if gap == 3 and macdCross and noMoreExtremeInside(last, k):
-                if CHAN_CFG["debug"]:
-                    print(f"[阶段二] MACD变色成笔: {last['mergedIdx']} -> {k['mergedIdx']} (合并4根K, {'绿变红' if direction == 'up' else '红变绿'})")
-                k["macdCross"] = True
-                k["macdRaw"] = countRaw(merged, last["mergedIdx"], k["mergedIdx"])
-                result.append(k)
-            else:
-                if len(result) >= 2 and result[-2]["type"] == k["type"]:
-                    prev = result[-2]
-                    moreExtreme = k["high"] >= prev["high"] if k["type"] == "top" else k["low"] <= prev["low"]
-                    gapPrevLast = last["mergedIdx"] - prev["mergedIdx"]
-                    if CHAN_CFG["debug"]:
-                        print(f"[阶段二] 间隔不足: {k['mergedIdx']} 与 {last['mergedIdx']}, moreExtreme={moreExtreme}, gapPrevLast={gapPrevLast}")
-                    # 前顶/前底作废原则（缠论，与 JS chan-core 一致）：顶被更高顶突破时，
-                    # 作废前顶的条件是「前顶右侧是否已有足够K线构成笔」：
-                    #   prev→last 构成有效笔（间隔>=4 且 笔内无更极值 且 分型范围脱离）
-                    #   → 前顶有效，保留，不能被更高顶作废（如已走出有效下跌笔后，
-                    #     更高顶无法与右侧成笔，应作废的是新顶而非前顶）；
-                    # 仅当 prev→last 不构成有效笔时，更极端的 k 才能顶替 prev。
-                    prev_last_valid_bi = gapPrevLast >= 4 and \
-                        noMoreExtremeInside(prev, last) and fractalRangeClear(prev, last)
-                    # 最小间隔脆弱笔例外：prev→last 虽构成有效笔，但间隔恰为最小值（4，
-                    # 即刚够 5 根合并K线）且回调/反弹浅（< 前段涨跌幅的 50%）时，该笔
-                    # 尚未被确认——随后 k 即创更高顶/更低底说明整段仍是同一笔的延伸
-                    # （缠论：顶被更高顶突破即作废，上涨笔延伸到新极值），prev 应被 k 顶替。
-                    fragile_minimal = False
-                    if prev_last_valid_bi and gapPrevLast == 4 and len(result) >= 3:
-                        p3 = result[-3]
-                        if prev["type"] == "top":
-                            rise = prev["high"] - p3["low"]
-                            fragile_minimal = rise > 0 and (prev["high"] - last["low"]) < rise * 0.5
-                        else:
-                            drop = p3["high"] - prev["low"]
-                            fragile_minimal = drop > 0 and (last["high"] - prev["low"]) < drop * 0.5
-                        if CHAN_CFG["debug"] and fragile_minimal:
-                            print(f"[阶段二] 最小间隔脆弱笔: {'顶' if prev['type']=='top' else '底'}@{prev['mergedIdx']}→"
-                                  f"{'顶' if last['type']=='top' else '底'}@{last['mergedIdx']} 间隔恰4且回调浅，"
-                                  f"允许被 {'顶' if k['type']=='top' else '底'}@{k['mergedIdx']} 顶替")
-                    if moreExtreme and (not prev_last_valid_bi or fragile_minimal):
-                        # 回溯替换保护（区间套一致性）：当 last 比更早的同类型分型 result[-3] 更极端时，
-                        # last 是笔内真实转折点（如插针低点/插针高点），不能无条件 pop 掉——吞掉会导致
-                        # 该笔内部藏着更极值（违反笔内极值原则），且本级别笔端点与上级周期（区间套）不重合。
-                        # 此时保留 last 取代 result[-3]，prev 被更高顶/更低底突破而作废移除，
-                        # k 与 last 间隔不足、暂不接入，等待后续满足最小间隔的分型成笔。
-                        if len(result) >= 3:
-                            prev3 = result[-3]
-                            last_is_deeper = (
-                                (k["type"] == "top" and last["low"] < prev3["low"])
-                                or (k["type"] == "bottom" and last["high"] > prev3["high"])
-                            )
-                            if last_is_deeper and not prev.get("locked", False) and not prev3.get("locked", False):
-                                if CHAN_CFG["debug"]:
-                                    print(f"[阶段二] 回溯替换保护: {'顶' if last['type']=='top' else '底'}@{last['mergedIdx']} 比 {'顶' if prev3['type']=='top' else '底'}@{prev3['mergedIdx']} 更极端，保留 last 为端点，作废 prev，暂不接入 k")
-                                result[-3] = last
-                                result.pop()
-                                result.pop()
-                                continue
-                        if not last.get("locked", False) and not prev.get("locked", False):
-                            result[-2] = k
-                            result.pop()
+        head = biStep(ctx, head, k)
 
+    result = biListFromHead(head)
     if CHAN_CFG["debug"]:
         def ft2(s):
             v = s["high"] if s["type"] == "top" else s["low"]
@@ -662,24 +772,7 @@ def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False,
     # 阶段三：两两连笔
     bis = []
     for i in range(0, len(result) - 1):
-        a = result[i]
-        b = result[i + 1]
-        startPrice = a["high"] if a["type"] == "top" else a["low"]
-        endPrice = b["high"] if b["type"] == "top" else b["low"]
-        isUp = b["type"] == "top"
-        bis.append({
-            "type": "up" if isUp else "down",
-            "startIdx": a["mergedIdx"],
-            "endIdx": b["mergedIdx"],
-            "startTime": a["time"],
-            "endTime": b["time"],
-            "startPrice": startPrice,
-            "endPrice": endPrice,
-            "rawCount": countRaw(merged, a["mergedIdx"], b["mergedIdx"]),
-            "span": abs(endPrice - startPrice),
-            "gapLocked": b.get("gapLocked", False) is True,
-            "macdCross": b.get("macdCross", False) is True,
-        })
+        bis.append(biPair(result[i], result[i + 1], merged, ctx))
     return bis
 
 
@@ -688,15 +781,18 @@ def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False,
 # ============================================================
 
 
-def fixBiExtremes(bis, merged):
+def fixBiExtremes(bis, merged, count_raw=None):
     """端点极值修正：包含关系合并时（如向上合并取「高高」会把更低的插针低点抬高，
     向下合并取「低低」会把更高的插针高点压低），笔的端点分型可能不是该区域内的真实极值。
     对每笔检查「终点分型之后、下一笔终点分型之前」的合并K线，若存在「被包含合并掩盖」
     （rawLow<low / rawHigh>high）且比当前端点更极端的真实极值，把本笔终点与下一笔起点
     同步平移到该极值所在K线（保持首尾连续）。只处理被掩盖的极值。
-    跳空独立成笔（gapLocked）端点固定在缺口处，不参与修正。原地修改并返回 bis。"""
+    跳空独立成笔（gapLocked）端点固定在缺口处，不参与修正。原地修改并返回 bis。
+    count_raw：可选 (a,b)→原始K线数 回调（bi_inc 增量路径传前缀和查询）。"""
     if not bis or len(bis) == 0 or not merged or len(merged) == 0:
         return bis
+    if count_raw is None:
+        count_raw = lambda a, b: countRaw(merged, a, b)
     eps = 1e-9
     for i in range(len(bis)):
         b = bis[i]
@@ -753,13 +849,13 @@ def fixBiExtremes(bis, merged):
         b["endTime"] = extreme["time"]
         b["endIdx"] = extreme["idx"]
         b["span"] = b["endPrice"] - b["startPrice"] if b["type"] == "up" else b["startPrice"] - b["endPrice"]
-        b["rawCount"] = countRaw(merged, b["startIdx"], b["endIdx"])
+        b["rawCount"] = count_raw(b["startIdx"], b["endIdx"])
         # 下一笔起点联动（保持两笔端点连续）
         next_["startPrice"] = extreme["price"]
         next_["startTime"] = extreme["time"]
         next_["startIdx"] = extreme["idx"]
         next_["span"] = next_["endPrice"] - next_["startPrice"] if next_["type"] == "up" else next_["startPrice"] - next_["endPrice"]
-        next_["rawCount"] = countRaw(merged, next_["startIdx"], next_["endIdx"])
+        next_["rawCount"] = count_raw(next_["startIdx"], next_["endIdx"])
     return bis
 
 

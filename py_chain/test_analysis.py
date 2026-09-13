@@ -97,7 +97,7 @@ class AnalysisTests(unittest.TestCase):
         unblock.set()
         self.finish()
         self.assertEqual(len(self.calls), 1)
-        self.assertEqual(self.calls[0][1]["near"], 1)
+        self.assertEqual(self.calls[0][1]["near"], 10)   # 2026-09-13 起默认绝对价差 10
         self.assertEqual(self.m.cfg["near"], 2)
         self.assertEqual(self.m.job["state"], "stopped")
 
@@ -194,6 +194,34 @@ class GateTests(unittest.TestCase):
         t.start(); t.join()
         self.assertEqual(result, [False])
         self.assertTrue(webapp._marks_lock.acquire(False))
+
+
+class TestSrPresetWith30s(unittest.TestCase):
+    """回测 with_30s + 支阻预设：30S 不属支阻级别（sr_service 白名单刻意拒收），
+    预设周期应取回测周期 ∩ 支阻级别，而非整体透传（整体透传曾抛 不支持的级别：30S）。"""
+
+    PRESET = {"name": "p30", "cfg": {"periods": ["D", "240", "60", "15", "3"],
+                                     "from": "2026-06-30",
+                                     "srTypes": ["cluster", "boll"]}}
+
+    def setUp(self):
+        self._orig = webapp._presets_load
+        webapp._presets_load = lambda: [dict(self.PRESET)]
+
+    def tearDown(self):
+        webapp._presets_load = self._orig
+
+    def test_30s_filtered_out(self):
+        kwargs = webapp.BacktestWorker._sr_preset_kwargs(
+            {"sr_preset": "p30", "symbol": "OANDA:XAUUSD", "from": "2026-07-26"},
+            ["D", "240", "60", "15", "3", "30S"])
+        self.assertIsInstance(kwargs, dict)
+        self.assertIn("clusterAtr", kwargs)      # engine_kwargs_of 的输出形状
+
+    def test_all_30s_falls_back_to_default_levels(self):
+        kwargs = webapp.BacktestWorker._sr_preset_kwargs(
+            {"sr_preset": "p30", "symbol": "OANDA:XAUUSD"}, ["30S"])
+        self.assertIsInstance(kwargs, dict)
 
 
 if __name__ == "__main__":

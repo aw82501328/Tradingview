@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>支阻位参数体系原型 · 人工输入 + 进出场参数 + 回测联动</title>
+<style>
+:root{color-scheme:dark;--bg:#0f1115;--panel:#191d25;--inner:#12161e;--line:#2b3342;--text:#dce2ed;--muted:#909caf;--blue:#659dff;--accent:#4d89f5;--green:#55d7b0;--orange:#edbc70;--red:#ec8d96;--sr:#787B86}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:13px/1.55 "Segoe UI","Microsoft YaHei",sans-serif}button,input,select{font:inherit}button{cursor:pointer}button,input,select{border:1px solid var(--line);border-radius:5px;background:#10151e;color:var(--text)}button{padding:7px 12px;background:#252e3d;transition:background .15s}button:hover{background:#33405a}button.primary{background:#2d67d6;border-color:#427fea;color:#fff}input,select{padding:6px 8px;min-width:0}input:focus,select:focus{outline:2px solid #4e8cf578;outline-offset:1px}input[type=checkbox]{width:14px;accent-color:#4d89f5;cursor:pointer}
+h1,h2,h3,p{margin:0}h1{font-size:18px;font-weight:650}h2{font-size:15px;font-weight:600}h3{font-size:13px;font-weight:600}
+.topbar{height:70px;padding:0 25px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:15px}.brand{display:flex;gap:12px;align-items:center}.brandmark{height:33px;width:33px;border:1px solid #3b5784;background:#1c2a44;border-radius:7px;display:grid;place-items:center;color:#8bb8ff;font:600 13px Consolas}.subtitle{color:var(--muted);font-size:11px;margin-top:3px}
+.pill{font-size:11px;border:1px solid #354052;border-radius:20px;padding:2px 9px;white-space:nowrap;color:#a8b8d0;background:#202734}.pill.demo{color:var(--orange);background:#32291c;border-color:#51412d}
+.layout{display:grid;grid-template-columns:430px minmax(0,1fr);gap:20px;padding:20px 25px;max-width:1500px;margin:auto;align-items:start}
+.panel{border:1px solid var(--line);border-radius:8px;background:var(--panel);overflow:hidden;margin-bottom:16px}.panel-head{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:8px}.panel-body{padding:14px 16px}
+.muted{color:var(--muted)}.tiny{font-size:11px}.blue{color:var(--blue)}.green{color:var(--green)}.orange{color:var(--orange)}.red{color:var(--red)}.mono{font-family:Consolas,monospace;font-variant-numeric:tabular-nums}
+table{border-collapse:collapse;width:100%;font-size:12.5px}th{color:var(--muted);font-weight:400;text-align:left;background:#141a24}th,td{padding:8px 9px;border-bottom:1px solid #242c3a}td.num{text-align:right;font-variant-numeric:tabular-nums}
+.src-sel{width:104px;padding:4px 6px}.manual-row td{background:#161d2a;border-bottom:1px solid #242c3a;padding:7px 9px 9px}
+.manual-input{width:100%;font-family:Consolas,monospace}.manual-meta{display:flex;justify-content:space-between;gap:8px;margin-top:5px;font-size:11px;color:var(--muted)}
+.err{color:var(--red);font-size:11px;margin-top:5px}
+.row{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.spread{justify-content:space-between}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.fld label{display:block;color:var(--muted);font-size:11px;margin-bottom:4px}.fld input,.fld select{width:100%}
+.formula{background:var(--inner);border:1px solid #263044;border-radius:6px;padding:10px 12px;font:12px Consolas,monospace;color:#b9c6dd;margin-top:12px;white-space:pre-line;line-height:1.8}
+.chart-pair{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.mini{background:var(--inner);border:1px solid #263044;border-radius:6px;padding:10px 12px 8px}.mini h3{font-size:12px;color:#c7d3e8}.mini .cap{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.6}
+.taglist{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}.tag{font:11px Consolas,monospace;border:1px solid #35486b;background:#182338;border-radius:4px;padding:2px 7px;color:#9db8e4}
+.note{font-size:11px;color:var(--muted);line-height:1.7;margin-top:9px}
+.toast{position:fixed;bottom:25px;left:50%;transform:translateX(-50%);background:#263b36;color:#c5f8e7;border:1px solid #4a786b;padding:10px 18px;border-radius:7px;z-index:40;font-size:12.5px;box-shadow:0 5px 30px #0006}
+.page-footer{font-size:11px;color:#68768a;text-align:center;padding:6px 0 20px}
+@media(max-width:1080px){.layout{grid-template-columns:1fr}.chart-pair{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header class="topbar"><div class="brand"><div class="brandmark">SR</div><div><h1>支阻位参数体系原型</h1><div class="subtitle">各周期人工输入 / 系统计算 · 进出场支阻参数（绝对价差） · 回测预设联动</div></div></div><div class="row"><span class="pill demo">交互原型 · 模拟数据 · 对应已批准实施计划</span></div></header>
+<div class="layout">
+
+<!-- ═══════════ 左列：/sr 页「周期与参数」改造 ═══════════ -->
+<div>
+<section class="panel">
+ <div class="panel-head"><h2>① 周期与参数 <span class="muted tiny">/sr 页 · 新增「来源」列</span></h2><span class="pill">交互演示</span></div>
+ <div class="panel-body" style="padding:0">
+  <table id="tbl-levels">
+   <thead><tr><th></th><th>周期</th><th class="num">ATR</th><th>支阻来源</th></tr></thead>
+   <tbody>
+    <tr data-res="W"><td><input type="checkbox" class="chk-res"></td><td>W 周线</td><td class="num">12.80</td>
+      <td><select class="src-sel" data-period="W"><option value="">系统计算</option><option value="manual">人工输入</option></select></td></tr>
+    <tr data-res="D"><td><input type="checkbox" class="chk-res" checked></td><td>D 日线</td><td class="num">28.40</td>
+      <td><select class="src-sel" data-period="D"><option value="">系统计算</option><option value="manual">人工输入</option></select></td></tr>
+    <tr data-res="240"><td><input type="checkbox" class="chk-res" checked></td><td>240 4小时</td><td class="num">16.90</td>
+      <td><select class="src-sel" data-period="240"><option value="">系统计算</option><option value="manual">人工输入</option></select></td></tr>
+    <tr data-res="60"><td><input type="checkbox" class="chk-res" checked></td><td><button class="period-edit" style="all:unset;cursor:pointer;color:#8bb8ff">60 1小时</button></td><td class="num">8.60</td>
+      <td><select class="src-sel" data-period="60"><option value="">系统计算</option><option value="manual" selected>人工输入</option></select></td></tr>
+    <tr class="manual-row" data-res="60"><td colspan="4">
+      <input class="manual-input" data-period="60" value="4418, 4440, 4462.5, 4478, 4495" placeholder="多个价位用逗号/空格分隔，如 4440, 4460.5">
+      <div class="manual-meta"><span>人工 = 替换本周期密集区支阻位；全部画出，不受每侧条数 / 距离上限限制；叠加层（fib/BOLL）照常。<b>未填价位 = 该周期没有支阻位</b></span><span class="mono" data-count="60">5 个价位</span></div>
+    </td></tr>
+    <tr data-res="15"><td><input type="checkbox" class="chk-res" checked></td><td>15 15分钟</td><td class="num">4.10</td>
+      <td><select class="src-sel" data-period="15"><option value="">系统计算</option><option value="manual">人工输入</option></select></td></tr>
+    <tr data-res="3"><td><input type="checkbox" class="chk-res" checked></td><td>3 3分钟</td><td class="num">1.90</td>
+      <td><select class="src-sel" data-period="3"><option value="">系统计算</option><option value="manual">人工输入</option></select></td></tr>
+   </tbody>
+  </table>
+  <div style="padding:11px 14px">
+   <div class="row spread"><span class="tiny muted">不同周期可混合：60 人工 + 15 系统并存；预设保存/载入/Excel 往返自动携带</span>
+   <button class="primary" id="btn-compute">计算</button></div>
+  </div>
+ </div>
+</section>
+<section class="panel">
+ <div class="panel-head"><h2>联动总览</h2></div>
+ <div class="panel-body"><div class="note" style="margin-top:0">
+  <b class="blue">/sr 页</b>：来源列 + 价位输入 → manualLevels 进 cfg（校验→引擎）→ 随预设落盘。<br>
+  <b class="blue">工作台</b>：选含人工位的支阻预设 → sr 阶段用人工位计算 → srflip 缓存 → mark-entry 的 nearSr / 止损参考读到人工价位。<br>
+  <b class="blue">回测</b>：回测卡片选同一预设（见③）→ BacktestEngine 用人工位 + near/滑点 → 回测与实盘同口径。<br>
+  三段共用同一校验与映射函数，人工位口径一处定义、三处生效。
+ </div></div>
+</section>
+</div>
+
+<!-- ═══════════ 右列 ═══════════ -->
+<div>
+
+<section class="panel">
+ <div class="panel-head"><h2>② 上图效果示意 <span class="muted tiny">人工=全部画出 · 系统=就近上/下各 sideCount</span></h2></div>
+ <div class="panel-body">
+  <div class="chart-pair">
+   <div class="mini">
+    <h3>1小时图 · 人工输入</h3>
+    <svg viewBox="0 0 380 200" width="100%" role="img" aria-label="人工输入周期示意图：5条人工支阻位全部画出">
+     <g stroke="#1c2331" stroke-width="1"><line x1="0" y1="40" x2="380" y2="40"/><line x1="0" y1="90" x2="380" y2="90"/><line x1="0" y1="140" x2="380" y2="140"/><line x1="0" y1="190" x2="380" y2="190"/></g>
+     <polyline fill="none" stroke="#4d89f5" stroke-width="2" points="8,120 40,132 66,104 96,126 122,96 150,116 178,92 208,112 236,86 264,108 292,96 320,116 352,104 372,126"/>
+     <g><title>手动位+1小时 4418.0（现价上方→支撑 SUP）</title><line x1="0" y1="152" x2="380" y2="152" stroke="#787B86" stroke-width="2"/><text x="376" y="148" text-anchor="end" font-size="10" fill="#909caf">手动位+1小时 4418.0</text></g>
+     <g><title>手动位+1小时 4440.0</title><line x1="0" y1="122" x2="380" y2="122" stroke="#787B86" stroke-width="2"/><text x="376" y="118" text-anchor="end" font-size="10" fill="#dce2ed">手动位+1小时 4440.0</text></g>
+     <g><title>手动位+1小时 4462.5（距现价 24.5 &gt; 3×ATR=25.8 仍画出——人工不受距离上限）</title><line x1="0" y1="91" x2="380" y2="91" stroke="#787B86" stroke-width="2"/><text x="376" y="87" text-anchor="end" font-size="10" fill="#dce2ed">手动位+1小时 4462.5</text></g>
+     <g><title>手动位+1小时 4478.0</title><line x1="0" y1="70" x2="380" y2="70" stroke="#787B86" stroke-width="2"/><text x="376" y="66" text-anchor="end" font-size="10" fill="#dce2ed">手动位+1小时 4478.0</text></g>
+     <g><title>手动位+1小时 4495.0</title><line x1="0" y1="47" x2="380" y2="47" stroke="#787B86" stroke-width="2"/><text x="376" y="43" text-anchor="end" font-size="10" fill="#dce2ed">手动位+1小时 4495.0</text></g>
+     <line x1="0" y1="126" x2="380" y2="126" stroke="#b2b5be" stroke-width="1" stroke-dasharray="4 4"/><text x="6" y="141" font-size="10" fill="#b2b5be">现价 4437.0</text>
+    </svg>
+    <div class="cap">输入 5 条 → 画 5 条。<b>不受</b>「每侧 sideCount=2」「≤3×ATR 距离上限」限制；type 按现价侧推导（价位 ≤ 现价 → SUP）。</div>
+   </div>
+   <div class="mini">
+    <h3>15分钟图 · 系统计算</h3>
+    <svg viewBox="0 0 380 200" width="100%" role="img" aria-label="系统计算周期示意图：就近上下各两条画出，其余候选虚线">
+     <g stroke="#1c2331" stroke-width="1"><line x1="0" y1="40" x2="380" y2="40"/><line x1="0" y1="90" x2="380" y2="90"/><line x1="0" y1="140" x2="380" y2="140"/><line x1="0" y1="190" x2="380" y2="190"/></g>
+     <polyline fill="none" stroke="#4d89f5" stroke-width="2" points="8,110 40,124 66,98 96,120 122,92 150,112 178,88 208,108 236,84 264,104 292,94 320,112 352,100 372,120"/>
+     <g><title>候选 4402.0（非最近，未画出）</title><line x1="0" y1="163" x2="380" y2="163" stroke="#4a5265" stroke-width="1.5" stroke-dasharray="5 5"/><text x="376" y="159" text-anchor="end" font-size="10" fill="#5d6779">4402.0 候选</text></g>
+     <g><title>候选 4415.0（下方第3近，超出 sideCount，未画出）</title><line x1="0" y1="145" x2="380" y2="145" stroke="#4a5265" stroke-width="1.5" stroke-dasharray="5 5"/><text x="376" y="141" text-anchor="end" font-size="10" fill="#5d6779">4415.0 候选</text></g>
+     <g><title>密集区+15分钟 4425.0（下方第2近）</title><line x1="0" y1="132" x2="380" y2="132" stroke="#787B86" stroke-width="2"/><text x="6" y="146" font-size="10" fill="#dce2ed">密集区+15分钟 4425.0</text></g>
+     <g><title>密集区+15分钟 4430.0（下方最近）</title><line x1="0" y1="125" x2="380" y2="125" stroke="#787B86" stroke-width="2"/><text x="6" y="121" font-size="10" fill="#dce2ed">密集区+15分钟 4430.0</text></g>
+     <g><title>BOLL上轨+15分钟 4444.0（上方最近）</title><line x1="0" y1="106" x2="380" y2="106" stroke="#787B86" stroke-width="2"/><text x="6" y="102" font-size="10" fill="#dce2ed">BOLL上轨+15分钟 4444.0</text></g>
+     <g><title>黄金分割0.5+15分钟 4452.0（上方第2近）</title><line x1="0" y1="95" x2="380" y2="95" stroke="#787B86" stroke-width="2"/><text x="376" y="91" text-anchor="end" font-size="10" fill="#dce2ed">黄金分割0.5+15分钟 4452.0</text></g>
+     <g><title>候选 4470.0（距现价 33 &gt; 3×ATR=12.3，超距离上限未画出）</title><line x1="0" y1="71" x2="380" y2="71" stroke="#4a5265" stroke-width="1.5" stroke-dasharray="5 5"/><text x="376" y="67" text-anchor="end" font-size="10" fill="#5d6779">4470.0 候选（超距离）</text></g>
+     <line x1="0" y1="126" x2="380" y2="126" stroke="#b2b5be" stroke-width="1" stroke-dasharray="4 4"/><text x="6" y="139" font-size="10" fill="#b2b5be">现价 4437.0</text>
+    </svg>
+    <div class="cap">就近上/下各 <b>sideCount=2</b> 条实线画出；其余候选（虚线）只进候选池供 nearSr / 止损参考，且受 ≤3×ATR 距离上限约束。</div>
+   </div>
+  </div>
+ </div>
+</section>
+
+<section class="panel">
+ <div class="panel-head"><h2>③ 进出场 · 支阻位使用参数 <span class="muted tiny">工作台分析配置（同参数也进回测卡片）</span></h2></div>
+ <div class="panel-body">
+  <div class="grid4">
+   <div class="fld"><label>近支阻阈值 near（绝对价差）</label><input type="number" id="in-near" value="10" min="0.1" step="0.5"></div>
+   <div class="fld"><label>止损滑点 slip_stop</label><input type="number" id="in-slip-stop" value="3" min="0.1" step="0.5"></div>
+   <div class="fld"><label>兜底滑点 slip_fallback</label><input type="number" id="in-slip-fallback" value="10" min="0.1" step="0.5"></div>
+   <div class="fld"><label>保本滑点 slip_be</label><input type="number" id="in-slip-be" value="3" min="0.1" step="0.5"></div>
+  </div>
+  <div class="formula" id="formula">进场③ 在支阻位附近：| 背驰点价 − 支阻位价 | ≤ 10   ← 绝对价差，不再 × ATR
+止损参考位 = 正确侧最近支阻位 ± 3（做空 + / 做多 −）
+无正确侧支阻位 → 兜底：进场价 ± 10
+保本位 beStop = 进场K线极值 ± 3</div>
+  <div class="note">near 语义变更：原先 1.0×检测周期ATR → 现直接输入绝对价差（默认 10，与兜底滑点同量级）；工作台与回测两处界面、JS/py 双端、回测引擎同参同名同默认。</div>
+ </div>
+</section>
+
+<section class="panel">
+ <div class="panel-head"><h2>④ 回测卡片 · 支阻预设联动 <span class="muted tiny">主界面回测参数区新增</span></h2></div>
+ <div class="panel-body">
+  <div class="grid2">
+   <div class="fld"><label>支阻预设（与 /sr、工作台共享）</label>
+    <select id="bt-preset"><option value="">默认（系统计算 · 引擎默认参数）</option><option value="mix" selected>60人工+系统混合 · v1</option><option value="pure">纯密集区 · 保守</option></select></div>
+   <div class="fld"><label>近支阻阈值 near（绝对价差）</label><input type="number" id="bt-near" value="10" min="0.1" step="0.5"></div>
+  </div>
+  <div class="taglist" id="preset-tags"></div>
+  <div class="note">选中预设后，其识别参数与<b>各周期人工位</b>并入回测 cfg → BacktestEngine；回测周期仍由回测自身决定（预设里的周期列表不生效，人工位按回测周期过滤）。回测与实盘同口径，回测结果可直接验证参数选择。</div>
+ </div>
+</section>
+
+</div>
+</div>
+<div class="toast" id="toast" hidden></div>
+<footer class="page-footer">SR PARAMS LINKAGE / 交互设计预览 · 对应计划：人工支阻位（A）· near+滑点参数化（B）· 回测预设联动（C）</footer>
+<script>
+(() => {
+'use strict';
+const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
+let toastTimer = null;
+function toast(msg){ const t = $('#toast'); t.textContent = msg; t.hidden = false;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.hidden = true, 2600); }
+
+// ① 来源列交互：select 切换子行 + 价位即时计数 + 空值校验
+function refreshRow(p){
+  const sel = $(`.src-sel[data-period="${p}"]`);
+  const isManual = sel.value === 'manual';
+  const row = $(`tr.manual-row[data-res="${p}"]`);
+  if (row) row.hidden = !isManual;
+  if (isManual) countPrices(p);
+}
+function countPrices(p){
+  const input = $(`.manual-input[data-period="${p}"]`); if (!input) return;
+  const words = input.value.trim().split(/[\s,，;；]+/).filter(Boolean);
+  const ok = words.every(w => Number.isFinite(Number(w)));
+  const n = new Set(words.map(Number)).size;
+  $(`[data-count="${p}"]`).textContent = !ok ? '存在非法数字' : (n ? `${n} 个价位` : '0 个价位（该周期无支阻位）');
+}
+$$('.src-sel').forEach(s => s.addEventListener('change', () => { refreshRow(s.dataset.period); toast(`${s.dataset.period} 周期来源已切为「${s.value === 'manual' ? '人工输入' : '系统计算'}」（原型演示）`); }));
+$$('.manual-input').forEach(i => i.addEventListener('input', () => countPrices(i.dataset.period)));
+$('#btn-compute').addEventListener('click', () => {
+  const bad = $$('.src-sel').filter(s => s.value === 'manual' && !$$(`.manual-input[data-period="${s.dataset.period}"]`)[0].value.trim() && !$$('#tbl-levels tr[data-res]')[0]);
+  toast('原型演示：计算请求已发出（正式版走 /api/sr/compute；空人工价位=该周期无支阻位）');
+});
+refreshRow('60');
+
+// ③ 判定式预览随输入联动
+function fmt(v){ return String(Number(v) || 0); }
+function refreshFormula(){
+  $('#formula').textContent =
+`进场③ 在支阻位附近：| 背驰点价 − 支阻位价 | ≤ ${fmt($('#in-near').value)}   ← 绝对价差，不再 × ATR
+止损参考位 = 正确侧最近支阻位 ± ${fmt($('#in-slip-stop').value)}（做空 + / 做多 −）
+无正确侧支阻位 → 兜底：进场价 ± ${fmt($('#in-slip-fallback').value)}
+保本位 beStop = 进场K线极值 ± ${fmt($('#in-slip-be').value)}`;
+}
+['in-near','in-slip-stop','in-slip-fallback','in-slip-be'].forEach(id => $('#'+id).addEventListener('input', refreshFormula));
+
+// ④ 预设携带内容演示
+const PRESETS = {
+  '': ['默认：srTypes=cluster,boll · 全部周期系统计算'],
+  mix: ['srTypes: cluster + boll', '60: 人工位 [4418, 4440, 4462.5, 4478, 4495]', '15/3/D: 系统计算（minTouch 3/8/4）', 'clusterAtr 0.5 · sideCount 2'],
+  pure: ['srTypes: cluster', '全部周期系统计算', 'minTouch 全局 6（更严）', 'clusterAtr 0.4'],
+};
+function refreshTags(){ $('#preset-tags').innerHTML = PRESETS[$('#bt-preset').value].map(t => `<span class="tag">${t}</span>`).join(''); }
+$('#bt-preset').addEventListener('change', refreshTags);
+refreshTags(); refreshFormula();
+})();
+</script>
+</body>
+</html>

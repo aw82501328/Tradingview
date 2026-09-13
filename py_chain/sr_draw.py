@@ -29,17 +29,17 @@ from .marks import _ensure_hist_loaded, _purge_broken_marks, _scroll_realtime
 from .monitor import RES_WAIT
 from .sr_flip import LEVEL_ORDER
 
-# 主线（合并后按周期选取的位置线）
+# 主线（各周期独立就近选取的位置线）
 SRT_PREFIX = "SRT·"
 SRT_IDS_KEY = "sr_test_ids"
-# 调试叠加（合并前原始成员线）
+# 调试叠加（本周期全量原始候选线）
 RAW_PREFIX = "RAW·"
 RAW_IDS_KEY = "sr_raw_ids"
 
 CHUNK = 50
 DEFAULT_SR_COLOR = "#787B86"
-RAW_KIND_COLORS = {"cluster": "#F0B90B", "fib": "#5B8DEF", "boll": "#26A69A"}
-KIND_NAMES = {"cluster": "密集区", "fib": "黄金分割", "boll": "BOLL"}
+RAW_KIND_COLORS = {"cluster": "#F0B90B", "fib": "#5B8DEF", "boll": "#26A69A", "manual": "#E8734A"}
+KIND_NAMES = {"cluster": "密集区", "fib": "黄金分割", "boll": "BOLL", "manual": "手动位"}
 
 # TV resolution() 可能回别名（日线 1D/周线 1W 等），比较前归一化
 _RES_ALIAS = {"1W": "W", "1D": "D", "4H": "240", "1H": "60", "W": "W", "D": "D"}

@@ -5,7 +5,7 @@
 职责：
   1. 数据覆盖判定 + 缓存优先取数（不足自动从 TradingView CDP 补拉，合并回写共享缓存）
   2. 各周期重建笔（backtest.build_bis）→ 引擎 compute_srflip（参数全透传）
-  3. meta 派生（当前价/各周期ATR/合并容差等，供页面展示合并语义与级别回填）
+  3. meta 派生（当前价/各周期ATR等，供页面展示与级别回填）
 
 纯编排：不连 CDP 之外的东西、不绘图；绘图见 sr_draw.py。
 级别键一律用 6 个规范化键：W / D / 240 / 60 / 15 / 3（1W→W、1D→D 在入口归一化，
@@ -19,7 +19,7 @@ from .backtest import build_bis
 from .sr_flip import (LEVEL_ORDER, DEFAULT_SR_TYPES, FIB_LEVELS,
                       BOLL_LENGTH, BOLL_MULT, RECENT_BI_COUNT,
                       TOUCH_WEIGHT, BARS_WEIGHT, SIDE_COUNT, MAX_PER_PERIOD,
-                      MAX_DIST_ATR, CLUSTER_ATR, MERGE_ATR,
+                      MAX_DIST_ATR, CLUSTER_ATR,
                       RECENT_CLUSTER_ATR, _kindOf, compute_srflip)
 
 # 级别（大 → 小，与 LEVEL_ORDER 相对顺序一致；不含 30S / 1W / 1D 别名键）
@@ -184,7 +184,6 @@ def engine_kwargs_of(cfg):
     """把页面 cfg 映射为 compute_srflip 关键字参数（缺失键走引擎默认）。"""
     return {
         "clusterAtr": float(cfg.get("clusterAtr", CLUSTER_ATR)),
-        "mergeAtr": float(cfg.get("mergeAtr", MERGE_ATR)),
         "recentClusterAtr": float(cfg.get("recentClusterAtr", RECENT_CLUSTER_ATR)),
         "maxDistAtr": float(cfg.get("maxDistAtr", MAX_DIST_ATR)),
         "maxPerPeriod": int(cfg.get("maxPerPeriod", MAX_PER_PERIOD)),
@@ -199,7 +198,7 @@ def engine_kwargs_of(cfg):
         "touchWeight": float(cfg.get("touchWeight", TOUCH_WEIGHT)),
         "barsWeight": float(cfg.get("barsWeight", BARS_WEIGHT)),
         "sideCount": int(cfg.get("sideCount", SIDE_COUNT)),
-        "mergeDetail": True,   # 调试页恒开成员追溯（明细表/RAW 叠加都依赖）
+        "manualLevels": dict(cfg.get("manualLevels") or {}),
     }
 
 
@@ -220,54 +219,47 @@ def build_chain_result(bars_by_period, cfg, log=None, bis_by_period=None):
         log(f"  {res:>4}: {len(bis_by_period.get(res) or [])} 笔"
             f"（K线 {len(bars_by_period[res])} 根）")
     kw = engine_kwargs_of(cfg)
-    log(f"计算支阻位（{','.join(kw['srTypes'])}；合并容差×最小ATR 参数={kw['mergeAtr']}）...")
+    manual = list(kw.get("manualLevels") or {})
+    log(f"计算支阻位（{','.join(kw['srTypes'])}；各周期独立成线，不合并"
+        + (f"；人工输入周期：{'/'.join(manual)}" if manual else "") + "）...")
     result = compute_srflip(bis_by_period, bars_by_period, periods, **kw)
-    meta = build_meta(result, bars_by_period, bis_by_period, cfg, kw)
+    meta = build_meta(result, bars_by_period, bis_by_period, cfg)
     return result, meta
 
 
-def build_meta(result, bars_by_period, bis_by_period, cfg, kw=None):
-    """派生展示用元信息：当前价、各周期 ATR、合并容差（与引擎 717-720 口径一致）、
-    bar/笔计数、覆盖判定。"""
-    kw = kw or engine_kwargs_of(cfg)
+def build_meta(result, bars_by_period, bis_by_period, cfg):
+    """派生展示用元信息：当前价、各周期 ATR、bar/笔计数、覆盖判定。"""
     periodAtrs = result["periodAtrs"]
-    # 引擎合并容差 = mergeAtr × 最小「有候选周期」ATR（口径同 compute_srflip）
-    atrValues = [periodAtrs[r] for r in cfg["periods"]
-                 if result["periods"].get(r) and r in periodAtrs]
-    minAtr = min(atrValues) if atrValues else 0.0
     periods_cov = coverage(bars_by_period, cfg["periods"], cfg.get("from_ts", 0))
     return {
         "current_price": result["currentPrice"],
         "per_level_atr": {r: periodAtrs[r] for r in cfg["periods"] if r in periodAtrs},
         "bar_counts": {r: len(bars_by_period.get(r) or []) for r in cfg["periods"]},
         "bi_counts": {r: len(bis_by_period.get(r) or []) for r in cfg["periods"]},
-        "min_atr": round(minAtr, 6),
-        "merge_tol": round(kw["mergeAtr"] * minAtr, 6),
         "coverage": periods_cov,
     }
 
 
 def main_lines(result):
-    """drawnByPeriod → 每显示周期画线数据（含合并项全字段，供行点击/成员查询）。
-    @returns { 显示周期: [line,...] }，line 带 breakTime/price/label/level/sources 等引擎原字段。"""
+    """drawnByPeriod → 每显示周期画线数据（含候选项全字段，供行点击）。
+    @returns { 显示周期: [line,...] }，line 带 breakTime/price/label/level/srcType 等引擎原字段。"""
     return {str(L): list(lines) for L, lines in (result.get("drawnByPeriod") or {}).items()}
 
 
 def raw_pool_lines(result, maxDistAtr=MAX_DIST_ATR):
-    """合并前原始候选 RAW 线（调试叠加用）：与合并灰线同一继承口径，同框对照。
+    """全量候选 RAW 线（调试叠加用）：与灰线同一「各周期独立」口径，同框对照。
 
-    对每个显示周期 L（drawnByPeriod 的键），叠加 来源级别 ≥ L（即比 L 粗或同级，
-    LEVEL_ORDER.index(R) <= index(L)）的各来源周期原始候选（result["periods"]：
-    密集区已按 maxPerPeriod 截断 + fib + boll，天然有上限）。
-    原始候选再多条最终也只会合成 ≤2×sideCount 条灰线，这里保留全部——
-    同价位多来源重叠正是「该价被跨级测试、合并成一 条」的可视依据。
+    对每个显示周期 L（drawnByPeriod 的键），叠加**仅 L 自身周期**的原始候选
+    （result["periods"]：密集区已按 maxPerPeriod 截断 + fib + boll）。
+    不合并、不继承其它周期线——灰线 = 本周期候选就近选取，RAW = 本周期候选全量，
+    同框即可对照「哪些候选被选取」。
 
-    距离过滤（防喧宾夺主）：只保留距 currentPrice ≤ maxDistAtr×该来源周期ATR 的
-    候选（与 drawnByPeriod 选取的距离上限同口径；来源无 ATR 或无限价时不限）。
+    距离过滤（防喧宾夺主）：只保留距 currentPrice ≤ maxDistAtr×该周期ATR 的
+    候选（与 drawnByPeriod 选取的距离上限同口径；无 ATR 或无限价时不限）；
+    **手动位豁免距离过滤**——人工价位「全部画出」不受距离上限，RAW 对照层同样全可见。
     想扩大可见范围就调大页面「选取距离上限(maxDistAtr)」。
 
-    @returns { L: [ {time, price, kind, type, source} ] }（price 升序；成员追溯
-    merged.members 仍在明细表展开用，不在这里重复画）
+    @returns { L: [ {time, price, kind, type, source} ] }（price 升序）
     """
     drawn = result.get("drawnByPeriod") or {}
     periods = result.get("periods") or {}
@@ -275,24 +267,17 @@ def raw_pool_lines(result, maxDistAtr=MAX_DIST_ATR):
     current = result.get("currentPrice")
     out = {}
     for L in drawn:
-        li = LEVEL_ORDER.index(L)
         items = []
-        for R, cands in periods.items():
-            try:
-                ri = LEVEL_ORDER.index(R)
-            except ValueError:
-                continue
-            if ri > li:
-                continue  # R 比 L 更细：不继承到本图（与灰线口径一致）
-            atr = periodAtrs.get(R)
-            for f in cands:
-                price = float(f["price"])
-                if current is not None and atr:
-                    if abs(price - current) > maxDistAtr * atr:
-                        continue
-                items.append({"time": int(f.get("breakTime") or 0), "price": price,
-                              "kind": _kindOf(f), "type": f.get("type") or "",
-                              "source": R})
+        cands = periods.get(L) or []
+        atr = periodAtrs.get(L)
+        for f in cands:
+            price = float(f["price"])
+            if current is not None and atr and not f.get("manual"):
+                if abs(price - current) > maxDistAtr * atr:
+                    continue
+            items.append({"time": int(f.get("breakTime") or 0), "price": price,
+                          "kind": _kindOf(f), "type": f.get("type") or "",
+                          "source": L})
         items.sort(key=lambda x: x["price"])
         out[L] = items
     return out

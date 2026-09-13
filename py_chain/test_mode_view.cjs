@@ -1,7 +1,7 @@
 const fs=require('fs'),vm=require('vm'),assert=require('node:assert/strict');
 const html=fs.readFileSync('py_chain/web/index.html','utf8');
 let script=[...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].find(m=>m[1].includes('const MODES'))[1].replace(/init\(\);\s*$/, '');
-const nodes=new Map();const node=id=>{if(!nodes.has(id))nodes.set(id,{value:'',textContent:'',innerHTML:'',style:{},hidden:false});return nodes.get(id)};
+const nodes=new Map();const node=id=>{if(!nodes.has(id))nodes.set(id,{value:'',textContent:'',innerHTML:'',style:{},hidden:false,setAttribute(){},getAttribute:()=>null});return nodes.get(id)};
 const ctx={console,URLSearchParams,location:{search:'?mode=bad',origin:'http://localhost'},window:{addEventListener(){}},document:{getElementById:node,querySelector:()=>({firstChild:{textContent:''}})}};
 vm.createContext(ctx);vm.runInContext(script,ctx);
 vm.runInContext(`

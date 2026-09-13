@@ -83,6 +83,17 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
 .plist-item .nm{flex:1;min-width:35px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;background:transparent;border:none;color:var(--text);padding:3px 4px;cursor:pointer;font-size:12px}
 .plist-item .nm:hover{color:#fff}
 .plist-empty{color:var(--muted);padding:8px;font-size:11px}
+.src-sel{font-size:11px;padding:2px 4px}
+tr.edit-sub td{white-space:normal;background:#141926;padding:5px 9px 7px}
+tr.edit-sub:hover td{background:#1a2030}
+.slot .param-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px 10px}
+.slot .param-grid label{display:block;color:var(--muted);font-size:11px;margin-bottom:2px}
+.slot .param-grid input{width:100%;padding:2px 5px;font-size:11.5px}
+.slot .sys-note{color:var(--muted);font-size:10.5px;margin-top:4px}
+.manual-input{width:100%;font-family:Consolas,Menlo,monospace}
+.manual-meta{display:flex;justify-content:space-between;gap:8px;color:var(--muted);font-size:11px;margin-top:3px}
+.mono{font-family:Consolas,Menlo,monospace;font-variant-numeric:tabular-nums}
+@media (max-width:720px){.slot .param-grid{grid-template-columns:1fr 1fr}}
 </style>
 <link rel="stylesheet" href="/sr-tune.css">
 <link rel="stylesheet" href="/theme.css">
@@ -92,7 +103,7 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
 <h1>支阻位参数调试控制台 <span class="badge idle" id="badge-busy">idle</span>
   <a href="/" style="float:right;font-size:13px;">← 三模式控制台</a>
 </h1>
-<div class="statusline">密集区 / 黄金分割 / BOLL 三类同池合并 · 每周期图 ≤2×每侧条数 · 灰线+来源标注 ·
+<div class="statusline">支阻位（系统密集区/人工输入，逐周期二选一）+ 叠加层（黄金分割/BOLL，开关即叠加）· 不合并各周期独立 · 人工位全部画出 ·
   <b id="occupy"></b></div>
 
 <div class="grid">
@@ -112,52 +123,88 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
 
   <!-- ② 级别矩阵 -->
   <div class="card">
-    <h2>② 周期与参数 <span class="hint">勾选参与计算 · 点击周期编辑</span></h2>
+    <h2>② 周期与参数 <span class="hint">勾选参与计算 · 子行随来源切换：系统=本周期参数 / 人工=价位输入</span></h2>
     <table id="tbl-levels">
-      <thead><tr><th></th><th>周期</th><th>ATR</th></tr></thead>
+      <thead><tr><th></th><th>周期</th><th>ATR</th><th>支阻来源</th></tr></thead>
       <tbody>
         <tr data-res="W"><td><input type="checkbox" class="chk-res"></td><td><button type="button" class="period-edit" data-period="W">W 周线</button></td>
-          <td class="num atr">—</td></tr>
+          <td class="num atr">—</td>
+          <td><select class="src-sel" data-period="W"><option value="">系统计算</option><option value="manual">人工输入</option></select></td></tr>
+        <tr class="edit-sub" data-res="W"><td colspan="4">
+          <div class="slot slot-sys" data-period="W"></div>
+          <div class="slot slot-manual" data-period="W" hidden>
+            <input type="text" class="manual-input" data-period="W" placeholder="多个价位用逗号/空格分隔，如 4450, 4460.5">
+            <div class="manual-meta"><span>人工 = 替换本周期密集区支阻位；全部画出（不受每侧条数/距离上限）。未填价位 = 该周期没有支阻位</span><span class="mono" data-count="W">0 个价位</span></div>
+          </div>
+        </td></tr>
         <tr data-res="D"><td><input type="checkbox" class="chk-res" checked></td><td><button type="button" class="period-edit" data-period="D">D 日线</button></td>
-          <td class="num atr">—</td></tr>
+          <td class="num atr">—</td>
+          <td><select class="src-sel" data-period="D"><option value="">系统计算</option><option value="manual">人工输入</option></select></td></tr>
+        <tr class="edit-sub" data-res="D"><td colspan="4">
+          <div class="slot slot-sys" data-period="D"></div>
+          <div class="slot slot-manual" data-period="D" hidden>
+            <input type="text" class="manual-input" data-period="D" placeholder="多个价位用逗号/空格分隔，如 4450, 4460.5">
+            <div class="manual-meta"><span>人工 = 替换本周期密集区支阻位；全部画出（不受每侧条数/距离上限）。未填价位 = 该周期没有支阻位</span><span class="mono" data-count="D">0 个价位</span></div>
+          </div>
+        </td></tr>
         <tr data-res="240"><td><input type="checkbox" class="chk-res" checked></td><td><button type="button" class="period-edit" data-period="240">240 4小时</button></td>
-          <td class="num atr">—</td></tr>
+          <td class="num atr">—</td>
+          <td><select class="src-sel" data-period="240"><option value="">系统计算</option><option value="manual">人工输入</option></select></td></tr>
+        <tr class="edit-sub" data-res="240"><td colspan="4">
+          <div class="slot slot-sys" data-period="240"></div>
+          <div class="slot slot-manual" data-period="240" hidden>
+            <input type="text" class="manual-input" data-period="240" placeholder="多个价位用逗号/空格分隔，如 4450, 4460.5">
+            <div class="manual-meta"><span>人工 = 替换本周期密集区支阻位；全部画出（不受每侧条数/距离上限）。未填价位 = 该周期没有支阻位</span><span class="mono" data-count="240">0 个价位</span></div>
+          </div>
+        </td></tr>
         <tr data-res="60"><td><input type="checkbox" class="chk-res" checked></td><td><button type="button" class="period-edit" data-period="60">60 1小时</button></td>
-          <td class="num atr">—</td></tr>
+          <td class="num atr">—</td>
+          <td><select class="src-sel" data-period="60"><option value="">系统计算</option><option value="manual">人工输入</option></select></td></tr>
+        <tr class="edit-sub" data-res="60"><td colspan="4">
+          <div class="slot slot-sys" data-period="60"></div>
+          <div class="slot slot-manual" data-period="60" hidden>
+            <input type="text" class="manual-input" data-period="60" placeholder="多个价位用逗号/空格分隔，如 4450, 4460.5">
+            <div class="manual-meta"><span>人工 = 替换本周期密集区支阻位；全部画出（不受每侧条数/距离上限）。未填价位 = 该周期没有支阻位</span><span class="mono" data-count="60">0 个价位</span></div>
+          </div>
+        </td></tr>
         <tr data-res="15"><td><input type="checkbox" class="chk-res" checked></td><td><button type="button" class="period-edit" data-period="15">15 15分钟</button></td>
-          <td class="num atr">—</td></tr>
+          <td class="num atr">—</td>
+          <td><select class="src-sel" data-period="15"><option value="">系统计算</option><option value="manual">人工输入</option></select></td></tr>
+        <tr class="edit-sub" data-res="15"><td colspan="4">
+          <div class="slot slot-sys" data-period="15"></div>
+          <div class="slot slot-manual" data-period="15" hidden>
+            <input type="text" class="manual-input" data-period="15" placeholder="多个价位用逗号/空格分隔，如 4450, 4460.5">
+            <div class="manual-meta"><span>人工 = 替换本周期密集区支阻位；全部画出（不受每侧条数/距离上限）。未填价位 = 该周期没有支阻位</span><span class="mono" data-count="15">0 个价位</span></div>
+          </div>
+        </td></tr>
         <tr data-res="3"><td><input type="checkbox" class="chk-res" checked></td><td><button type="button" class="period-edit" data-period="3">3 3分钟 </button></td>
-          <td class="num atr">—</td></tr>
+          <td class="num atr">—</td>
+          <td><select class="src-sel" data-period="3"><option value="">系统计算</option><option value="manual">人工输入</option></select></td></tr>
+        <tr class="edit-sub" data-res="3"><td colspan="4">
+          <div class="slot slot-sys" data-period="3"></div>
+          <div class="slot slot-manual" data-period="3" hidden>
+            <input type="text" class="manual-input" data-period="3" placeholder="多个价位用逗号/空格分隔，如 4450, 4460.5">
+            <div class="manual-meta"><span>人工 = 替换本周期密集区支阻位；全部画出（不受每侧条数/距离上限）。未填价位 = 该周期没有支阻位</span><span class="mono" data-count="3">0 个价位</span></div>
+          </div>
+        </td></tr>
       </tbody>
     </table>
-    <div class="merge-tip">显示周期 L 的候选池 = 级别 ≥ L 的全部合并线（高级别继承到低周期图）。1W/1D 别名与 30S 不入引擎（UI 已归一化为 W/D）。</div>
+    <div class="merge-tip">显示周期 L 的候选池 = 仅 L 自身周期的候选（各周期独立，不继承其它周期线）。1W/1D 别名与 30S 不入引擎（UI 已归一化为 W/D）。不同周期可混合来源（如 60 人工 + 15 系统）。</div>
   </div>
 
-  <!-- ③ 类型开关 -->
+  <!-- ③ 显示/绘图 + 预设（原⑤，类型开关并入通用计算设置后重编号） -->
   <div class="card">
-    <h2>③ 类型开关</h2>
-    <label class="chk"><input type="checkbox" id="t-cluster" checked> 密集区 cluster</label>
-    <div style="margin:3px 0 3px 24px;">
-      <label class="chk small"><input type="checkbox" id="t-flip" checked> 强互换 flip（R2S / S2R）</label><br>
-      <label class="chk small"><input type="checkbox" id="t-recent" checked> 近期极值 recent（RES / SUP）</label>
-    </div>
-    <label class="chk"><input type="checkbox" id="t-fib"> 黄金分割 fib <span class="muted small">（默认关）</span></label><br>
-    <label class="chk"><input type="checkbox" id="t-boll" checked> BOLL boll</label>
-  </div>
-
-  <!-- ⑤ 显示/绘图 + 预设 -->
-  <div class="card">
-    <h2>⑤ 显示 / 绘图</h2>
+    <h2>③ 显示 / 绘图</h2>
     <div class="row">
       <label>线色</label><input type="color" id="d-color" value="#787b86">
       <label class="chk small"><input type="checkbox" id="d-text" checked> 文本标注</label>
-      <label class="chk small"><input type="checkbox" id="d-raw"> 调试:叠合并前原始线</label>
+      <label class="chk small"><input type="checkbox" id="d-raw"> 调试:叠加RAW原始线</label>
     </div>
     <div class="row">
       <button class="primary" id="btn-draw">画图</button>
       <button class="danger" id="btn-clear">清除本模块线</button>
     </div>
-    <div class="merge-tip" id="raw-note" style="display:none;">叠加 RAW· 合并前原始候选线：每张图显示 级别 ≥ 本图 的全部来源候选（密集区黄 / 黄金分割蓝 / BOLL 青），与合并后灰线同框对照；只画距现价 ≤ 距离上限×级别ATR 的候选。</div>
+    <div class="merge-tip" id="raw-note" style="display:none;">叠加 RAW· 本周期原始候选线：每张图只显示 本图周期 的全部候选（密集区黄 / 黄金分割蓝 / BOLL 青），与灰线同框对照；只画距现价 ≤ 距离上限×本周期ATR 的候选。</div>
     <div class="row" style="border-top:1px solid var(--border);margin-top:8px;padding-top:7px">
       <span style="color:#fff;font-size:12px">预设</span>
       <input type="text" id="preset-name" placeholder="新预设名称" maxlength="40">
@@ -187,17 +234,22 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
     <div class="banner" id="banner">⚠ 参数已改动，<b>结果表与图上仍为上次参数</b> —— 请「重算」后再画图。</div>
   </div>
 
-  <!-- ④ 通用计算设置（生成 → 截断 ⊂ 密集区 → 合并 → 选取） -->
+  <!-- ②B 通用计算设置（原④；类型开关已并入：勾选=启用该组件，fib/BOLL 勾选即叠加） -->
   <div class="card sec">
-    <h2>④ 通用计算设置 <span class="hint">按生成 → 截断 → 合并 → 选取；改后重算生效</span></h2>
+    <h2>通用计算设置 <span class="hint">按生成 → 截断 → 选取；组件前打勾启用；改后重算生效</span></h2>
 
     <fieldset class="step">
       <legend><span class="stepn">1</span> 生成候选</legend>
-      <div class="merge-tip">三类各自出线；开关在③。密集区才有「截断」子步，fib / BOLL 不进截断。</div>
+      <div class="merge-tip">支阻位来源在②逐周期选择（系统计算=密集区，恒开启；人工输入=手动价位）。fib / BOLL 为<b>叠加层</b>——组件前打勾即叠加，独立于支阻位来源，人工周期照样叠加；密集区才有「截断」子步，fib / BOLL / 手动位不进截断。</div>
 
       <fieldset class="nest" id="box-cluster">
-        <legend>密集区 cluster</legend>
-        <div class="merge-tip">密集区识别参数统一在左侧「周期与参数」中按周期编辑。</div>
+        <legend>密集区 cluster <span class="tag">支阻位·系统计算</span></legend>
+        <div class="merge-tip">识别参数在②「周期与参数」子行按周期编辑；子类开关：</div>
+        <div class="row" style="margin-left:6px">
+          <label class="chk small"><input type="checkbox" id="t-flip" checked> 强互换 flip（R2S / S2R）</label>
+          <label class="chk small"><input type="checkbox" id="t-recent" checked> 近期极值 recent（RES / SUP）</label>
+          <span class="muted small">（仅系统计算周期生效）</span>
+        </div>
         <fieldset class="nest2">
           <legend>截断 <span class="tag">仅密集区</span></legend>
           <div class="merge-tip">超上限才按强度评分留 Top N；fib / BOLL 豁免，不走这一步。</div>
@@ -212,37 +264,26 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
 
       <div class="grid-src">
         <fieldset class="nest" id="box-fib">
-          <legend>黄金分割 fib</legend>
+          <legend><label class="chk"><input type="checkbox" id="t-fib"> 黄金分割 fib</label> <span class="tag">叠加层</span></legend>
           <div class="row"><label style="width:158px">黄金分割比率</label>
             <input type="text" data-k="fibLevels" value="0.382,0.5,0.618" style="width:150px"></div>
-          <div class="merge-tip">关时忽略；0&lt;r&lt;1 至多 6 项</div>
+          <div class="merge-tip">不勾忽略；0&lt;r&lt;1 至多 6 项</div>
         </fieldset>
         <fieldset class="nest" id="box-boll">
-          <legend>BOLL</legend>
+          <legend><label class="chk"><input type="checkbox" id="t-boll" checked> BOLL</label> <span class="tag">叠加层</span></legend>
           <div class="row"><label style="width:90px">周期</label>
             <input type="number" data-k="bollLength" value="26" min="2" step="1">
             <label>σ 倍数</label>
             <input type="number" data-k="bollMult" value="2.0" min="0.5" step="0.1"></div>
-          <div class="merge-tip">每周期三轨全生成；上图条数由第 3 步裁</div>
+          <div class="merge-tip">每周期三轨全生成；上图条数由第 2 步裁</div>
         </fieldset>
       </div>
     </fieldset>
 
     <fieldset class="step">
-      <legend class="warn"><span class="stepn">2</span> 跨周期合并</legend>
-      <div class="merge-tip">三类同池。价差 ≤ 容差×最小周期ATR 并成一条。不评分、不看离现价多远。</div>
-      <div class="row">
-        <label>合并容差(×最小周期ATR)</label>
-        <input type="number" data-k="mergeAtr" value="0.5" min="0.01" step="0.1" style="width:70px">
-        <span class="merge-tip" id="merge-preview"></span>
-      </div>
-      <div class="merge-tip">并条后：价按触及次数加权平均 · level=最大来源周期 · 类型冲突按触及多者 · 多来源混合线丢 fib/pending/boll 标记。调大 → 并条更多；调小 → 更少。用「合并池」tab 展开成员与 RAW 叠加核对。</div>
-    </fieldset>
-
-    <fieldset class="step">
-      <legend><span class="stepn">3</span> 选取上图</legend>
-      <div class="merge-tip">合并之后才走。距现价最近上/下各 N 条，且 ≤ 距离上限×该线级别ATR。纯就近，不再按评分。</div>
-      <div class="row"><label style="width:158px">距离上限(×线级别ATR)</label>
+      <legend><span class="stepn">2</span> 选取上图</legend>
+      <div class="merge-tip">生成/截断之后直接选取（不合并）。各周期独立：距现价最近上/下各 N 条，且 ≤ 距离上限×本周期ATR。纯就近，不再按评分。</div>
+      <div class="row"><label style="width:158px">距离上限(×本周期ATR)</label>
         <input type="number" data-k="maxDistAtr" value="3.0" min="0.1" step="0.1"></div>
       <div class="row"><label style="width:158px">每侧条数 sideCount</label>
         <input type="number" data-k="sideCount" value="2" min="1" max="10" step="1">
@@ -250,12 +291,12 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
     </fieldset>
   </div>
 
-  <!-- ⑥ 结果明细表 -->
+  <!-- ④ 结果明细表（原⑥） -->
   <div class="card">
-    <h2>⑥ 结果明细表
+    <h2>④ 结果明细表
       <span style="float:right;font-weight:400;font-size:12px">
         <span class="muted">过滤:</span>
-        <select id="f-family" style="width:92px"><option value="">全部来源</option><option value="cluster">密集区</option><option value="fib">黄金分割</option><option value="boll">BOLL</option><option value="mixed">位置线(混合)</option></select>
+        <select id="f-family" style="width:92px"><option value="">全部来源</option><option value="cluster">密集区</option><option value="fib">黄金分割</option><option value="boll">BOLL</option><option value="manual">手动位</option></select>
         <select id="f-type" style="width:100px"><option value="">全部子类型</option><option>R2S</option><option>S2R</option><option>RES</option><option>SUP</option><option>上轨</option><option>中轨</option><option>下轨</option></select>
         <select id="f-level" style="width:72px"><option value="">全部级别</option></select>
         <label class="chk small"><input type="checkbox" id="f-drawnonly"> 仅图上选中</label>
@@ -264,10 +305,9 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
     </h2>
     <div class="tabs">
       <button class="on" data-tab="periods">1 原始候选 periods</button>
-      <button data-tab="merged">2 合并池 merged</button>
+      <button data-tab="merged">2 候选池 merged</button>
       <button data-tab="drawn">3 图上结果 drawnByPeriod</button>
     </div>
-    <div class="merge-tip" id="merge-semantics"></div>
     <div class="filterbar" id="filter-row"></div>
     <div class="scrollbox"><table id="result-tbl">
       <thead id="result-thead"></thead>
@@ -276,14 +316,14 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
   </div>
 
   <details class="details">
-    <summary>语义速查（生成 / 截断 / 合并 / 选取）</summary>
+    <summary>语义速查（生成 / 截断 / 选取）</summary>
     <ul>
-      <li>生成·密集区 = 强互换(R2S/S2R：触及≥minTouch 且角色反转或突破) + 近期极值(RES/SUP：最近 N 笔端点、宽容差、无触及要求)</li>
-      <li>生成·黄金分割 = 每方向最新非一类买卖点（引擎内现算）参照笔 × 比率；无已形成点走 pending 预期位</li>
-      <li>生成·BOLL = 每周期最后 <b>一根已收盘K线</b>的 SMA±σ×倍数 三轨；中轨按现价侧定支撑/阻力；不足 length 根无位</li>
-      <li>截断（仅密集区）= 超 maxPerPeriod 按评分留 Top N；评分 = 触及权重×触及 + 经过K线权重×经K线（候选集内 min-max 归一）；fib/boll 豁免</li>
-      <li>合并 = 三类同池；价差 ≤ 合并容差×最小周期ATR 并条（价触及加权、level=最大来源周期、混合线去 fib/pending/boll 标记）</li>
-      <li>选取上图 = 每显示周期池 = 级别 ≥ L 的合并线，距现价最近上/下各 sideCount 条，每条 ≤ 距离上限×线级别ATR</li>
+      <li>支阻位来源（②逐周期二选一）= <b>系统计算</b>（密集区：强互换 R2S/S2R 触及≥minTouch 且角色反转或突破 + 近期极值 RES/SUP）或 <b>人工输入</b>（手动价位，type 按现价侧）</li>
+      <li>叠加层（③开关，独立于支阻位来源）= 黄金分割（每方向最新非一类买卖点参照笔×比率，无已形成点走 pending）+ BOLL（每周期最后 <b>一根已收盘K线</b>的 SMA±σ×倍数 三轨，中轨按现价侧）；人工周期照样叠加</li>
+      <li>截断（仅密集区）= 超 maxPerPeriod 按评分留 Top N；评分 = 触及权重×触及 + 经过K线权重×经K线（候选集内 min-max 归一）；fib/boll/manual 豁免</li>
+      <li>不合并 = 全部候选逐条进全量候选池（价格=原始识别价，同价位不并条、不做加权平均；手动位与人工/系统支阻位同池）</li>
+      <li>选取上图 = 系统周期：距现价最近上/下各 sideCount 条、≤距离上限×本周期ATR；<b>人工周期：输入几条画几条</b>（不受条数/距离限制），叠加层仍就近选取</li>
+      <li>人工输入未填价位 = 该周期没有支阻位（不画线、不进候选池，叠加层照常）</li>
     </ul>
   </details>
   </div>
@@ -293,11 +333,11 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
 <script>
 const LEVELS = ['W', 'D', '240', '60', '15', '3'];
 const LEVEL_NAME = { W: 'W 周线', D: 'D 日线', 240: '240 4H', 60: '60 1H', 15: '15 15m', 3: '3 3m' };
-const FAMILY = { cluster: '密集区', fib: '黄金分割', boll: 'BOLL', mixed: '位置线(混合)' };
+const FAMILY = { cluster: '密集区', fib: '黄金分割', boll: 'BOLL', manual: '手动位' };
 
 const state = { busy: null, active: null, hasResult: false, computedAt: null,
                 cfg: null, meta: null, periods: {}, merged: [], drawn: {}, current: null,
-                tab: 'periods', expanded: {}, watchdogs: {},
+                tab: 'periods', watchdogs: {},
                 sessionComputed: false,   // 本页面会话内是否真实计算成功（画图解锁的唯一依据）
                 loadedPreset: null };     // 当前列表高亮的预设名
 let logs = [];
@@ -306,6 +346,26 @@ const defaultMinTouchs = {W:4,D:4,'240':4,'60':3,'15':3,'3':8};
 let minTouchsByPeriod = {...defaultMinTouchs};
 // Legacy defaults also retain the existing Fibonacci clustering behavior.
 let clusterDefaults = {clusterAtr:'0.5',recentClusterAtr:'1.0',recentBiCount:'20'};
+// 人工支阻位：{ 周期: 价位原始文本 }（select=人工输入 的周期才有键；空文本=该周期无支阻位）
+let manualLevelsByPeriod = {};
+// 来源切换 → 子行内容切换：系统计算显示该周期 4 项参数（sr-tune.js 注入），人工显示价位输入
+function syncSourceSlots(p) {
+  const sel = q(`.src-sel[data-period="${p}"]`);
+  const isManual = !!sel && sel.value === "manual";
+  const sys = q(`.slot-sys[data-period="${p}"]`);
+  const man = q(`.slot-manual[data-period="${p}"]`);
+  if (sys) sys.hidden = isManual;
+  if (man) man.hidden = !isManual;
+}
+function countManual(p) {
+  const input = q(`.manual-input[data-period="${p}"]`);
+  const out = q(`[data-count="${p}"]`);
+  if (!input || !out) return;
+  const words = input.value.trim().split(/[\s,，;；]+/).filter(Boolean);
+  const ok = words.every(w => Number.isFinite(Number(w)));
+  const n = new Set(words.map(Number)).size;
+  out.textContent = !ok ? '存在非法数字' : (n ? `${n} 个价位` : '0 个价位（该周期无支阻位）');
+}
 
 function el(id) { return document.getElementById(id); }
 function q(sel) { return document.querySelector(sel); }
@@ -400,11 +460,12 @@ function updateButtons() {
   syncParamDim();
 }
 function syncParamDim() {
-  // ③ 类型开关关掉时，④ 对应子块变淡（仍可改值，改后须重算）
+  // 组件勾选关掉时，通用计算设置内对应子块变淡（仍可改值，改后须重算）；
+  // 密集区恒开启（支阻位来源由②逐周期决定），仅子类开关影响变淡
   const on = id => el(id).checked;
-  el('box-cluster').classList.toggle('dim', !on('t-cluster'));
-  el('box-flip')?.classList.toggle('dim', !on('t-cluster') || !on('t-flip'));
-  el('box-recent')?.classList.toggle('dim', !on('t-cluster') || !on('t-recent'));
+  el('box-cluster').classList.toggle('dim', !on('t-flip') && !on('t-recent'));
+  el('box-flip')?.classList.toggle('dim', !on('t-flip'));
+  el('box-recent')?.classList.toggle('dim', !on('t-recent'));
   el('box-fib').classList.toggle('dim', !on('t-fib'));
   el('box-boll').classList.toggle('dim', !on('t-boll'));
 }
@@ -417,13 +478,15 @@ function collectCfg() {
   cfg.minTouchs = {...minTouchsByPeriod};
   Object.assign(cfg, clusterDefaults);
   cfg.clusterParamsByPeriod = structuredClone(clusterParamsByPeriod);
-  cfg.srTypes = [];
-  if (el('t-cluster').checked) cfg.srTypes.push('cluster');
+  // 密集区恒开启（支阻位来源由②逐周期的 系统计算/人工输入 决定）；fib/boll 为叠加开关
+  cfg.srTypes = ['cluster'];
   if (el('t-fib').checked) cfg.srTypes.push('fib');
   if (el('t-boll').checked) cfg.srTypes.push('boll');
   cfg.clusterParts = [];
   if (el('t-flip').checked) cfg.clusterParts.push('flip');
   if (el('t-recent').checked) cfg.clusterParts.push('recent');
+  // 人工支阻位：select=人工输入 的周期 → 原始价位文本（服务端统一解析；空=该周期无支阻位）
+  cfg.manualLevels = {...manualLevelsByPeriod};
   qa('[data-k]').forEach(inp => { cfg[inp.dataset.k] = inp.value; });
   cfg.color = el('d-color').value;
   cfg.draw_text = el('d-text').checked;
@@ -436,8 +499,8 @@ function cfgSnapshot() {
   const c = collectCfg();
   return JSON.stringify({ symbol: c.symbol, from: c.from, periods: c.periods,
     minTouchs: c.minTouchs, clusterParamsByPeriod: c.clusterParamsByPeriod,
-    srTypes: c.srTypes, clusterParts: c.clusterParts,
-    clusterAtr: c.clusterAtr, mergeAtr: c.mergeAtr, recentClusterAtr: c.recentClusterAtr,
+    srTypes: c.srTypes, clusterParts: c.clusterParts, manualLevels: c.manualLevels,
+    clusterAtr: c.clusterAtr, recentClusterAtr: c.recentClusterAtr,
     maxDistAtr: c.maxDistAtr, maxPerPeriod: c.maxPerPeriod, sideCount: c.sideCount,
     recentBiCount: c.recentBiCount, touchWeight: c.touchWeight, barsWeight: c.barsWeight,
     fibLevels: c.fibLevels, bollLength: c.bollLength, bollMult: c.bollMult });
@@ -451,11 +514,31 @@ function applyCfgToUI(cfg) {
   qa('.chk-res').forEach(c => { c.checked = want.has(c.closest('tr').dataset.res); });
   minTouchsByPeriod = {...defaultMinTouchs, ...(cfg.minTouchs || {})};
   clusterDefaults = {clusterAtr:cfg.clusterAtr??'0.5',recentClusterAtr:cfg.recentClusterAtr??'1.0',recentBiCount:cfg.recentBiCount??'20'};
-  el('t-cluster').checked = (cfg.srTypes || []).includes('cluster');
+  // 密集区恒开启（旧预设 srTypes 无 cluster 也强制补上——支阻位来源模型已改）
   el('t-fib').checked = (cfg.srTypes || []).includes('fib');
   el('t-boll').checked = (cfg.srTypes || []).includes('boll');
   el('t-flip').checked = (cfg.clusterParts || []).includes('flip');
   el('t-recent').checked = (cfg.clusterParts || []).includes('recent');
+  // 人工支阻位回填：manualLevels 有该周期（列表或文本）→ select=人工 + 价位框填入；
+  // 子行内容随来源切换（系统=参数 / 人工=价位）
+  const ml = cfg.manualLevels || {};
+  manualLevelsByPeriod = {};
+  qa('.src-sel').forEach(s => {
+    const p = s.dataset.period;
+    const raw = ml[p];
+    const isManual = raw !== undefined && raw !== null;
+    s.value = isManual ? 'manual' : '';
+    const input = q(`.manual-input[data-period="${p}"]`);
+    if (isManual) {
+      const text = Array.isArray(raw) ? raw.join(', ') : String(raw ?? '');
+      manualLevelsByPeriod[p] = text;
+      if (input) input.value = text;
+      countManual(p);
+    } else if (input) {
+      input.value = '';
+    }
+    syncSourceSlots(p);
+  });
   qa('[data-k]').forEach(inp => {
     if (inp.dataset.k === 'fibLevels' && Array.isArray(cfg.fibLevels))
       inp.value = cfg.fibLevels.join(',');
@@ -576,24 +659,11 @@ async function delPreset(name) {
 
 // ---------- 结果渲染 ----------
 function kindOf(f) {
-  if (f.srcType === 'mixed' || (f.srcType && !FAMILY[f.srcType])) return f.srcType || '';
+  if (f.manual) return 'manual';
   if (f.boll) return 'boll';
   if (f.fib || f.pending) return 'fib';
-  return 'cluster';
+  return (f.srcType && !FAMILY[f.srcType]) ? f.srcType : 'cluster';
 }
-function lineMemberHtml(m, linePrice) {
-  const kind = m.kind && m.kind !== 'cluster' ? m.kind : (m.recent ? 'recent' : 'cluster');
-  const fam = FAMILY[kind] || kind;
-  const diff = m.price - linePrice;
-  const extra = [];
-  if (m.ratio != null) extra.push('fib ' + m.ratio);
-  if (m.boll) extra.push(m.boll);
-  if (m.pending) extra.push('pending');
-  return `成员: ${fam}·${m.source} ${m.type || ''} 原价 ${fmt(m.price)}` +
-         `（与合并价 ${diff >= 0 ? '+' : ''}${fmt(diff)}）触及 ${m.touchCount}` +
-         (extra.length ? ' [' + extra.join(' / ') + ']' : '');
-}
-function lineDiff(other) { return other; }
 function famName(f) {
   const k = kindOf(f);
   return FAMILY[k] || (k === 'cluster' ? '密集区' : k || '—');
@@ -603,24 +673,16 @@ function typeText(f) { return f.type || (f.boll || (f.pending ? '预期' : '—'
 function buildCols(tab) {
   if (tab === 'drawn')
     return [['L', 'level'], ['来源', 'fam'], ['类型', 'type'], ['价', 'price'], ['距现价', 'dist'],
-            ['ATR倍', 'atrX'], ['触及', 'tc'], ['经K线', 'bp'], ['成员', 'mem'], ['锚点', 'bt'], ['标注', 'label']];
+            ['ATR倍', 'atrX'], ['触及', 'tc'], ['经K线', 'bp'], ['锚点', 'bt'], ['标注', 'label']];
   if (tab === 'merged')
     return [['级别', 'level'], ['来源', 'fam'], ['类型', 'type'], ['价', 'price'], ['距现价', 'dist'],
-            ['触及', 'tc'], ['成员', 'mem'], ['与上行价差', 'gap'], ['锚点', 'bt'], ['标注', 'label']];
+            ['触及', 'tc'], ['与上行价差', 'gap'], ['锚点', 'bt'], ['标注', 'label']];
   return [['周期', 'res'], ['来源', 'fam'], ['类型', 'type'], ['价', 'price'], ['触及', 'tc'], ['经K线', 'bp'], ['锚点', 'bt']];
 }
 function drawnSet() {
   const s = new Set();
   for (const L of Object.keys(state.drawn))
     for (const f of state.drawn[L]) s.add(f.level + '|' + Number(f.price).toFixed(4));
-  return s;
-}
-function drawnMemberSet() {
-  // 图上选中线的合并成员原价（供「原始候选」tab 的仅图上过滤）
-  const s = new Set();
-  for (const L of Object.keys(state.drawn))
-    for (const f of state.drawn[L])
-      for (const m of (f.members || [])) s.add(Number(m.price).toFixed(4));
   return s;
 }
 function rowPass(f, drawnOnly, L) {
@@ -633,11 +695,11 @@ function rowPass(f, drawnOnly, L) {
   if (!drawnOnly) return true;
   // 「仅图上选中」：按 tab 语义过滤
   if (L == null) {
-    // 合并池：只列「图上选中过的合并线」（drawnByPeriod 全部键的并集）
+    // 候选池：只列「图上选中过的线」（drawnByPeriod 全部键的并集）
     return drawnSet().has(f.level + '|' + Number(f.price).toFixed(4));
   }
-  // 原始候选：只列「被选中线合并掉的候选」（按成员原价命中）
-  return drawnMemberSet().has(Number(f.price).toFixed(4));
+  // 原始候选：只列「本周期被选中上图」的候选（按 周期|价格 命中）
+  return drawnSet().has(L + '|' + Number(f.price).toFixed(4));
 }
 function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 function renderTable() {
@@ -673,7 +735,6 @@ function renderTable() {
     if (k === 'tc') return `<td class="num">${num(f.touchCount)}</td>`;
     if (k === 'bp') return `<td class="num">${num(f.barsPassed)}</td>`;
     if (k === 'bt') return `<td>${fmtTime(f.breakTime)}</td>`;
-    if (k === 'mem') return `<td class="num">${(f.members || []).length || '—'}</td>`;
     if (k === 'gap') return `<td class="num">—</td>`;
     return '<td></td>';
   });
@@ -681,15 +742,10 @@ function renderTable() {
   if (tab === 'drawn') {
     for (const L of Object.keys(state.drawn)) {
       const lines = state.drawn[L].filter(f => rowPass(f, false, L));
-      html += `<tr class="group"><td colspan="${cols.length + 1}">显示周期 ${LEVEL_NAME[L] || L} · ${lines.length}/${state.drawn[L].length} 条（候选池=级别≥${L} 合并线）</td></tr>`;
+      html += `<tr class="group"><td colspan="${cols.length + 1}">显示周期 ${LEVEL_NAME[L] || L} · ${lines.length}/${state.drawn[L].length} 条（候选池=本周期候选）</td></tr>`;
       lines.forEach((f, i) => {
         n++;
-        const key = keyOf(L, i);
-        const mem = f.members || [];
-        html += `<tr class="line" data-key="${key}">` + cells(f, L).join('') +
-          `<td>${mem.length ? `<button class="sm exp" data-key="${key}">${state.expanded[key] ? '▾收起' : `▸成员${mem.length}`}</button>` : ''}</td></tr>`;
-        if (state.expanded[key])
-          html += `<tr class="member"><td colspan="${cols.length + 1}">${mem.map(m => esc(lineMemberHtml(m, f.price))).join('<br>')}</td></tr>`;
+        html += `<tr class="line">` + cells(f, L).join('') + '<td></td></tr>';
       });
     }
   } else if (tab === 'merged') {
@@ -698,18 +754,14 @@ function renderTable() {
     lines.forEach((f, i) => {
       if (!rowPass(f, drawnOnly, null)) return;
       n++;
-      const key = keyOf('m', i);
-      const mem = f.members || [];
       const gap = prev == null ? null : f.price - prev.price;
       prev = f.price;
-      html += `<tr class="line" data-key="${key}">` + cols.map(c => {
+      html += `<tr class="line">` + cols.map(c => {
         if (c[1] === 'gap') return `<td class="num">${gap == null ? '—' : fmt(gap)}</td>`;
         const tds = cells(f, null);
         const idx = cols.indexOf(c);
         return tds[idx] || '<td></td>';
-      }).join('') + `<td>${mem.length ? `<button class="sm exp" data-key="${key}">${state.expanded[key] ? '▾收起' : `▸成员${mem.length}`}</button>` : ''}</td></tr>`;
-      if (state.expanded[key])
-        html += `<tr class="member"><td colspan="${cols.length + 1}">${mem.map(m => esc(lineMemberHtml(m, f.price))).join('<br>')}</td></tr>`;
+      }).join('') + '<td></td></tr>';
     });
   } else {
     for (const L of Object.keys(state.periods)) {
@@ -737,16 +789,6 @@ function updateLevelFilter() {
     LEVELS.filter(l => lvs.has(l)).map(l => `<option ${l === keep ? 'selected' : ''}>${l}</option>`).join('');
 }
 
-function refreshMergeTip() {
-  const m = state.meta;
-  const a = m ? m.merge_tol : null;
-  const atr = m ? m.min_atr : null;
-  const val = q('[data-k="mergeAtr"]').value;
-  el('merge-preview').textContent = m
-    ? `上次计算: ${fmt(val)} × ${fmt(atr)} = ${a != null ? fmt(a) : '—'}；当前控件值 ${val}`
-    : '计算后显示：合并容差 × 最小周期ATR';
-}
-
 async function fetchResult() {
   const r = await api('/api/sr/result', undefined, 'GET');
   if (!r || !r.has_result) return;
@@ -760,7 +802,6 @@ async function fetchResult() {
     const a = (state.meta.per_level_atr || {})[tr.dataset.res];
     tr.querySelector('.atr').textContent = a != null ? fmt(a) : '—';
   });
-  refreshMergeTip();
   // 覆盖提示
   const cov = state.meta.coverage || {};
   const partial = LEVELS.filter(l => cov[l] === 'partial');
@@ -905,6 +946,21 @@ function bindEvents() {
   };
   el('d-raw').onchange = noteRawToggle;
   el('d-text').onchange = () => {};
+  // 支阻来源（系统计算/人工输入）与人工价位输入；子行内容随来源切换
+  qa('.src-sel').forEach(s => s.addEventListener('change', () => {
+    const p = s.dataset.period;
+    if (s.value === 'manual') {
+      manualLevelsByPeriod[p] = manualLevelsByPeriod[p] ?? '';
+      countManual(p);
+    } else {
+      delete manualLevelsByPeriod[p];
+    }
+    syncSourceSlots(p);
+  }));
+  qa('.manual-input').forEach(i => i.addEventListener('input', () => {
+    manualLevelsByPeriod[i.dataset.period] = i.value;
+    countManual(i.dataset.period);
+  }));
   qa('.tabs button').forEach(b => b.onclick = () => {
     qa('.tabs button').forEach(x => x.classList.remove('on'));
     b.classList.add('on');
@@ -913,14 +969,6 @@ function bindEvents() {
   });
   ['f-family', 'f-type', 'f-level'].forEach(id => el(id).onchange = renderTable);
   el('f-drawnonly').onchange = renderTable;
-  document.addEventListener('click', e => {
-    const btn = e.target.closest('.exp');
-    if (btn) {
-      const key = btn.dataset.key;
-      state.expanded[key] = !state.expanded[key];
-      renderTable();
-    }
-  });
   // 参数改动 → 横幅提示 + 画图按钮即时变灰（需重算后才能再画）
   qa('input,select').forEach(inp => inp.addEventListener('input', () => { checkStale(); updateButtons(); }));
   setInterval(() => { checkStale(); updateButtons(); }, 2000);
@@ -931,7 +979,6 @@ function init() {
   bindEvents();
   connectSSE();
   refreshPresetList();
-  refreshMergeTip();
   updateButtons();
   refreshState();                     // 立即与服务端对齐（历史结果/忙状态）
   setInterval(refreshState, 4000);    // 轮询自愈：SSE 事件丢失不卡按钮
