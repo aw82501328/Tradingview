@@ -69,7 +69,7 @@ class ParamCenterTests(unittest.TestCase):
     def test_corrupt_file_degrades_to_defaults(self):
         Path(param_center.PARAMS_FILE).write_text("{ not json", encoding="utf-8")
         self.assertEqual(param_center.effective("plan"),
-                         dict(trading_plan.RANGE_DEFAULTS))
+                         {**trading_plan.RANGE_DEFAULTS, "trendRes": trading_plan.TREND_RES})
 
     def test_plan_cfg_changes_range_verdict(self):
         # 震荡阈值收得很紧（kMult=0.5 必不满足）→ 原本判震荡的窗口变趋势；
@@ -97,8 +97,26 @@ class ParamCenterTests(unittest.TestCase):
             self.assertEqual(set(schema), set(defaults))
             for key, spec in schema.items():
                 self.assertEqual(spec["default"], defaults[key])
-                self.assertIn(spec["type"], ("bool", "int", "float"))
+                self.assertIn(spec["type"], ("bool", "int", "float", "str"))
                 self.assertTrue(spec["label"])
+
+    def test_trend_res_enum(self):
+        # plan.trendRes 字符串枚举：合法值通过、非法值/非字符串 raise；默认 = TREND_RES
+        self.assertEqual(param_center.defaults_of("plan")["trendRes"],
+                         trading_plan.TREND_RES)
+        self.assertEqual(param_center.normalize("plan", {"trendRes": "D"}), {"trendRes": "D"})
+        self.assertEqual(param_center.normalize("plan", {"trendRes": ""}), {"trendRes": ""})
+        for bad in ("XX", 240, None):
+            with self.assertRaises(ValueError):
+                param_center.normalize("plan", {"trendRes": bad})
+        schema = param_center.schema_of("plan")["trendRes"]
+        self.assertEqual(schema["type"], "str")
+        self.assertEqual(schema["choices"], ["", "240", "D"])
+        # 保存-生效往返（"" = 显式关闭，不被默认值覆盖）
+        param_center.update("plan", {"trendRes": ""})
+        self.assertEqual(param_center.effective("plan")["trendRes"], "")
+        param_center.reset("plan")
+        self.assertEqual(param_center.effective("plan")["trendRes"], "240")
 
 
 if __name__ == "__main__":

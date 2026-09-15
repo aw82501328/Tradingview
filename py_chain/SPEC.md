@@ -122,6 +122,8 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 
 映射函数 `entryStrategyOf`（`mark_entry.py` L290 / `mark_entry.js` L360）；计划策略本身由 `trading_plan.strategyOf` 产出。
 
+**顺势参考周期过滤**（2026-09-15 起，默认开启）：`compute_entries`/`evaluateRealtimeEntries` 形参 `trend_res`（None→`trading_plan.TREND_RES="240"`；`""`=关闭，参数中心 plan 模块 `trendRes` / JS CLI `--trend-res` 可配 `240`/`D`/关闭）。①参考周期及以上**结构性剔除**出检测周期（只作方向锚；`D` 锚时 240 恢复检测）；②方向状态（`trading_plan.trend_state_of`→`trend_direction`：最近买卖点定方向——1类点须强分型、非1类点出现即确立、收盘破锚定价反向闩锁、无点回退末笔方向，规则全文见 `.cursor/skills/trading-plan/SPEC.md` §5 与 WEB 参数页交易计划页签）非 None 且与策略方向相反时跳过该周期；③命中信号附 `trendDirection`/`trendReason`，回测信号列表方向列显示「多（4小时2买）」式注记（`web/index.html` `signalDirectionName`，方向过滤按基名 多/空 匹配）。当下制 `trend_state` 由回测引擎在链路重算拍（每根 fine）算好传入复用（`evaluateRealtimeEntries` 无 bars 入参不自算）。
+
 #### 2.1.2.2 三个公共条件（必须同时满足）
 
 1. **够笔** `lastBiOk`——检测周期最后一笔方向要「对着来」：做空要等一段反弹（up 笔），做多要等一段回调（down 笔）。

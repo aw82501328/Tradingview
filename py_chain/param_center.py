@@ -5,7 +5,7 @@
   chan   缠论核心 CHAN_CFG（chan_core.apply_cfg 进程内全局生效）
   points 买卖点（compute_all_marks 的 nearAtrRatio/keep）
   entry  进出场（near/lots/slip_* 与出场门槛）
-  plan   交易计划（震荡判定阈值 RANGE_DEFAULTS）
+  plan   交易计划（震荡判定阈值 RANGE_DEFAULTS + 顺势参考周期 trendRes）
 
 存储 web/module_params.json，**只存与代码默认不同的键（overrides-only）**：
 代码默认值升级后不被旧存量静默覆盖，UI 可据此高亮"已修改"。
@@ -84,6 +84,8 @@ PARAM_MODULES = {
             "rangeKMult": ("K线区间阈值(×ATR)", "窗口高低差 ≤ 该值×ATR 判震荡", 0.5, 50.0),
             "rangeBiMult": ("笔端点阈值(×ATR)", "笔端点极差 ≤ 该值×ATR 判震荡", 0.5, 50.0),
             "rangeBreakMult": ("突破跳过阈值(×ATR)", "末笔端点越过窗口另一端 >该值×ATR 视为突破（跳过震荡判定）", 0.0, 10.0),
+            "trendRes": ("顺势参考周期", "参考周期方向过滤更低周期进场（关闭/4小时/日线；规则见本页下方说明）",
+                         ("", "240", "D"), None),
         },
     },
 }
@@ -107,7 +109,7 @@ def defaults_of(module):
             "zs_exit_weak_ratio": mark_entry.ZS_EXIT_WEAK_RATIO,
         }
     if module == "plan":
-        return dict(trading_plan.RANGE_DEFAULTS)
+        return {**trading_plan.RANGE_DEFAULTS, "trendRes": trading_plan.TREND_RES}
     raise ValueError(f"未知参数模块：{module}")
 
 
@@ -116,16 +118,26 @@ def _type_of(default):
         return "bool"
     if isinstance(default, int):
         return "int"
+    if isinstance(default, str):
+        return "str"
     return "float"
 
 
 def schema_of(module):
-    """前端渲染用 schema：每键 label/desc/type/min/max/default。"""
+    """前端渲染用 schema：每键 label/desc/type/min/max/default（str 枚举另带 choices）。"""
     defaults = defaults_of(module)
     spec = PARAM_MODULES[module]["params"]
-    return {key: {"label": meta[0], "desc": meta[1], "type": _type_of(defaults[key]),
-                  "min": meta[2], "max": meta[3], "default": defaults[key]}
-            for key, meta in spec.items()}
+    out = {}
+    for key, meta in spec.items():
+        typ = _type_of(defaults[key])
+        item = {"label": meta[0], "desc": meta[1], "type": typ,
+                "min": None if typ == "str" else meta[2],
+                "max": None if typ == "str" else meta[3],
+                "default": defaults[key]}
+        if typ == "str":
+            item["choices"] = list(meta[2])  # spec 第3位 = 允许值列表（枚举）
+        out[key] = item
+    return out
 
 
 def normalize(module, cfg):
@@ -145,6 +157,12 @@ def normalize(module, cfg):
         if typ == "bool":
             if not isinstance(value, bool):
                 raise ValueError(f"{key} 须为布尔值")
+            out[key] = value
+            continue
+        if typ == "str":
+            choices = PARAM_MODULES[module]["params"][key][2]
+            if not isinstance(value, str) or value not in choices:
+                raise ValueError(f"{key} 须为 {'/'.join(choices)} 之一")
             out[key] = value
             continue
         if isinstance(value, bool):

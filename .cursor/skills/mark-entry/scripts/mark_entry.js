@@ -45,6 +45,8 @@ const CDP = require("../../../../server-cdp/node_modules/chrome-remote-interface
 // 缠论算法核心（复用背驰判定、中枢、ATR、MACD 等工具函数）
 const core = require("../../chan-core/scripts/chan_core.js");
 const { calcATR, calcMACD, isBiDiverge, fmtT, lowerResOf, buildZSByUpper, intervalSecOf } = core;
+// 交易计划模块（顺势参考周期方向判定 trendStateOf；规则见 trading-plan SPEC 与 WEB 参数页）
+const planCore = require("../../trading-plan/scripts/trading_plan.js");
 
 // 缓存目录（chan-bi 笔数据、mark-sr-flip 支阻位数据、本脚本落盘进出场数据）
 const CACHE_DIR = process.env.CHAN_CACHE_DIR || path.join(__dirname, "..", "..", "..", "..", ".cursor", "cache");
@@ -103,6 +105,11 @@ let FROM_TS = null;
 const WITH_30S = args.includes("--with-30s");
 const PERIODS = getStrArg("periods", "240,60,15,3")
   .split(",").map(s => s.trim()).filter(Boolean);
+// 顺势参考周期（--trend-res=240/D/off，默认 trading_plan.TREND_RES；off/空=关闭）：
+// 参考周期及以上不作检测周期（只作方向锚）；参考周期方向与信号方向相反时跳过该信号
+// （方向判定规则见 trading-plan 模块 trendDirection，与 WEB 参数页「交易计划」页签说明一致）
+const TREND_RES_ARG = getStrArg("trend-res", planCore.TREND_RES);
+const TREND_RES = (TREND_RES_ARG === "off" || TREND_RES_ARG === "") ? "" : TREND_RES_ARG;
 
 // 箭头颜色：买点（多头）红色、卖点（空头）绿色
 const BUY_COLOR = "#F23645";
@@ -1152,6 +1159,18 @@ async function main() {
     // 逐周期判定进场状态（依赖交易计划 plan 结果）→ 生成进场信号
     // ============================================================
     // allEntries 按「背驰级别（标记级别）」聚合：periods[markRes] = [信号...]
+    // 顺势参考周期方向状态（trading-plan 模块 trendStateOf，一次性全量重放到最新）：
+    // trendRes 关闭时为 null——参考周期照常检测、方向不过滤
+    const trendState = TREND_RES ? planCore.trendStateOf(periodBis,
+      Object.fromEntries(Object.keys(periodData).map(r => [r, periodData[r].bars])),
+      TREND_RES) : null;
+    const trendDir = trendState ? trendState.dir : null;
+    const trendReason = trendState ? trendState.reason : "";
+    if (TREND_RES) {
+      const dirName = trendDir === "long" ? "多" : trendDir === "short" ? "空" : "无方向（不过滤）";
+      console.log(`[顺势过滤] 参考周期 ${TREND_RES}：${dirName}${trendReason ? `（${trendReason}）` : ""}`);
+    }
+    const trendSec = TREND_RES ? (intervalSecOf(TREND_RES) || 0) : 0;
     let allEntries = {};
     for (const res of PERIODS) {
       const pd = periodData[res];
@@ -1161,6 +1180,10 @@ async function main() {
       }
       if (!hasLowerResLoaded(periodData, res)) {
         console.log(`\n[周期 ${res}] 之下无已加载更低级别，不作检测周期，跳过`);
+        continue;
+      }
+      if (trendSec && (intervalSecOf(res) || 0) >= trendSec) {
+        console.log(`\n[周期 ${res}] 为顺势参考周期（${TREND_RES}）及以上，不作检测周期，跳过`);
         continue;
       }
       // 从交易计划结果取该周期状态
@@ -1173,6 +1196,10 @@ async function main() {
       const strategy = entryStrategyOf(planStrategy);
       if (!strategy) {
         console.log(`\n[周期 ${res}] 交易计划策略「${planStrategy}」无对应进场策略，跳过`);
+        continue;
+      }
+      if (trendDir && trendDir !== strategy.direction) {
+        console.log(`\n[周期 ${res}] 策略「${strategy.label}」与参考周期方向（${trendReason}）相反，顺势过滤跳过`);
         continue;
       }
       const ctx = {
@@ -1202,6 +1229,10 @@ async function main() {
         planDirection: plan.direction,
         color: strategy.direction === "long" ? BUY_COLOR : SELL_COLOR,
       };
+      if (trendDir) {
+        sig.trendDirection = trendDir;
+        sig.trendReason = trendReason;
+      }
       (allEntries[evalRes.markRes] = allEntries[evalRes.markRes] || []).push(sig);
       const dirName = sig.direction === "long" ? "买点(向上)" : "卖点(向下)";
       const colorName = sig.direction === "long" ? "红" : "绿";

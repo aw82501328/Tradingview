@@ -57,7 +57,7 @@ from .chan_core import (
 from .mark_buy_sell import compute_all_marks
 from .bi_inc import BiIncBuilder
 from .sr_flip import compute_srflip, prepare_bar_arrays
-from .trading_plan import compute_plan
+from .trading_plan import compute_plan, trend_state_of, TREND_RES as DEFAULT_TREND_RES
 from .mark_entry import (
     compute_entries, stop_ref_of, find_bi_event, filterDetectPeriods,
     trend_following_of, forming_seg_ready,
@@ -284,13 +284,19 @@ class BacktestEngine:
         #   marks → compute_all_marks（买卖点 nearAtrRatio/keep）
         #   exit_min_merged / realtime_min_bars / zs_exit_weak_ratio → 出场/够笔/出中枢衰减
         mp = module_params or {}
-        self.plan_cfg = dict(mp["plan"]) if mp.get("plan") else None
+        # plan 模块的 trendRes（顺势参考周期）单独取出：不混入震荡阈值 plan_cfg；
+        # "" = 关闭（区分「显式关闭」与「未配置→默认」）
+        plan_mp = dict(mp.get("plan") or {})
+        tr = plan_mp.pop("trendRes", mp.get("trendRes"))
+        self.trend_res = DEFAULT_TREND_RES if tr is None else tr
+        self.plan_cfg = plan_mp or None
         self.marks_params = dict(mp["marks"]) if mp.get("marks") else {}
         self.exit_min_merged = mp.get("exit_min_merged", EXIT_MIN_MERGED)
         self.realtime_min_bars = mp.get("realtime_min_bars", REALTIME_MIN_BARS)
         self.zs_exit_weak_ratio = mp.get("zs_exit_weak_ratio", ZS_EXIT_WEAK_RATIO)
 
         # 增量状态
+        self._trend_state = None  # 顺势参考周期方向状态（_rebuild_chain 拍更新）
         self._cut = {res: 0 for res in self.periods}
         self._merged = {res: [] for res in self.periods}
         # 合并块截止时间数组（与 _merged 平行：块 .time = 覆盖的最后一根原始K线时间，
@@ -976,6 +982,13 @@ class BacktestEngine:
                                       cfg=self.plan_cfg)
         except Exception:
             self._plan = {}
+        # 3.5 顺势参考周期方向状态（mark_entry 顺势过滤；与计划同拍重算——
+        #     每根 fine 链路重算时顺带更新，参考周期收盘/笔结构变化即刻生效）
+        try:
+            self._trend_state = trend_state_of(periodBis, barsByPeriod, self.trend_res,
+                                               periodMacd=periodMacd)
+        except Exception:
+            self._trend_state = None
         # 4. 进出场（检测周期与 JS 一致：不含日线、不含 30S——30S 仅作背驰级别；
         #    且须有已加载的更低级别可供区间套下沉，30S 未加载时 3 不作检测周期）
         # realtime 全量回测通过 _collect_realtime 收集信号，不消费 _entries。
@@ -990,7 +1003,9 @@ class BacktestEngine:
                                             detectPeriods=detectPeriods, near=self.near,
                                             periodMacd=periodMacd, periodAtr=periodAtr,
                                             with_30s=any(str(p).upper() == "30S" for p in self.periods),
-                                            zs_exit_weak_ratio=self.zs_exit_weak_ratio)
+                                            zs_exit_weak_ratio=self.zs_exit_weak_ratio,
+                                            trend_res=self.trend_res,
+                                            trend_state=self._trend_state)
         except Exception:
             self._entries = {}
 
@@ -1041,6 +1056,8 @@ class BacktestEngine:
             expectBiEnabled=self.expect_bi,
             realtimeMinBars=self.realtime_min_bars,
             zsExitWeakRatio=self.zs_exit_weak_ratio,
+            trend_res=self.trend_res,
+            trend_state=self._trend_state,
         )
         newSigs = []
         for s in sigs:
@@ -1124,6 +1141,8 @@ class BacktestEngine:
                 "fillMode": fillMode,
                 "nearSr": s.get("nearSr"),
                 "planDirection": s.get("planDirection"),
+                "trendDirection": s.get("trendDirection"),  # 顺势参考周期方向（2026-09-15）
+                "trendReason": s.get("trendReason"),        # 成因注记，如「4小时2买」
                 "fallback": s.get("fallback", False),   # M1 回退候选标记（透传自信号）
                 "nearEqual": s.get("nearEqual", False), # M2 近等候选标记
                 "expectBi": s.get("expectBi", False),   # M4 检测周期预期够笔口径标记

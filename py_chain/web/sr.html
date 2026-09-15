@@ -477,7 +477,7 @@ function collectCfg() {
   cfg.periods = qa('.chk-res:checked').map(c => c.closest('tr').dataset.res);
   cfg.minTouchs = {...minTouchsByPeriod};
   Object.assign(cfg, clusterDefaults);
-  cfg.clusterParamsByPeriod = structuredClone(clusterParamsByPeriod);
+  cfg.clusterParamsByPeriod = cloneJSON(clusterParamsByPeriod);
   // 密集区恒开启（支阻位来源由②逐周期的 系统计算/人工输入 决定）；fib/boll 为叠加开关
   cfg.srTypes = ['cluster'];
   if (el('t-fib').checked) cfg.srTypes.push('fib');
@@ -507,7 +507,7 @@ function cfgSnapshot() {
 }
 let lastComputedSnap = null;
 function applyCfgToUI(cfg) {
-  clusterParamsByPeriod = structuredClone(cfg.clusterParamsByPeriod || {});
+  clusterParamsByPeriod = cloneJSON(cfg.clusterParamsByPeriod);
   el('cfg-symbol').value = cfg.symbol || 'OANDA:XAUUSD';
   if (cfg.from) el('cfg-from').value = cfg.from;
   const want = new Set(cfg.periods || []);
@@ -642,7 +642,14 @@ async function loadPreset(name) {
   if (!r) return;
   const p = (r.presets || []).find(x => x.name === name);
   if (!p) { log('预设不存在：' + name, true); await refreshPresetList(); return; }
-  applyCfgToUI(p.cfg);
+  try {
+    applyCfgToUI(p.cfg);
+  } catch (e) {
+    // 回填失败必须可见（异步未捕获会变成「点了没反应」），并保留原始报错便于定位
+    log('载入预设失败：' + (e && e.message || e), true);
+    console.error(e);
+    return;
+  }
   markLoadedPreset(name);
   el('preset-name').value = name;
   log(`已载入预设：${name}`);
@@ -702,6 +709,8 @@ function rowPass(f, drawnOnly, L) {
   return drawnSet().has(L + '|' + Number(f.price).toFixed(4));
 }
 function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+// JSON 深拷贝（替代 structuredClone：老浏览器无此 API，缺失会让预设载入静默失败）
+function cloneJSON(o) { return JSON.parse(JSON.stringify(o == null ? {} : o)); }
 function renderTable() {
   const tab = state.tab;
   const drawnOnly = el('f-drawnonly').checked;

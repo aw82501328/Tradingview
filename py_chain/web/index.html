@@ -229,6 +229,8 @@
           <span class="ms-value">方向：全部</span><span class="ms-caret">▾</span>
         </button>
         <div class="ms-panel" hidden>
+          <label class="ms-opt"><input type="checkbox" data-sig-opt value="多">多 · 顺势锚方向</label>
+          <label class="ms-opt"><input type="checkbox" data-sig-opt value="空">空 · 顺势锚方向</label>
           <label class="ms-opt"><input type="checkbox" data-sig-opt value="多头多">多头多</label>
           <label class="ms-opt"><input type="checkbox" data-sig-opt value="空头空">空头空</label>
           <label class="ms-opt"><input type="checkbox" data-sig-opt value="多头空">多头空</label>
@@ -455,11 +457,17 @@ function fmtTime(t) {
 }
 function modeName(id) { return MODES.find(m => m.id === id)?.name || id; }
 function signalDirectionName(r) {
+  // 顺势过滤开启（信号带 trendReason）：方向列显示参考周期锚方向 + 成因，如「多（4小时2买）」
+  if (r.trendReason) return `${r.direction === 'short' ? '空' : '多'}（${r.trendReason}）`;
   const directions = ['多头多', '空头空', '多头空', '空头多'];
   if (directions.includes(r.planDirection)) return r.planDirection;
   // 旧记录未保存 planDirection，按 trading_plan.strategyOf / entryStrategyOf 的固定对应关系显示。
   return {wait2Buy:'多头多',waitBuy:'多头多',wait2Sell:'空头空',waitSell:'空头空',
     wait1Sell:'多头空',wait1Buy:'空头多'}[r.strategyKey] || '-';
+}
+// 方向过滤的匹配键：顺势开启 = 基名（多/空，不按成因碎片化）；否则 = 展示口径（计划方向名）
+function signalDirectionKey(r) {
+  return r.trendReason ? (r.direction === 'short' ? '空' : '多') : signalDirectionName(r);
 }
 // 信号候选角标（SPEC_divergence_fallback）：回退/近等/预期够笔口径标记
 function candidateBadges(r) {
@@ -534,7 +542,7 @@ function filteredRows() {
   return sigRows.filter(r=>r.mode===selectedMode
     &&(!f||r.status===f)
     &&(!st.length||st.includes(r.strategyKey))
-    &&(!dir.length||dir.includes(signalDirectionName(r))));
+    &&(!dir.length||dir.includes(signalDirectionKey(r))));
 }
 // 盈亏汇总：统计（summaryStats，对过滤后的行实时聚合）与展示（summaryHtml）分离，
 // 展示函数同时吃后端保存时固化的 summary（bt_runs.compute_summary 同口径），

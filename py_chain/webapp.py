@@ -200,6 +200,11 @@ class SignalLog:
                 "markRes": s.get("markRes"),
                 "price": s.get("price"),
                 "nearSr": s.get("nearSr"),
+                # 方向口径（2026-09-15 顺势过滤）：trendReason 非空时前端方向列显示
+                # 「多（4小时2买）」式注记；planDirection 供关闭态/旧记录的检测周期计划方向
+                "trendDirection": s.get("trendDirection"),
+                "trendReason": s.get("trendReason"),
+                "planDirection": s.get("planDirection"),
                 # M1/M2/M4 候选标记（SPEC_divergence_fallback）：fallback=下沉链回退候选、
                 # nearEqual=创新低近等容差候选、expectBi=检测周期预期够笔口径；
                 # 前端据此在策略列加角标
@@ -242,6 +247,9 @@ class SignalLog:
                     "markRes": tr.get("markRes"),
                     "price": tr.get("signalPrice"),
                     "nearSr": tr.get("nearSr"),
+                    "trendDirection": tr.get("trendDirection"),
+                    "trendReason": tr.get("trendReason"),
+                    "planDirection": tr.get("planDirection"),
                     "fallback": bool(tr.get("fallback", False)),
                     "nearEqual": bool(tr.get("nearEqual", False)),
                     "expectBi": bool(tr.get("expectBi", False)),
@@ -977,6 +985,7 @@ def _engine_module_params(pm):
     """参数中心 effective_all → BacktestEngine.module_params 映射（三模式 Worker 共用）。"""
     ep = pm["entry"]
     return {"plan": pm["plan"], "marks": pm["points"],
+            "trendRes": pm["plan"]["trendRes"],
             "exit_min_merged": ep["exit_min_merged"],
             "realtime_min_bars": ep["realtime_min_bars"],
             "zs_exit_weak_ratio": ep["zs_exit_weak_ratio"]}
@@ -1773,6 +1782,8 @@ def make_handler(app):
                 return
             self.send_response(200)
             self.send_header("Content-Type", content_type)
+            # 静态页无缓存：浏览器长开标签页须随服务端文件更新，旧 JS 会让新接口行为错乱
+            self.send_header("Cache-Control", "no-cache")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

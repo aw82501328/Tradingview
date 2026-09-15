@@ -14,6 +14,7 @@
 from .chan_core import (
     calcATR, calcMACD, intervalSecOf, fmtT,
     findBuyPoints, findSellPoints, buildZS, buildZSByUpper, isBiDiverge,
+    markWickBars, mergeBars, findFractals,
 )
 
 # ============================================================
@@ -337,3 +338,135 @@ def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=No
         }
         upperBis = curBis
     return planRows
+
+
+# ============================================================
+# 纯函数：参考周期方向判定（顺势过滤，2026-09-15 口径与用户逐条确认）
+# ============================================================
+
+# 顺势参考周期默认值："" = 关闭；"240" = 4小时；"D" = 日线
+# （参数中心 plan 模块 trendRes，Web 交易计划页签可配；mark_entry 进场方向过滤消费）
+TREND_RES = "240"
+
+# 周期 → 中文名（方向成因展示用，如「4小时2买」「日线1卖」）
+RES_NAME_CN = {"D": "日线", "240": "4小时", "60": "1小时", "30": "30分钟",
+               "15": "15分钟", "3": "3分钟", "30S": "30秒"}
+
+
+def trend_res_name(res):
+    return RES_NAME_CN.get(str(res).upper(), str(res))
+
+
+def strong_fractal_after(merged, fractals, t, kind):
+    """t（含）之后是否出现强分型（kind="bottom"|"top"）。
+
+    强分型定义（与用户确认，2026-09-15）：底分型右肩（第 3 根合并K）收盘价 >
+    左肩（第 1 根合并K）最高价；顶分型镜像（右肩收盘 < 左肩最低）。合并K/分型
+    用 chan_core 现有链（markWickBars → mergeBars → findFractals，与 buildBi 同源）。
+    """
+    for f in fractals:
+        if f["type"] != kind or f["time"] < t:
+            continue
+        i = f["mergedIdx"]
+        if i - 1 < 0 or i + 1 >= len(merged):
+            continue  # 左/右肩不完整（尾部形成中）
+        left, right = merged[i - 1], merged[i + 1]
+        if kind == "bottom" and right["close"] > left["high"]:
+            return True
+        if kind == "top" and right["close"] < left["low"]:
+            return True
+    return False
+
+
+def trend_direction(res, bis, bars, upperBis, macdArr, tCut=None):
+    """参考周期方向判定（顺势过滤的唯一口径；mark_entry 进场方向过滤消费）。
+
+    规则（2026-09-15 与用户逐条确认）：
+      1. 取参考周期最近一个买卖点（findBuyPoints/findSellPoints，最近 60 笔窗口
+         与 compute_plan 同口径）；
+      2. 1买/1卖：端点后出现强分型（strong_fractal_after）才确立方向，
+         强分型出现前回退末笔方向；
+      3. 非1类点（2买/类2买/3买、2卖/类2卖/3卖）：出现即确立方向（点锚定的笔
+         本身已够笔成笔）；
+      4. 确立后破坏：参考周期任一收盘价 跌破买点端点价 / 涨破卖点端点价 →
+         反向（下跌/上涨延续），闩锁到下一个买卖点事件（实现口径：从点时间起
+         扫描全部收盘，命中即反向——价格收回也不翻回，直到更新的买卖点出现）；
+      5. 无买卖点 / 1类点强分型未出现 → 回退最近一笔方向（末笔 up→多、down→空）；
+      6. 笔数据不足（<2 笔）→ (None, "")，消费方不过滤。
+
+    @returns (dir, reason)：dir ∈ "long"/"short"/None；reason 展示用，
+              如 "4小时2买"（点确立）、"4小时下跌延续"（破坏闩锁）、
+              "4小时末笔向上"（回退）；dir=None 时 reason=""。
+    """
+    name = trend_res_name(res)
+    if not bis or len(bis) < 2:
+        return None, ""
+    win = bis[-60:]  # 与 compute_plan 同窗口：计划只看最新结构
+    barSec = intervalSecOf(res)
+    try:
+        pts = findBuyPoints(win, upperBis, macdArr, barSec) \
+            + findSellPoints(win, upperBis, macdArr, barSec)
+    except Exception:
+        pts = []
+    if tCut is not None:
+        pts = [p for p in pts if p["time"] <= tCut]
+    pts.sort(key=lambda p: p["time"])
+    if bis[-1]["type"] == "up":
+        fallback = ("long", f"{name}末笔向上")
+    else:
+        fallback = ("short", f"{name}末笔向下")
+    if not pts:
+        return fallback
+    p = pts[-1]
+    t_ = p["type"]
+    is_buy = t_ in ("1买", "2买", "类2买", "3买")
+    if t_ in ("1买", "1卖"):
+        # 1类点须先出现强分型（合并K链与 buildBi 同源；懒计算——仅 1类点需要）
+        merged = mergeBars(markWickBars(bars or []))
+        if not strong_fractal_after(merged, findFractals(merged), p["time"],
+                                    "bottom" if t_ == "1买" else "top"):
+            return fallback
+    # 破坏闩锁：点确立后任一参考周期收盘破端点价 → 反向延续（价格收回不翻回）
+    for b in bars or []:
+        if b["time"] < p["time"]:
+            continue
+        if is_buy:
+            if b["close"] < p["price"]:
+                return ("short", f"{name}下跌延续")
+        elif b["close"] > p["price"]:
+            return ("long", f"{name}上涨延续")
+    return ("long" if is_buy else "short"), f"{name}{t_}"
+
+
+def trend_state_of(periodBis, barsByPeriod, trend_res, periodMacd=None):
+    """按配置计算参考周期方向状态（mark_entry 顺势过滤统一入口）。
+
+    上级周期取法与 mark_entry.upperResOf 同口径：periodBis 中比参考周期大一级的
+    最小周期（240→D），供 findBuyPoints 区间套使用。
+
+    @param trend_res 参考周期（"240"/"D"；""/None = 关闭 → 返回 None）
+    @returns {"dir": "long"/"short"/None, "reason": str, "res": 参考周期}；
+             参考周期无笔数据时 dir=None（不过滤，规则 6）。检测周期的结构性剔除
+             由 mark_entry 按 trend_res 字符串独立执行，与本状态无关。
+    """
+    if not trend_res:
+        return None
+    tr = str(trend_res).upper()
+    bis = (periodBis or {}).get(tr) or []
+    bars = (barsByPeriod or {}).get(tr) or []
+    if not bis:
+        return {"dir": None, "reason": "", "res": tr}
+    sec = intervalSecOf(tr) or 0
+    upper = None
+    best = None
+    for r in periodBis:
+        s = intervalSecOf(r) or 0
+        if s > sec and (best is None or s < (intervalSecOf(best) or 0)):
+            best = r
+    if best is not None:
+        upper = periodBis.get(best)
+    macdArr = (periodMacd or {}).get(tr)
+    if macdArr is None:
+        macdArr = calcMACD(bars)
+    d, reason = trend_direction(tr, bis, bars, upper, macdArr)
+    return {"dir": d, "reason": reason, "res": tr}

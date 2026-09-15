@@ -28,9 +28,17 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 .prow.mod .badge{display:inline-block}
 .prow input[type=number]{width:86px;text-align:right}
 .prow input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px}
+.prow select{background:var(--bg);color:var(--text);border:1px solid var(--border);
+  border-radius:4px;padding:3px 6px;font-size:12px}
 .pfoot{display:flex;gap:10px;align-items:center;margin:14px 0 0;flex-wrap:wrap}
 .pfoot .state{color:var(--muted);font-size:11px}
 .pnote{color:var(--muted);font-size:12px;margin-top:10px;max-width:1180px}
+.prules{margin-top:14px;max-width:1180px;background:var(--card);border:1px solid var(--border);
+  border-radius:6px;padding:10px 14px}
+.prules h3{font-size:13px;color:#bad4ff;margin-bottom:6px}
+.prules ol{margin:0 0 0 18px;color:var(--muted);font-size:12px}
+.prules li{margin:3px 0}
+.prules b{color:var(--text);font-weight:600}
 .toast{position:fixed;right:18px;bottom:18px;background:#1f4aa8;color:#fff;border-radius:6px;
   padding:8px 16px;font-size:12.5px;opacity:.96}
 .toast.err{background:#5a1d1d}
@@ -50,6 +58,7 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
     <span class="state" id="stateLine"></span>
   </div>
   <p class="pnote" id="noteLine"></p>
+  <div class="prules" id="rulesBlock" hidden></div>
 </div>
 <div class="toast" id="toast" hidden></div>
 <script>
@@ -58,6 +67,21 @@ const $ = id => document.getElementById(id);
 const PARAM_MODULES = ['chan', 'points', 'entry', 'plan'];
 const TABS = [['sr', '支阻位'], ['chan', '缠论核心'], ['points', '买卖点'], ['entry', '进出场'], ['plan', '交易计划']];
 let modules = {}, active = 'sr', toastTimer;
+
+// 模块逻辑规则说明（renderModule 时渲染在参数网格下方；与 trading_plan.trend_direction 同步维护）
+const MODULE_RULES = {
+  plan: {
+    title: '顺势参考周期方向判定规则（trendRes 开启时生效，实现见 trading_plan.trend_direction）',
+    items: [
+      '取<b>参考周期（默认4小时）最近一个买卖点</b>作方向锚；参考周期自身不再产生进场信号，更低周期（1小时/15分钟/3分钟）只做锚方向的单边',
+      '<b>1买/1卖</b>：端点后出现<b>强分型</b>才确立方向——底分型右肩（第3根合并K）收盘价 &gt; 左肩（第1根合并K）最高价，顶分型镜像',
+      '<b>非一类买卖点</b>（2买/类2买/3买、2卖/类2卖/3卖）：出现即确立方向（点锚定的笔本身已够笔成笔）',
+      '<b>破坏闩锁</b>：确立后参考周期<b>收盘价</b>跌破买点端点价 / 涨破卖点端点价 → 反向（下跌/上涨延续），闩锁至下一个买卖点事件（价格收回也不翻回）',
+      '<b>回退</b>：无买卖点、或1类点强分型未出现时，按最近一笔方向（末笔向上→只做多 / 向下→只做空）',
+      '参考周期无笔数据 → 不过滤（多空照常）；回测信号列表方向列显示锚方向与成因，如 <b>多（4小时2买）</b>',
+    ],
+  },
+};
 
 function toast(text, err) {
   const el = $('toast');
@@ -90,11 +114,20 @@ function switchTab(name) {
   drawTabs();
 }
 
+// 枚举参数的选项展示名（choices 原值提交，展示用中文）
+const CHOICE_LABELS = { trendRes: { '': '关闭', '240': '4小时', 'D': '日线' } };
+const choiceLabel = (key, v) => (CHOICE_LABELS[key] && CHOICE_LABELS[key][v]) || v;
+
 function rowHtml(key, spec, value, isMod) {
-  const defText = spec.type === 'bool' ? (spec.default ? '默认开' : '默认关') : `默认 ${spec.default}`;
+  const defText = spec.type === 'bool' ? (spec.default ? '默认开' : '默认关')
+    : spec.type === 'str' ? `默认 ${choiceLabel(key, spec.default)}`
+    : `默认 ${spec.default}`;
   let control;
   if (spec.type === 'bool') {
     control = `<input type="checkbox" data-k="${key}" ${value ? 'checked' : ''}>`;
+  } else if (spec.type === 'str') {
+    control = `<select data-k="${key}">` + (spec.choices || [])
+      .map(c => `<option value="${c}" ${c === value ? 'selected' : ''}>${choiceLabel(key, c)}</option>`).join('') + '</select>';
   } else {
     const step = spec.type === 'int' ? '1' : 'any';
     const min = spec.min != null ? ` min="${spec.min}"` : '';
@@ -118,8 +151,16 @@ function renderModule(name) {
     chan: '缠论核心参数保存后立即全局生效（画笔/回测/监控共用的算法阈值）。有任务运行中时会拒绝保存。',
     points: '买卖点参数在工作台「更新全部」与回测运行时读取生效。',
     entry: '进出场参数在工作台分析与回测运行时读取生效；「当下制够笔K线数」仅回测/监控引擎使用（JS 技能无此参数）。',
-    plan: '交易计划震荡判定阈值在工作台分析与回测运行时读取生效。',
+    plan: '交易计划参数在工作台分析与回测运行时读取生效；「顺势参考周期」额外过滤进出场信号方向（规则见下方说明）。',
   }[name] || '';
+  const rules = MODULE_RULES[name];
+  const rb = $('rulesBlock');
+  if (rules) {
+    rb.innerHTML = `<h3>${rules.title}</h3><ol>` + rules.items.map(i => `<li>${i}</li>`).join('') + '</ol>';
+    rb.hidden = false;
+  } else {
+    rb.hidden = true;
+  }
 }
 
 function collect(name) {

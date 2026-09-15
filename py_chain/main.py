@@ -85,14 +85,18 @@ def build_full_chain(bars_by_period, periods, with_marks=True, sr_types=None, fi
     if boll_mult is not None:
         srKw["bollMult"] = boll_mult
     sr = compute_srflip(bis, bars_by_period, core, **srKw)
-    plan = compute_plan(bis, bars_by_period, core, cfg=mp.get("plan"))
+    # plan 模块的 trendRes（顺势参考周期）单独取出：不混入震荡阈值 cfg（"" = 关闭）
+    plan_mp = dict(mp.get("plan") or {})
+    trend_res = plan_mp.pop("trendRes", None)
+    plan = compute_plan(bis, bars_by_period, core, cfg=plan_mp or None)
     srLevels = (sr or {}).get("merged") or []
     ep = mp.get("entry") or {}
     entries = compute_entries(bis, bars_by_period, plan, srLevels,
                               detectPeriods=filterDetectPeriods(periods),
                               near=ep.get("near", NEAR),
                               with_30s=any(str(p).upper() == "30S" for p in periods),
-                              zs_exit_weak_ratio=ep.get("zs_exit_weak_ratio", ZS_EXIT_WEAK_RATIO))
+                              zs_exit_weak_ratio=ep.get("zs_exit_weak_ratio", ZS_EXIT_WEAK_RATIO),
+                              trend_res=trend_res)
     return {"bis": bis, "marks": marks, "sr": sr, "plan": plan, "entries": entries}
 
 

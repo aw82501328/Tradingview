@@ -28,6 +28,7 @@ const CDP = require("../../../../server-cdp/node_modules/chrome-remote-interface
 const core = require("../../chan-core/scripts/chan_core.js");
 const {
   calcATR, calcMACD, findBuyPoints, findSellPoints, buildZS, buildZSByUpper, isBiDiverge, fmtT, intervalSecOf,
+  markWickBars, mergeBars, findFractals,
 } = core;
 
 // 缓存目录：chan-bi 画笔落盘笔数据（强制依赖）
@@ -423,6 +424,108 @@ function printPlanTable(rows) {
   console.log(line("└", "┴", "┘"));
 }
 
+// ============================================================
+// 参考周期方向判定（顺势过滤，2026-09-15 口径与用户逐条确认；
+// 与 py_chain/trading_plan.py 同步维护，规则文本另见 WEB 参数页交易计划页签）
+// ============================================================
+
+// 顺势参考周期默认值："" = 关闭；"240" = 4小时；"D" = 日线
+// （WEB 参数中心 plan 模块 trendRes；mark-entry 进场方向过滤消费）
+const TREND_RES = "240";
+
+// 周期 → 中文名（方向成因展示用，如「4小时2买」「日线1卖」）
+const RES_NAME_CN = { "D": "日线", "240": "4小时", "60": "1小时", "30": "30分钟", "15": "15分钟", "3": "3分钟", "30S": "30秒" };
+const trendResName = (res) => RES_NAME_CN[String(res).toUpperCase()] || String(res);
+
+// t（含）之后是否出现强分型（kind="bottom"|"top"）。
+// 强分型定义（与用户确认）：底分型右肩（第3根合并K）收盘价 > 左肩（第1根合并K）最高价；
+// 顶分型镜像（右肩收盘 < 左肩最低）。合并K/分型与 buildBi 同源
+// （markWickBars → mergeBars → findFractals）。
+function strongFractalAfter(merged, fractals, t, kind) {
+  for (const f of fractals) {
+    if (f.type !== kind || f.time < t) continue;
+    const i = f.mergedIdx;
+    if (i - 1 < 0 || i + 1 >= merged.length) continue; // 左/右肩不完整（尾部形成中）
+    const left = merged[i - 1], right = merged[i + 1];
+    if (kind === "bottom" && right.close > left.high) return true;
+    if (kind === "top" && right.close < left.low) return true;
+  }
+  return false;
+}
+
+// 参考周期方向判定（顺势过滤的唯一口径；mark_entry 进场方向过滤消费）。
+// 规则（与 py_chain/trading_plan.py trend_direction 一致）：
+//   1. 取参考周期最近一个买卖点（最近 60 笔窗口与 compute_plan 同口径）；
+//   2. 1买/1卖：端点后出现强分型才确立方向，未出现回退末笔方向；
+//   3. 非1类点（2买/类2买/3买、2卖/类2卖/3卖）：出现即确立方向；
+//   4. 破坏闩锁：确立后任一参考周期收盘价 破 买点端点价（跌）/ 涨破卖点端点价 →
+//      反向延续，闩锁到下一个买卖点事件（价格收回不翻回，直到更新的买卖点出现）；
+//   5. 无买卖点 / 1类点强分型未出现 → 回退末笔方向（up→多、down→空）；
+//   6. 笔数据不足（<2 笔）→ [null, ""]，消费方不过滤。
+// @returns [dir, reason]：reason 如 "4小时2买"（点确立）、"4小时下跌延续"（破坏）、
+//          "4小时末笔向上"（回退）
+function trendDirection(res, bis, bars, upperBis, macdArr, tCut = null) {
+  const name = trendResName(res);
+  if (!bis || bis.length < 2) return [null, ""];
+  const win = bis.slice(-60); // 与 compute_plan 同窗口：计划只看最新结构
+  const barSec = intervalSecOf(res);
+  let pts = [];
+  try {
+    pts = findBuyPoints(win, upperBis, macdArr, barSec)
+      .concat(findSellPoints(win, upperBis, macdArr, barSec));
+  } catch (e) {
+    pts = [];
+  }
+  if (tCut != null) pts = pts.filter(p => p.time <= tCut);
+  pts.sort((a, b) => a.time - b.time);
+  const fallback = bis[bis.length - 1].type === "up"
+    ? ["long", `${name}末笔向上`] : ["short", `${name}末笔向下`];
+  if (!pts.length) return fallback;
+  const p = pts[pts.length - 1];
+  const t = p.type;
+  const isBuy = ["1买", "2买", "类2买", "3买"].includes(t);
+  if (t === "1买" || t === "1卖") {
+    // 1类点须先出现强分型（合并K链与 buildBi 同源；懒计算——仅 1类点需要）
+    const merged = mergeBars(markWickBars(bars || []));
+    if (!strongFractalAfter(merged, findFractals(merged), p.time, t === "1买" ? "bottom" : "top")) {
+      return fallback;
+    }
+  }
+  // 破坏闩锁：点确立后任一参考周期收盘破端点价 → 反向延续（价格收回不翻回）
+  for (const b of bars || []) {
+    if (b.time < p.time) continue;
+    if (isBuy) {
+      if (b.close < p.price) return ["short", `${name}下跌延续`];
+    } else if (b.close > p.price) {
+      return ["long", `${name}上涨延续`];
+    }
+  }
+  return [isBuy ? "long" : "short", `${name}${t}`];
+}
+
+// 按配置取参考周期方向状态（mark_entry 顺势过滤统一入口）。
+// 上级周期取法与 mark_entry.upperResOf 同口径：periodBis 中比参考周期大一级的最小周期
+// （240→D），供 findBuyPoints 区间套使用。
+// @returns { dir: "long"|"short"|null, reason: string, res } | null（trendRes 关闭）
+function trendStateOf(periodBis, barsByPeriod, trendRes, periodMacd = null) {
+  if (!trendRes) return null;
+  const tr = String(trendRes).toUpperCase();
+  const bis = (periodBis || {})[tr] || [];
+  const bars = (barsByPeriod || {})[tr] || [];
+  if (!bis.length) return { dir: null, reason: "", res: tr };
+  const sec = intervalSecOf(tr) || 0;
+  let upper = null, best = null;
+  for (const r of Object.keys(periodBis)) {
+    const s = intervalSecOf(r) || 0;
+    if (s > sec && (best === null || s < (intervalSecOf(best) || 0))) best = r;
+  }
+  if (best !== null) upper = periodBis[best];
+  let macdArr = (periodMacd || {})[tr];
+  if (macdArr == null) macdArr = calcMACD(bars);
+  const [dir, reason] = trendDirection(tr, bis, bars, upper, macdArr);
+  return { dir, reason, res: tr };
+}
+
 module.exports = {
   PLAN_COLOR,
   isRangeBound,
@@ -432,6 +535,12 @@ module.exports = {
   dispWidth,
   padCell,
   printPlanTable,
+  TREND_RES,
+  RES_NAME_CN,
+  trendResName,
+  strongFractalAfter,
+  trendDirection,
+  trendStateOf,
 };
 
 // ============================================================

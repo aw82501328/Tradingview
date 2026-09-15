@@ -102,7 +102,7 @@
  },
  {
   "name": "test002",
-  "saved_at": 1789285532,
+  "saved_at": 1789483510,
   "cfg": {
    "symbol": "OANDA:XAUUSD",
    "from": "2026-07-02",
@@ -126,7 +126,8 @@
    "recentBiCount": "20",
    "clusterParamsByPeriod": {},
    "srTypes": [
-    "cluster"
+    "cluster",
+    "boll"
    ],
    "clusterParts": [
     "flip",

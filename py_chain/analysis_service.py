@@ -363,6 +363,8 @@ class AnalysisManager:
             command.append("--slip-be=" + str(cfg.get("slip_be", 3.0)))
             command.append("--exit-min-merged=" + str(pm["entry"]["exit_min_merged"]))
             command.append("--zs-weak-ratio=" + str(pm["entry"]["zs_exit_weak_ratio"]))
+            # 顺势参考周期（交易计划模块；"" = 关闭）——低周期只做参考周期方向的单边
+            command.append("--trend-res=" + str(pm["plan"].get("trendRes", "")))
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         # Output is drained in a separate reader so a hung CDP cannot defeat timeout.
         with subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

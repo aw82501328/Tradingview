@@ -297,3 +297,91 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
     assert.equal(sim.events[1].time, 700);       // close 成交不早于 half（lastFill 单调）
   });
 });
+
+// ============================================================
+// 顺势参考周期方向判定（trading-plan 模块 trendDirection/trendStateOf；
+// 与 py_chain/test_trend_filter.py 对齐，规则见 WEB 参数页交易计划页签）
+// ============================================================
+const planCore = require("../../trading-plan/scripts/trading_plan.js");
+const S240 = 14400;
+// bar5(time, open, close)：high/low 由开收推导（无影线，避免长影压平干扰）
+const bar5 = (t, o, c) => ({ time: t, open: o, close: c, high: Math.max(o, c), low: Math.min(o, c) });
+// 结构底路径产出 2买 的 4h 笔序列（与 py 用例同构）：b1 低点 90=结构底、
+// b3 低点 95>90 → 2买 @ 4*S240（价格 95）；同窗口 2卖 @ 3*S240（108<顶 110）更早
+const BUY_BIS = [
+  bi("up", 0, S240, 100, 110),
+  bi("down", S240, 2 * S240, 110, 90),
+  bi("up", 2 * S240, 3 * S240, 90, 108),
+  bi("down", 3 * S240, 4 * S240, 108, 95),
+];
+// 卖点镜像：结构顶 111（b1），b3 高点 108<111 → 2卖 @ 4*S240（价格 108）
+const SELL_BIS = [
+  bi("down", 0, S240, 110, 100),
+  bi("up", S240, 2 * S240, 100, 111),
+  bi("down", 2 * S240, 3 * S240, 111, 105),
+  bi("up", 3 * S240, 4 * S240, 105, 108),
+];
+
+describe("trendDirection 顺势方向状态机", () => {
+  test("笔数据不足 → [null, '']", () => {
+    assert.deepEqual(planCore.trendDirection("240", [], [], null, []), [null, ""]);
+    assert.deepEqual(planCore.trendDirection("240", [bi("up", 0, S240, 1, 2)], [], null, []), [null, ""]);
+  });
+
+  test("2买出现即判多（结构底路径，最近点=2买）", () => {
+    const bars = [0, 1, 2, 3, 4].map((i) => bar5(i * S240, 100, 96));
+    assert.deepEqual(planCore.trendDirection("240", BUY_BIS, bars, null, []),
+                     ["long", "4小时2买"]);
+  });
+
+  test("破坏闩锁：点后收盘跌破买点端点价 → 下跌延续（价格收回不翻回）", () => {
+    const bars = [bar5(3 * S240, 100, 96), bar5(4 * S240, 95, 94), bar5(5 * S240, 94, 99)];
+    assert.deepEqual(planCore.trendDirection("240", BUY_BIS, bars, null, []),
+                     ["short", "4小时下跌延续"]);
+  });
+
+  test("卖点镜像：2卖即判空；涨破端点价 → 上涨延续", () => {
+    const ok = [0, 1, 2, 3, 4].map((i) => bar5(i * S240, 107, 106));
+    assert.deepEqual(planCore.trendDirection("240", SELL_BIS, ok, null, []),
+                     ["short", "4小时2卖"]);
+    const brk = [bar5(4 * S240, 108, 108.5), bar5(5 * S240, 108.5, 110)];
+    assert.deepEqual(planCore.trendDirection("240", SELL_BIS, brk, null, []),
+                     ["long", "4小时上涨延续"]);
+  });
+
+  test("无买卖点 → 回退末笔方向", () => {
+    const bars = [0, 1, 2].map((i) => bar5(i * S240, 100, 103));
+    const downEnd = [bi("up", 0, S240, 100, 110), bi("down", S240, 2 * S240, 110, 105)];
+    assert.deepEqual(planCore.trendDirection("240", downEnd, bars, null, []),
+                     ["short", "4小时末笔向下"]);
+    const upEnd = [bi("down", 0, S240, 110, 100), bi("up", S240, 2 * S240, 100, 108)];
+    assert.deepEqual(planCore.trendDirection("240", upEnd, bars, null, []),
+                     ["long", "4小时末笔向上"]);
+  });
+
+  test("强分型：右肩收盘穿左肩极值（底/顶镜像）", () => {
+    const mBottom = [
+      { high: 106, low: 96, close: 100, time: 0, highTime: 0, lowTime: 0 },
+      { high: 104, low: 90, close: 98, time: 1, highTime: 1, lowTime: 1 },
+      { high: 108, low: 92, close: 107, time: 2, highTime: 2, lowTime: 2 },
+    ];
+    const frs = findFractalsOf(mBottom);
+    assert.equal(frs.length, 1);
+    assert.equal(frs[0].type, "bottom");
+    assert.equal(planCore.strongFractalAfter(mBottom, frs, 1, "bottom"), true);
+    const mWeak = mBottom.map((b, i) => (i === 2 ? { ...b, close: 103 } : b));
+    assert.equal(planCore.strongFractalAfter(mWeak, findFractalsOf(mWeak), 1, "bottom"), false);
+  });
+
+  test("trendStateOf：关闭 null / 无笔 dir=null / 默认参考周期 240", () => {
+    assert.equal(planCore.trendStateOf({}, {}, ""), null);
+    assert.deepEqual(planCore.trendStateOf({ "240": [] }, { "240": [] }, "240"),
+                     { dir: null, reason: "", res: "240" });
+    assert.equal(planCore.TREND_RES, "240");
+  });
+});
+
+// findFractals 从 chan-core 取（保持测试自包含的薄封装）
+function findFractalsOf(merged) {
+  return require("../../chan-core/scripts/chan_core.js").findFractals(merged);
+}

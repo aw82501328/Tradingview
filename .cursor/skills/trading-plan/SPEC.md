@@ -125,16 +125,68 @@
 | 趋势但最近笔端点均无买卖点 | 方向「观望」，策略「趋势中无匹配买卖点」 |
 | 2/3类买卖点后无同向笔 / 无前一同向参照笔 / MACD 背驰 | classifySecond 返回「其他分类」（方向 多头空/空头多 + 等待高点附近的一卖 / 等待低点附近的一买） |
 
-## 5. 与其他模块的依赖
+## 5. 参考周期方向判定（顺势过滤，2026-09-15 口径）
+
+归属本模块（`trading_plan.js` 导出 / `py_chain/trading_plan.py` 同构实现），供
+`mark-entry` 进出场过滤消费：**参考周期**（默认 4 小时，`TREND_RES="240"`；可配
+`"D"` 日线 / `""` 关闭，WEB 参数中心 plan 模块 `trendRes` / mark-entry CLI
+`--trend-res`）判上涨时，更低检测周期（1小时/15分钟/3分钟）只出多单不出空单，
+判下跌反之。
+
+### 5.1 判定规则（`trendDirection`，逐条与代码核实）
+
+1. **取点**：参考周期最近一个买卖点（`findBuyPoints`/`findSellPoints`，最近 60 笔
+   窗口与 §2.2 计划同口径，按时间取最新）；
+2. **1买/1卖**：端点后出现**强分型**才确立方向（强分型未出现 → 回退规则 5）；
+3. **非1类点**（2买/类2买/3买、2卖/类2卖/3卖）：出现即确立方向——点锚定的笔本身
+   已够笔成笔（chan-core isValid ≥5 根合并K）；
+4. **破坏闩锁**：确立后参考周期任一**收盘价**跌破买点端点价 / 涨破卖点端点价 →
+   反向（`4小时下跌延续` / `4小时上涨延续`），**闩锁**到下一个买卖点事件——实现口径
+   为从点时间起扫描全部收盘价、命中即反向，价格收回也不翻回，直到更新的买卖点出现；
+5. **回退**：无任何买卖点、或 1类点强分型未出现 → 参考周期最近一笔方向
+   （末笔 up→多 / down→空，`4小时末笔向上/向下`）；
+6. **数据不足**：参考周期笔 <2 → 方向 `None`，消费方不过滤（多空照常）。
+
+**强分型定义**（`strongFractalAfter`，2026-09-15 与用户确认；合并K/分型与 buildBi
+同源：`markWickBars → mergeBars → findFractals`）：
+
+- 底分型：右肩（第 3 根合并K）**收盘价 > 左肩（第 1 根合并K）最高价**；
+- 顶分型镜像：右肩收盘价 < 左肩最低价；
+- 左/右肩不完整（尾部形成中）不计；分型中心时间早于点时间的不计。
+
+### 5.2 消费方式（mark-entry 侧）
+
+- **结构性剔除**：参考周期及以上不作检测周期（只作方向锚；`trendRes="D"` 时 240
+  恢复检测）。剔除只看 `trend_res` 字符串，与方向状态无关；
+- **方向过滤**：状态方向非 `None` 且与策略方向相反 → 跳过该周期信号（确认制与
+  当下制同口径）；`trendRes=""`（关闭）时完全不过滤；
+- **成因展示**：命中信号附 `trendDirection`/`trendReason`，回测信号列表方向列显示
+  `多（4小时2买）` 式注记；成因格式 =「{参考周期名}{点类型}」/「…下跌·上涨延续」/
+  「…末笔向上·向下」，周期名映射 240→4小时、D→日线；
+- **统一入口**：`trendStateOf(periodBis, barsByPeriod, trendRes, periodMacd?)`——
+  上级周期取 `periodBis` 中比参考周期大一级的最小周期（240→D）供区间套使用；
+  Python 端 evaluateRealtimeEntries 无 bars 入参，`trend_state` 由回测引擎在链路
+  重算拍（每根 fine）算好复用传入。
+
+### 5.3 边界情况
+
+| 场景 | 处理 |
+|------|------|
+| `trendRes=""`（关闭）或参考周期无笔数据 | 不过滤（多空照常）；结构性剔除仍生效 |
+| 参考周期不在已加载周期中 | `trendStateOf` 返回 `dir=None` → 不过滤 |
+| 点确立后价格收回（破坏后反弹回端点价上方） | 保持破坏方向（闩锁），直到新买卖点 |
+| 同时刻出现买卖点（时间并列） | 按时间排序稳定取末位（确定性） |
+
+## 6. 与其他模块的依赖
 
 | 模块 | 关系 |
 |------|------|
-| `chan-core` | 复用 `calcATR/calcMACD/buildZS/buildZSByUpper/isBiDiverge/findBuyPoints/findSellPoints/intervalSecOf/fmtT` |
+| `chan-core` | 复用 `calcATR/calcMACD/buildZS/buildZSByUpper/isBiDiverge/findBuyPoints/findSellPoints/intervalSecOf/fmtT` 及 §5 强分型的 `markWickBars/mergeBars/findFractals` |
 | `chan-bi`（画笔） | **强制读取**本脚本落盘笔数据 |
 | `chan-status`（状态） | **复制**其内部 `isRangeBound`（不 require、不修改，保持 chan-status 独立） |
 | `mark-buy-sell`（买卖点） | 独立（本 SKILL 只生成计划，不重复标记历史买卖点） |
 | `mark-sr-flip`（支阻位） | 独立（本 SKILL 不读取支阻位） |
-| `mark-entry`（进出场） | **下游依赖**：本脚本落盘 `plan_<品种>.json`，`mark-entry` 读取其判定进场状态 |
+| `mark-entry`（进出场） | **下游依赖**：本脚本落盘 `plan_<品种>.json`，`mark-entry` 读取其判定进场状态；另 require 本模块 `trendStateOf`（§5 顺势过滤） |
 
 **运行依赖链**（完整执行顺序，各技能依序运行）：
 

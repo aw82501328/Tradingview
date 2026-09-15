@@ -23,6 +23,7 @@ from .chan_core import (
     calcATR, calcMACD, isBiDiverge, lowerResOf, buildZSByUpper, intervalSecOf,
     CHAN_CFG, biMacdMetrics, _areaDurComparable,
 )
+from .trading_plan import TREND_RES, trend_state_of
 
 # 箭头颜色：买点（多头）红色、卖点（空头）绿色
 BUY_COLOR = "#F23645"
@@ -790,7 +791,7 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
                             detectPeriods, near=NEAR, tCut=None, fired=None,
                             periodTimes=None, periodMacdTimes=None, divergeConfirm=None,
                             expectBiEnabled=None, realtimeMinBars=None,
-                            zsExitWeakRatio=None):
+                            zsExitWeakRatio=None, trend_res=None, trend_state=None):
     """当下模式进场评估（每根 fine 收盘调用，信号无需等反向笔确认）。
 
     三条件与确认制同构，差异只在"何时评"与"②用什么评"：
@@ -812,9 +813,15 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
                              缺省时 realtimeLowerDiverge 内部现建）
     @param divergeConfirm    M4 背驰进场时机（None → 读 CHAN_CFG.divergeConfirm）：
                              True=极值K线右邻K收盘后才出信号（分型确认后下一根开盘进场）
+    @param trend_res         顺势参考周期（None→TREND_RES 默认 "240"；""=关闭）。
+                             参考周期及以上不作检测周期；方向与信号相反时跳过信号
+                             （规则见 trading_plan.trend_direction）。
+    @param trend_state       参考周期方向状态（trend_state_of 结果）。本函数无 bars
+                             入参、无法自行计算，须由调用方传入（回测引擎在链路重算拍
+                             算好复用；None = 不过滤，仅保留检测周期剔除）。
     @returns 新信号列表（flat），每项含 { periodX, markRes, time, price, direction,
              strategyKey, nearSr, planDirection, realtime:True, segStart,
-             fallback?, nearEqual?, expectBi }
+             fallback?, nearEqual?, expectBi, trendDirection?, trendReason? }
     """
     fired = fired if fired is not None else set()
     # 出场参数（参数中心可调；None → 模块常量默认）
@@ -845,10 +852,17 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
         return best
 
     out = []
+    # 顺势参考周期（同 compute_entries；trend_state 须由调用方传入，见 docstring）
+    trend_res = TREND_RES if trend_res is None else trend_res
+    trend_sec = (intervalSecOf(trend_res) or 0) if trend_res else 0
+    trend_dir = (trend_state or {}).get("dir") if trend_res else None
+    trend_reason = (trend_state or {}).get("reason", "") if trend_res else ""
     for X in (detectPeriods or []):
         pd = periodData.get(X)
         if pd is None:
             continue
+        if trend_sec and (intervalSecOf(X) or 0) >= trend_sec:
+            continue  # 顺势参考周期及以上不作检测周期（只作方向锚，结构性剔除）
         plan = (planPeriods or {}).get(X)
         planStrategy = plan.get("strategy") if plan else None
         if not planStrategy or plan.get("direction") == "观望":
@@ -856,6 +870,8 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
         strategy = entryStrategyOf(planStrategy)
         if strategy is None:
             continue
+        if trend_dir and trend_dir != strategy["direction"]:
+            continue  # 逆参考周期方向的信号跳过（顺势过滤）
         key = strategy["key"]
         direction = strategy["direction"]
         wantType = "up" if direction == "short" else "down"  # 空头等反弹(up)，多头等回调(down)
@@ -899,7 +915,7 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
             if hit is None:
                 continue
             fired.add(fkey)
-            out.append({
+            sig = {
                 "periodX": X,
                 "markRes": c["res"],
                 "time": c["point"]["time"],
@@ -913,7 +929,11 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
                 "fallback": bool(c.get("fallback", False)),   # M1 回退候选（非停止级命中）
                 "nearEqual": bool(c.get("nearEqual", False)), # M2 近等候选（未严格创新极值）
                 "expectBi": expectBi,                         # M4 检测周期走了预期够笔口径
-            })
+            }
+            if trend_dir:
+                sig["trendDirection"] = trend_dir
+                sig["trendReason"] = trend_reason
+            out.append(sig)
     return out
 
 
@@ -929,7 +949,8 @@ ALL_RES_WITH_30S = ["D", "240", "60", "15", "3", "30S"]
 
 def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriods,
                     near=NEAR, periodMacd=None, periodAtr=None, with_30s=False,
-                    zs_exit_weak_ratio=ZS_EXIT_WEAK_RATIO):
+                    zs_exit_weak_ratio=ZS_EXIT_WEAK_RATIO,
+                    trend_res=None, trend_state=None):
     """逐周期判定进场状态（依赖交易计划 plan 结果）→ 生成进场信号。
 
     @param periodBis     各周期笔 { 周期: [bis] }
@@ -941,8 +962,14 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
     @param periodMacd    可选：各周期预计算 MACD { 周期: [macdArr] }
     @param periodAtr     可选：各周期预计算 ATR { 周期: atr }
     @param with_30s      启用 30 秒级别（ALL_RES 追加 30S，仍按数据存在性过滤）
+    @param trend_res     顺势参考周期（None→TREND_RES 默认 "240"；""=关闭）。
+                         参考周期及以上不作检测周期（只作方向锚，结构性剔除）；
+                         参考周期方向与信号方向相反时跳过（规则见
+                         trading_plan.trend_direction）。
+    @param trend_state   调用方预计算的参考周期方向状态（trend_state_of 结果），
+                         缺省时本函数内部计算（回测引擎在链路重算拍复用传入）。
     @returns { 标记级别: [信号...] }，信号含 { periodX, time, price, direction, strategyKey,
-             nearSr, color, markRes, planDirection }
+             nearSr, color, markRes, planDirection, trendDirection, trendReason }
     """
     periodMacd = periodMacd or {}
     periodAtr = periodAtr or {}
@@ -978,11 +1005,23 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
                 best = r
         return best
 
+    # 顺势参考周期方向（trading_plan.trend_state_of；trend_state 可由调用方在链路
+    # 重算拍预计算传入复用）。trend_res 为空 = 关闭：参考周期照常检测、方向不过滤。
+    trend_res = TREND_RES if trend_res is None else trend_res
+    trend_sec = (intervalSecOf(trend_res) or 0) if trend_res else 0
+    if trend_state is None and trend_res:
+        trend_state = trend_state_of(periodBis, barsByPeriod, trend_res,
+                                     periodMacd=periodMacd)
+    trend_dir = (trend_state or {}).get("dir") if trend_res else None
+    trend_reason = (trend_state or {}).get("reason", "") if trend_res else ""
+
     allEntries = {}
     for res in detectPeriods:
         pd = periodData.get(res)
         if pd is None:
             continue
+        if trend_sec and (intervalSecOf(res) or 0) >= trend_sec:
+            continue  # 顺势参考周期及以上不作检测周期（只作方向锚，结构性剔除）
         plan = planPeriods.get(res)
         planStrategy = plan.get("strategy") if plan else None
         if not planStrategy or plan.get("direction") == "观望":
@@ -990,6 +1029,8 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
         strategy = entryStrategyOf(planStrategy)
         if strategy is None:
             continue
+        if trend_dir and trend_dir != strategy["direction"]:
+            continue  # 逆参考周期方向的信号跳过（顺势过滤）
         upRes = upperResOf(res)
         ctx = {
             "res": res,
@@ -1018,6 +1059,9 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
             "markRes": evalRes["markRes"],
             "planDirection": plan.get("direction"),
         }
+        if trend_dir:
+            sig["trendDirection"] = trend_dir
+            sig["trendReason"] = trend_reason
         allEntries.setdefault(evalRes["markRes"], []).append(sig)
     return allEntries
 
