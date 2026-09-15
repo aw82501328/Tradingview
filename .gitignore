@@ -35,6 +35,7 @@ Thumbs.db
 # dump_baseline 生成的对拍数据快照（可再生成，不入库）
 py_chain/.after/
 py_chain/.baseline/
+py_chain/.baseline_*/
 
 # 基础数据存储（SQLite，按品种累积的K线库，不入库）
 data/bars.db
@@ -55,6 +56,9 @@ bis_front*.json
 # 调试残留：临时画笔/截图脚本与重启前信号快照（一次性产物，不入库）
 tmp_*
 webapp-signals-before-restart.json
+
+# WEB 服务运行时信号日志（每次回测/监控追加，可清空重生成，不入库）
+py_chain/signals.ndjson
 
 # JS 对齐试验工作区（chan_core 对拍用，正式版在 py_chain/）
 chan_strategy/

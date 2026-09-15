@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from .analysis_service import AnalysisManager, dependency_order, ORDER
-from . import webapp, sr_service
+from . import webapp, sr_service, param_center
 
 
 class AnalysisTests(unittest.TestCase):
@@ -20,6 +20,10 @@ class AnalysisTests(unittest.TestCase):
         self.holder = None
         self.chart = threading.Lock()
         self.release_count = 0
+        # 参数中心持久化隔离到临时目录（configure 会读取参数中心值，避免受真实
+        # web/module_params.json 的本地覆盖影响导致断言漂移）
+        self._orig_pm_file = param_center.PARAMS_FILE
+        param_center.PARAMS_FILE = str(Path(self.tmp.name) / "module_params.json")
         def acquire(name):
             if self.holder:
                 return self.holder
@@ -45,6 +49,7 @@ class AnalysisTests(unittest.TestCase):
         self.assertFalse(self.m.thread.is_alive())
 
     def tearDown(self):
+        param_center.PARAMS_FILE = self._orig_pm_file
         self.m.close()
         if self.m.thread:
             self.m.thread.join(3)
@@ -91,7 +96,9 @@ class AnalysisTests(unittest.TestCase):
         self.m.stage_runner = stage
         self.m.start()
         self.assertTrue(begun.wait(1))
-        self.m.configure({"near": 2})
+        # 2026-09-15 起 near 由参数中心统一管理：经参数中心修改后 configure 刷新 cfg
+        param_center.update("entry", {"near": 2})
+        self.m.configure({})
         self.assertFalse(self.m.start()["ok"])
         self.m.stop()
         unblock.set()
@@ -128,8 +135,9 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(self.m.job["state"], "error")
 
     def test_invalid_config(self):
+        # keep/near/slip_* 已改由参数中心管理（页面不再传值），此处只校验运行配置本身
         for patch_cfg in ({"intervalMinutes": 0}, {"intervalMinutes": float("nan")},
-                          {"from": "nonsense"}, {"keep": 0}, {"near": -1},
+                          {"from": "nonsense"},
                           {"sr": {"periods": ["W"], "srTypes": ["boll"]}}):
             with self.assertRaises(ValueError):
                 self.m.configure(patch_cfg)

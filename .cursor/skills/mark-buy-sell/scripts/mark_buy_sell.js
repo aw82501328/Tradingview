@@ -49,6 +49,13 @@ const getStrArg = (name, def) => {
 const ATR_FILTER = getArg("atr", 0.5);
 const GAP_FILTER = getArg("gap", 1.0);
 core.CHAN_CFG.gapFilter = GAP_FILTER;
+// 参数中心（WEB 参数配置页）整体覆盖：在上述单键 CLI 之后应用、优先级更高；
+// 未知键在 JS 侧闲置无害（Python 回测引擎的扩展键不为本脚本读取）
+const CHAN_CFG_JSON = getStrArg("chan-cfg", "");
+if (CHAN_CFG_JSON) {
+  try { Object.assign(core.CHAN_CFG, JSON.parse(CHAN_CFG_JSON)); }
+  catch (e) { console.log("警告: --chan-cfg JSON 解析失败，忽略该参数"); }
+}
 // 1类 与 2类 邻近判定：1买/1卖 与 2买/2卖 的「K线最低/最高价差」不超过 nearp×ATR（至少 0.05）时
 // 视为「很近」（不限制时间差），直接把 1类 合并到 2类 标记上标注为「真1买/真1卖」（见 mergeNearFirstSecond）
 const NEAR_ATR_RATIO = Math.max(parseFloat(getArg("nearp", 0.3)) || 0.3, 0);

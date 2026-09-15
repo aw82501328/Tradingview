@@ -77,7 +77,7 @@
 - **对拍（align_check，JS 侧 rebuild_bis.js 复用 chan_core.js）**：bars_all_tf.json
   6 周期（D/240/60/15/3/30S）逐笔 diff **0 差异**。
 - **增量一致性（engine_consistency）**：引擎逐根推进状态 == batch(前缀) 全检查点通过——
-  增量 wick 运行均值的早期漂移由 `_resync_bis`（每 RESYNC_EVERY=1000 根 fine bar 批量
+  增量 wick 运行均值的早期漂移由 `_resync_bis`（每 RESYNC_EVERY=200 根 fine bar 批量（2026-09-15 起 1000→200）
   重同步，`run()` 收尾最终重同步）消除；`_rewind_res` 同步改为批量重建。
 - **残余差异（文档化，不阻塞）**：图表管线专属步骤（lockedPivots/alignBiToUpper/ATR
   幅度过滤/calibrateBiTimes/绘制窗口）未移植——引擎 vs 图表落盘（bis_OANDA_XAUUSD.json）

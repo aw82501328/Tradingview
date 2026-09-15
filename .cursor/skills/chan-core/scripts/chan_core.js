@@ -1170,11 +1170,15 @@ function intervalSecOf(res) {
 /**
  * 判断本周期某笔是否与上一级别某笔完全重合（起点、终点时间与价格一致）。
  * 完全重合说明本周期该笔内部无更细结构（整笔就是上一级别的一笔），
- * 本周期无法在本级别判断背驰，1类买卖点应由上一级别标记，本周期不标记。
+ * 本级别无从选有效参照（跨上级笔边界的比较无意义）→ 上级笔已结束时由
+ * 本周期做「同笔」纯结构标记（免参照/创新低/背驰）；上级笔仍为末笔
+ * （延伸中、反向笔未确认）时不标记。
  * 时间容差 = 本周期 1 个 bar（低级别笔用更低一级校准，与上级笔端点可能有最多一个bar的偏差）。
+ * @returns 命中的上级笔对象（与 upperBis 内元素同引用）| null（未命中/空表），
+ *          调用方可按真值使用（旧 bool 契约兼容）。
  */
 function isSameAsUpperBi(bi, upperBis, barSec) {
-  if (!upperBis || upperBis.length === 0) return false;
+  if (!upperBis || upperBis.length === 0) return null;
   const tEps = barSec || 900;
   const pEps = 0.01;
   for (const ub of upperBis) {
@@ -1183,10 +1187,10 @@ function isSameAsUpperBi(bi, upperBis, barSec) {
         Math.abs(ub.endTime - bi.endTime) <= tEps &&
         Math.abs(ub.startPrice - bi.startPrice) <= pEps &&
         Math.abs(ub.endPrice - bi.endPrice) <= pEps) {
-      return true;
+      return ub;
     }
   }
-  return false;
+  return null;
 }
 
 /**
@@ -1261,9 +1265,16 @@ function findBuyPoints(bis, upperBis, macdArr, barSec) {
   const firstBuys = [];
   for (let k = 1; k < downIdx.length; k++) {
     const cur = bis[downIdx[k]];
-    // 本周期这笔与上一级别某笔完全重合（内部无结构），本周期不标记 1买
-    if (isSameAsUpperBi(cur, upperBis, barSec)) {
-      if (CHAN_CFG.debug) console.log(`[一买跳过-与上级笔重合] ${fmtT(cur.endTime)}(${cur.endPrice}) 整笔与上一级别完全重合，本周期不标记`);
+    // 与上级某笔完全重合（同笔）：上级笔已结束（非末笔）→ 纯结构标记 1买；
+    // 上级末笔（延伸中，反向笔未确认进列表）→ 维持跳过（时序护栏）
+    const sameUpper = isSameAsUpperBi(cur, upperBis, barSec);
+    if (sameUpper) {
+      if (upperBis && sameUpper === upperBis[upperBis.length - 1]) {
+        if (CHAN_CFG.debug) console.log(`[一买跳过-上级末笔延伸中] ${fmtT(cur.endTime)}(${cur.endPrice}) 与上级末笔重合，上级反向笔未确认`);
+        continue;
+      }
+      if (CHAN_CFG.debug) console.log(`[一买同笔] ${fmtT(cur.endTime)}(${cur.endPrice}) 与上级已结束下跌笔重合，结构同笔标记1买`);
+      firstBuys.push({ biIdx: downIdx[k], time: cur.endTime, price: cur.endPrice });
       continue;
     }
     let refer = null;
@@ -1426,9 +1437,16 @@ function findSellPoints(bis, upperBis, macdArr, barSec) {
   const firstSells = [];
   for (let k = 1; k < upIdx.length; k++) {
     const cur = bis[upIdx[k]];
-    // 本周期这笔与上一级别某笔完全重合（内部无结构），本周期不标记 1卖
-    if (isSameAsUpperBi(cur, upperBis, barSec)) {
-      if (CHAN_CFG.debug) console.log(`[一卖跳过-与上级笔重合] ${fmtT(cur.endTime)}(${cur.endPrice}) 整笔与上一级别完全重合，本周期不标记`);
+    // 与上级某笔完全重合（同笔）：上级笔已结束（非末笔）→ 纯结构标记 1卖；
+    // 上级末笔（延伸中，反向笔未确认进列表）→ 维持跳过（时序护栏）
+    const sameUpper = isSameAsUpperBi(cur, upperBis, barSec);
+    if (sameUpper) {
+      if (upperBis && sameUpper === upperBis[upperBis.length - 1]) {
+        if (CHAN_CFG.debug) console.log(`[一卖跳过-上级末笔延伸中] ${fmtT(cur.endTime)}(${cur.endPrice}) 与上级末笔重合，上级反向笔未确认`);
+        continue;
+      }
+      if (CHAN_CFG.debug) console.log(`[一卖同笔] ${fmtT(cur.endTime)}(${cur.endPrice}) 与上级已结束上涨笔重合，结构同笔标记1卖`);
+      firstSells.push({ biIdx: upIdx[k], time: cur.endTime, price: cur.endPrice });
       continue;
     }
     let refer = null;

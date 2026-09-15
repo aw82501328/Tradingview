@@ -73,8 +73,18 @@ const SLIP_STOP = getArg("slip-stop", 3);
 const SLIP_FALLBACK = getArg("slip-fallback", 10);
 // 保本滑点：beStop = 进场K线极值 ± 该值（short: high+ / long: low−）
 const SLIP_BE = getArg("slip-be", 3);
-// 形成段「成笔预期」门槛：合并后 ≥5 根K（chan_core isValid gap>=4 同口径）
-const EXIT_MIN_MERGED = 5;
+// 形成段「成笔预期」门槛：合并后 ≥5 根K（chan_core isValid gap>=4 同口径）；
+// --exit-min-merged 来自 WEB 参数中心（进出场模块，py_chain EXIT_MIN_MERGED 同名）
+const EXIT_MIN_MERGED = Math.max(2, Math.round(getArg("exit-min-merged", 5) || 5));
+// 出中枢力度衰减比例：离开笔 span < 进入笔 span × ratio 视为力度变弱
+// （--zs-weak-ratio 来自 WEB 参数中心，py_chain ZS_EXIT_WEAK_RATIO 同名）
+const ZS_WEAK_RATIO = getArg("zs-weak-ratio", 1.0) || 1.0;
+// 参数中心（WEB 参数配置页）整体覆盖；未知键在 JS 侧闲置无害
+const CHAN_CFG_JSON = getStrArg("chan-cfg", "");
+if (CHAN_CFG_JSON) {
+  try { Object.assign(core.CHAN_CFG, JSON.parse(CHAN_CFG_JSON)); }
+  catch (e) { console.log("警告: --chan-cfg JSON 解析失败，忽略该参数"); }
+}
 // 顺势（计划方向=多头多/空头空）判定集合；planDirection 缺失时按 strategyKey 兜底
 const TREND_PLAN_DIRS = new Set(["多头多", "空头空"]);
 const TREND_STRATEGY_KEYS = new Set(["wait2Buy", "waitBuy", "wait2Sell", "waitSell"]);
@@ -573,11 +583,11 @@ function evaluateEntry(ctx, strategy) {
       break;
     case "wait1Sell":
       if (!brokePrevHigh(bis)) return { ok: false, reason: "未够笔且过高点" };
-      if (!zsExitWeak(bis, upperBis, macdArr, barSec, 1.0, "short")) return { ok: false, reason: "出中枢力度未变弱" };
+      if (!zsExitWeak(bis, upperBis, macdArr, barSec, ZS_WEAK_RATIO, "short")) return { ok: false, reason: "出中枢力度未变弱" };
       break;
     case "wait1Buy":
       if (!brokePrevLow(bis)) return { ok: false, reason: "未够笔且过低点" };
-      if (!zsExitWeak(bis, upperBis, macdArr, barSec, 1.0, "long")) return { ok: false, reason: "出中枢力度未变弱" };
+      if (!zsExitWeak(bis, upperBis, macdArr, barSec, ZS_WEAK_RATIO, "long")) return { ok: false, reason: "出中枢力度未变弱" };
       break;
     case "waitBuy":
     case "waitSell":

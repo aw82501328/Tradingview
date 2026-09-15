@@ -42,7 +42,7 @@
     复用图表算法源重建）——bars_all_tf.json 6 周期（含 30S）逐笔 diff **0 差异**。
   - **增量=batch 一致性**：`python -m py_chain.engine_consistency`——引擎逐根推进状态在
     重同步点上严格等于 batch(前缀)；增量 wick 运行均值与全量均值的早期边界漂移由
-    `_resync_bis`（每 `RESYNC_EVERY=1000` 根 fine bar 全量重同步）消除，`run()` 收尾
+    `_resync_bis`（每 `RESYNC_EVERY=200` 根 fine bar 全量重同步；2026-09-15 起 1000→200，    最坏漂移窗口 50h→10h，见 backtest.py 常量注释）消除，`run()` 收尾
     最终重同步使末端状态严格等于 batch(全前缀)。
   - **块2 下沉判定**（`mark_entry.py`）：`sinkChainRealtime`/`sinkChainConfirm` 按规则 1
     逐级下沉（次级别 ≥3 笔且末段终点即 P 才下沉，链连续不可跳级，上限=检测周期 X）；
@@ -315,6 +315,16 @@ run() 批量路径成交 bar 当拍未收盘，存在 ≤1 根 fine bar 的微�
 - **Web 控制台**：信号行状态流转 `信号→持仓中→已平仓`（或 `同向过滤`），含出场时间/出场价/出场类型/盈亏/手数列；「标记进出场」按钮画箭头 + 黄色出场标记（`marks.py`：终局 `xcross` / 平一半 `circle`，默认色 `DEFAULT_EXIT_COLOR = #FFEB3B`）。
   - 注：`marks.py` 的模块 docstring（L11、L57）仍写着「统一灰 `#787B86`」，与常量和实际行为不符，属陈旧注释（本次未改代码）。
 
+### 2.1.7 交易起始时刻 start_ts 与预热提前量 lead（2026-09-15）
+
+「起始日期 = 交易开始日」口径：用户输入的起始日期即首笔可成交日，引擎用更早的数据建立状态后**从空仓开始交易**。
+
+- **为什么需要**：引擎状态（笔/支阻位/MACD/长影压平的 TR 均值）从加载起点增量构建，起点不同则结果不同，且不收敛（全窗口均值/大周期笔/跨月持仓互斥）——起始日期贴近统计窗口会系统性缺信号（如 from=8-1 时 8 月上旬 D/240 无结构）。
+- **引擎**：`BacktestEngine.run(start_ts=None)` / `run_backtest(start_ts=...)`——start_ts 非 None 时忽略 `warmup_bars`，`start_i = 首根 time >= start_ts 的 fine bar`（至少保留 1 根预热）；之前的K线全部只推进状态（不收集信号、不成交），之后照常「收盘判定 → 下一根开盘成交」，**start_ts 前无任何成交、空仓起步**。
+- **取数层前移**：Web 回测「预热提前（天）」`lead_days`（默认 60；0=旧口径）/ CLI `--lead-days`——取数 `from_ts` 自动前移 `lead_days*86400` 秒，`engine.run(start_ts=from_ts)`。旧方案库 cfg 无 `lead_days` 键 → 0 → 行为与旧版逐笔一致。
+- **两个预热勿混淆**：旧「预热根数 warmup=60 根 fine(3m)K线 ≈ 3 小时」（仅 lead=0 生效）；新「预热提前 lead_days=60 **天**」（lead>0 生效，两个月 ≈ 2.7 万根 3mK线，D 周期 ~44 根）。
+- **确定性**：同数据 + 同 lead + 同起始日期 → 结果逐笔一致（数据源建议 store，冻结可复现）。与「from 前移 lead 天后从 from 交易」的全量跑的唯一差异：本口径交易起点从空仓开始，不继承起点前的持仓（无跨月同向互斥影响）。
+
 ## 2.2 支阻位三类来源（2026-09-12 取消跨周期合并，与 mark_sr_flip.js 对齐）
 
 支阻位（`sr_flip.py` `compute_srflip`）= **支阻位来源（逐周期二选一）+ 独立叠加层**（2026-09-13 拆分）：
@@ -441,7 +451,7 @@ cProfile 归因后做四项「逐位等价」优化（每项均有新旧直接�
    无 numpy 回退纯循环。numpy 为可选依赖。
 3. `chan_core.findBuyPoints` / `findSellPoints` 内部：2买/2卖 区间套的「上级笔 × 全部笔」双层
    循环改为 down/up 笔端点数组 + bisect 时间取窗（集合与顺序不变）；`_findIndex` 等值线性查找
-   改 endTime→首次下标字典；`isSameAsUpperBi` 上级笔按类型分组传入（函数本就跳过异类型）。
+   改 endTime→首次下标字典；`isSameAsUpperBi` 上级笔按类型分组传入（函数本就跳过异类型；   2026-09-15 起返回命中笔对象/None——同笔且上级笔已结束（非末笔）时 findBuyPoints/   findSellPoints 走纯结构标记，不选参照/不比创新低新高/不比背驰）。
 4. 实测（XAUUSD，anchor/realtime，无 marks）：
    - 7 天（2295 根）：12.4s → 5.9s；21 天（6885 根）：283s → 88.4s（含 1+2）
    - 35 天（11475 根）：256.3s → 163.2s（1+2+3，累计 1.57×）

@@ -77,11 +77,11 @@ let bis = core.buildBi(fractals, merged, atr, macdArr); // ③ 笔构建
 
 | 函数 | 说明 |
 |------|------|
-| `findBuyPoints(bis, upperBis, macdArr, barSec)` | 买点识别（1/2/3买/类2买，含区间套、MACD背驰、与上级笔重合跳过） |
+| `findBuyPoints(bis, upperBis, macdArr, barSec)` | 买点识别（1/2/3买/类2买，含区间套、MACD背驰、同笔例外：上级笔已结束→纯结构标记） |
 | `findSellPoints(bis, upperBis, macdArr, barSec)` | 卖点识别（1/2/3卖/类2卖，对称逻辑） |
 | `anchorFirstBuy(cand, upperBis)` | 一买锚定：取候选之前最近的上级底部端点 |
 | `anchorFirstSell(cand, upperBis)` | 一卖锚定：候选在上级上涨笔内则上移到其结束点，否则取最近上级顶部端点 |
-| `isSameAsUpperBi(bi, upperBis, barSec)` | 本笔与上级某笔完全重合判断（时间容差=本周期1个bar） |
+| `isSameAsUpperBi(bi, upperBis, barSec)` | 本笔与上级某笔完全重合判断（时间容差=本周期1个bar；返回命中笔对象或 null） |
 | `snapToOwnBar(price, refTime, bars)` | 极值价格/时间映射到本周期bar边界 |
 | `keepRecentEach(points)` | 低级别每类买卖点只保留最近一个（历史策略保留，当前主流程已不调用） |
 | `keepRecentAll(points, keep=10)` | 买卖点不分类（买+卖合并）只保留时间上最近 keep 个（现行主流程保留策略，mark-buy-sell 每周期邻近合并后调用） |

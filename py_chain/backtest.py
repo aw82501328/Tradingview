@@ -37,6 +37,9 @@
     （手数默认 4，参数化），未平仓仍按最新收盘价 mark-to-market × lots。
   - run() 与 step_to(execute=True) 同一套逐根逻辑（实时监控/回放从此也有成交与出场；
     step_to(execute=False) 仅预热推进）。
+  - run(start_ts)：交易开始时刻口径——start_ts 前只推进状态不交易（忽略 warmup_bars），
+    配合取数层把加载起点前移 lead 天（Web 回测「预热提前天数」/ CLI --lead-days），
+    实现「起始日期=交易开始日」：状态在交易开始前已充分建立，从空仓起步。
 
 为避免逐根重复计算，链路只在某周期新增K线（bis 变化）时重算，
 MACD / ATR 在各周期切片变化时缓存。注意：本引擎的判定结果是「研究用近似」，
@@ -59,7 +62,7 @@ from .mark_entry import (
     compute_entries, stop_ref_of, find_bi_event, filterDetectPeriods,
     trend_following_of, forming_seg_ready,
     DEFAULT_LOTS, DEFAULT_SLIP_STOP, DEFAULT_SLIP_FALLBACK, DEFAULT_SLIP_BE,
-    NEAR as DEFAULT_NEAR,
+    NEAR as DEFAULT_NEAR, EXIT_MIN_MERGED, REALTIME_MIN_BARS, ZS_EXIT_WEAK_RATIO,
 )
 
 DEFAULT_PERIODS = ["D", "240", "60", "15", "3"]
@@ -68,14 +71,20 @@ DEFAULT_WARMUP_BARS = 60
 # 稳定均值在窗口早期的边界 bar 上可能翻转判定并经包含关系级联放大。每 N 根 fine bar
 # 用当前前缀做一次 markWickBars 全量重建（_resync_bis），重同步点上引擎状态严格等于
 # batch(前缀)；间隔内的漂移窗口 ≤ N 根，且无未来函数（只用已收盘数据）。
-RESYNC_EVERY = 1000
+# 2026-09-15 起 1000 → 200（根 3m ≈ 10h）：50h 漂移窗口曾使 8-20 白天的 60m 下跌笔
+# 在增量链上迟迟不开（下沉链无根，8-20 20:30 决策拍拿不到 15m 背驰候选，仅 batch
+# 重算可见）；200 收紧后结构变化最迟 10h 内进入增量链。重同步频次 ×5 实测无耗时
+# 回退（dump_baseline realtime 98→84s、confirm 129→99s；store 全量重放 132→127s，
+# 状态更干净使分型尾部的全量重建反而变少）；若后续数据窗口加大再评估回调。
+RESYNC_EVERY = 200
 
 # ============================================================
 # 出场状态机（三模式统一口径：收盘判定 → 下一根开盘成交）
 # ============================================================
 
 
-def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None):
+def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
+                          min_merged=EXIT_MIN_MERGED):
     """出场判定（纯函数，三模式共用）——在「已收盘 bar」上判定一次。
 
     统一语义（出场阶梯重构 2026-09-09：止损±滑点+兜底 / beStop / 顺势逆势分支）：
@@ -100,7 +109,8 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None):
     trend = trend_following_of(pos.get("planDirection"), pos.get("strategyKey"))
     tp1 = find_bi_event(mark_bis, pos["signalTime"], fav)
     tp3a = find_bi_event(px_bis, pos["signalTime"], fav, break_prev=True) if trend else None
-    seg5 = forming_seg_ready(px_bis, px_merged_times, is_short) if px_merged_times else False
+    seg5 = forming_seg_ready(px_bis, px_merged_times, is_short, min_merged) \
+        if px_merged_times else False
     # 同一拍顺序：保本 → 半平 → 全平 → 止损（逐拍各挂一个）
     if tp1 and tp1["time"] <= t and not pos.get("beDone"):
         pos["beDone"] = True
@@ -179,7 +189,7 @@ class BacktestEngine:
                  lots=DEFAULT_LOTS, slip_stop=DEFAULT_SLIP_STOP,
                  slip_fallback=DEFAULT_SLIP_FALLBACK, slip_be=DEFAULT_SLIP_BE,
                  near=DEFAULT_NEAR, sr_kwargs=None,
-                 diverge_confirm=None, expect_bi=None):
+                 diverge_confirm=None, expect_bi=None, module_params=None):
         self.periods = list(periods or DEFAULT_PERIODS)
         # 各周期按时间升序整理 + 缓存时间数组
         self.bars = {}
@@ -269,6 +279,16 @@ class BacktestEngine:
         # ≥expectBiMinBars 根K线即视为回调/反弹中）；False = 旧口径（末笔须已是确认的反向笔）。
         self.expect_bi = (bool(CHAN_CFG.get("expectBiEnough"))
                           if expect_bi is None else bool(expect_bi))
+        # 参数中心模块参数（param_center.effective_all 的子集；缺省回退各模块常量）：
+        #   plan  → compute_plan cfg（交易计划震荡阈值 rangeBarN 等）
+        #   marks → compute_all_marks（买卖点 nearAtrRatio/keep）
+        #   exit_min_merged / realtime_min_bars / zs_exit_weak_ratio → 出场/够笔/出中枢衰减
+        mp = module_params or {}
+        self.plan_cfg = dict(mp["plan"]) if mp.get("plan") else None
+        self.marks_params = dict(mp["marks"]) if mp.get("marks") else {}
+        self.exit_min_merged = mp.get("exit_min_merged", EXIT_MIN_MERGED)
+        self.realtime_min_bars = mp.get("realtime_min_bars", REALTIME_MIN_BARS)
+        self.zs_exit_weak_ratio = mp.get("zs_exit_weak_ratio", ZS_EXIT_WEAK_RATIO)
 
         # 增量状态
         self._cut = {res: 0 for res in self.periods}
@@ -641,7 +661,8 @@ class BacktestEngine:
                     advance_exit_decision(pos, t_dec, fine[i],
                                           self._bis.get(pos.get("markRes")) or [],
                                           self._bis.get(pos.get("periodX")) or [],
-                                          self._merged_times.get(pos.get("periodX")) or [])
+                                          self._merged_times.get(pos.get("periodX")) or [],
+                                          min_merged=self.exit_min_merged)
             # ② 收集进场信号（与 run 同序同口径）
             if self.signal_mode == "realtime":
                 if changed:
@@ -685,12 +706,16 @@ class BacktestEngine:
 
     # ---------------- 主循环 ----------------
 
-    def run(self, to_ts=None, log=None, log_every=2000,
+    def run(self, to_ts=None, start_ts=None, log=None, log_every=2000,
             on_progress=None, on_signal=None, on_trade=None, on_exit=None, on_suppressed=None,
             paused=None, stopped=None):
         """逐根K线重放。
 
         @param to_ts      结束时间戳（None 表示回测到最后一根）
+        @param start_ts   交易开始时刻（None=现行为：预热 warmup_bars 根 fine K线后开始）。
+          非 None 时忽略 warmup_bars：首根 time >= start_ts 的 fine bar 起才收集信号/成交，
+          之前的K线全部只推进状态（笔/支阻位/MACD 充分建立后从空仓开始交易）——
+          配合取数层把加载起点前移 lead 天，实现「起始日期=交易开始日」的回测口径。
         @param log        日志函数（None 不输出）
         @param log_every  每 N 根输出一次进度
         @param on_progress 可选：每根推进后调用 on_progress(i, end_i)（供进度条/后台线程）
@@ -706,6 +731,11 @@ class BacktestEngine:
         fine = self.bars[self.fine_res]["_list"]
         n = len(fine)
         start_i = min(n, self.warmup_bars)
+        if start_ts is not None:
+            # 交易开始时刻口径：预热边界由时刻决定（忽略 warmup_bars），start_ts 之前
+            # 只推进状态；至少保留 1 根预热 bar（start_ts 早于数据起点时不至于空预热）
+            si = bisect.bisect_left(self._times[self.fine_res], start_ts)
+            start_i = min(n, max(1, si))
         end_i = n
         if to_ts is not None:
             end_i = min(end_i, bisect.bisect_right(self.bars[self.fine_res]["_times"], to_ts))
@@ -793,7 +823,8 @@ class BacktestEngine:
                 advance_exit_decision(pos, t, fine[i],
                                       self._bis.get(pos.get("markRes")) or [],
                                       self._bis.get(pos.get("periodX")) or [],
-                                      self._merged_times.get(pos.get("periodX")) or [])
+                                      self._merged_times.get(pos.get("periodX")) or [],
+                                      min_merged=self.exit_min_merged)
             if self.signal_mode == "realtime":
                 # 当下背驰：笔结构变化时重算链路（刷新①③所需的计划/支阻位缓存），
                 # 之后每根 fine 收盘都用当前增量状态（bis 已延伸到当下极值、MACD 增量）评估②
@@ -907,7 +938,8 @@ class BacktestEngine:
             try:
                 self._marks = compute_all_marks(periodBis, barsByPeriod, core,
                                                 fromTs=None, periodMacd=periodMacd,
-                                                periodAtr=periodAtr)
+                                                periodAtr=periodAtr,
+                                                **self.marks_params)
             except Exception:
                 self._marks = {}
         # 2. 支阻位（密集区 + 黄金分割；传 periodMacdIn 复用增量 MACD 缓存）
@@ -937,10 +969,11 @@ class BacktestEngine:
                                       periodAtrsIn=periodAtr, periodMacdIn=periodMacd, **srKw)
         except Exception:
             self._sr = None
-        # 3. 交易计划
+        # 3. 交易计划（cfg = 参数中心交易计划模块参数）
         try:
             self._plan = compute_plan(periodBis, barsByPeriod, core,
-                                      periodMacd=periodMacd, periodAtr=periodAtr)
+                                      periodMacd=periodMacd, periodAtr=periodAtr,
+                                      cfg=self.plan_cfg)
         except Exception:
             self._plan = {}
         # 4. 进出场（检测周期与 JS 一致：不含日线、不含 30S——30S 仅作背驰级别；
@@ -956,7 +989,8 @@ class BacktestEngine:
             self._entries = compute_entries(periodBis, barsByPeriod, self._plan, srLevels,
                                             detectPeriods=detectPeriods, near=self.near,
                                             periodMacd=periodMacd, periodAtr=periodAtr,
-                                            with_30s=any(str(p).upper() == "30S" for p in self.periods))
+                                            with_30s=any(str(p).upper() == "30S" for p in self.periods),
+                                            zs_exit_weak_ratio=self.zs_exit_weak_ratio)
         except Exception:
             self._entries = {}
 
@@ -1005,6 +1039,8 @@ class BacktestEngine:
             periodTimes=self._times, periodMacdTimes=self._macd_times,
             divergeConfirm=self.diverge_confirm,
             expectBiEnabled=self.expect_bi,
+            realtimeMinBars=self.realtime_min_bars,
+            zsExitWeakRatio=self.zs_exit_weak_ratio,
         )
         newSigs = []
         for s in sigs:
@@ -1144,14 +1180,15 @@ class BacktestEngine:
 
 
 def run_backtest(bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
-                 with_marks=False, to_ts=None, log=None, fill_mode="anchor",
+                 with_marks=False, to_ts=None, start_ts=None, log=None, fill_mode="anchor",
                  signal_mode="realtime", sr_types=None, fib_levels=None,
                  boll_length=None, boll_mult=None,
                  lots=DEFAULT_LOTS, slip_stop=DEFAULT_SLIP_STOP,
                  slip_fallback=DEFAULT_SLIP_FALLBACK, slip_be=DEFAULT_SLIP_BE,
                  near=DEFAULT_NEAR, sr_kwargs=None,
-                 diverge_confirm=None, expect_bi=None):
-    """便捷入口：构建引擎并运行。fill_mode 见 BacktestEngine（anchor=锚点当拍成交，confirm=确认成交）；
+                 diverge_confirm=None, expect_bi=None, module_params=None):
+    """便捷入口：构建引擎并运行。start_ts=交易开始时刻（None=预热 warmup_bars 根后开始，
+    见 BacktestEngine.run）；fill_mode 见 BacktestEngine（anchor=锚点当拍成交，confirm=确认成交）；
     signal_mode：realtime=当下背驰（每拍评估形成中段，默认），confirm=确认制（结构变化时收集）；
     sr_types/fib_levels 透传支阻位类型开关与黄金分割比率（None → compute_srflip 默认）；
     boll_length/boll_mult 透传 BOLL 布林带周期与标准差倍数（None → compute_srflip 默认 26/2）；
@@ -1167,8 +1204,9 @@ def run_backtest(bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
                             lots=lots, slip_stop=slip_stop,
                             slip_fallback=slip_fallback, slip_be=slip_be,
                             near=near, sr_kwargs=sr_kwargs,
-                            diverge_confirm=diverge_confirm, expect_bi=expect_bi)
-    return engine.run(to_ts=to_ts, log=log)
+                            diverge_confirm=diverge_confirm, expect_bi=expect_bi,
+                            module_params=module_params)
+    return engine.run(to_ts=to_ts, start_ts=start_ts, log=log)
 
 
 def build_bis(bars_by_period, periods=None):

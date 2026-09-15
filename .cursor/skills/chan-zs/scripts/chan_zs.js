@@ -36,6 +36,13 @@ const getStrArg = (name, def) => {
   return a ? a.split("=")[1] : def;
 };
 const FROM_DATE = getStrArg("from", "");
+// 参数中心（WEB 参数配置页）整体覆盖（中枢构建当前不读 CHAN_CFG，透传保持五模块 CLI 一致；
+// 未知键在 JS 侧闲置无害）
+const CHAN_CFG_JSON = getStrArg("chan-cfg", "");
+if (CHAN_CFG_JSON) {
+  try { Object.assign(core.CHAN_CFG, JSON.parse(CHAN_CFG_JSON)); }
+  catch (e) { console.log("警告: --chan-cfg JSON 解析失败，忽略该参数"); }
+}
 let FROM_TS = null;
 if (FROM_DATE) {
   const m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(FROM_DATE.trim());

@@ -53,6 +53,13 @@ core.CHAN_CFG.gapFilter = GAP_FILTER;
 // 长影标记参数（见 chan-core markWickBars）：影线占比阈值 + 绝对长度下限（wickAtrK*ATR）
 core.CHAN_CFG.wickRatio = getArg("wick-ratio", core.CHAN_CFG.wickRatio);
 core.CHAN_CFG.wickAtrK = getArg("wick-atr", core.CHAN_CFG.wickAtrK);
+// 参数中心（WEB 参数配置页）整体覆盖：在上述单键 CLI 之后应用、优先级更高；
+// 未知键在 JS 侧闲置无害（Python 回测引擎的扩展键如 sinkFallback 不在本脚本读取）
+const CHAN_CFG_JSON = getStrArg("chan-cfg", "");
+if (CHAN_CFG_JSON) {
+  try { Object.assign(core.CHAN_CFG, JSON.parse(CHAN_CFG_JSON)); }
+  catch (e) { console.log("警告: --chan-cfg JSON 解析失败，忽略该参数"); }
+}
 // 指定的日线起点日期（如 2026-07-02），解析为 UTC 当天 0 点的时间戳
 const FROM_DATE = getStrArg("from", "");
 let FROM_TS = null;

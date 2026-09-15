@@ -814,18 +814,91 @@ describe("anchorFirstSell 一卖锚定（SPEC 2.9）", () => {
 describe("isSameAsUpperBi 笔与上级笔完全重合（SPEC 2.9）", () => {
   const bi = { type: "up", startTime: 1000, endTime: 2000, startPrice: 100, endPrice: 120 };
 
-  test("起终点时间与价格一致 → true", () => {
-    const upper = [{ type: "up", startTime: 1000, endTime: 2000, startPrice: 100, endPrice: 120 }];
-    assert.equal(core.isSameAsUpperBi(bi, upper, 900), true);
+  test("起终点时间与价格一致 → 返回命中的上级笔对象（同引用）", () => {
+    const ub = { type: "up", startTime: 1000, endTime: 2000, startPrice: 100, endPrice: 120 };
+    const upper = [ub];
+    assert.equal(core.isSameAsUpperBi(bi, upper, 900), ub);
   });
 
-  test("价格不同 → false", () => {
+  test("价格不同 → null", () => {
     const upper = [{ type: "up", startTime: 1000, endTime: 2000, startPrice: 100, endPrice: 121 }];
-    assert.equal(core.isSameAsUpperBi(bi, upper, 900), false);
+    assert.equal(core.isSameAsUpperBi(bi, upper, 900), null);
   });
 
-  test("上级笔为空 → false", () => {
-    assert.equal(core.isSameAsUpperBi(bi, [], 900), false);
+  test("上级笔为空 → null", () => {
+    assert.equal(core.isSameAsUpperBi(bi, [], 900), null);
+  });
+});
+
+describe("同笔 1买/1卖（上级笔已结束 → 纯结构标记）", () => {
+  // 镜像 8-17~8-20 XAUUSD 60m 实例：同笔下跌段 4436.23→4324.68，
+  // macdArr 故意造成「无背驰」（后段绿柱面积更大、DIF 更低），
+  // 锁定同笔分支不依赖背驰/创新低——普通路径（test 3）在此数据下不产 1买
+  const BI_BUY = [
+    { type: "down", startTime: 1000, endTime: 2000, startPrice: 4440.0, endPrice: 4390.0, span: 60.0 },
+    { type: "up", startTime: 2000, endTime: 3000, startPrice: 4390.0, endPrice: 4436.0, span: 46.0 },
+    { type: "down", startTime: 3000, endTime: 4000, startPrice: 4436.0, endPrice: 4324.68, span: 111.32 },
+    { type: "up", startTime: 4000, endTime: 5000, startPrice: 4324.68, endPrice: 4524.34, span: 199.66 },
+    { type: "down", startTime: 5000, endTime: 6000, startPrice: 4524.34, endPrice: 4450.74, span: 73.6 },
+  ];
+  const UPPER_HIT_DOWN = { type: "down", startTime: 3000, endTime: 4000, startPrice: 4436.0, endPrice: 4324.68, span: 111.32 };
+  const UPPER_ENDED = [
+    { type: "up", startTime: 0, endTime: 1000, startPrice: 4300.0, endPrice: 4440.0, span: 140.0 },
+    UPPER_HIT_DOWN,
+    { type: "up", startTime: 4000, endTime: 5000, startPrice: 4324.68, endPrice: 4524.34, span: 199.66 },
+  ];
+  const UPPER_LAST = [UPPER_ENDED[0], UPPER_HIT_DOWN]; // 命中笔是末笔（延伸中）
+  const UPPER_MISS = [UPPER_ENDED[0],
+    { type: "down", startTime: 1900, endTime: 5000, startPrice: 4436.0, endPrice: 4324.68, span: 111.32 }]; // 起点偏移破坏重合
+  const MACD_NO_DIVERGE = [
+    { time: 1000, macd: -3, dif: -1 }, { time: 1500, macd: -3, dif: -1 }, { time: 2000, macd: -3, dif: -1 },
+    { time: 3000, macd: -18, dif: -15 }, { time: 3500, macd: -20, dif: -17 }, { time: 4000, macd: -18, dif: -15 },
+    { time: 5000, macd: 8, dif: 3 }, { time: 6000, macd: 4, dif: 1 },
+  ];
+
+  test("同笔 + 上级笔已结束 → 纯结构标记 1买（免背驰/创新低）", () => {
+    const pts = core.findBuyPoints(BI_BUY, UPPER_ENDED, MACD_NO_DIVERGE, 900);
+    assert.deepEqual(pts, [{ type: "1买", time: 4000, price: 4324.68 }]);
+  });
+
+  test("同笔 + 命中笔是上级末笔（延伸中）→ 跳过不标", () => {
+    const pts = core.findBuyPoints(BI_BUY, UPPER_LAST, MACD_NO_DIVERGE, 900);
+    assert.equal(pts.find(p => p.type === "1买"), undefined);
+  });
+
+  test("非同笔（破坏重合）→ 普通路径仍需背驰，无 1买", () => {
+    const pts = core.findBuyPoints(BI_BUY, UPPER_MISS, MACD_NO_DIVERGE, 900);
+    assert.equal(pts.find(p => p.type === "1买"), undefined);
+  });
+
+  // 卖侧镜像：同笔上涨段 4324.68→4436.23，锚定管线应锚回同一端点（无漂移）
+  const BI_SELL = [
+    { type: "up", startTime: 1000, endTime: 2000, startPrice: 4320.0, endPrice: 4370.0, span: 60.0 },
+    { type: "down", startTime: 2000, endTime: 3000, startPrice: 4370.0, endPrice: 4324.68, span: 45.32 },
+    { type: "up", startTime: 3000, endTime: 4000, startPrice: 4324.68, endPrice: 4436.23, span: 111.55 },
+    { type: "down", startTime: 4000, endTime: 5000, startPrice: 4436.23, endPrice: 4330.0, span: 106.23 },
+    { type: "up", startTime: 5000, endTime: 6000, startPrice: 4330.0, endPrice: 4400.0, span: 70.0 },
+  ];
+  const UPPER_SELL_ENDED = [
+    { type: "down", startTime: 0, endTime: 1000, startPrice: 4370.0, endPrice: 4320.0, span: 50.0 },
+    { type: "up", startTime: 3000, endTime: 4000, startPrice: 4324.68, endPrice: 4436.23, span: 111.55 },
+    { type: "down", startTime: 4000, endTime: 5000, startPrice: 4436.23, endPrice: 4330.0, span: 106.23 },
+  ];
+  const UPPER_SELL_LAST = [UPPER_SELL_ENDED[0], UPPER_SELL_ENDED[1]];
+  const MACD_NO_DIVERGE_SELL = [
+    { time: 1000, macd: 3, dif: 1 }, { time: 1500, macd: 3, dif: 1 }, { time: 2000, macd: 3, dif: 1 },
+    { time: 3000, macd: 18, dif: 15 }, { time: 3500, macd: 20, dif: 17 }, { time: 4000, macd: 18, dif: 15 },
+    { time: 5000, macd: -8, dif: -3 }, { time: 6000, macd: -4, dif: -1 },
+  ];
+
+  test("同笔 + 上级笔已结束 → 纯结构标记 1卖（锚定无漂移）", () => {
+    const pts = core.findSellPoints(BI_SELL, UPPER_SELL_ENDED, MACD_NO_DIVERGE_SELL, 900);
+    assert.deepEqual(pts, [{ type: "1卖", time: 4000, price: 4436.23 }]);
+  });
+
+  test("同笔 + 命中笔是上级末笔（延伸中）→ 跳过不标", () => {
+    const pts = core.findSellPoints(BI_SELL, UPPER_SELL_LAST, MACD_NO_DIVERGE_SELL, 900);
+    assert.equal(pts.find(p => p.type === "1卖"), undefined);
   });
 });
 

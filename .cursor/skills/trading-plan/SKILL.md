@@ -39,6 +39,8 @@ node .cursor/skills/trading-plan/scripts/trading_plan.js --periods=240,60
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `--periods=...` | 周期列表（逗号分隔，从大到小） | `D,240,60,15,3` |
+| `--range-bar-n/--range-bi-n/--range-k-mult/--range-bi-mult/--range-break-mult` | 震荡判定阈值（窗口K线数/最近笔数/两个×ATR阈值/突破跳过阈值）；WEB 参数中心「交易计划」模块同名透传 | `40 / 4 / 5 / 7 / 1` |
+| `--chan-cfg=<json>` | 缠论核心 CHAN_CFG 整体覆盖（WEB 参数中心透传，未知键闲置无害） | 不覆盖 |
 | `--dry` | 只输出文本计划表，不绘图 | 关闭 |
 | `--debug` | 打印买卖点列表、匹配过程等调试信息 | 关闭 |
 

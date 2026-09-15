@@ -43,6 +43,8 @@ DEFAULT_SLIP_FALLBACK = 10.0
 DEFAULT_SLIP_BE = 3.0
 # 形成段「成笔预期」门槛：合并后 ≥5 根K（chan_core.isValid gap>=4 同口径）
 EXIT_MIN_MERGED = 5
+# 出中枢力度衰减比例：离开笔 span < 进入笔 span × ratio 即力度变弱（参数中心可调）
+ZS_EXIT_WEAK_RATIO = 1.0
 # 顺势（计划方向=多头多/空头空）判定集合；plan_direction 缺失时按 strategyKey 兜底
 TREND_PLAN_DIRS = {"多头多", "空头空"}
 TREND_STRATEGY_KEYS = {"wait2Buy", "waitBuy", "wait2Sell", "waitSell"}
@@ -540,8 +542,9 @@ def nearSr(price, srLevels, nearTol):
     return best
 
 
-def strategyExtraOk(key, bis, upperBis, macdArr, barSec):
+def strategyExtraOk(key, bis, upperBis, macdArr, barSec, zs_exit_weak_ratio=ZS_EXIT_WEAK_RATIO):
     """各策略专属条件（原 evaluateEntry 第 2 步抽取为独立函数，确认制/当下制共用）。
+    zs_exit_weak_ratio：出中枢力度衰减比例（参数中心可调，默认 ZS_EXIT_WEAK_RATIO）。
     @returns None（全部通过）或 失败原因字符串"""
     if key == "wait2Sell":
         if not brokePrevLow(bis):
@@ -556,12 +559,12 @@ def strategyExtraOk(key, bis, upperBis, macdArr, barSec):
     elif key == "wait1Sell":
         if not brokePrevHigh(bis):
             return "未够笔且过高点"
-        if not zsExitWeak(bis, upperBis, macdArr, barSec, 1.0, "short"):
+        if not zsExitWeak(bis, upperBis, macdArr, barSec, zs_exit_weak_ratio, "short"):
             return "出中枢力度未变弱"
     elif key == "wait1Buy":
         if not brokePrevLow(bis):
             return "未够笔且过低点"
-        if not zsExitWeak(bis, upperBis, macdArr, barSec, 1.0, "long"):
+        if not zsExitWeak(bis, upperBis, macdArr, barSec, zs_exit_weak_ratio, "long"):
             return "出中枢力度未变弱"
     # waitBuy / waitSell：仅需够笔 + 以下级别背驰 + 支阻位附近
     return None
@@ -593,7 +596,8 @@ def evaluateEntry(ctx, strategy):
                 "reason": f"最后一笔为 {bis[-1]['type'] if bis else '?'}，需 {wantType}（反弹/回调不够笔）"}
 
     # 2. 各策略专属条件（与当下制共用 strategyExtraOk）
-    extraReason = strategyExtraOk(key, bis, upperBis, macdArr, barSec)
+    extraReason = strategyExtraOk(key, bis, upperBis, macdArr, barSec,
+                                  ctx.get("zs_exit_weak_ratio", ZS_EXIT_WEAK_RATIO))
     if extraReason is not None:
         return {"ok": False, "reason": extraReason}
 
@@ -785,7 +789,8 @@ def realtimeLowerDiverge(periodData, X, wantDir, tCut,
 def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLevels,
                             detectPeriods, near=NEAR, tCut=None, fired=None,
                             periodTimes=None, periodMacdTimes=None, divergeConfirm=None,
-                            expectBiEnabled=None):
+                            expectBiEnabled=None, realtimeMinBars=None,
+                            zsExitWeakRatio=None):
     """当下模式进场评估（每根 fine 收盘调用，信号无需等反向笔确认）。
 
     三条件与确认制同构，差异只在"何时评"与"②用什么评"：
@@ -812,6 +817,9 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
              fallback?, nearEqual?, expectBi }
     """
     fired = fired if fired is not None else set()
+    # 出场参数（参数中心可调；None → 模块常量默认）
+    min_bars = realtimeMinBars if realtimeMinBars is not None else REALTIME_MIN_BARS
+    zs_ratio = zsExitWeakRatio if zsExitWeakRatio is not None else ZS_EXIT_WEAK_RATIO
     if tCut is None:
         tCut = max((ts[-1] for ts in (periodTimes or {}).values() if ts), default=0)
     # 组装 periodData（bis/macdArr/atr/macdTimes）
@@ -867,12 +875,13 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
             segStart = bis[-1]["endTime"]
         else:
             segStart = bis[-1]["startTime"]
-        if _barsSince(times, segStart, tCut) < REALTIME_MIN_BARS:
+        if _barsSince(times, segStart, tCut) < min_bars:
             continue
         # 策略专属条件（与确认制共用）
         upRes = upperResOf(X)
         upperBis = periodData[upRes]["bis"] if (upRes and upRes in periodData) else None
-        extraReason = strategyExtraOk(key, bis, upperBis, pd["macdArr"], intervalSecOf(X))
+        extraReason = strategyExtraOk(key, bis, upperBis, pd["macdArr"], intervalSecOf(X),
+                                      zs_ratio)
         if extraReason is not None:
             continue
         # ② 当下背驰 + ③ 支阻位附近（候选级别从大到小，命中即出）
@@ -919,7 +928,8 @@ ALL_RES_WITH_30S = ["D", "240", "60", "15", "3", "30S"]
 
 
 def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriods,
-                    near=NEAR, periodMacd=None, periodAtr=None, with_30s=False):
+                    near=NEAR, periodMacd=None, periodAtr=None, with_30s=False,
+                    zs_exit_weak_ratio=ZS_EXIT_WEAK_RATIO):
     """逐周期判定进场状态（依赖交易计划 plan 结果）→ 生成进场信号。
 
     @param periodBis     各周期笔 { 周期: [bis] }
@@ -991,6 +1001,7 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
             "near": near,
             "srLevels": srLevels,
             "periodData": periodData,
+            "zs_exit_weak_ratio": zs_exit_weak_ratio,
         }
         evalRes = evaluateEntry(ctx, strategy)
         if not evalRes["ok"]:

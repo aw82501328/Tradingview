@@ -44,6 +44,24 @@ const getStrArg = (name, def) => {
 };
 const PERIODS = getStrArg("periods", "D,240,60,15,3")
   .split(",").map(s => s.trim()).filter(Boolean);
+// 震荡判定阈值（WEB 参数中心可调；默认值与 py_chain/trading_plan.py RANGE_DEFAULTS 一致）
+const numArg = (name, def) => {
+  const v = parseFloat(getStrArg(name, ""));
+  return Number.isFinite(v) ? v : def;
+};
+const RANGE_CFG = {
+  rangeBarN: Math.round(numArg("range-bar-n", 40)),
+  rangeBiN: Math.round(numArg("range-bi-n", 4)),
+  rangeKMult: numArg("range-k-mult", 5.0),
+  rangeBiMult: numArg("range-bi-mult", 7.0),
+  rangeBreakMult: numArg("range-break-mult", 1.0),
+};
+// 参数中心（WEB 参数配置页）整体覆盖；未知键在 JS 侧闲置无害
+const CHAN_CFG_JSON = getStrArg("chan-cfg", "");
+if (CHAN_CFG_JSON) {
+  try { Object.assign(core.CHAN_CFG, JSON.parse(CHAN_CFG_JSON)); }
+  catch (e) { console.log("警告: --chan-cfg JSON 解析失败，忽略该参数"); }
+}
 
 // 图上策略标记的颜色（蓝色）
 const PLAN_COLOR = "#2962FF";
@@ -70,11 +88,13 @@ const PLAN_COLOR = "#2962FF";
  */
 function isRangeBound(bis, bars, atr, cfg) {
   if (!bars || bars.length === 0 || !bis || bis.length < 3 || !atr || atr <= 0) return null;
-  const rangeBarN = (cfg && cfg.rangeBarN) || 40;
-  const rangeBiN = (cfg && cfg.rangeBiN) || 4;
-  const rangeKMult = (cfg && cfg.rangeKMult) || 5.0;
-  const rangeBiMult = (cfg && cfg.rangeBiMult) || 7.0;
-  const rangeBreakMult = (cfg && cfg.rangeBreakMult) || 1.0;
+  // 逐键读取（显式判 null/undefined，允许 0 值——如 rangeBreakMult=0 关闭突破跳过）
+  const pick = (k, def) => (cfg && cfg[k] != null ? cfg[k] : def);
+  const rangeBarN = pick("rangeBarN", 40);
+  const rangeBiN = pick("rangeBiN", 4);
+  const rangeKMult = pick("rangeKMult", 5.0);
+  const rangeBiMult = pick("rangeBiMult", 7.0);
+  const rangeBreakMult = pick("rangeBreakMult", 1.0);
 
   // 条件1：最近 rangeBarN 根K线区间
   const win = bars.slice(-rangeBarN);
@@ -254,8 +274,8 @@ function predictPlan(opts) {
   const empty = { res, direction: "观望", strategy: "数据不足", reason: "笔数量不足，无法判断", label: "数据不足" };
   if (!bis || bis.length < 2) return empty;
 
-  // 1. 震荡优先（A：isRangeBound 横盘判定）
-  const rb = isRangeBound(bis, bars, atr);
+  // 1. 震荡优先（A：isRangeBound 横盘判定，RANGE_CFG 来自参数中心/CLI）
+  const rb = isRangeBound(bis, bars, atr, RANGE_CFG);
   if (rb && rb.range) {
     const reason = `最近 ${rb.rangeBarN} 根K线区间 ${rb.kSpan.toFixed(2)}（${rb.kAtr.toFixed(1)}×ATR）${rb.winBiCount > 0
       ? `，笔端点区间 ${rb.biSpan.toFixed(2)}（${rb.biAtr.toFixed(1)}×ATR），涨跌交替无明确方向`

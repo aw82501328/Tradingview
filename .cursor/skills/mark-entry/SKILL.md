@@ -62,6 +62,9 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 | `--slip-stop=K` | 止损位滑点（绝对价格：正确侧支阻位外侧偏移，short +/long −） | `3` |
 | `--slip-fallback=K` | 兜底止损滑点（无正确侧支阻位 → 止损 = 进场价±该值；止损位永不为 null） | `10` |
 | `--slip-be=K` | 保本滑点（beStop = 进场K线极值±该值，short: high+/long: low−） | `3` |
+| `--exit-min-merged=N` | 出场成笔预期门槛（形成段合并后 ≥N 根K；WEB 参数中心「进出场」模块同名透传） | `5` |
+| `--zs-weak-ratio=K` | 出中枢力度衰减比例（离开笔幅度 < 进入笔×K 视为变弱；WEB 参数中心同名透传） | `1.0` |
+| `--chan-cfg=<json>` | 缠论核心 CHAN_CFG 整体覆盖（WEB 参数中心透传，未知键闲置无害） | 不覆盖 |
 | `--dry` | 只计算不绘图 | 关闭 |
 | `--debug` | 打印背驰、条件判定等调试信息 | 关闭 |
 

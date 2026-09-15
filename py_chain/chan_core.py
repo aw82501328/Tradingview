@@ -29,6 +29,7 @@
 import bisect
 import math
 import re
+import threading
 
 from datetime import datetime
 
@@ -63,6 +64,54 @@ CHAN_CFG = {
                                   # 右邻K收盘（分型可见最早时刻的代理）后的下一根 fine 开盘成交
     "debug": False,    # 调试打印（buildBi / 买卖点识别过程）
 }
+
+# 默认值快照（参数中心 param_center 的默认值单一来源；CHAN_CFG 运行期可被 apply_cfg 覆盖）
+CHAN_CFG_DEFAULTS = dict(CHAN_CFG)
+
+_cfg_lock = threading.Lock()
+
+
+def apply_cfg(overrides):
+    """应用参数中心覆盖（进程内全局生效）：只接受 CHAN_CFG_DEFAULTS 已有的键，
+    值按默认值类型校验（bool 严格、int/float 数值化），未知键忽略。
+    @returns 实际应用的 {key: value}（过滤+校验后）
+    """
+    applied = {}
+    with _cfg_lock:
+        for k, v in (overrides or {}).items():
+            if k not in CHAN_CFG_DEFAULTS:
+                continue
+            dv = CHAN_CFG_DEFAULTS[k]
+            if isinstance(dv, bool):
+                if not isinstance(v, bool):
+                    continue
+            elif isinstance(dv, int) and not isinstance(dv, bool):
+                try:
+                    v = int(v)
+                except (TypeError, ValueError):
+                    continue
+            elif isinstance(dv, float):
+                try:
+                    v = float(v)
+                except (TypeError, ValueError):
+                    continue
+            CHAN_CFG[k] = v
+            applied[k] = v
+    return applied
+
+
+def reset_cfg():
+    """恢复全部默认值（参数中心「恢复默认」用）。"""
+    with _cfg_lock:
+        CHAN_CFG.clear()
+        CHAN_CFG.update(CHAN_CFG_DEFAULTS)
+
+
+def active_overrides():
+    """当前与默认不同的键（用于落盘 overrides-only 存储）。"""
+    with _cfg_lock:
+        return {k: v for k, v in CHAN_CFG.items()
+                if k in CHAN_CFG_DEFAULTS and CHAN_CFG_DEFAULTS[k] != v}
 
 # ============================================================
 # 0. 长影线标记（冲高/探底插针：影线可成端点、不参与区间竞争）
@@ -1396,9 +1445,15 @@ def _findIndex(arr, pred):
 
 
 def isSameAsUpperBi(bi, upperBis, barSec):
-    """判断本周期某笔是否与上一级别某笔完全重合（时间容差 = 本周期 1 个 bar）。"""
+    """判断本周期某笔是否与上一级别某笔完全重合（时间容差 = 本周期 1 个 bar）。
+
+    完全重合（同笔）说明本周期该笔内部无更细结构，本级别无从选有效参照（跨上级笔
+    边界的比较无意义）→ 上级笔已结束时由本周期做「同笔」纯结构标记（不选参照笔、
+    不比创新低/背驰）；上级笔仍为末笔（延伸中、反向笔未确认）时不标记。
+    @returns 命中的上级笔对象（与 upperBis 内元素同引用）| None（未命中/空表），
+             调用方可按真值使用（旧 bool 契约兼容）。"""
     if not upperBis or len(upperBis) == 0:
-        return False
+        return None
     tEps = barSec if barSec else 900
     pEps = 0.01
     for ub in upperBis:
@@ -1408,8 +1463,8 @@ def isSameAsUpperBi(bi, upperBis, barSec):
            abs(ub["endTime"] - bi["endTime"]) <= tEps and \
            abs(ub["startPrice"] - bi["startPrice"]) <= pEps and \
            abs(ub["endPrice"] - bi["endPrice"]) <= pEps:
-            return True
-    return False
+            return ub
+    return None
 
 
 def anchorFirstBuy(cand, upperBis):
@@ -1491,13 +1546,26 @@ def findBuyPoints(bis, upperBis, macdArr, barSec):
         upperByType = {"up": [u for u in upperBis if u["type"] == "up"],
                        "down": [u for u in upperBis if u["type"] == "down"]}
 
-    # 候选一买：创新低 + MACD 背驰
+    # 候选一买：创新低 + MACD 背驰；同笔例外（与已结束的上级下跌笔整体重合 → 纯结构标记）
     firstBuys = []
     for k in range(1, len(downIdx)):
         cur = bis[downIdx[k]]
-        if upperByType is not None and isSameAsUpperBi(cur, upperByType.get(cur["type"]) or [], barSec):
+        sameUpper = isSameAsUpperBi(cur, upperByType.get(cur["type"]) or [], barSec) \
+            if upperByType is not None else None
+        if sameUpper is not None:
+            if sameUpper is upperBis[-1]:
+                # 时序护栏：命中上级末笔（延伸中的形成笔，反向笔未确认进列表）→ 维持跳过
+                if CHAN_CFG["debug"]:
+                    print(f"[一买跳过-上级末笔延伸中] {fmtT(cur['endTime'])}({cur['endPrice']}) "
+                          f"与上级末笔重合，上级反向笔未确认")
+                continue
+            # 同笔1买：本级下跌笔与已结束上级下跌笔整体重合，本级无内部结构、有效参照
+            # 须同处上级笔内部（跨上级笔边界的比较无意义）→ 纯结构标记（不选参照笔、
+            # 不比创新低/背驰）；安全闸由进场侧 wait2Buy（破前高等）承担
             if CHAN_CFG["debug"]:
-                print(f"[一买跳过-与上级笔重合] {fmtT(cur['endTime'])}({cur['endPrice']}) 整笔与上一级别完全重合，本周期不标记")
+                print(f"[一买同笔] {fmtT(cur['endTime'])}({cur['endPrice']}) "
+                      f"与上级已结束下跌笔重合，结构同笔标记1买")
+            firstBuys.append({"biIdx": downIdx[k], "time": cur["endTime"], "price": cur["endPrice"]})
             continue
         refer = None
         for j in range(k - 1, -1, -1):
@@ -1654,13 +1722,25 @@ def findSellPoints(bis, upperBis, macdArr, barSec):
         upperByType = {"up": [u for u in upperBis if u["type"] == "up"],
                        "down": [u for u in upperBis if u["type"] == "down"]}
 
-    # 候选一卖：创新高 + MACD 背驰
+    # 候选一卖：创新高 + MACD 背驰；同笔例外（与已结束的上级上涨笔整体重合 → 纯结构标记）
     firstSells = []
     for k in range(1, len(upIdx)):
         cur = bis[upIdx[k]]
-        if upperByType is not None and isSameAsUpperBi(cur, upperByType.get(cur["type"]) or [], barSec):
+        sameUpper = isSameAsUpperBi(cur, upperByType.get(cur["type"]) or [], barSec) \
+            if upperByType is not None else None
+        if sameUpper is not None:
+            if sameUpper is upperBis[-1]:
+                # 时序护栏：命中上级末笔（延伸中的形成笔，反向笔未确认进列表）→ 维持跳过
+                if CHAN_CFG["debug"]:
+                    print(f"[一卖跳过-上级末笔延伸中] {fmtT(cur['endTime'])}({cur['endPrice']}) "
+                          f"与上级末笔重合，上级反向笔未确认")
+                continue
+            # 同笔1卖：本级上涨笔与已结束上级上涨笔整体重合 → 纯结构标记（不选参照笔、
+            # 不比创新高/背驰）；安全闸由进场侧 wait2Sell（破前低等）承担
             if CHAN_CFG["debug"]:
-                print(f"[一卖跳过-与上级笔重合] {fmtT(cur['endTime'])}({cur['endPrice']}) 整笔与上一级别完全重合，本周期不标记")
+                print(f"[一卖同笔] {fmtT(cur['endTime'])}({cur['endPrice']}) "
+                      f"与上级已结束上涨笔重合，结构同笔标记1卖")
+            firstSells.append({"biIdx": upIdx[k], "time": cur["endTime"], "price": cur["endPrice"]})
             continue
         refer = None
         for j in range(k - 1, -1, -1):

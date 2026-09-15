@@ -1,7 +1,7 @@
 const fs=require('fs'),vm=require('vm'),assert=require('node:assert/strict');
 const html=fs.readFileSync('py_chain/web/index.html','utf8');
 let script=[...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].find(m=>m[1].includes('const MODES'))[1].replace(/init\(\);\s*$/, '');
-const nodes=new Map();const node=id=>{if(!nodes.has(id))nodes.set(id,{value:'',textContent:'',innerHTML:'',style:{},hidden:false,setAttribute(){},getAttribute:()=>null});return nodes.get(id)};
+const nodes=new Map();const node=id=>{if(!nodes.has(id))nodes.set(id,{value:'',textContent:'',innerHTML:'',style:{},hidden:false,setAttribute(){},getAttribute:()=>null,querySelector:()=>({textContent:''}),querySelectorAll:()=>[]});return nodes.get(id)};
 const ctx={console,URLSearchParams,location:{search:'?mode=bad',origin:'http://localhost'},window:{addEventListener(){}},document:{getElementById:node,querySelector:()=>({firstChild:{textContent:''}})}};
 vm.createContext(ctx);vm.runInContext(script,ctx);
 vm.runInContext(`
@@ -22,4 +22,19 @@ if(state.modes.live.state!=='running'||el('bar-live').style.width!=='25%')throw 
 if(!el('btn-start-backtest').disabled)throw Error('mutex status lost');
 `,ctx);
 assert.equal(node('count').textContent,'筛选 1 / 共 2 条');
+// 策略/方向多选过滤：按 strategyKey 与 方向列口径（planDirection；旧记录回退策略映射）过滤
+vm.runInContext(`
+sigRows=[{id:1,mode:'backtest',status:'已平仓',pnl:10,strategyKey:'waitSell',planDirection:'空头空'},
+  {id:2,mode:'backtest',status:'已平仓',pnl:20,strategyKey:'waitBuy',planDirection:'多头多'},
+  {id:3,mode:'backtest',status:'已平仓',pnl:30,strategyKey:'wait1Sell',planDirection:null}];
+sigFilterValues = n => n==='strategy' ? ['waitSell','wait1Sell'] : [];
+if(filteredRows().length!==2)throw Error('strategy filter');
+sigFilterValues = n => n==='direction' ? ['多头多'] : [];
+if(filteredRows().length!==1||filteredRows()[0].id!==2)throw Error('direction filter');
+sigFilterValues = n => n==='direction' ? ['空头空'] : [];
+if(filteredRows().length!==1||filteredRows()[0].id!==1)throw Error('direction filter excludes other fallbacks');
+sigFilterValues = n => n==='direction' ? ['多头空'] : [];
+if(filteredRows().length!==1||!filteredRows().some(r=>r.id===3))throw Error('direction fallback (wait1Sell→多头空)');
+`,ctx);
 console.log('Mode selection, visibility, filter retention, count and summary checks passed');
+console.log('Strategy/direction multi-select filter checks passed');

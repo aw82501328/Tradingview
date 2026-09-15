@@ -39,7 +39,8 @@ from .main import parse_from
 from .chan_core import fmtT
 from .monitor import LiveMonitor, ReplayMonitor, clear_rt_markers
 from .marks import draw_signal_marks, draw_sr_marks, clear_signal_marks, clear_all_marks
-from . import data_store, td_launcher, sr_service, sr_draw, sr_tune, sr_tune_api, sr_preset_excel, analysis_service, analysis_api, bt_runs
+from . import chan_core
+from . import data_store, td_launcher, sr_service, sr_draw, sr_tune, sr_tune_api, sr_preset_excel, analysis_service, analysis_api, bt_runs, param_center, params_api
 
 # ============================================================
 # 全局互斥：三种模式同一时间最多运行一种
@@ -524,42 +525,62 @@ class BacktestWorker(ModeWorker):
     def _run(self):
         cfg = self.cfg
         periods = cfg.get("periods") or DEFAULT_PERIODS
+        # 预热提前（lead_days > 0）：「起始日期=交易开始日」口径——取数自动前移 lead 天
+        # 建状态（笔/支阻位/MACD 就绪），引擎 start_ts 前只推进状态不交易、从空仓起步；
+        # 0 = 旧口径（从 from 起交易，warmup_bars 根预热）。旧方案库 cfg 无此键 → 0 → 行为不变。
+        lead_days = int(cfg.get("lead_days") or 0)
+        from_ts = int(cfg.get("from_ts", 0))
+        data_from_ts = max(0, from_ts - lead_days * 86400)
+        start_ts = from_ts if lead_days > 0 else None
         # 数据源：store=本地SQLite存储（不连CDP，TV关闭可跑）；cache=bars_all_tf.json；live=CDP实时
         src = cfg.get("data_source") or ("cache" if cfg.get("use_cache") else "live")
+        if lead_days > 0:
+            self.log(f"预热提前 {lead_days} 天：数据起点 {fmtT(data_from_ts)}，交易起点 {fmtT(from_ts)}")
         if src == "store":
             self.log(f"取数：数据源=本地存储 symbol={cfg.get('symbol')} "
-                     f"periods={periods} from_ts={cfg.get('from_ts', 0)}")
+                     f"periods={periods} from_ts={data_from_ts}")
             bars = data_store.load_store(cfg.get("symbol"), periods=periods,
-                                         from_ts=cfg.get("from_ts", 0))
+                                         from_ts=data_from_ts)
         else:
             self.log(f"取数：数据源={'本地缓存' if src == 'cache' else 'CDP实时'} "
                      f"symbol={cfg.get('symbol')} periods={periods} "
                      f"use_cache={cfg.get('use_cache')}")
-            bars = load_bars(periods=periods, from_ts=cfg.get("from_ts", 0),
+            bars = load_bars(periods=periods, from_ts=data_from_ts,
                              use_cache=cfg.get("use_cache", False),
                              symbol=cfg.get("symbol"), log=self.log)
         for res in periods:
             n = len(bars.get(res, []) or [])
             if n:
                 self.log(f"  {res:>4}: {n} 根（{fmtT(bars[res][-1]['time'])} 止）")
+        # 参数中心（参数配置页统一管理）：API 显式值优先（历史方案复现/后端覆盖能力），
+        # 缺省用参数中心当前值；回写 cfg 保证 bt_runs 历史方案快照/对比表显示实际生效参数。
+        # diverge_confirm/expect_bi 页面不再传入（None → 引擎读 CHAN_CFG，由缠论核心模块控制）。
+        pm = param_center.effective_all()
+        chan_core.apply_cfg(pm["chan"])   # 幂等重放（启动已应用；防参数文件被手改）
+        ep = pm["entry"]
+        for k in ("lots", "slip_stop", "slip_fallback", "slip_be", "near"):
+            if cfg.get(k) is None:
+                cfg[k] = ep[k]
         engine = BacktestEngine(bars, periods=periods,
                                 warmup_bars=cfg.get("warmup", 60),
                                 with_marks=cfg.get("with_marks", False),
                                 fill_mode=cfg.get("fill_mode", "anchor"),
                                 signal_mode=cfg.get("signal_mode", "realtime"),
-                                lots=cfg.get("lots", 4),
-                                slip_stop=cfg.get("slip_stop", 3.0),
-                                slip_fallback=cfg.get("slip_fallback", 10.0),
-                                slip_be=cfg.get("slip_be", 3.0),
-                                near=cfg.get("near", 10.0),
+                                lots=cfg["lots"],
+                                slip_stop=cfg["slip_stop"],
+                                slip_fallback=cfg["slip_fallback"],
+                                slip_be=cfg["slip_be"],
+                                near=cfg["near"],
                                 sr_kwargs=self._sr_preset_kwargs(cfg, periods),
-                                diverge_confirm=cfg.get("diverge_confirm", False),
-                                expect_bi=cfg.get("expect_bi", True))
+                                diverge_confirm=cfg.get("diverge_confirm"),
+                                expect_bi=cfg.get("expect_bi"),
+                                module_params=_engine_module_params(pm))
         self.log(f"回测开始（最小周期 {engine.fine_res}，成交口径 {engine.fill_mode}，"
                  f"信号模式 {'当下背驰' if engine.signal_mode == 'realtime' else '确认制'}，"
                  f"背驰进场 {'分型确认后下一根开盘' if engine.diverge_confirm else '当下'}，"
                  f"检测周期够笔 {'预期' if engine.expect_bi else '分型确认'}）...")
         result = engine.run(
+            start_ts=start_ts,
             log=self.log,
             on_progress=self._on_progress,
             on_signal=self._on_signal,
@@ -597,10 +618,13 @@ class LiveWorker(ModeWorker):
     def _run(self):
         cfg = self.cfg
         periods = cfg.get("periods") or DEFAULT_PERIODS
+        pm = param_center.effective_all()
+        chan_core.apply_cfg(pm["chan"])
         m = LiveMonitor(symbol=cfg.get("symbol"), periods=periods,
                         from_ts=cfg.get("from_ts", 0), port=cfg.get("port", DEFAULT_CDP_PORT),
                         interval=cfg.get("interval", 15.0), tail=cfg.get("tail", 100),
-                        use_cache=cfg.get("use_cache", False), log=self.log)
+                        use_cache=cfg.get("use_cache", False), log=self.log,
+                        module_params=_engine_module_params(pm))
         self.monitor = m
         self.log("实时监控就绪（Ctrl+C 无效，用停止按钮）")
         while not self._stop_evt.is_set():
@@ -639,12 +663,15 @@ class ReplayWorker(ModeWorker):
     def _run(self):
         cfg = self.cfg
         periods = cfg.get("periods") or DEFAULT_PERIODS
+        pm = param_center.effective_all()
+        chan_core.apply_cfg(pm["chan"])
         m = ReplayMonitor(symbol=cfg.get("symbol"), periods=periods,
                           from_ts=cfg.get("from_ts", 0), port=cfg.get("port", DEFAULT_CDP_PORT),
                           start_ts=cfg.get("start_ts"),
                           speed_ms=cfg.get("speed", 1000), hold_sec=cfg.get("hold", 2.0),
                           interval=cfg.get("interval", 0.5), tail=cfg.get("tail", 100),
-                          use_cache=cfg.get("use_cache", False), log=self.log)
+                          use_cache=cfg.get("use_cache", False), log=self.log,
+                          module_params=_engine_module_params(pm))
         self.monitor = m
         m.enter_replay()
         self.log(f"回放自动播放已启动：速度 {m.speed_ms}ms/根，默认驻留 3m")
@@ -723,6 +750,9 @@ class ControlApp:
         self.analysis = analysis_service.AnalysisManager(
             self.broadcaster.emit, acquire_active, release_active, _marks_lock,
             self.normalize_sr_cfg, self.publish_analysis_sr)
+        # 参数中心：启动时恢复持久化的缠论核心参数（进程内全局生效；
+        # points/entry/plan 在每次任务启动时读取，无需预热应用）
+        chan_core.apply_cfg(param_center.effective("chan"))
 
     def publish_analysis_sr(self, cfg, result, meta):
         with _sr_result_lock:
@@ -857,7 +887,7 @@ class ControlApp:
     def normalize_cfg(cfg, mode):
         """把前端字符串配置规范化为引擎所需类型（时间戳/数字/周期列表）。"""
         out = dict(cfg or {})
-        for k in ("warmup", "speed", "tail", "port", "lots"):
+        for k in ("warmup", "speed", "tail", "port", "lots", "lead_days"):
             if k in out and out[k] not in (None, ""):
                 try:
                     out[k] = int(out[k])
@@ -932,6 +962,26 @@ def _presets_save(presets):
             os.unlink(temp_path)
 
 
+def _params_busy(app):
+    """参数中心 chan 模块保存前的忙碌检查：三模式/支阻计算/分析轮次任一运行中即拒绝
+    （CHAN_CFG 全局变更会让运行中的单次计算混用两套参数）。"""
+    if active_mode() is not None:
+        return True
+    if _sr_busy_snapshot():
+        return True
+    job = (app.analysis.snapshot().get("job") or {})
+    return job.get("state") in ("pending", "running", "stopping")
+
+
+def _engine_module_params(pm):
+    """参数中心 effective_all → BacktestEngine.module_params 映射（三模式 Worker 共用）。"""
+    ep = pm["entry"]
+    return {"plan": pm["plan"], "marks": pm["points"],
+            "exit_min_merged": ep["exit_min_merged"],
+            "realtime_min_bars": ep["realtime_min_bars"],
+            "zs_exit_weak_ratio": ep["zs_exit_weak_ratio"]}
+
+
 def make_handler(app):
     """构造 HTTP 请求处理器（闭包携带 ControlApp）。"""
 
@@ -976,6 +1026,8 @@ def make_handler(app):
                 return
             if analysis_api.handle(self, app, "GET"):
                 return
+            if params_api.handle(self, app, "GET"):
+                return
             if bt_runs.handle(self, app, "GET"):
                 return
             if self._tune("GET"):
@@ -995,6 +1047,9 @@ def make_handler(app):
                 return
             if path == "/sr" or path == "/sr.html":
                 self._serve_file("sr.html", "text/html; charset=utf-8")
+                return
+            if path == "/params" or path == "/params.html":
+                self._serve_file("params.html", "text/html; charset=utf-8")
                 return
             if path == "/api/status":
                 self._send_json(app.status())
@@ -1087,6 +1142,8 @@ def make_handler(app):
                 self._send_json({'ok': False, 'error': '服务重启中，请稍候'}, 503)
                 return
             if analysis_api.handle(self, app, "POST"):
+                return
+            if params_api.handle(self, app, "POST", lambda: _params_busy(app)):
                 return
             if bt_runs.handle(self, app, "POST"):
                 return

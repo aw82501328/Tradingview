@@ -3,7 +3,7 @@ const html = fs.readFileSync('py_chain/web/index.html', 'utf8');
 const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].find(m=>m[1].includes('const MODES'))[1].replace(/init\(\);\s*$/, '');
 const nodes = new Map();
 const node = id => {
-  if (!nodes.has(id)) nodes.set(id, {value:'', textContent:'', innerHTML:'', style:{}, hidden:false, setAttribute(){}, getAttribute:()=>null});
+  if (!nodes.has(id)) nodes.set(id, {value:'', textContent:'', innerHTML:'', style:{}, hidden:false, setAttribute(){}, getAttribute:()=>null, querySelector:()=>({textContent:''}), querySelectorAll:()=>[]});
   return nodes.get(id);
 };
 let resolvePost, calls = [], job = {jobId:'job-1',id:2,mode:'backtest',state:'running'};

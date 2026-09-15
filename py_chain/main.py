@@ -21,7 +21,8 @@ from .backtest import build_bis, run_backtest, summarize
 from .mark_buy_sell import compute_all_marks
 from .sr_flip import compute_srflip
 from .trading_plan import compute_plan
-from .mark_entry import compute_entries, filterDetectPeriods
+from .mark_entry import (compute_entries, filterDetectPeriods,
+                         NEAR, ZS_EXIT_WEAK_RATIO)
 from .tv_draw import draw_trades
 from .chan_core import intervalSecOf, fmtT
 
@@ -57,7 +58,7 @@ def parse_from(s):
 
 
 def build_full_chain(bars_by_period, periods, with_marks=True, sr_types=None, fib_levels=None,
-                     boll_length=None, boll_mult=None):
+                     boll_length=None, boll_mult=None, module_params=None):
     """全链路（对整段数据一次性计算），返回各阶段结果。
 
     30S（--with-30s 追加）只参与 bis 计算与进出场（compute_entries），
@@ -65,12 +66,15 @@ def build_full_chain(bars_by_period, periods, with_marks=True, sr_types=None, fi
     的周期不含 30S，sr_flip 的 LEVEL_ORDER 也未收录 30S）。
     sr_types/fib_levels 透传给 compute_srflip（None 用其默认 cluster+boll / 0.382,0.5,0.618）；
     boll_length/boll_mult 透传 BOLL 周期与标准差倍数（None 用默认 26/2）。
+    module_params 为参数中心模块参数（marks/plan/entry；None 用各模块默认）。
     """
+    mp = module_params or {}
     core = [p for p in periods if str(p).upper() != "30S"]
     bis = build_bis(bars_by_period, periods)
     marks = {}
     if with_marks:
-        marks = compute_all_marks(bis, bars_by_period, core, fromTs=None)
+        marks = compute_all_marks(bis, bars_by_period, core, fromTs=None,
+                                  **(mp.get("marks") or {}))
     srKw = {}
     if sr_types is not None:
         srKw["srTypes"] = tuple(sr_types)
@@ -81,11 +85,14 @@ def build_full_chain(bars_by_period, periods, with_marks=True, sr_types=None, fi
     if boll_mult is not None:
         srKw["bollMult"] = boll_mult
     sr = compute_srflip(bis, bars_by_period, core, **srKw)
-    plan = compute_plan(bis, bars_by_period, core)
+    plan = compute_plan(bis, bars_by_period, core, cfg=mp.get("plan"))
     srLevels = (sr or {}).get("merged") or []
+    ep = mp.get("entry") or {}
     entries = compute_entries(bis, bars_by_period, plan, srLevels,
                               detectPeriods=filterDetectPeriods(periods),
-                              with_30s=any(str(p).upper() == "30S" for p in periods))
+                              near=ep.get("near", NEAR),
+                              with_30s=any(str(p).upper() == "30S" for p in periods),
+                              zs_exit_weak_ratio=ep.get("zs_exit_weak_ratio", ZS_EXIT_WEAK_RATIO))
     return {"bis": bis, "marks": marks, "sr": sr, "plan": plan, "entries": entries}
 
 
@@ -147,6 +154,9 @@ def main(argv=None):
     ap.add_argument("--periods", default=",".join(DEFAULT_PERIODS), help="周期列表，默认 D,240,60,15,3")
     ap.add_argument("--with-30s", action="store_true", help="追加 30 秒级别（30S 只取最近3天数据，供 3 分钟的进场背驰检测）")
     ap.add_argument("--from", dest="from_date", default="2026-07-02", help="起始日期 YYYY-MM-DD（UTC）")
+    ap.add_argument("--lead-days", dest="lead_days", type=int, default=0,
+                    help="预热提前天数（>0 时起始日期=交易开始日：取数自动前移 N 天建状态，"
+                         "交易起点前只推进状态不成交、空仓起步；0=现行为，用 --warmup 根数预热）")
     ap.add_argument("--port", type=int, default=9222, help="CDP 调试端口，默认 9222")
     ap.add_argument("--use-cache", action="store_true", help="优先读 bars_all_tf.json 缓存")
     ap.add_argument("--warmup", type=int, default=60, help="预热K线数，默认 60")
@@ -160,16 +170,16 @@ def main(argv=None):
                     help="BOLL SMA 周期（默认 26，已收盘K线口径）")
     ap.add_argument("--boll-mult", type=float, default=None,
                     help="BOLL 标准差倍数（默认 2）")
-    ap.add_argument("--lots", type=int, default=4,
-                    help="每笔进场手数（盈亏 = 价格差 × 方向 × 手数），默认 4")
-    ap.add_argument("--slip-stop", type=float, default=3.0,
-                    help="止损位滑点（绝对价格：正确侧支阻位外侧偏移），默认 3")
-    ap.add_argument("--slip-fallback", type=float, default=10.0,
-                    help="兜底止损滑点（无正确侧支阻位时 止损 = 进场价 ± 该值），默认 10")
-    ap.add_argument("--slip-be", type=float, default=3.0,
-                    help="保本滑点（beStop = 进场成交K线极值 ± 该值），默认 3")
-    ap.add_argument("--near", type=float, default=10.0,
-                    help="近支阻阈值（绝对价差，不乘 ATR；|背驰点价−支阻位价| ≤ near），默认 10")
+    ap.add_argument("--lots", type=int, default=None,
+                    help="每笔进场手数（盈亏 = 价格差 × 方向 × 手数）；缺省用参数中心值（默认 4）")
+    ap.add_argument("--slip-stop", type=float, default=None,
+                    help="止损位滑点（绝对价格：正确侧支阻位外侧偏移）；缺省用参数中心值（默认 3）")
+    ap.add_argument("--slip-fallback", type=float, default=None,
+                    help="兜底止损滑点（无正确侧支阻位时 止损 = 进场价 ± 该值）；缺省用参数中心值（默认 10）")
+    ap.add_argument("--slip-be", type=float, default=None,
+                    help="保本滑点（beStop = 进场成交K线极值 ± 该值）；缺省用参数中心值（默认 3）")
+    ap.add_argument("--near", type=float, default=None,
+                    help="近支阻阈值（绝对价差，不乘 ATR）；缺省用参数中心值（默认 10）")
     ap.add_argument("--sr-preset", default=None,
                     help="支阻位预设名称（读 py_chain/web/sr_presets.json，与 /sr、工作台共享；"
                          "载入识别参数+人工位，优先于 --sr-types 等独立参数）")
@@ -179,11 +189,17 @@ def main(argv=None):
     if args.with_30s and "30S" not in periods:
         periods.append("30S")
     from_ts = parse_from(args.from_date)
+    # 预热提前（--lead-days > 0）：起始日期=交易开始日——取数自动前移 N 天建状态，
+    # 引擎 start_ts 前只推进状态不交易（空仓起步）；0=现行为（warmup 根数预热）
+    lead_days = args.lead_days or 0
+    data_from_ts = max(0, from_ts - lead_days * 86400) if lead_days > 0 else from_ts
+    start_ts = from_ts if lead_days > 0 else None
 
     # 1. 取数（CDP 或缓存）
     print(f"取数：symbol={args.symbol} periods={periods} from={args.from_date} "
-          f"use_cache={args.use_cache}")
-    bars_by_period = load_bars(periods=periods, from_ts=from_ts,
+          f"use_cache={args.use_cache}"
+          + (f" 预热提前 {lead_days} 天（数据起点前移）" if lead_days > 0 else ""))
+    bars_by_period = load_bars(periods=periods, from_ts=data_from_ts,
                                use_cache=args.use_cache, symbol=args.symbol)
     for res in periods:
         n = len(bars_by_period.get(res, []))
@@ -194,13 +210,29 @@ def main(argv=None):
         else:
             print(f"  {res:>4}: 无数据")
 
-    # 2. 全链路（实时态摘要）
+    # 2. 全链路（实时态摘要）—— 参数中心（参数配置页）：CLI 显式值优先，缺省用参数中心值
+    from . import param_center
+    from .chan_core import apply_cfg
+    pm = param_center.effective_all()
+    apply_cfg(pm["chan"])
+    ep = pm["entry"]
+    lots = args.lots if args.lots is not None else ep["lots"]
+    slip_stop = args.slip_stop if args.slip_stop is not None else ep["slip_stop"]
+    slip_fallback = args.slip_fallback if args.slip_fallback is not None else ep["slip_fallback"]
+    slip_be = args.slip_be if args.slip_be is not None else ep["slip_be"]
+    near = args.near if args.near is not None else ep["near"]
+    module_params = {"plan": pm["plan"], "marks": pm["points"],
+                     "exit_min_merged": ep["exit_min_merged"],
+                     "realtime_min_bars": ep["realtime_min_bars"],
+                     "zs_exit_weak_ratio": ep["zs_exit_weak_ratio"],
+                     "entry": ep}
     sr_types = [t.strip().lower() for t in args.sr_types.split(",") if t.strip()] if args.sr_types else None
     fib_levels = ([float(x.strip()) for x in args.fib_levels.split(",") if x.strip()]
                   if args.fib_levels else None)
     chain = build_full_chain(bars_by_period, periods, with_marks=not args.no_marks,
                              sr_types=sr_types, fib_levels=fib_levels,
-                             boll_length=args.boll_length, boll_mult=args.boll_mult)
+                             boll_length=args.boll_length, boll_mult=args.boll_mult,
+                             module_params=module_params)
     print_chain(chain, periods)
 
     # 3. 点状回测（--sr-preset：载入支阻预设（含人工位）→ normalize → engine_kwargs）
@@ -218,11 +250,12 @@ def main(argv=None):
     print("\n回测中（逐根K线重放整条链路）...")
     result = run_backtest(bars_by_period, periods=periods,
                           warmup_bars=args.warmup, with_marks=not args.no_marks,
+                          start_ts=start_ts,
                           sr_types=sr_types, fib_levels=fib_levels,
                           boll_length=args.boll_length, boll_mult=args.boll_mult,
-                          lots=args.lots, slip_stop=args.slip_stop,
-                          slip_fallback=args.slip_fallback, slip_be=args.slip_be,
-                          near=args.near, sr_kwargs=sr_kwargs,
+                          lots=lots, slip_stop=slip_stop,
+                          slip_fallback=slip_fallback, slip_be=slip_be,
+                          near=near, sr_kwargs=sr_kwargs, module_params=module_params,
                           log=lambda *a: print(*a) if a and a[0].startswith("回测") else None)
 
     # 4. 打印统计

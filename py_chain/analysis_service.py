@@ -14,7 +14,7 @@ import urllib.request
 import uuid
 
 from .data_loader import CDPClient, CDPConfig
-from . import sr_service, sr_draw
+from . import sr_service, sr_draw, param_center
 from .monitor import replay_started
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -141,16 +141,19 @@ class AnalysisManager:
             raise ValueError("请选择目标TradingView图表")
         if not re.fullmatch(r"[A-Za-z0-9_:.!/-]{1,100}", str(candidate.get("symbol", ""))):
             raise ValueError("缺少或无效品种")
-        candidate["keep"] = int(candidate.get("keep", 10))
-        candidate["near"] = float(candidate.get("near", 10))
+        # keep/near/slip_*：参数配置页统一管理（参数中心为唯一编辑入口），每次 configure
+        # 强制刷新为参数中心当前值 → state.json/job cfg 快照随之更新，参数变化后旧结果
+        # 走现有 resultsStale 机制标记"本轮未更新"。
+        pm = param_center.effective_all()
+        candidate["keep"] = int(pm["points"]["keep"])
+        candidate["near"] = float(pm["entry"]["near"])
         if not 1 <= candidate["keep"] <= 100 or not math.isfinite(candidate["near"]) or candidate["near"] <= 0:
             raise ValueError("标记数量须为1至100；近支阻阈值须大于0")
         # 进出场支阻使用参数（绝对价差；entry 子进程 --slip-* 透传，与回测界面同名）
-        for k, label in (("slip_stop", "止损滑点"), ("slip_fallback", "兜底止损滑点"),
-                         ("slip_be", "保本滑点")):
-            candidate[k] = float(candidate.get(k, 3.0 if k != "slip_fallback" else 10.0))
+        for k in ("slip_stop", "slip_fallback", "slip_be"):
+            candidate[k] = float(pm["entry"][k])
             if not math.isfinite(candidate[k]) or candidate[k] <= 0:
-                raise ValueError(f"{label}须大于0")
+                raise ValueError("滑点参数须大于0")
         candidate["with30s"] = candidate.get("with30s") is True
         sr = copy.deepcopy(candidate.get("sr") or {"srTypes": ["cluster", "boll"]})
         sr.update(symbol=candidate["symbol"], **{"from": candidate["from"]})
@@ -338,15 +341,28 @@ class AnalysisManager:
                "CHAN_PORT": str(cfg["port"]), "CHAN_REPORT": str(report), "CHAN_CACHE_DIR": str(folder)}
         command = [shutil.which("node") or "node", "--require", str(ROOT / "py_chain" / "analysis_bridge.cjs"),
                    str(ROOT / ".cursor" / "skills" / skill / "scripts" / (script + ".js")), "--from=" + cfg["from"]]
+        # 参数中心（参数配置页）：--chan-cfg 透传缠论核心 CHAN_CFG（JS 子进程无法共享
+        # 本进程全局 override，未知键在 JS 侧闲置不报错）；各模块专属参数按 stage 追加
+        pm = param_center.effective_all()
+        command.append("--chan-cfg=" + json.dumps(pm["chan"], separators=(",", ":")))
         if cfg["with30s"] and stage in ("bi", "entry"):
             command.append("--with-30s")
         if stage == "points":
             command.append("--keep=" + str(cfg["keep"]))
+            command.append("--nearp=" + str(pm["points"]["nearAtrRatio"]))
+        if stage == "plan":
+            command.append("--range-bar-n=" + str(pm["plan"]["rangeBarN"]))
+            command.append("--range-bi-n=" + str(pm["plan"]["rangeBiN"]))
+            command.append("--range-k-mult=" + str(pm["plan"]["rangeKMult"]))
+            command.append("--range-bi-mult=" + str(pm["plan"]["rangeBiMult"]))
+            command.append("--range-break-mult=" + str(pm["plan"]["rangeBreakMult"]))
         if stage == "entry":
             command.append("--near=" + str(cfg["near"]))
             command.append("--slip-stop=" + str(cfg.get("slip_stop", 3.0)))
             command.append("--slip-fallback=" + str(cfg.get("slip_fallback", 10.0)))
             command.append("--slip-be=" + str(cfg.get("slip_be", 3.0)))
+            command.append("--exit-min-merged=" + str(pm["entry"]["exit_min_merged"]))
+            command.append("--zs-weak-ratio=" + str(pm["entry"]["zs_exit_weak_ratio"]))
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         # Output is drained in a separate reader so a hung CDP cannot defeat timeout.
         with subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

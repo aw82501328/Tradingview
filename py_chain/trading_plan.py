@@ -20,6 +20,15 @@ from .chan_core import (
 # 纯函数：震荡判定（复制自 chan-status SKILL，保持原逻辑不变）
 # ============================================================
 
+# 震荡判定参数默认值（参数中心 param_center 的默认值单一来源；cfg 逐键覆盖）
+RANGE_DEFAULTS = {
+    "rangeBarN": 40,       # 震荡判定窗口K线数
+    "rangeBiN": 4,         # 震荡判定最近笔数
+    "rangeKMult": 5.0,     # K线区间阈值（≤5×ATR 判震荡）
+    "rangeBiMult": 7.0,    # 笔端点极差阈值（≤7×ATR）
+    "rangeBreakMult": 1.0, # 突破跳过：末笔端点越过窗口另一端 >1×ATR 视为突破
+}
+
 
 def isRangeBound(bis, bars, atr, cfg=None):
     """震荡（横盘整理）判定：K线重叠度高、价格变化不大、无明确方向。
@@ -33,11 +42,12 @@ def isRangeBound(bis, bars, atr, cfg=None):
     """
     if not bars or len(bars) == 0 or not bis or len(bis) < 3 or not atr or atr <= 0:
         return None
-    rangeBarN = (cfg or {}).get("rangeBarN", 40)
-    rangeBiN = (cfg or {}).get("rangeBiN", 4)
-    rangeKMult = (cfg or {}).get("rangeKMult", 5.0)
-    rangeBiMult = (cfg or {}).get("rangeBiMult", 7.0)
-    rangeBreakMult = (cfg or {}).get("rangeBreakMult", 1.0)
+    cfg = cfg or RANGE_DEFAULTS
+    rangeBarN = cfg.get("rangeBarN", RANGE_DEFAULTS["rangeBarN"])
+    rangeBiN = cfg.get("rangeBiN", RANGE_DEFAULTS["rangeBiN"])
+    rangeKMult = cfg.get("rangeKMult", RANGE_DEFAULTS["rangeKMult"])
+    rangeBiMult = cfg.get("rangeBiMult", RANGE_DEFAULTS["rangeBiMult"])
+    rangeBreakMult = cfg.get("rangeBreakMult", RANGE_DEFAULTS["rangeBreakMult"])
 
     # 条件1：最近 rangeBarN 根K线区间
     win = bars[-rangeBarN:]
@@ -175,7 +185,8 @@ def classifySecond(bis, macdArr, p):
     return "过左高不背驰" if wantUp else "过左低不背驰"
 
 
-def predictPlan(res, bis, upperBis, macdArr, lastPrice, bars, atr=0, barSec=None):
+def predictPlan(res, bis, upperBis, macdArr, lastPrice, bars, atr=0, barSec=None,
+                range_cfg=None):
     """核心：对单个周期生成「方向 + 策略」。
 
     判定顺序：
@@ -194,8 +205,8 @@ def predictPlan(res, bis, upperBis, macdArr, lastPrice, bars, atr=0, barSec=None
     if not bis or len(bis) < 2:
         return empty
 
-    # 1. 震荡优先（A：isRangeBound 横盘判定）
-    rb = isRangeBound(bis, bars, atr)
+    # 1. 震荡优先（A：isRangeBound 横盘判定，range_cfg 来自参数中心逐键覆盖）
+    rb = isRangeBound(bis, bars, atr, range_cfg)
     if rb and rb["range"]:
         reason = (f"最近 {rb['rangeBarN']} 根K线区间 {rb['kSpan']:.2f}（{rb['kAtr']:.1f}×ATR）"
                   + (f"，笔端点区间 {rb['biSpan']:.2f}（{rb['biAtr']:.1f}×ATR），涨跌交替无明确方向"
@@ -285,7 +296,7 @@ def predictPlan(res, bis, upperBis, macdArr, lastPrice, bars, atr=0, barSec=None
 # ============================================================
 
 
-def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=None):
+def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=None, cfg=None):
     """逐周期（从大到小）计算交易计划。
 
     @param periodBis    各周期笔 { 周期: [bis] }
@@ -317,7 +328,7 @@ def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=No
             curBis = curBis[-60:]
         p = predictPlan(res=res, bis=curBis, upperBis=upperBis, macdArr=macdArr,
                         lastPrice=lastPrice, bars=rawBars, atr=atr,
-                        barSec=intervalSecOf(res))
+                        barSec=intervalSecOf(res), range_cfg=cfg)
         planRows[res] = {
             "direction": p["direction"],
             "strategy": p["strategy"],

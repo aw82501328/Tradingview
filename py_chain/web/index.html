@@ -56,6 +56,9 @@
   }
   .ms-opt:hover { background: var(--card-2); }
   .ms-opt input[type="checkbox"] { width: auto; accent-color: var(--accent); }
+  /* 信号列表的策略/方向多选过滤（复用 .ms 结构）：按钮随内容收缩，不占满一行 */
+  .sig-filter { flex: none; }
+  .sig-filter .ms-toggle { width: auto; min-width: 96px; max-width: 260px; }
   .row { display: flex; gap: 8px; }
   .row .field { flex: 1; }
   .btn-row { display: flex; gap: 8px; margin-top: auto; flex-wrap: wrap; }
@@ -208,6 +211,30 @@
   <div class="head">
     <strong>进场信号记录</strong>
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <div class="ms sig-filter" id="filter-strategy">
+        <button type="button" class="ms-toggle" data-ms-toggle aria-expanded="false" title="按策略过滤信号列表（可多选；不勾选=全部）">
+          <span class="ms-value">策略：全部</span><span class="ms-caret">▾</span>
+        </button>
+        <div class="ms-panel" hidden>
+          <label class="ms-opt"><input type="checkbox" data-sig-opt value="waitBuy">waitBuy · 回调后买点</label>
+          <label class="ms-opt"><input type="checkbox" data-sig-opt value="wait2Buy">wait2Buy · 回调后2买</label>
+          <label class="ms-opt"><input type="checkbox" data-sig-opt value="wait1Buy">wait1Buy · 一买</label>
+          <label class="ms-opt"><input type="checkbox" data-sig-opt value="waitSell">waitSell · 反弹后卖点</label>
+          <label class="ms-opt"><input type="checkbox" data-sig-opt value="wait2Sell">wait2Sell · 反弹后2卖</label>
+          <label class="ms-opt"><input type="checkbox" data-sig-opt value="wait1Sell">wait1Sell · 一卖</label>
+        </div>
+      </div>
+      <div class="ms sig-filter" id="filter-direction">
+        <button type="button" class="ms-toggle" data-ms-toggle aria-expanded="false" title="按方向过滤信号列表（可多选；不勾选=全部）">
+          <span class="ms-value">方向：全部</span><span class="ms-caret">▾</span>
+        </button>
+        <div class="ms-panel" hidden>
+          <label class="ms-opt"><input type="checkbox" data-sig-opt value="多头多">多头多</label>
+          <label class="ms-opt"><input type="checkbox" data-sig-opt value="空头空">空头空</label>
+          <label class="ms-opt"><input type="checkbox" data-sig-opt value="多头空">多头空</label>
+          <label class="ms-opt"><input type="checkbox" data-sig-opt value="空头多">空头多</label>
+        </div>
+      </div>
       <select id="filter-status" style="width:auto;" title="按状态过滤信号列表">
         <option value="">全部</option>
         <option value="信号">信号</option>
@@ -273,7 +300,9 @@ let sigRows = [];
 const validMode = mode => MODES.some(m=>m.id===mode);
 let selectedMode = new URLSearchParams(location.search).get('mode');
 if(!validMode(selectedMode))selectedMode='backtest';
-const modeFilters = {backtest:'',replay:'',live:''};
+// 每个模式各自记忆 状态/策略/方向 三个筛选；sigFilterEmpty = 默认（全部）
+const sigFilterEmpty = () => ({ status: '', strategy: [], direction: [] });
+const modeFilters = { backtest: sigFilterEmpty(), replay: sigFilterEmpty(), live: sigFilterEmpty() };
 const modePnlSort = {backtest:'none',replay:'none',live:'none'};
 const selectedSignal = {backtest:null,replay:null,live:null};
 const locateMessages = {backtest:'',replay:'',live:''};
@@ -284,9 +313,9 @@ function reportModes(){
 }
 function selectMode(mode){
   if(!validMode(mode))return;
-  modeFilters[selectedMode]=el('filter-status').value;
+  modeFilters[selectedMode]=sigFilterCurrent();
   selectedMode=mode;
-  el('filter-status').value=modeFilters[mode];
+  sigFilterApply(modeFilters[mode]);
   MODES.forEach(m=>el('card-'+m.id).hidden=m.id!==mode);
   // 历史方案 TAB 只属于全量回测；切到回放/实时时隐藏该 TAB 并回到信号表
   el('tab-btn-bt').hidden = mode !== 'backtest';
@@ -344,22 +373,10 @@ function buildCard(m) {
   };
   const extras = {
     backtest: [
-      { k: 'warmup', label: '预热根数', type: 'text', def: '60' },
-      { k: 'lots', label: '手数', type: 'text', def: '4' },
-      { k: 'slip_stop', label: '止损滑点', type: 'text', def: '3' },
-      { k: 'slip_fallback', label: '兜底止损滑点', type: 'text', def: '10' },
-      { k: 'slip_be', label: '保本滑点', type: 'text', def: '3' },
-      { k: 'near', label: '近支阻阈值·绝对价差', type: 'text', def: '10' },
+      { k: 'lead_days', label: '预热提前（天）·0=从起始日交易', type: 'text', def: '60' },
+      { k: 'warmup', label: '预热根数（提前=0 时生效）', type: 'text', def: '60' },
       { k: 'sr_preset', label: '支阻预设', type: 'select', def: '', options: [
         ['', '默认（引擎参数：密集区+BOLL）'],
-      ] },
-      { k: 'diverge_confirm', label: '背驰进场', type: 'select', def: 'false', options: [
-        ['false', '当下（默认）'],
-        ['true', '分型确认后下一根开盘'],
-      ] },
-      { k: 'expect_bi', label: '检测周期够笔', type: 'select', def: 'true', options: [
-        ['true', '预期够笔（默认）'],
-        ['false', '分型确认'],
       ] },
     ],
     replay: [
@@ -384,7 +401,7 @@ function buildCard(m) {
   rows.push(`<div class="row">
     <div class="field"><label>品种</label><input data-cfg="symbol" value="OANDA:XAUUSD"></div>
     ${periodsHtml}
-    <div class="field"><label>${m.id === 'replay' ? '起始日期' : '起始日期'}</label><input data-cfg="from" value="2026-07-02"></div>
+    <div class="field"><label>${m.id === 'backtest' ? '起始日期（开始交易）' : '起始日期'}</label><input data-cfg="from" value="2026-07-02"></div>
   </div>`);
   const extraHtml = (extras[m.id] || []).map(f => {
     const ctrl = (f.type === 'select')
@@ -405,6 +422,10 @@ function buildCard(m) {
     ${sourceField}
     <div class="field"><label>30秒级别</label><select data-cfg="with_30s"><option value="false">关闭</option><option value="true">开启（仅作背驰级别，时间轴仍为3m；30S数据量大，回测明显慢于关闭时）</option></select></div>
   </div>`);
+  // 手数/滑点/近支阻/背驰进场/够笔等算法参数已移至「参数配置」页分模块统一管理（2026-09-15 去重）
+  if (m.id === 'backtest') {
+    rows.push(`<div class="row" style="font-size:11px;color:var(--muted);">手数、止损/保本滑点、近支阻阈值、缠论核心阈值（含背驰进场/检测周期够笔）等算法参数在「参数配置」页统一设置，启动时读取生效；历史方案对比表仍显示各方案保存时的取值。</div>`);
+  }
   return `
   <div class="card" id="card-${m.id}">
     <h2><span>${m.name}</span><span class="badge" id="badge-${m.id}">idle</span></h2>
@@ -484,10 +505,36 @@ function exitDisplayRows(r) {
 function statusClass(s) {
   return { '已平仓': 'closed', '持仓中': 'open', '同向过滤': 'filtered', '已成交': 'filled' }[s] || 'sig';
 }
-// 状态过滤器：'' = 全部
+// 状态/策略/方向过滤器：状态 '' = 全部；策略/方向为多选下拉，不勾选 = 全部
+// 方向按 方向 列的展示口径（signalDirectionName，旧记录回退到策略映射）过滤
+function sigFilterValues(name) {
+  return [...el(`filter-${name}`).querySelectorAll('[data-sig-opt]:checked')].map(c => c.value);
+}
+function sigFilterCurrent() {
+  return { status: el('filter-status').value,
+    strategy: sigFilterValues('strategy'), direction: sigFilterValues('direction') };
+}
+function sigFilterApply(f) {
+  el('filter-status').value = f.status;
+  for (const name of ['strategy', 'direction'])
+    el(`filter-${name}`).querySelectorAll('[data-sig-opt]').forEach(c => { c.checked = f[name].includes(c.value); });
+  syncSigFilter('strategy');
+  syncSigFilter('direction');
+}
+// 下拉按钮文案：显示已选值（逗号连接），空 = 全部
+function syncSigFilter(name) {
+  const vals = sigFilterValues(name);
+  el(`filter-${name}`).querySelector('.ms-value').textContent =
+    (name === 'strategy' ? '策略' : '方向') + '：' + (vals.length ? vals.join(',') : '全部');
+}
 function filteredRows() {
   const f = el('filter-status').value;
-  return sigRows.filter(r=>r.mode===selectedMode&&(!f||r.status===f));
+  const st = sigFilterValues('strategy');
+  const dir = sigFilterValues('direction');
+  return sigRows.filter(r=>r.mode===selectedMode
+    &&(!f||r.status===f)
+    &&(!st.length||st.includes(r.strategyKey))
+    &&(!dir.length||dir.includes(signalDirectionName(r))));
 }
 // 盈亏汇总：统计（summaryStats，对过滤后的行实时聚合）与展示（summaryHtml）分离，
 // 展示函数同时吃后端保存时固化的 summary（bt_runs.compute_summary 同口径），
@@ -1022,11 +1069,11 @@ const BT_METRICS = [
   ['同向过滤', s => s.cnt_filtered ?? '-'],
 ];
 // 参数对比展示顺序与汉化（键为保存的规范化 cfg 字段名）
-const BT_CFG_KEYS = ['symbol', 'from', 'periods', 'data_source', 'warmup', 'lots',
+const BT_CFG_KEYS = ['symbol', 'from', 'periods', 'data_source', 'lead_days', 'warmup', 'lots',
                      'slip_stop', 'slip_fallback', 'slip_be', 'near', 'sr_preset',
                      'diverge_confirm', 'expect_bi', 'with_30s'];
 const BT_CFG_LABELS = { symbol: '品种', from: '起始日期', periods: '周期', data_source: '数据源',
-                        warmup: '预热根数', lots: '手数', slip_stop: '止损滑点', slip_fallback: '兜底止损滑点',
+                        lead_days: '预热提前(天)', warmup: '预热根数', lots: '手数', slip_stop: '止损滑点', slip_fallback: '兜底止损滑点',
                         slip_be: '保本滑点', near: '近支阻阈值', sr_preset: '支阻预设', diverge_confirm: '背驰进场', expect_bi: '检测周期够笔', with_30s: '30秒级别' };
 function btCfgVal(k, v) {
   if (k === 'periods') return Array.isArray(v) ? v.join('+') : (v ?? '—');
@@ -1178,6 +1225,12 @@ async function init() {
   if(parent!==window)parent.postMessage({type:'modes-ready'},location.origin);
   el('btn-clear').onclick = () => clearModeRows(selectedMode);
   el('filter-status').onchange = () => renderTable();
+  // 策略/方向多选过滤：勾选变化 → 更新按钮文案与当前模式的筛选记忆 → 重渲染
+  document.querySelectorAll('[data-sig-opt]').forEach(c => c.onchange = () => {
+    syncSigFilter(c.closest('.ms').id.replace('filter-', ''));
+    modeFilters[selectedMode] = sigFilterCurrent();
+    renderTable();
+  });
   el('sort-pnl').onclick = togglePnlSort;
   // 记录区 TAB：进场信号记录 / 历史回测方案
   document.querySelectorAll('[data-record-tab]').forEach(b => {
