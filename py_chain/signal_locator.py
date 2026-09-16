@@ -113,11 +113,32 @@ class LocateManager:
         with self.lock:
             return dict(self.job) if self.job else None
 
-    def start(self, mode, row_id, colors=None):
-        row = self.signals.get(row_id, mode)
-        if row is None:
-            raise LookupError('记录已清空或不存在，请刷新列表')
-        validate_signal(row)
+    def start(self, mode, row_id, colors=None, row=None):
+        """启动定位任务。
+
+        row 非空时直接用该快照（历史方案明细），不再查内存 SignalLog；
+        否则按 mode+row_id 取服务端当前记录。
+        """
+        if row is not None:
+            if not isinstance(row, dict):
+                raise ValueError('无效的记录快照')
+            row = dict(row)
+            if type(row_id) is not int or row_id <= 0:
+                rid = row.get('id')
+                if type(rid) is not int or rid <= 0:
+                    raise ValueError('无效的记录ID')
+                row_id = rid
+            row['id'] = row_id
+            if mode not in ('backtest', 'replay', 'live'):
+                mode = row.get('mode') if row.get('mode') in ('backtest', 'replay', 'live') else 'backtest'
+            validate_signal(row)
+            from_log = False
+        else:
+            row = self.signals.get(row_id, mode)
+            if row is None:
+                raise LookupError('记录已清空或不存在，请刷新列表')
+            validate_signal(row)
+            from_log = True
         if not self.chart_lock.acquire(blocking=False):
             raise RuntimeError('图表正被任务占用，请结束运行或暂停中的任务，并等待图表操作完成后再定位')
         job = {'jobId': uuid.uuid4().hex, 'mode': mode, 'id': row_id, 'state': 'running', 'error': None}
@@ -127,7 +148,8 @@ class LocateManager:
         def work():
             result, error = None, None
             try:
-                if self.signals.get(row_id, mode) is None:
+                # 内存表定位：任务期间若被清空则中止；快照定位不依赖内存表
+                if from_log and self.signals.get(row_id, mode) is None:
                     raise LookupError('记录已清空，请刷新列表')
                 result = locate_signal(row, colors=colors)
             except Exception as exc:

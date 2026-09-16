@@ -10,17 +10,19 @@ import tempfile
 import time
 import unittest
 
-from py_chain.bt_runs import BtRunStore, build_cfg_summary, compute_summary, default_name
+from py_chain.bt_runs import (
+    BtRunStore, build_cfg_summary, compute_equity, compute_summary, default_name,
+)
 
 
-def row(status, pnl=None, exitType=None, exits=None):
+def row(status, pnl=None, exitType=None, exits=None, exitTime=1100, entryPrice=4201.0, lots=4):
     return {"id": 1, "mode": "backtest", "symbol": "OANDA:XAUUSD", "time": 1000,
             "direction": "long", "periodX": "15", "strategyKey": "waitBuy",
             "markRes": "15", "price": 4200.0, "nearSr": 4210.0,
             "fallback": False, "nearEqual": False, "expectBi": False,
-            "status": status, "entryTime": 1010, "entryPrice": 4201.0,
-            "lots": 4, "stopRef": 4190.0, "state": "closed" if status == "已平仓" else None,
-            "exitTime": 1100, "exitPrice": 4230.0, "exitType": exitType,
+            "status": status, "entryTime": 1010, "entryPrice": entryPrice,
+            "lots": lots, "stopRef": 4190.0, "state": "closed" if status == "已平仓" else None,
+            "exitTime": exitTime, "exitPrice": 4230.0, "exitType": exitType,
             "exits": exits or [], "pnl": pnl}
 
 
@@ -32,7 +34,9 @@ def sample_rows():
         row("已平仓", pnl=-4.0, exitType="stopBe"),                       # 亏
         row("已平仓", pnl=0.0, exitType="stopBe"),                        # 保本：不计胜负
         row("已平仓", pnl=None),                                          # 异常行：不进已平仓盈亏
-        row("持仓中", pnl=-2.5, exits=[{"type": "half", "time": 1050, "price": 4220.0}]),
+        # 持仓中无 exitTime；半平盈亏按 exitDisplayRows 拆分，余下为浮盈
+        row("持仓中", pnl=-2.5, exitTime=None,
+            exits=[{"type": "half", "time": 1050, "price": 4220.0}]),
         row("信号"),                                                      # 未成交
         row("同向过滤"),                                                  # 互斥过滤
     ]
@@ -78,13 +82,48 @@ class TestComputeSummary(unittest.TestCase):
                              "realized": 0.0, "floating": 0.0, "total": 0.0,
                              "exits": {"stopBe": 0, "stopSr": 0, "close": 0, "half": 0},
                              "rows_total": 0, "cnt_signal": 0, "cnt_open": 0,
-                             "cnt_closed": 0, "cnt_filtered": 0})
+                             "cnt_closed": 0, "cnt_filtered": 0, "equity": []})
+
+    def test_equity_in_summary(self):
+        s = compute_summary(sample_rows())
+        eq = s["equity"]
+        self.assertTrue(eq)
+        self.assertEqual(eq[0]["v"], 0.0)
+        # 终点 = 合计（realized 16 + floating -2.5）
+        self.assertEqual(eq[-1]["v"], s["total"])
 
     def test_cfg_summary_and_default_name(self):
         cs = build_cfg_summary(CFG)
         self.assertEqual(cs, {"symbol": "OANDA:XAUUSD",
                               "periods": "D+240+60+15+3", "from": "2026-07-02"})
         self.assertTrue(default_name(CFG).startswith("OANDA:XAUUSD 2026-07-02·"))
+
+
+class TestComputeEquity(unittest.TestCase):
+
+    def test_empty(self):
+        self.assertEqual(compute_equity([]), [])
+        self.assertEqual(compute_equity([row("信号"), row("同向过滤")]), [])
+
+    def test_simple_closed(self):
+        # 两笔已平仓：t=100 → +10；t=200 → -3 → 终点 7
+        rows = [
+            row("已平仓", pnl=10.0, exitType="close", exitTime=100),
+            row("已平仓", pnl=-3.0, exitType="stopSr", exitTime=200),
+        ]
+        eq = compute_equity(rows)
+        self.assertEqual(eq[0], {"t": 100, "v": 0.0})
+        self.assertEqual(eq[1], {"t": 100, "v": 10.0})
+        self.assertEqual(eq[2], {"t": 200, "v": 7.0})
+
+    def test_half_and_floating(self):
+        # 半平 (4220-4201)*2 = 38 @1050；终局余下 -2.5-38=-40.5 无 exitTime → 末尾补点
+        rows = [row("持仓中", pnl=-2.5, exitTime=None, lots=4, entryPrice=4201.0,
+                    exits=[{"type": "half", "time": 1050, "price": 4220.0}])]
+        eq = compute_equity(rows)
+        self.assertEqual(eq[0]["v"], 0.0)
+        self.assertEqual(eq[1], {"t": 1050, "v": 38.0})
+        self.assertEqual(eq[-1]["v"], -2.5)   # 终点 = 整笔浮盈合计
 
 
 class TestBtRunStore(unittest.TestCase):

@@ -398,6 +398,10 @@ class ModeWorker:
         self._pause_evt = threading.Event()
         self._stop_evt = threading.Event()
         self.monitor = None
+        # 墙钟计时：启动→结束（含暂停），保存回测方案时写入 summary.duration_sec
+        self.started_at = None
+        self.ended_at = None
+        self.duration_sec = None
 
     # ---- 日志 ----
     def log(self, msg):
@@ -454,6 +458,9 @@ class ModeWorker:
         self.cfg = dict(cfg)
         self._row_base = self.signals.max_id()
         self.error = None
+        self.started_at = time.time()
+        self.ended_at = None
+        self.duration_sec = None
         self._pause_evt = threading.Event()
         self._stop_evt = threading.Event()
         self.progress = {"current": 0, "total": 0, "pct": 0}
@@ -485,13 +492,17 @@ class ModeWorker:
             self.log(f"运行异常：{e}")
             self.set_state("error")
         finally:
+            self.ended_at = time.time()
+            if self.started_at is not None:
+                self.duration_sec = round(self.ended_at - self.started_at, 1)
             release_active(self.MODE)
             if self.monitor is not None:
                 try:
                     self.monitor.restore_chart()
                 except Exception:
                     pass
-            self.log(f"已结束（state={self.state}）")
+            dur = f"，耗时 {self.duration_sec}s" if self.duration_sec is not None else ""
+            self.log(f"已结束（state={self.state}{dur}）")
 
     def _run(self):
         raise NotImplementedError
@@ -1160,14 +1171,36 @@ def make_handler(app):
                 return
             if path == '/api/signals/locate':
                 body = self._read_body()
+                colors = body.get('colors') if isinstance(body, dict) else None
+                if not isinstance(colors, dict):
+                    colors = None
+                # 历史方案明细：带 row 快照，直接定位/标记，不依赖内存 SignalLog
+                row_snap = body.get('row') if isinstance(body, dict) else None
+                if isinstance(row_snap, dict):
+                    mode = body.get('mode') if body.get('mode') in ('backtest', 'replay', 'live') else None
+                    if mode is None:
+                        mode = row_snap.get('mode') if row_snap.get('mode') in ('backtest', 'replay', 'live') else 'backtest'
+                    rid = body.get('id') if type(body.get('id')) is int else row_snap.get('id')
+                    if type(rid) is not int or rid <= 0:
+                        self._send_json({'ok': False, 'error': '无效的模式或记录ID'}, 400)
+                        return
+                    try:
+                        job = app.locator.start(mode, rid, colors=colors, row=row_snap)
+                    except ValueError as exc:
+                        self._send_json({'ok': False, 'error': str(exc)}, 400)
+                    except LookupError as exc:
+                        self._send_json({'ok': False, 'error': str(exc)}, 404)
+                    except RuntimeError as exc:
+                        self._send_json({'ok': False, 'error': str(exc)}, 409)
+                    except Exception as exc:
+                        self._send_json({'ok': False, 'error': str(exc)}, 500)
+                    else:
+                        self._send_json({'ok': True, 'job': job}, 202)
+                    return
                 if (not isinstance(body, dict) or body.get('mode') not in ('backtest', 'replay', 'live')
                         or type(body.get('id')) is not int or body['id'] <= 0):
                     self._send_json({'ok': False, 'error': '无效的模式或记录ID'}, 400)
                     return
-                # 单行标记颜色（可选）：非 dict 视为缺省，由后端默认色兜底
-                colors = body.get('colors')
-                if not isinstance(colors, dict):
-                    colors = None
                 try:
                     job = app.locator.start(body['mode'], body['id'], colors=colors)
                 except ValueError as exc:

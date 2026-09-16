@@ -9,7 +9,9 @@
 赋值、done 后仍在）；信号行按 _row_base 过滤"本次运行新增行"——/api/backtest/start
 不清信号表，连跑多次行会混叠，行 id 单调递增（clear 也不复用）保证 cfg 与行严格
 配对。汇总额在保存时由 compute_summary 固化，口径逐字段复刻前端 renderSummary
-（web/index.html），保证当前表格 / 明细 / 对比三处数字一致。
+（web/index.html），保证当前表格 / 明细 / 对比三处数字一致；另含 equity 资金曲线点列
+（compute_equity，与前端 equityPoints 同口径），以及 duration_sec 墙钟运行秒数
+（ModeWorker 启动→结束，供列表/对比/明细展示），供对比小图与运行时长直接使用。
 
 用法（入口是 WEB 全量回测页的"保存方案"按钮）：
     GET    /api/bt/runs                 列表（轻量，不含信号行）
@@ -49,12 +51,96 @@ def _dumps(obj):
     return json.dumps(obj, ensure_ascii=False, default=str)
 
 
+def _num(v):
+    """可转浮点则返回 float，否则 None（与前端 numeric 对齐）。"""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _exit_pnl_events(row):
+    """按 exitDisplayRows 口径拆分出场盈亏事件：半平一段 + 终局/浮盈一段。
+
+    返回 [{t, pnl}, ...]；无有效 pnl 的事件跳过。时间戳原样保留（秒或毫秒均可）。
+    """
+    total = _num(row.get("pnl"))
+    lots = _num(row.get("lots"))
+    final_t = row.get("exitTime")
+    final_pnl = total
+    events = []
+    half = next((e for e in (row.get("exits") or []) if e.get("type") == "half"), None)
+    if half:
+        half_lots = None if lots is None else lots / 2
+        entry = _num(row.get("entryPrice"))
+        price = _num(half.get("price"))
+        d = 1 if row.get("direction") == "long" else -1 if row.get("direction") == "short" else None
+        half_pnl = None
+        if entry is not None and price is not None and half_lots is not None and d is not None:
+            half_pnl = (price - entry) * d * half_lots
+        if half_pnl is not None and half.get("time") is not None:
+            events.append({"t": half["time"], "pnl": half_pnl})
+        if total is not None and half_pnl is not None:
+            final_pnl = total - half_pnl
+    if final_pnl is not None and final_t is not None:
+        events.append({"t": final_t, "pnl": final_pnl})
+    elif final_pnl is not None and final_t is None and row.get("status") == "持仓中":
+        # 持仓浮盈无出场时间：留给 compute_equity 在末尾补点
+        events.append({"t": None, "pnl": final_pnl})
+    return events
+
+
+def compute_equity(rows):
+    """资金曲线：从 0 起步，按出场事件时间累加已实现盈亏（含半平拆分）。
+
+    口径与前端 equityPoints / 汇总条「合计」一致：pnl 为 None 的行不参与；
+    持仓浮盈（无 exitTime）排在时间序列末尾，使终点等于 realized+floating。
+    返回 [{t, v}, ...]；无事件时返回 []。起点补 (首事件时间, 0)。
+    """
+    timed, floating = [], []
+    for r in rows:
+        if r.get("pnl") is None and r.get("status") not in ("已平仓", "持仓中"):
+            continue
+        if r.get("status") not in ("已平仓", "持仓中"):
+            continue
+        if r.get("pnl") is None:
+            continue
+        for ev in _exit_pnl_events(r):
+            if ev["pnl"] is None:
+                continue
+            if ev["t"] is None:
+                floating.append(ev)
+            else:
+                timed.append(ev)
+    timed.sort(key=lambda e: e["t"])
+    events = timed + floating
+    if not events:
+        return []
+    # 浮盈补时间：取末笔有时事件之后 +1，全是浮盈则用 0
+    last_t = timed[-1]["t"] if timed else 0
+    out = []
+    cum = 0.0
+    first_t = timed[0]["t"] if timed else last_t
+    out.append({"t": first_t, "v": 0.0})
+    for i, ev in enumerate(events):
+        t = ev["t"] if ev["t"] is not None else (last_t + 1 if timed else 0)
+        # 多笔浮盈共用同一补时：依次 +1 避免重叠覆盖
+        if ev["t"] is None:
+            t = last_t + 1 + sum(1 for e in events[:i] if e["t"] is None)
+        cum += ev["pnl"]
+        out.append({"t": t, "v": round(cum, 2)})
+    return out
+
+
 def compute_summary(rows):
     """按前端 renderSummary 的口径聚合信号行（web/index.html 盈亏汇总条）。
 
     pnl 为 None 的行（信号/同向过滤/未回填）不参与任何盈亏合计；
     pnl=0 的保本单不计胜负、不进盈亏均值；avg_loss==0 时 payoff_ratio 存
     None（避免 JSON 出 Infinity），前端按 win 数显示 ∞ / —。
+    额外写入 equity（compute_equity），供历史方案对比小图直接使用。
     """
     closed = [r for r in rows if r.get("status") == "已平仓" and r.get("pnl") is not None]
     open_pos = [r for r in rows if r.get("status") == "持仓中" and r.get("pnl") is not None]
@@ -85,6 +171,7 @@ def compute_summary(rows):
         "rows_total": len(rows),
         "cnt_signal": counts["信号"], "cnt_open": counts["持仓中"],
         "cnt_closed": counts["已平仓"], "cnt_filtered": counts["同向过滤"],
+        "equity": compute_equity(rows),
     }
 
 
@@ -159,20 +246,25 @@ class BtRunStore:
             "signal_count": row[9],
         }
 
-    def save(self, name, cfg, rows, worker_state=None, mode="backtest"):
+    def save(self, name, cfg, rows, worker_state=None, mode="backtest",
+             duration_sec=None):
         """保存一条方案（bt_runs 一行 + bt_signals N 行，事务原子）。
 
+        duration_sec：墙钟运行秒数，写入 summary（旧方案无此字段）。
         @returns 完整 meta（含 cfg / cfg_summary / summary）
         @raises sqlite3.IntegrityError 方案名重名（UNIQUE 约束，调用方转 409）
         """
         run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
         cfg = dict(cfg or {})
+        summary = compute_summary(rows)
+        if duration_sec is not None:
+            summary["duration_sec"] = float(duration_sec)
         meta = {
             "id": run_id, "name": name, "saved_at": int(time.time()), "v": 1,
             "mode": mode, "worker_state": worker_state,
             "cfg": cfg,
             "cfg_summary": build_cfg_summary(cfg),
-            "summary": compute_summary(rows),
+            "summary": summary,
             "signal_count": len(rows),
         }
         with self.lock:
@@ -274,7 +366,9 @@ def _save_current(app, body):
     name = str(body.get("name") or "").strip() or default_name(worker.cfg)
     name = name[:100]
     try:
-        meta = app.bt_runs.save(name, worker.cfg, rows, worker_state=worker.state)
+        meta = app.bt_runs.save(
+            name, worker.cfg, rows, worker_state=worker.state,
+            duration_sec=worker.duration_sec)
     except sqlite3.IntegrityError:
         raise _HttpError(f"方案名已存在：{name}", 409)
     app.broadcaster.emit("log", {"mode": "backtest",

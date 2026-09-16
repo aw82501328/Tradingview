@@ -114,6 +114,40 @@
   .status-tag.filtered { background: #2a2f3a; color: var(--muted); }
   #pnl-summary .pnl-pos, td.pnl-pos { color: var(--buy); }
   #pnl-summary .pnl-neg, td.pnl-neg { color: var(--sell); }
+  /* ---------- 资金曲线（自绘 SVG：当前回测大图 / 明细大图 / 对比小图） ---------- */
+  .equity-chart {
+    border-top: 1px solid var(--border); padding: 10px 14px 12px;
+    background: var(--card); position: relative;
+  }
+  .equity-chart[hidden] { display: none; }
+  .equity-chart .eq-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    gap: 10px; margin-bottom: 6px; font-size: 12px; color: var(--muted);
+  }
+  .equity-chart .eq-head strong { color: var(--text); font-size: 13px; }
+  .equity-chart .eq-legend {
+    display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--muted);
+    align-items: center;
+  }
+  .equity-chart .eq-legend i {
+    display: inline-block; width: 10px; height: 3px; border-radius: 1px;
+    margin-right: 4px; vertical-align: middle;
+  }
+  .equity-chart .eq-legend .eq-swatch {
+    display: inline-flex; align-items: center; gap: 4px;
+  }
+  .equity-chart .eq-legend input[type="color"] {
+    width: 22px; height: 18px; padding: 0; border-radius: 3px;
+    vertical-align: middle; flex: none;
+  }
+  .equity-chart svg { display: block; width: 100%; height: auto; touch-action: none; }
+  .equity-chart .eq-tip {
+    position: absolute; pointer-events: none; z-index: 5;
+    background: #1a2030; border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 8px; font-size: 11px; color: var(--text); white-space: nowrap;
+    box-shadow: 0 6px 18px rgba(0,0,0,.4); display: none;
+  }
+  .equity-chart .eq-tip.on { display: block; }
   .scroll { max-height: 420px; overflow-y: auto; }
   #sig-body tr { cursor: pointer; }
   #sig-body tr:hover td { background: var(--card-2); }
@@ -122,6 +156,16 @@
   #sig-body td[rowspan] { vertical-align: middle; }
   #sig-body tr.exit-continuation td { border-top-style: dashed; }
   #sig-body tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  /* 历史方案明细表：与主表同款可点击定位 */
+  #bt-detail-sig-body tr[data-signal-id] { cursor: pointer; }
+  #bt-detail-sig-body tr[data-signal-id]:hover td { background: var(--card-2); }
+  #bt-detail-sig-body tr.selected td { background: color-mix(in srgb, var(--accent) 18%, var(--card)); }
+  #bt-detail-sig-body tr.selected:not(.exit-continuation) td:first-child { box-shadow: inset 3px 0 var(--accent); }
+  #bt-detail-sig-body td[rowspan] { vertical-align: middle; }
+  #bt-detail-sig-body tr.exit-continuation td { border-top-style: dashed; }
+  #bt-detail-sig-body tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .bt-detail-locate { padding: 8px 16px; color: var(--muted); font-size: 12px;
+    border-bottom: 1px solid var(--border); background: var(--card-2); }
   #locate-status { padding: 8px 14px; color: var(--muted); font-size: 12px; }
   /* ---------- 记录区 TAB（进场信号记录 / 历史回测方案） ---------- */
   .record-tabs {
@@ -153,8 +197,30 @@
   .bt-modal-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px;
     max-width: 96vw; width: min(1200px, 96vw); max-height: 90vh; display: flex;
     flex-direction: column; overflow: hidden; }
+  /* 明细全屏最大化：铺满视口；配合 Fullscreen API 盖住浏览器外框 */
+  #bt-detail-modal.maximized {
+    padding: 0; background: var(--card);
+  }
+  #bt-detail-modal.maximized .bt-modal-card {
+    width: 100%; max-width: none; height: 100%; max-height: none;
+    border: 0; border-radius: 0;
+  }
+  #bt-detail-modal.maximized #bt-detail-body .scroll { max-height: none; flex: 1; }
+  #bt-detail-modal.maximized #bt-detail-body {
+    display: flex; flex-direction: column; flex: 1; min-height: 0;
+  }
+  #bt-detail-modal:fullscreen,
+  #bt-detail-modal:-webkit-full-screen {
+    padding: 0; background: var(--card); width: 100%; height: 100%;
+  }
+  #bt-detail-modal:fullscreen .bt-modal-card,
+  #bt-detail-modal:-webkit-full-screen .bt-modal-card {
+    width: 100%; max-width: none; height: 100%; max-height: none;
+    border: 0; border-radius: 0;
+  }
   .bt-modal-head { display: flex; justify-content: space-between; align-items: center; gap: 12px;
     padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  .bt-modal-head .bt-modal-actions { display: flex; gap: 8px; flex-shrink: 0; }
   #bt-detail-body { overflow: auto; }
   .bt-params { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
     gap: 6px 14px; padding: 10px 16px; font-size: 12px; }
@@ -166,6 +232,11 @@
   .bt-summary .pnl-pos { color: var(--buy); }
   .bt-summary .pnl-neg { color: var(--sell); }
   #bt-detail-body .scroll { max-height: 44vh; }
+  #bt-detail-body .equity-chart { border-top: 0; }
+  #bt-compare-view .equity-chart {
+    border: 1px solid var(--border); border-radius: 8px;
+    margin: 4px 0 10px; padding: 8px 10px 10px;
+  }
 </style>
 <link rel="stylesheet" href="/theme.css">
 <link rel="stylesheet" href="/legacy-theme.css">
@@ -261,6 +332,8 @@
     </div>
   </div>
   <div id="pnl-summary"></div>
+  <!-- 当前回测资金曲线大图：仅全量回测且有出场盈亏时显示；不受列表筛选影响 -->
+  <div id="equity-chart" class="equity-chart" hidden></div>
   <div id="locate-status" role="status" aria-live="polite">点击记录，定位到 TradingView 的信号K线并标记该行进出场与支阻位</div>
   <div class="scroll">
     <table>
@@ -282,7 +355,10 @@
   <div class="bt-modal-card">
     <div class="bt-modal-head">
       <strong id="bt-detail-title"></strong>
-      <button id="bt-detail-close">关闭</button>
+      <div class="bt-modal-actions">
+        <button id="bt-detail-max" type="button" title="全屏最大化明细窗口">最大化</button>
+        <button id="bt-detail-close" type="button">关闭</button>
+      </div>
     </div>
     <div id="bt-detail-body"></div>
   </div>
@@ -510,6 +586,209 @@ function exitDisplayRows(r) {
   if (!r.exitType) final.label = '剩余持仓';
   return [{time:half.time,price:half.price,type:'half',label:'半平',lots:halfLots,pnl:halfPnl},final];
 }
+// 资金曲线点列：与后端 compute_equity 同口径——从 0 起步，按出场事件（含半平拆分）
+// 时间累加；持仓浮盈无 exitTime 排末尾，终点 = 汇总「合计」。
+function equityPoints(rows) {
+  const timed = [], floating = [];
+  for (const r of rows) {
+    if (r.status !== '已平仓' && r.status !== '持仓中') continue;
+    if (r.pnl == null) continue;
+    for (const exit of exitDisplayRows(r)) {
+      if (exit.pnl == null) continue;
+      if (exit.time == null) floating.push({ t: null, pnl: exit.pnl });
+      else timed.push({ t: Number(exit.time), pnl: exit.pnl });
+    }
+  }
+  timed.sort((a, b) => a.t - b.t);
+  const events = timed.concat(floating);
+  if (!events.length) return [];
+  const lastT = timed.length ? timed[timed.length - 1].t : 0;
+  const firstT = timed.length ? timed[0].t : lastT;
+  const out = [{ t: firstT, v: 0 }];
+  let cum = 0, floatIdx = 0;
+  for (const ev of events) {
+    const t = ev.t == null ? lastT + 1 + floatIdx++ : ev.t;
+    cum += ev.pnl;
+    out.push({ t, v: Math.round(cum * 100) / 100 });
+  }
+  return out;
+}
+// 对比/多方案默认配色；用户可选色按方案 id 记住（localStorage）
+const EQ_COLORS = ['#7cb0ff', '#7fe0b0', '#c9a0ff', '#ffb86c', '#ff8fa3'];
+const EQ_COLOR_STORE_KEY = 'bt-compare-eq-colors';
+function loadCompareColors() {
+  try { return JSON.parse(localStorage.getItem(EQ_COLOR_STORE_KEY) || '{}') || {}; }
+  catch { return {}; }
+}
+function saveCompareColor(id, color) {
+  const map = loadCompareColors();
+  map[id] = color;
+  localStorage.setItem(EQ_COLOR_STORE_KEY, JSON.stringify(map));
+}
+function compareColorOf(id, index) {
+  const saved = loadCompareColors()[id];
+  return saved || EQ_COLORS[index % EQ_COLORS.length];
+}
+function escAttr(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+// 自绘 SVG 资金曲线：seriesList = [{id?, name, points:[{t,v}], color?}]；opts.height 大图约 280 / 小图约 140
+// opts.pickColors=true 时图例旁出颜色选择器，改色触发 opts.onColorChange(id, color, series)
+function drawEquityChart(host, seriesList, opts = {}) {
+  const series = (seriesList || []).filter(s => s.points && s.points.length);
+  if (!host) return;
+  if (!series.length) { host.hidden = true; host.innerHTML = ''; return; }
+  host.hidden = false;
+  host._eqSeries = series;
+  host._eqOpts = opts;
+  const H = opts.height || 280;
+  const pad = { l: 52, r: 14, t: 18, b: 26 };
+  // 用容器宽度做 viewBox；无宽时退回 720
+  const W = Math.max(320, Math.floor(host.clientWidth || host.parentElement?.clientWidth || 720));
+  const plotW = W - pad.l - pad.r, plotH = H - pad.t - pad.b;
+  let tMin = Infinity, tMax = -Infinity, vMin = 0, vMax = 0;
+  for (const s of series) for (const p of s.points) {
+    if (p.t < tMin) tMin = p.t;
+    if (p.t > tMax) tMax = p.t;
+    if (p.v < vMin) vMin = p.v;
+    if (p.v > vMax) vMax = p.v;
+  }
+  if (tMax <= tMin) tMax = tMin + 1;
+  const vPad = Math.max((vMax - vMin) * 0.08, 1);
+  vMin -= vPad; vMax += vPad;
+  const xOf = t => pad.l + ((t - tMin) / (tMax - tMin)) * plotW;
+  const yOf = v => pad.t + (1 - (v - vMin) / (vMax - vMin)) * plotH;
+  const fmtV = v => (v > 0 ? '+' : '') + Number(v).toFixed(2);
+  const pathOf = pts => pts.map((p, i) =>
+    `${i ? 'L' : 'M'}${xOf(p.t).toFixed(1)},${yOf(p.v).toFixed(1)}`).join(' ');
+  const zeroY = yOf(0);
+  const yTicks = [vMin, 0, vMax].filter((v, i, a) =>
+    i === 0 || Math.abs(v - a[i - 1]) > (vMax - vMin) * 0.05);
+  // 极值：单线时标最大/最小点
+  let extrema = '';
+  if (series.length === 1) {
+    const pts = series[0].points;
+    let hi = pts[0], lo = pts[0];
+    for (const p of pts) { if (p.v > hi.v) hi = p; if (p.v < lo.v) lo = p; }
+    const mark = (p, label, dy) =>
+      `<circle cx="${xOf(p.t).toFixed(1)}" cy="${yOf(p.v).toFixed(1)}" r="3" fill="${series[0].color || EQ_COLORS[0]}"/>` +
+      `<text x="${xOf(p.t).toFixed(1)}" y="${(yOf(p.v) + dy).toFixed(1)}" text-anchor="middle" fill="var(--muted)" font-size="10">${label} ${fmtV(p.v)}</text>`;
+    if (hi !== lo || hi.v !== 0) {
+      extrema = mark(hi, '高', -8) + (lo.v !== hi.v ? mark(lo, '低', 14) : '');
+    }
+  }
+  const lines = series.map((s, i) => {
+    const color = s.color || EQ_COLORS[i % EQ_COLORS.length];
+    const sid = s.id != null ? ` data-eq-sid="${escAttr(s.id)}"` : ` data-eq-idx="${i}"`;
+    return `<path${sid} d="${pathOf(s.points)}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/>`;
+  }).join('');
+  const legend = series.map((s, i) => {
+    const color = s.color || EQ_COLORS[i % EQ_COLORS.length];
+    const last = s.points[s.points.length - 1];
+    const swatch = opts.pickColors && s.id
+      ? `<label class="eq-swatch" title="选择曲线颜色"><input type="color" data-eq-color="${escAttr(s.id)}" value="${escAttr(color)}"></label>`
+      : `<i style="background:${color}"></i>`;
+    return `<span>${swatch}${escAttr(s.name || '曲线')}` +
+      (last ? ` <b class="${last.v > 0 ? 'pnl-pos' : last.v < 0 ? 'pnl-neg' : ''}">${fmtV(last.v)}</b>` : '') +
+      `</span>`;
+  }).join('');
+  const title = opts.title || '资金曲线';
+  const note = opts.note || '出场盈亏累加（含半平）；终点含浮盈';
+  host.innerHTML = `
+    <div class="eq-head"><strong>${escAttr(title)}</strong><span>${escAttr(note)}</span></div>
+    <div class="eq-legend">${legend}</div>
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="${escAttr(title)}">
+      <line x1="${pad.l}" y1="${zeroY.toFixed(1)}" x2="${W - pad.r}" y2="${zeroY.toFixed(1)}"
+            stroke="var(--border)" stroke-dasharray="4 3"/>
+      ${yTicks.map(v =>
+        `<text x="${pad.l - 6}" y="${(yOf(v) + 3).toFixed(1)}" text-anchor="end" fill="var(--muted)" font-size="10">${fmtV(v)}</text>`
+      ).join('')}
+      <text x="${pad.l}" y="${H - 6}" fill="var(--muted)" font-size="10">${escAttr(fmtTime(tMin))}</text>
+      <text x="${W - pad.r}" y="${H - 6}" text-anchor="end" fill="var(--muted)" font-size="10">${escAttr(fmtTime(tMax))}</text>
+      ${lines}${extrema}
+      <line class="eq-cross" x1="0" y1="${pad.t}" x2="0" y2="${H - pad.b}" stroke="var(--muted)" stroke-opacity=".35" visibility="hidden"/>
+      <rect class="eq-hit" x="${pad.l}" y="${pad.t}" width="${plotW}" height="${plotH}" fill="transparent"/>
+    </svg>
+    <div class="eq-tip"></div>`;
+  // 悬停读数：找各系列最近时间点
+  const svg = host.querySelector('svg');
+  const tip = host.querySelector('.eq-tip');
+  const cross = host.querySelector('.eq-cross');
+  const hit = host.querySelector('.eq-hit');
+  const nearest = (pts, t) => {
+    let best = pts[0], bestD = Math.abs(pts[0].t - t);
+    for (const p of pts) {
+      const d = Math.abs(p.t - t);
+      if (d < bestD) { best = p; bestD = d; }
+    }
+    return best;
+  };
+  const onMove = e => {
+    const rect = svg.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * W;
+    if (x < pad.l || x > W - pad.r) { tip.classList.remove('on'); cross.setAttribute('visibility', 'hidden'); return; }
+    const t = tMin + ((x - pad.l) / plotW) * (tMax - tMin);
+    cross.setAttribute('x1', x.toFixed(1));
+    cross.setAttribute('x2', x.toFixed(1));
+    cross.setAttribute('visibility', 'visible');
+    // 用 host._eqSeries：取色过程中会就地改 color，悬停读数跟新色
+    const live = host._eqSeries || series;
+    const rows = live.map((s, i) => {
+      const p = nearest(s.points, t);
+      const color = s.color || EQ_COLORS[i % EQ_COLORS.length];
+      return `<div><span style="color:${color}">●</span> ${escAttr(s.name || '曲线')}：` +
+        `<b class="${p.v > 0 ? 'pnl-pos' : p.v < 0 ? 'pnl-neg' : ''}">${fmtV(p.v)}</b>` +
+        ` <span style="color:var(--muted)">${escAttr(fmtTime(p.t))}</span></div>`;
+    }).join('');
+    tip.innerHTML = rows;
+    tip.classList.add('on');
+    const tipW = tip.offsetWidth || 120;
+    let left = e.clientX - host.getBoundingClientRect().left + 12;
+    if (left + tipW > host.clientWidth - 8) left = left - tipW - 24;
+    tip.style.left = Math.max(4, left) + 'px';
+    tip.style.top = Math.max(4, e.clientY - host.getBoundingClientRect().top - 10) + 'px';
+  };
+  const onLeave = () => { tip.classList.remove('on'); cross.setAttribute('visibility', 'hidden'); };
+  hit.addEventListener('mousemove', onMove);
+  hit.addEventListener('mouseleave', onLeave);
+  // 对比图改色：禁止 input 时整图重绘（会拆掉系统取色窗）；就地改 path stroke，change 时再落盘
+  if (opts.pickColors) {
+    host.querySelectorAll('input[data-eq-color]').forEach(inp => {
+      const applyColor = (id, color, persist) => {
+        host._eqSeries = (host._eqSeries || series).map(s => s.id === id ? { ...s, color } : s);
+        const path = host.querySelector(`path[data-eq-sid="${CSS.escape(id)}"]`);
+        if (path) path.setAttribute('stroke', color);
+        if (persist && typeof opts.onColorChange === 'function') {
+          opts.onColorChange(id, color, host._eqSeries);
+        }
+      };
+      // 阻止冒泡，避免外层点击逻辑干扰取色窗
+      inp.addEventListener('click', e => e.stopPropagation());
+      inp.addEventListener('mousedown', e => e.stopPropagation());
+      inp.addEventListener('input', () => applyColor(inp.dataset.eqColor, inp.value, false));
+      inp.addEventListener('change', () => applyColor(inp.dataset.eqColor, inp.value, true));
+    });
+  }
+}
+// 当前回测大图：本轮全部 backtest 行（不受筛选），回放/实时隐藏
+let equityRedrawTimer = null;
+function scheduleLiveEquity() {
+  clearTimeout(equityRedrawTimer);
+  equityRedrawTimer = setTimeout(renderLiveEquity, 200);
+}
+function renderLiveEquity() {
+  const host = el('equity-chart');
+  if (!host) return;
+  if (selectedMode !== 'backtest') {
+    host.hidden = true; host.innerHTML = ''; return;
+  }
+  const pts = equityPoints(sigRows.filter(r => r.mode === 'backtest'));
+  if (!pts.length) { host.hidden = true; host.innerHTML = ''; return; }
+  drawEquityChart(host, [{ name: '本轮回测', points: pts }], {
+    height: 280, title: '资金曲线', note: '出场盈亏累加（含半平）；不受上方筛选影响',
+  });
+}
 function statusClass(s) {
   return { '已平仓': 'closed', '持仓中': 'open', '同向过滤': 'filtered', '已成交': 'filled' }[s] || 'sig';
 }
@@ -606,14 +885,16 @@ function locateLabel(mode, id) {
   return `#${row ? displayNo(row) : id}`;
 }
 // 行 → <tr> HTML：实时表格与历史方案明细弹窗共用。
-// interactive=false（已保存方案明细）不绑定定位点击/选中态——定位依赖内存
-// SignalLog，对落库快照无意义。
+// opts.selectedId：明细弹窗用独立选中态；opts.labelById：明细用方案内序号。
 function signalRowsHtml(rows, opts = {}) {
   const interactive = opts.interactive !== false;
+  const selectedId = 'selectedId' in opts ? opts.selectedId : selectedSignal[selectedMode];
   return rows.map(r => {
     const exits = exitDisplayRows(r);
+    const no = opts.labelById ? (opts.labelById[r.id] ?? r.id)
+      : (interactive ? displayNo(r) : r.id);
     const shared = `
-      ${interactive ? `<td title="内部记录 id：${r.id}">${displayNo(r)}</td>` : `<td title="内部记录 id">${r.id}</td>`}
+      <td title="内部记录 id：${r.id}">${no}</td>
       <td>${fmtTime(r.time)}</td>
       <td class="${r.direction === 'long' ? 'long' : 'short'}">${signalDirectionName(r)}</td>
       <td>${r.periodX || '-'}</td>
@@ -630,7 +911,7 @@ function signalRowsHtml(rows, opts = {}) {
       const pnlCls = pnl == null || pnl === 0 ? '' : (pnl > 0 ? 'pnl-pos' : 'pnl-neg');
       const pnlTxt = pnl == null ? '-' : (pnl > 0 ? '+' : '') + pnl.toFixed(2);
       const totalTxt = r.pnl == null ? '-' : Number(r.pnl).toFixed(2);
-      const selected = interactive && selectedSignal[selectedMode] === r.id;
+      const selected = interactive && selectedId === r.id;
       const classes = [selected ? 'selected' : '', i ? 'exit-continuation' : ''].filter(Boolean).join(' ');
       const attrs = interactive
         ? ` data-signal-id="${r.id}" tabindex="0" aria-selected="${selected}" title="点击定位信号K线并标记该行进出场"`
@@ -660,6 +941,7 @@ function renderTable() {
   el('sort-pnl').textContent = '盈亏 ' + ({none:'↕',descending:'↓',ascending:'↑'}[sort]);
   el('sort-pnl').title = {none:'点击按整笔交易盈亏从高到低排序',descending:'点击按整笔交易盈亏从低到高排序',ascending:'点击恢复默认顺序'}[sort];
   renderSummary(rows);
+  scheduleLiveEquity();
   if (sort !== 'none') {
     rows.sort((a, b) => {
       const aValue = a.pnl == null ? NaN : Number(a.pnl);
@@ -685,20 +967,27 @@ function togglePnlSort() {
 function finishLocate(job) {
   if (!locatePending || job?.jobId !== locatePending.jobId || job.state === 'running') return;
   const mode = locatePending.mode;
+  const source = locatePending.source;
+  const id = locatePending.id;
   if (job.state === 'done') {
     // 单行标记结果：定位成功后同一任务内已画该行进出场箭头+支阻横线
     const mk = job.result.mark;
     const markTxt = mk?.error ? `（标记未画：${mk.error}）`
       : mk?.skipped ? `（${mk.skipped}，不画标记）`
       : mk ? `并标记 ${mk.drawn} 个` : '';
-    locateMessages[mode] = `${locateLabel(mode, job.id)} 已定位${markTxt} · ${job.result.symbol} · ${job.result.markRes} · ${fmtTime(job.result.time)}`;
+    const msg = `${source === 'detail' ? `#${btDetailLabelOf(id)}` : locateLabel(mode, id)} 已定位${markTxt} · ${job.result.symbol} · ${job.result.markRes} · ${fmtTime(job.result.time)}`;
+    if (source === 'detail') setBtDetailLocateMsg(msg);
+    else locateMessages[mode] = msg;
   } else {
-    locateMessages[mode] = `${locateLabel(mode, job.id)} 定位失败：${job.error || '未知错误'}`;
+    const msg = `${source === 'detail' ? `#${btDetailLabelOf(id)}` : locateLabel(mode, id)} 定位失败：${job.error || '未知错误'}`;
+    if (source === 'detail') setBtDetailLocateMsg(msg, true);
+    else locateMessages[mode] = msg;
   }
   locatePending = null;
   clearTimeout(locatePoll);
   updateMarkButtons();
-  renderTable();
+  if (source === 'detail') renderBtDetailRows();
+  else renderTable();
 }
 
 async function pollLocate() {
@@ -714,8 +1003,12 @@ async function pollLocate() {
     } else finishLocate(data.job);
   } catch (e) {
     if (locatePending === pending) {
-      locateMessages[pending.mode] = `${locateLabel(pending.mode, pending.id)} 定位状态连接中断，正在重新查询…`;
-      renderTable();
+      const msg = `${pending.source === 'detail' ? `#${btDetailLabelOf(pending.id)}` : locateLabel(pending.mode, pending.id)} 定位状态连接中断，正在重新查询…`;
+      if (pending.source === 'detail') setBtDetailLocateMsg(msg);
+      else {
+        locateMessages[pending.mode] = msg;
+        renderTable();
+      }
     }
   }
   if (locatePending === pending) locatePoll = setTimeout(pollLocate, 2000);
@@ -940,6 +1233,20 @@ const btCompareSel = new Set();  // 对比勾选的方案 id
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const pnlClass = v => (v > 0 ? 'pnl-pos' : v < 0 ? 'pnl-neg' : '');
 const fmtPnlText = v => v == null ? '-' : (v > 0 ? '+' : '') + Number(v).toFixed(2);
+// 方案运行墙钟时长：45秒 / 3分12秒 / 1小时05分；缺字段（旧方案）→ —
+function fmtDuration(sec) {
+  if (sec == null || !Number.isFinite(Number(sec)) || Number(sec) < 0) return '—';
+  const s = Math.round(Number(sec));
+  if (s < 60) return `${s}秒`;
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  if (h > 0) return `${h}小时${String(m).padStart(2, '0')}分`;
+  return r ? `${m}分${String(r).padStart(2, '0')}秒` : `${m}分`;
+}
+function btRunStateLabel(run) {
+  const base = run.worker_state === 'stopped' ? '中途停止' : '完整';
+  const dur = fmtDuration(run.summary?.duration_sec);
+  return dur === '—' ? base : `${base} · ${dur}`;
+}
 
 // 保存按钮：仅最近一次回测结束（done/stopped）且信号表有回测行时可点；
 // 实际可保存性（本轮是否有新增行）由后端在保存时校验
@@ -1019,7 +1326,7 @@ function renderBtRuns() {
         <td>${s.payoff_ratio != null ? s.payoff_ratio.toFixed(2) : '—'}</td>
         <td class="${pnlClass(s.total)}">${fmtPnlText(s.total)}</td>
         <td>${r.signal_count}</td>
-        <td>${r.worker_state === 'stopped' ? '中途停止' : '完整'}</td>
+        <td title="${esc(btRunStateLabel(r))}">${btRunStateLabel(r)}</td>
         <td class="bt-actions">
           <button data-bt-act="detail">明细</button>
           <button data-bt-act="load" title="把该方案的参数回填到表单（不自动启动）">载参数</button>
@@ -1070,6 +1377,7 @@ const BT_METRICS = [
   ['已平仓盈亏', s => `<span class="${pnlClass(s.realized)}">${fmtPnlText(s.realized)}</span>`],
   ['浮盈', s => `<span class="${pnlClass(s.floating)}">${fmtPnlText(s.floating)}</span>`],
   ['合计', s => `<b class="${pnlClass(s.total)}">${fmtPnlText(s.total)}</b>`],
+  ['运行时长', s => fmtDuration(s.duration_sec)],
   ['出场分布', s => `保损 ${s.exits?.stopBe ?? 0} · 止损 ${s.exits?.stopSr ?? 0} · 全平 ${s.exits?.close ?? 0}${s.exits?.half ? ' · 半平 ' + s.exits.half : ''}`],
   ['信号总数', s => s.rows_total ?? '-'],
   ['未成交信号', s => s.cnt_signal ?? '-'],
@@ -1103,11 +1411,67 @@ function renderBtCompare() {
     return `<tr><th>${BT_CFG_LABELS[k] || k}</th>${base.map(v =>
       `<td${String(v) !== String(base[0]) ? ' class="bt-diff"' : ''}>${esc(v)}</td>`).join('')}</tr>`;
   }).join('');
+  view.hidden = false;
   view.innerHTML = `
+    <div class="equity-chart" id="bt-compare-equity"></div>
     <div style="padding:6px 0 6px;"><strong>汇总对比</strong><span style="color:var(--muted);font-size:12px;">（数值为保存时固化的统计）</span></div>
     <table><thead><tr><th>指标</th>${head}</tr></thead><tbody>${metricsHtml}</tbody></table>
     <div style="padding:8px 0 6px;"><strong>参数对比</strong><span style="color:var(--muted);font-size:12px;">（与第一个选中方案不同的高亮）</span></div>
     <table><thead><tr><th>参数</th>${head}</tr></thead><tbody>${cfgHtml}</tbody></table>`;
+  // 对比小图：优先用 summary.equity；旧方案缺字段时拉明细现场算并缓存
+  fillCompareEquity(runs, el('bt-compare-equity'));
+}
+
+// 旧方案无 summary.equity 时拉 /detail 计算，结果写回列表缓存避免重复请求
+async function ensureRunEquity(run) {
+  if (Array.isArray(run.summary?.equity) && run.summary.equity.length) return run.summary.equity;
+  if (Array.isArray(run._equity)) return run._equity;
+  const resp = await fetch(`/api/bt/runs/detail?id=${encodeURIComponent(run.id)}`);
+  const d = await resp.json();
+  if (!resp.ok || !d.ok) throw Error(d.error || `请求失败 ${resp.status}`);
+  const eq = (Array.isArray(d.run.summary?.equity) && d.run.summary.equity.length)
+    ? d.run.summary.equity
+    : equityPoints(d.run.signals || []);
+  run._equity = eq;
+  if (!run.summary) run.summary = {};
+  run.summary.equity = eq;
+  return eq;
+}
+
+let compareEquityToken = 0;
+async function fillCompareEquity(runs, host) {
+  if (!host) return;
+  const token = ++compareEquityToken;
+  host.innerHTML = `<div class="eq-head"><strong>资金曲线对比</strong><span style="color:var(--muted)">加载中…</span></div>`;
+  host.hidden = false;
+  try {
+    const series = [];
+    for (let i = 0; i < runs.length; i++) {
+      const pts = await ensureRunEquity(runs[i]);
+      if (token !== compareEquityToken) return;  // 用户已改勾选，丢弃过期结果
+      if (pts && pts.length) series.push({
+        id: runs[i].id,
+        name: runs[i].name,
+        points: pts,
+        color: compareColorOf(runs[i].id, i),
+      });
+    }
+    if (token !== compareEquityToken) return;
+    if (!series.length) {
+      host.innerHTML = `<div class="eq-head"><strong>资金曲线对比</strong><span>所选方案暂无出场盈亏，无法画曲线</span></div>`;
+      return;
+    }
+    drawEquityChart(host, series, {
+      height: 140,
+      title: '资金曲线对比',
+      note: '叠加对比；点色块可选颜色；悬停可读累计盈亏',
+      pickColors: true,
+      onColorChange: (id, color) => saveCompareColor(id, color),
+    });
+  } catch (e) {
+    if (token !== compareEquityToken) return;
+    host.innerHTML = `<div class="eq-head"><strong>资金曲线对比</strong><span style="color:var(--buy)">加载失败：${esc(e.message)}</span></div>`;
+  }
 }
 
 // ---------- 明细弹窗 ----------
@@ -1125,21 +1489,189 @@ async function openBtDetail(id) {
     run = d.run;
   } catch (e) { alert('明细加载失败：' + e.message); return; }
   const cfg = run.cfg || {};
+  // 快照行缺 symbol 时用方案 cfg 补全，定位需要品种
+  btDetailSignals = (run.signals || []).map(r => ({
+    ...r,
+    symbol: r.symbol || cfg.symbol,
+    mode: r.mode || 'backtest',
+  }));
+  btDetailSelectedId = null;
+  btDetailLocateMsg = '点击记录，定位到 TradingView 的信号K线并标记该行进出场与支阻位';
   const paramsHtml = BT_CFG_KEYS.filter(k => k in cfg).map(k =>
     `<div><span class="k">${BT_CFG_LABELS[k] || k}</span>${esc(btCfgVal(k, cfg[k]))}</div>`).join('');
+  const stateBit = run.worker_state === 'stopped' ? '中途停止' : '完整';
+  const durBit = fmtDuration(run.summary?.duration_sec);
   el('bt-detail-title').textContent =
-    `${run.name}（保存于 ${fmtTime(run.saved_at)}${run.worker_state === 'stopped' ? ' · 中途停止' : ''}）`;
+    `${run.name}（保存于 ${fmtTime(run.saved_at)} · ${stateBit}${durBit === '—' ? '' : ' · ' + durBit}）`;
   el('bt-detail-body').innerHTML = `
     <div class="bt-params">${paramsHtml}</div>
     <div class="bt-summary">${summaryHtml(run.summary || {})}</div>
+    <div class="equity-chart" id="bt-detail-equity"></div>
+    <div id="bt-detail-locate" class="bt-detail-locate" role="status">${esc(btDetailLocateMsg)}</div>
     <div class="scroll"><table>
       <thead><tr>${SIG_TABLE_HEADERS}</tr></thead>
-      <tbody>${signalRowsHtml(run.signals || [], { interactive: false })}</tbody>
+      <tbody id="bt-detail-sig-body">${btDetailRowsHtml()}</tbody>
     </table></div>`;
   el('bt-detail-modal').hidden = false;
+  // 明细大图：优先固化 equity，否则用信号行现场算
+  const eq = (Array.isArray(run.summary?.equity) && run.summary.equity.length)
+    ? run.summary.equity
+    : equityPoints(btDetailSignals);
+  drawEquityChart(el('bt-detail-equity'), eq.length ? [{ name: run.name, points: eq }] : [], {
+    height: 280, title: '资金曲线', note: '本方案出场盈亏累加（含半平）',
+  });
 }
 
-function closeBtDetail() { el('bt-detail-modal').hidden = true; }
+// 历史方案明细：行点击定位（带 row 快照，不依赖内存信号表）
+let btDetailSignals = [];
+let btDetailSelectedId = null;
+let btDetailLocateMsg = '';
+
+function btDetailLabelOf(id) {
+  const i = btDetailSignals.findIndex(r => r.id === id);
+  return i >= 0 ? i + 1 : id;
+}
+
+function btDetailLabelById() {
+  const m = {};
+  btDetailSignals.forEach((r, i) => { m[r.id] = i + 1; });
+  return m;
+}
+
+function btDetailRowsHtml() {
+  return signalRowsHtml(btDetailSignals, {
+    interactive: true,
+    selectedId: btDetailSelectedId,
+    labelById: btDetailLabelById(),
+  });
+}
+
+function renderBtDetailRows() {
+  const body = el('bt-detail-sig-body');
+  if (body) body.innerHTML = btDetailRowsHtml();
+}
+
+function setBtDetailLocateMsg(msg, isError) {
+  btDetailLocateMsg = msg || '';
+  const s = el('bt-detail-locate');
+  if (!s) return;
+  s.textContent = btDetailLocateMsg;
+  s.style.color = isError ? 'var(--buy)' : 'var(--muted)';
+}
+
+async function locateDetailRow(id) {
+  if (locatePending) return;
+  const row = btDetailSignals.find(r => r.id === id);
+  if (!row) return;
+  btDetailSelectedId = id;
+  if (markBusy || isAnyModeRunning()) {
+    setBtDetailLocateMsg('图表正被任务占用，请结束运行或暂停中的任务，并等待图表操作完成后再定位', true);
+    renderBtDetailRows();
+    return;
+  }
+  const mode = row.mode === 'replay' || row.mode === 'live' ? row.mode : 'backtest';
+  const pending = { mode, id, source: 'detail' };
+  locatePending = pending;
+  setBtDetailLocateMsg(`#${btDetailLabelOf(id)} 定位并标记中…（历史数据加载最多等待360秒）`);
+  renderBtDetailRows();
+  updateMarkButtons();
+  try {
+    const response = await fetch('/api/signals/locate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mode, id, row,
+        colors: {
+          buy: el('mark-color-buy').value, sell: el('mark-color-sell').value,
+          exit: el('mark-color-exit').value, sr: el('mark-color-sr').value,
+        },
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw Error(data.error || '定位请求失败');
+    pending.jobId = data.job.jobId;
+    pollLocate();
+  } catch (e) {
+    setBtDetailLocateMsg(`#${btDetailLabelOf(id)} 定位失败：${e.message}`, true);
+    locatePending = null;
+    updateMarkButtons();
+    renderBtDetailRows();
+  }
+}
+
+function onBtDetailSigActivate(event) {
+  if (event.type === 'keydown' && !['Enter', ' '].includes(event.key)) return;
+  const tr = event.target.closest('#bt-detail-sig-body tr[data-signal-id]');
+  if (!tr) return;
+  if (event.type === 'keydown') event.preventDefault();
+  locateDetailRow(Number(tr.dataset.signalId));
+}
+
+function redrawBtDetailEquity() {
+  const host = el('bt-detail-equity');
+  if (!host || !host._eqSeries?.length) return;
+  // 最大化/还原后容器宽度变了，按缓存系列重画
+  drawEquityChart(host, host._eqSeries, host._eqOpts || {
+    height: 280, title: '资金曲线', note: '本方案出场盈亏累加（含半平）',
+  });
+}
+
+function syncBtDetailMaxButton() {
+  const modal = el('bt-detail-modal');
+  const on = modal.classList.contains('maximized') || !!document.fullscreenElement;
+  const btn = el('bt-detail-max');
+  btn.textContent = on ? '还原' : '最大化';
+  btn.title = on ? '退出全屏，还原明细窗口' : '全屏最大化明细窗口';
+}
+
+function btDetailIsFullscreen() {
+  return document.fullscreenElement === el('bt-detail-modal');
+}
+
+async function enterBtDetailFullscreen() {
+  const modal = el('bt-detail-modal');
+  modal.classList.add('maximized');
+  try {
+    if (!btDetailIsFullscreen() && modal.requestFullscreen) {
+      await modal.requestFullscreen();
+    }
+  } catch (e) {
+    // iframe 未允许全屏等：仍保留 CSS 铺满视口
+  }
+  syncBtDetailMaxButton();
+  requestAnimationFrame(() => requestAnimationFrame(redrawBtDetailEquity));
+}
+
+async function exitBtDetailFullscreen() {
+  const modal = el('bt-detail-modal');
+  modal.classList.remove('maximized');
+  try {
+    if (document.fullscreenElement && document.exitFullscreen) {
+      await document.exitFullscreen();
+    }
+  } catch (e) { /* 忽略退出全屏失败 */ }
+  syncBtDetailMaxButton();
+  requestAnimationFrame(() => requestAnimationFrame(redrawBtDetailEquity));
+}
+
+function toggleBtDetailMax() {
+  if (el('bt-detail-modal').classList.contains('maximized') || btDetailIsFullscreen()) {
+    exitBtDetailFullscreen();
+  } else {
+    enterBtDetailFullscreen();
+  }
+}
+
+function closeBtDetail() {
+  // 关闭前先退出浏览器全屏，避免残留全屏态
+  if (btDetailIsFullscreen() || el('bt-detail-modal').classList.contains('maximized')) {
+    exitBtDetailFullscreen();
+  }
+  el('bt-detail-modal').hidden = true;
+  el('bt-detail-modal').classList.remove('maximized');
+  syncBtDetailMaxButton();
+  btDetailSignals = [];
+  btDetailSelectedId = null;
+}
 
 // ---------- 载参数：collectCfg 的逆映射（只回填表单，不自动启动） ----------
 function loadBtCfg(run) {
@@ -1185,9 +1717,31 @@ function bindBtRuns() {
   el('bt-runs-body').onclick = onBtRunsClick;
   el('bt-runs-body').onchange = onBtRunsCheck;
   el('bt-detail-close').onclick = closeBtDetail;
+  el('bt-detail-max').onclick = toggleBtDetailMax;
+  el('bt-detail-body').onclick = onBtDetailSigActivate;
+  el('bt-detail-body').onkeydown = onBtDetailSigActivate;
   el('bt-detail-modal').onclick = e => { if (e.target === el('bt-detail-modal')) closeBtDetail(); };
+  // Esc 退出浏览器全屏时同步按钮与布局
+  document.addEventListener('fullscreenchange', () => {
+    const modal = el('bt-detail-modal');
+    if (!document.fullscreenElement && modal.classList.contains('maximized') && !modal.hidden) {
+      modal.classList.remove('maximized');
+      syncBtDetailMaxButton();
+      requestAnimationFrame(() => requestAnimationFrame(redrawBtDetailEquity));
+    } else if (document.fullscreenElement === modal) {
+      modal.classList.add('maximized');
+      syncBtDetailMaxButton();
+      requestAnimationFrame(() => requestAnimationFrame(redrawBtDetailEquity));
+    }
+  });
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape' && !el('bt-detail-modal').hidden) closeBtDetail();
+    if (el('bt-detail-modal').hidden) return;
+    if (e.key === 'Escape') {
+      // 全屏时 Esc 先交给浏览器退出全屏；非全屏再关弹窗
+      if (!btDetailIsFullscreen()) closeBtDetail();
+      return;
+    }
+    if (e.key === 'F10') { e.preventDefault(); toggleBtDetailMax(); }
   });
 }
 
