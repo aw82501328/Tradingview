@@ -41,6 +41,10 @@ except Exception:  # pragma: no cover - 环境无 numpy
 # 必须按对象各自缓存（单槽缓存在多周期交替下每次都重建，形同虚设）。
 # 持强引用防 id 复用；条目上限防长回测会话累积。
 _barsArraysCache = {}
+# countBarsPassing 前缀累加缓存：(id(bars), price, tol) → (bars对象, len, count)
+# cut 只增时 = 旧计数 + 新增K线贡献；价位/容差 miss 时全量一次。
+_barsPassingCache = {}
+_BARS_PASSING_CACHE_MAX = 4096
 
 
 def prepare_bar_arrays(bars):
@@ -66,6 +70,24 @@ def _barsArrays(bars):
     _barsArraysCache[id(bars)] = (bars, len(bars), lows, highs)
     return lows, highs
 
+
+def _count_passing_range(bars, loP, hiP, start, end, barArrays=None):
+    """统计 bars[start:end] 中与价位带重叠的根数（语义与逐根循环一致）。"""
+    if start >= end:
+        return 0
+    n_total = len(bars)
+    if _np is not None and n_total >= 512 and end - start >= 64:
+        lows, highs = barArrays if barArrays is not None else _barsArrays(bars)
+        # barArrays 可能是全量运行数组的 [:cut] 视图，长度须与 bars 对齐
+        if lows is not None and len(lows) >= end:
+            return int(_np.count_nonzero((lows[start:end] <= hiP) & (highs[start:end] >= loP)))
+    n = 0
+    for i in range(start, end):
+        b = bars[i]
+        if b["low"] <= hiP and b["high"] >= loP:
+            n += 1
+    return n
+
 # 参数（与 JS 默认值一致）
 CLUSTER_ATR = 0.5        # 价位聚类阈值（×ATR）
 RECENT_CLUSTER_ATR = 1.0  # 近期极值位聚类容差（×ATR）
@@ -89,6 +111,15 @@ FIB_BUY_TYPES = ["2买", "类2买", "3买"]
 FIB_SELL_TYPES = ["2卖", "类2卖", "3卖"]
 # 上级周期映射（现算买卖点的区间套用；D 及未收录周期无上级，走结构底分支）
 UPPER_OF = {"240": "D", "60": "240", "15": "60", "3": "15"}
+
+
+def _bis_fingerprint(bis):
+    """笔列表指纹：长度 + 末笔端点（延伸/新分型任一变化即 miss）。"""
+    if not bis:
+        return (0, None, None, None, None)
+    last = bis[-1]
+    return (len(bis), last.get("startTime"), last.get("endTime"),
+            last.get("endPrice"), last.get("type"))
 
 # 级别大小顺序（从大到小），用于候选池排序与可见范围判断
 LEVEL_ORDER = ["1W", "W", "1D", "D", "240", "4H", "60", "1H", "15", "3"]
@@ -491,16 +522,33 @@ def countBarsPassing(price, bars, tol, barArrays=None):
     主要热点之一。numpy 可用时用向量化比较（比较语义与逐根循环完全一致），
     并按 bars 列表对象缓存 lows/highs 数组——同一链路重算内 bars 不变，只建一次。
     barArrays 可传本次运行预建的 (lows, highs)，必须已裁剪至 bars 的可见前缀。
-    无 numpy 时回退逐根循环（结果一致）。"""
+    前缀累加：同一 (bars对象, price, tol) 在 cut 只增时 = 旧计数 + 新增段，
+    与全量重算 int 级一致。无 numpy 时回退逐根循环（结果一致）。"""
     hiP, loP = price + tol, price - tol
-    if _np is not None and len(bars) >= 512:
+    n = len(bars)
+    key = (id(bars), price, tol)
+    ent = _barsPassingCache.get(key)
+    if ent is not None and ent[0] is bars:
+        prev_n, prev_cnt = ent[1], ent[2]
+        if prev_n == n:
+            return prev_cnt
+        if prev_n < n:
+            cnt = prev_cnt + _count_passing_range(bars, loP, hiP, prev_n, n, barArrays)
+            _barsPassingCache[key] = (bars, n, cnt)
+            return cnt
+    # miss 或 cut 回退：全量一次
+    if _np is not None and n >= 512:
         lows, highs = barArrays if barArrays is not None else _barsArrays(bars)
-        return int(_np.count_nonzero((lows <= hiP) & (highs >= loP)))
-    n = 0
-    for b in bars:
-        if b["low"] <= hiP and b["high"] >= loP:
-            n += 1
-    return n
+        if lows is not None and len(lows) >= n:
+            cnt = int(_np.count_nonzero((lows[:n] <= hiP) & (highs[:n] >= loP)))
+        else:
+            cnt = _count_passing_range(bars, loP, hiP, 0, n, barArrays)
+    else:
+        cnt = _count_passing_range(bars, loP, hiP, 0, n, barArrays)
+    if len(_barsPassingCache) >= _BARS_PASSING_CACHE_MAX:
+        _barsPassingCache.clear()
+    _barsPassingCache[key] = (bars, n, cnt)
+    return cnt
 
 
 def flipScore(f, group, touchWeight=TOUCH_WEIGHT, barsWeight=BARS_WEIGHT):
@@ -634,32 +682,12 @@ def compute_srflip(periodBis, barsByPeriod, periods,
                    touchWeight=TOUCH_WEIGHT, barsWeight=BARS_WEIGHT,
                    sideCount=SIDE_COUNT,
                    clusterParamsByPeriod=None, manualLevels=None, periodBarTimesIn=None,
-                   periodBarArraysIn=None):
+                   periodBarArraysIn=None, work_cache=None):
     """逐周期识别支阻位（密集区 + 黄金分割 + BOLL + 人工输入），展平为全量候选池、各周期独立选取。
 
-    @param periodBis    各周期笔 { 周期: [bis] }
-    @param barsByPeriod 各周期原始K线 { 周期: [bars] }
-    @param periods      周期列表（从大到小）
-    @param periodAtrsIn 可选：各周期预计算 ATR { 周期: atr }（增量回测用，避免重复计算）
-    @param srTypes      支阻位类型开关（"cluster" 密集区 / "fib" 黄金分割 / "boll" 布林带）
-    @param fibLevels    黄金分割比率列表
-    @param periodMacdIn 可选：各周期预计算 MACD { 周期: macdArr }（增量回测用）
-    @param bollLength   BOLL SMA 周期（已收盘K线口径）
-    @param bollMult     BOLL 标准差倍数
-    @param clusterParts cluster 子开关（"flip" 强互换 / "recent" 近期极值，任意组合；全空则该周期无 cluster 候选）
-    @param minTouchsIn  按级别最少触及次数 { 周期: int }，命中键优先于 minTouchOverride/默认
-    @param recentBiCount 近期极值位取最近 N 根笔
-    @param touchWeight/barsWeight 强度评分权重（仅 capPerPeriod 截断与 score 字段，显示选取纯按价就近）
-    @param sideCount    每周期图每侧条数（总 ≤ 2×sideCount）
-    @param manualLevels 人工支阻位 { 周期: [价位,...] }：键存在即该周期支阻位来源=人工——
-                        替换该周期密集区计算（不要求 bis≥3，仍需 bars），人工候选全部画出
-                        （不受 sideCount/距离上限），type 按现价侧推导，srcType="manual"；
-                        空列表 = 该周期无支阻位（不画线、不进候选池，不回退系统计算）；
-                        叠加层（fib/BOLL）独立于支阻位来源，人工周期照常生成并叠加
-    @returns { periods: 各周期候选(密集区截断后+fib+boll+manual), merged: 全量候选池（展平不合并，
-               每项附 level/srcType；下游 mark-entry/回测只读 price）,
-               drawnByPeriod: 各显示周期选中的 ≤2×sideCount 条(人工周期=全部候选),
-               currentPrice: 当前价, periodAtrs: 各周期ATR }
+    @param work_cache 可选：跨次调用复用的 dict。未变周期（cut/ATR/笔指纹相同）直接复用
+                      该周期的 cluster+fib 结果；BOLL/展平/选取仍每拍重算（依赖现价）。
+                      输出与无缓存路径逐位一致。
     """
     # 可选加速输入：时间索引与 bars 同序；价格数组仅含当前可见前缀。
     periodAtrsIn = periodAtrsIn or {}
@@ -688,29 +716,55 @@ def compute_srflip(periodBis, barsByPeriod, periods,
         if atr is None:
             atr = calcATR(bars, 14)
         periodAtrs[res] = atr
+
+        # 未变周期：复用 cluster + fib（BOLL 依赖现价，后面统一重算）
+        upperRes = UPPER_OF.get(str(res).upper())
+        upperBis = periodBis.get(upperRes) if upperRes else None
+        cache_key = (
+            "sr_cf", res, len(bars), atr, _bis_fingerprint(bis),
+            _bis_fingerprint(upperBis) if ("fib" in srTypes) else None,
+            tuple(srTypes) if not isinstance(srTypes, tuple) else srTypes,
+            clusterAtr, recentClusterAtr, recentBiCount, maxPerPeriod,
+            tuple(clusterParts) if clusterParts is not None else None,
+            minTouchOverride, bollLength, bollMult,
+            tuple(fibLevels) if fibLevels is not None else None,
+        )
+        if work_cache is not None:
+            ent = work_cache.get(("sr_cf", res))
+            if ent is not None and ent[0] == cache_key:
+                if ent[1] is not None:
+                    allFlips[res] = ent[1]
+                if ent[2] is not None:
+                    allFibs[res] = ent[2]
+                continue
+
+        flips = None
+        fibs = None
         if manual is None:
             # 系统计算支阻位 = 密集区（人工周期跳过，支阻位由人工价位提供）
             pcfg = (clusterParamsByPeriod or {}).get(str(res).upper(), {})
             localCluster = pcfg.get("clusterAtr", clusterAtr)
-            tol = localCluster * atr
             minTouch = (minTouchsIn or {}).get(str(res).upper()) or minTouchFor(res, minTouchOverride)
-            allFlips[res] = cluster_candidates(
+            flips = cluster_candidates(
                 bis, bars, atr, clusterAtr=localCluster,
                 recentClusterAtr=pcfg.get("recentClusterAtr", recentClusterAtr),
                 recentBiCount=pcfg.get("recentBiCount", recentBiCount),
                 minTouch=minTouch, clusterParts=clusterParts,
                 barTimes=periodBarTimesIn.get(res),
                 barArrays=periodBarArraysIn.get(res)) if "cluster" in srTypes else []
+            allFlips[res] = flips
 
         # 黄金分割叠加层：独立于支阻位来源，人工周期照常生成（需笔：bis≥3）
         if "fib" in srTypes and bis and len(bis) >= 3:
             macd = periodMacdIn.get(res) or calcMACD(bars)
-            upperRes = UPPER_OF.get(str(res).upper())
-            upperBis = periodBis.get(upperRes) if upperRes else None
             buyPts = findBuyPoints(bis, upperBis, macd, intervalSecOf(res))
             sellPts = findSellPoints(bis, upperBis, macd, intervalSecOf(res))
-            allFibs[res] = buildFibCandidates(bis, buyPts, sellPts, fibLevels, bars, clusterAtr * atr,
-                                            periodBarArraysIn.get(res))
+            fibs = buildFibCandidates(bis, buyPts, sellPts, fibLevels, bars, clusterAtr * atr,
+                                      periodBarArraysIn.get(res))
+            allFibs[res] = fibs
+
+        if work_cache is not None:
+            work_cache[("sr_cf", res)] = (cache_key, flips, fibs)
 
     # 每周期候选数量上限（数据层截断，仅密集区；fib/boll 评分语义不适用，豁免）
     allFlipsCapped = capPerPeriod(allFlips, maxPerPeriod, touchWeight, barsWeight)

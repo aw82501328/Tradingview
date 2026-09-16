@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""30S 等大周期数据的增量笔构建器（与引擎批量口径一致，尾部续算）。
+"""全周期增量笔构建器（与引擎批量口径一致，尾部续算）。
 
-动机：深度回补后 30S 可达 10^5~10^6 根K线，分型尾部每次变化都全量重跑
-buildBi+fixBiExtremes 是 O(全窗口)，随回测窗口平方级放大。本构建器把
-阶段一（同型合并）/阶段二（回溯替换）改为尾部续算：
+动机：分型尾部每次变化都全量重跑 buildBi+fixBiExtremes 是 O(全窗口)，
+随回测窗口平方级放大。本构建器把阶段一（同型合并）/阶段二（回溯替换）
+改为尾部续算：
 
 - 阶段一：seq 与各元素的分型 run 起始索引增量维护。分型只在尾部变化
   （updateFractalsTail 只动 mergedIdx ≥ n-2 的元素），从「首个受影响的
@@ -16,14 +16,16 @@ buildBi+fixBiExtremes 是 O(全窗口)，随回测窗口平方级放大。本构
   （含边界前一笔的复制重修正）。跳空判定用逐对差值表（gapDiffs）只扫
   查询区间，原始K线数用前缀和（rawCounter）O(1) 查询。
 
-口径说明：已冻结前缀上的历史跳空判定沿用**冻结时的 ATR**（批量口径每次
-用最新 ATR 重判全部分型），极罕见情况（跳空幅度恰在阈值附近且 ATR 已漂移）
-下个别笔边界与全量重建不同——与引擎已有的增量 wick 漂移同类，重同步
-（BacktestEngine._resync_bis → invalidate + 批量重建）后严格归零。
+口径说明（与批量 buildBi 逐位对齐）：
+- 跳空差值表只存价格差；判定阈值始终用**当前 ATR**（与批量每次重建一致）。
+- 若 ATR 漂移使任一已固化相邻对的跳空布尔翻转，从阶段二起点重放
+  （k=0），保证与全量重建同结果。
+- nearDouble / lowerContext 与 buildBi 同参；任一变化触发全量重建。
+- 重同步（BacktestEngine._resync_bis → invalidate + 批量重建）后严格归零。
 """
 
 from .chan_core import (BiBuildCtx, biSeqStep, biStep, biPair, fixBiExtremes,
-                        _stkLen, biListFromHead, countRaw)
+                        _stkLen, biListFromHead, countRaw, CHAN_CFG)
 
 # 尾部重建的笔数裕量：覆盖阶段二最深 3 层回看 + 单次 update 的热区分型数。
 # 单次 _advance_cut（fine=3m）约并入 6 根 30S bar → 热区 seq 元素 ≤ ~8，
@@ -50,6 +52,9 @@ class BiIncBuilder:
         self._gap_final = 0     # [0:_gap_final) 已固化（块 p+1 不再是末块）
         self._cum = [0]         # cum[i] = blocks[:i] 的 _rawCount 和
         self._cum_final = 1     # cum 有效下标数（0.._cum_final-1）
+        self._gap_threshold = None  # 上次构建用的跳空阈值（ATR×gapFilter）
+        self._near_double = False
+        self._lower_key = None  # lowerContext 指纹（长度/末时/cutoff），避免对象身份误伤
 
     # ---------------- 对外接口 ----------------
 
@@ -57,14 +62,46 @@ class BiIncBuilder:
         """批量重同步后调用：下一次 update 走全量重建（严格等于 batch 口径）。"""
         self._stale = True
 
-    def update(self, fractals, merged, macd, atr):
-        """分型尾部变化后重建笔列表；返回笔列表（self._bis，同一对象）。"""
-        if self._stale or fractals is not self._fracs or merged is not self._merged:
-            return self._full_rebuild(fractals, merged, macd, atr)
+    @staticmethod
+    def _lower_fingerprint(lowerContext):
+        """lowerContext 内容指纹：bars 切片对象每次新建，不能用 is 比较。
+
+        不含 cutoff：决策时刻每根 fine 都变，若纳入指纹会迫使 60m 每次阶段二从 0 重放；
+        cutoff 仍传入 BiBuildCtx，仅影响尾部 nearDouble 补充分支（与批量「当前 cutoff」一致
+        的尾部重放足够——接缝用 _TAIL 裕量覆盖）。
+        """
+        if not lowerContext:
+            return None
+        bars = lowerContext.get("bars") or []
+        return (
+            len(bars),
+            bars[-1]["time"] if bars else None,
+            len(lowerContext.get("macd") or []),
+        )
+
+    def update(self, fractals, merged, macd, atr, nearDouble=False, lowerContext=None):
+        """分型尾部变化后重建笔列表；返回笔列表（self._bis，同一对象）。
+
+        nearDouble/lowerContext 与 buildBi 同口径（≥60m 近等双顶底、60m 的 15m 补充分支）。
+        """
+        nearDouble = bool(nearDouble)
+        lower_key = self._lower_fingerprint(lowerContext)
+        # nearDouble 开关变化 → 全量重建；lowerContext 内容变化在增量路径里阶段二重放
+        if (self._stale or fractals is not self._fracs or merged is not self._merged
+                or nearDouble != self._near_double):
+            return self._full_rebuild(fractals, merged, macd, atr,
+                                      nearDouble=nearDouble, lowerContext=lowerContext)
         self._sync_gap_cum(len(merged))
         if len(fractals) < 2:
             self._bis = []
             return self._bis
+        # ATR 跳空布尔翻转 → 从首个受影响 seq 起重放；lowerContext 长度变化 → 尾部重放
+        atr_rewind = self._atr_gap_rewind_to(atr)
+        if lower_key != self._lower_key:
+            # 15m 上下文变长：只重放尾部（近等双顶补充分支只影响新分型决策）
+            tail_k = max(0, len(self._seq) - _TAIL)
+            atr_rewind = tail_k if atr_rewind is None else min(atr_rewind, tail_k)
+            self._lower_key = lower_key
         # 1) 分型热区：updateFractalsTail 只保留/新增 mergedIdx ≥ n-2 的尾部元素，
         #    d = 首个热区分型索引（此前的前缀 dict 与索引均已冻结）
         n2 = len(merged) - 2
@@ -78,6 +115,8 @@ class BiIncBuilder:
             k -= 1
         if k > 0:
             k -= 1
+        if atr_rewind is not None:
+            k = min(k, atr_rewind)
         fold_from = self._seq_start[k] if k < len(self._seq_start) else d
         del self._seq[k:]
         del self._seq_start[k:]
@@ -91,7 +130,8 @@ class BiIncBuilder:
         del self._heads[k:]
         del self._lens[k:]
         head = self._heads[k - 1] if k > 0 else None
-        ctx = BiBuildCtx(merged, atr, macd, fractals=fractals,
+        ctx = BiBuildCtx(merged, atr, macd, nearDouble=nearDouble,
+                         lowerContext=lowerContext, fractals=fractals,
                          gapDiffs=self._gap_diffs, rawCounter=self.count_raw)
         for kk in self._seq[k:]:
             head = biStep(ctx, head, kk)
@@ -103,20 +143,50 @@ class BiIncBuilder:
 
     # ---------------- 内部 ----------------
 
+    def _atr_gap_rewind_to(self, atr):
+        """若当前 ATR 使跳空布尔翻转，返回需重放的最小 seq 下标；否则 None。
+
+        差值表与 ATR 无关；阈值 = atr×gapFilter 与批量 BiBuildCtx 一致。
+        只回溯到首个翻转相邻对所影响的 seq 位置，避免无谓词变化时全量重放。
+        """
+        new_th = atr * CHAN_CFG["gapFilter"] if atr else 0
+        old_th = self._gap_threshold
+        self._gap_threshold = new_th
+        if old_th is None or old_th == new_th or not self._gap_diffs:
+            return None
+        flip_at = None
+        for i, (up, dn) in enumerate(self._gap_diffs):
+            old_gap = up >= old_th or dn >= old_th
+            new_gap = up >= new_th or dn >= new_th
+            if old_gap != new_gap:
+                flip_at = i
+                break
+        if flip_at is None:
+            return None
+        # 首个 mergedIdx > flip_at 的 seq 元素：其 biStep 才可能读到该相邻对
+        for k, f in enumerate(self._seq):
+            if f.get("mergedIdx", -1) > flip_at:
+                return max(0, k - 1)
+        return 0
+
     def count_raw(self, a, b):
         """(a, b] 区间原始K线数；前缀和 O(1)，涉及未固化末块时回退逐块累加。"""
         if b + 1 < self._cum_final:
             return self._cum[b + 1] - self._cum[a + 1]
         return countRaw(self._merged, a, b)
 
-    def _full_rebuild(self, fractals, merged, macd, atr):
+    def _full_rebuild(self, fractals, merged, macd, atr,
+                      nearDouble=False, lowerContext=None):
         self._fracs = fractals
         self._merged = merged
+        self._near_double = bool(nearDouble)
+        self._lower_key = self._lower_fingerprint(lowerContext)
         self._gap_diffs = []
         self._gap_final = 0
         self._cum = [0]
         self._cum_final = 1
         self._sync_gap_cum(len(merged))
+        self._gap_threshold = atr * CHAN_CFG["gapFilter"] if atr else 0
         self._seq = []
         self._seq_start = []
         self._heads = []
@@ -126,7 +196,8 @@ class BiIncBuilder:
             biSeqStep(self._seq, f)
             if len(self._seq) > before:
                 self._seq_start.append(fi)
-        ctx = BiBuildCtx(merged, atr, macd, fractals=fractals,
+        ctx = BiBuildCtx(merged, atr, macd, nearDouble=self._near_double,
+                         lowerContext=lowerContext, fractals=fractals,
                          gapDiffs=self._gap_diffs, rawCounter=self.count_raw)
         head = None
         for kk in self._seq:

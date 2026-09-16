@@ -297,20 +297,18 @@ def predictPlan(res, bis, upperBis, macdArr, lastPrice, bars, atr=0, barSec=None
 # ============================================================
 
 
-def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=None, cfg=None):
+def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=None, cfg=None,
+                 work_cache=None):
     """逐周期（从大到小）计算交易计划。
 
-    @param periodBis    各周期笔 { 周期: [bis] }
-    @param barsByPeriod 各周期原始K线 { 周期: [bars] }
-    @param periods      周期列表（从大到小）
-    @param periodMacd   可选：各周期预计算 MACD { 周期: [macdArr] }（增量回测用，避免重复计算）
-    @param periodAtr    可选：各周期预计算 ATR { 周期: atr }
-    @returns { 周期: { direction, strategy, reason, pointDesc } }
+    @param work_cache 可选：跨次调用复用。本周期笔指纹/cut/ATR/上级笔未变时直接复用该行计划。
     """
+    from .sr_flip import _bis_fingerprint
     periodMacd = periodMacd or {}
     periodAtr = periodAtr or {}
     planRows = {}
     upperBis = None
+    cfg_fp = tuple(sorted((cfg or {}).items())) if cfg else ()
     for res in periods:
         curBis = periodBis.get(res, []) or []
         if not curBis:
@@ -327,15 +325,33 @@ def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=No
         # 取最近 60 笔即可（计划只看最新结构）
         if len(curBis) > 60:
             curBis = curBis[-60:]
+        # 震荡判定只看最近 rangeBarN 根；截尾与全量在该窗口内逐位一致
+        range_n = (cfg or RANGE_DEFAULTS).get("rangeBarN", RANGE_DEFAULTS["rangeBarN"])
+        plan_bars = rawBars[-range_n:] if rawBars and len(rawBars) > range_n else rawBars
+
+        cache_key = (
+            "plan", res, _bis_fingerprint(curBis), len(rawBars), lastPrice, atr,
+            _bis_fingerprint(upperBis), cfg_fp,
+        )
+        if work_cache is not None:
+            ent = work_cache.get(("plan", res))
+            if ent is not None and ent[0] == cache_key:
+                planRows[res] = ent[1]
+                upperBis = ent[2]
+                continue
+
         p = predictPlan(res=res, bis=curBis, upperBis=upperBis, macdArr=macdArr,
-                        lastPrice=lastPrice, bars=rawBars, atr=atr,
+                        lastPrice=lastPrice, bars=plan_bars, atr=atr,
                         barSec=intervalSecOf(res), range_cfg=cfg)
-        planRows[res] = {
+        row = {
             "direction": p["direction"],
             "strategy": p["strategy"],
             "reason": p.get("reason", ""),
             "pointDesc": p.get("pointDesc", ""),
         }
+        planRows[res] = row
+        if work_cache is not None:
+            work_cache[("plan", res)] = (cache_key, row, curBis)
         upperBis = curBis
     return planRows
 

@@ -306,10 +306,14 @@ class BacktestEngine:
         self._merge_dir = {res: 0 for res in self.periods}
         self._fractals = {res: [] for res in self.periods}
         self._bis = {res: [] for res in self.periods}
-        # 30S 增量笔构建器（bi_inc：分型尾部变化只续算尾部，避免 O(全窗口) 全量重建
-        # 的平方级放大；其余周期维持全量重建口径，行为不变）。重同步时 invalidate。
-        self._bi_inc = {res: BiIncBuilder(res) for res in self.periods
-                        if str(res).upper() == "30S"}
+        # 增量笔构建器（bi_inc：分型尾部变化只续算尾部，避免 O(全窗口) 全量重建
+        # 的平方级放大）。全周期启用；ATR 跳空布尔翻转时阶段二重放；重同步时 invalidate。
+        self._bi_inc = {res: BiIncBuilder(res) for res in self.periods}
+        # bars 前缀缓存：cut 只增不减时原地 extend，避免每次链路重算 O(cut) 切片拷贝
+        self._bars_prefix = {res: [] for res in self.periods}
+        self._bars_prefix_cut = {res: 0 for res in self.periods}
+        # 链路按周期工作缓存（sr cluster/fib、plan）：未变周期跨重算复用
+        self._chain_work_cache = {}
         self._macd = {res: MacdAccumulator() for res in self.periods}
         self._macd_times = {res: [] for res in self.periods}  # 与 macd.entries 一一对应（切片二分用）
         self._atr = {res: AtrAccumulator(14) for res in self.periods}
@@ -430,11 +434,11 @@ class BacktestEngine:
         if len(new_f) != old_len or (new_f and old_last is not None and new_f[-1] != old_last):
             bis_changed = True
         if bis_changed:
-            inc = self._bi_inc.get(res)
-            if inc is not None:
-                self._bis[res] = inc.update(new_f, merged, macd.to_list(), atr.value)
-            else:
-                self._bis[res] = self._build_bis(res, merged, new_f, macd.to_list(), atr.value)
+            near_double = (intervalSecOf(res) or 0) >= 3600
+            lower = self._lower_context_for(res)
+            self._bis[res] = self._bi_inc[res].update(
+                new_f, merged, macd.to_list(), atr.value,
+                nearDouble=near_double, lowerContext=lower)
         if self._extend_last(res):
             bis_changed = True
         return bis_changed
@@ -463,6 +467,10 @@ class BacktestEngine:
         （见 RESYNC_EVERY 注释）。wick 运行状态（TR 均值/邻居/pending _topCand）同步重建，
         重同步后增量从该前缀无缝继续。"""
         from .chan_core import _mergeStep, markWickBars, findFractals
+        # 链路工作缓存一并失效：批量重建可能修正中段笔而 _bis_fingerprint
+        # （len+末笔端点）不变，sr/plan 按周期复用会拿到漂移期旧结果，破坏
+        # 「重同步点输出严格等于 batch(前缀)」的既有保证
+        self._chain_work_cache.clear()
         inc = self._bi_inc.get(res)
         if inc is not None:
             inc.invalidate()  # 增量笔构建器状态已过期：下次 update 走全量重建
@@ -515,18 +523,44 @@ class BacktestEngine:
             self._resync_bis(res)
         self._last_resync = self._cut.get(self.fine_res, 0)
 
+    def _lower_context_for(self, res):
+        """60m 近等双顶/底的 15m 补充分支上下文（与批量 buildBi 同口径）。"""
+        if str(res) != "60" or "15" not in self._cut:
+            return None
+        # 复用前缀缓存，避免每次切片新 list（指纹仍含 len/末时/cutoff）
+        raw = self._prefix_bars("15")
+        return makeBiLowerContext(
+            res, raw, cutoff=getattr(self, "_decision_time", float("inf")),
+            macd=self._macd["15"].to_list())
+
+    def _prefix_bars(self, res):
+        """返回 bars[:cut] 的稳定前缀列表：cut 增长时原地 extend（O(Δ)），避免整表拷贝。"""
+        cut = self._cut[res]
+        prev = self._bars_prefix_cut[res]
+        prefix = self._bars_prefix[res]
+        if cut < prev:
+            prefix[:] = self.bars[res]["_list"][:cut]
+        elif cut > prev:
+            prefix.extend(self.bars[res]["_list"][prev:cut])
+        self._bars_prefix_cut[res] = cut
+        return prefix
+
+    def _invalidate_prefix(self, res):
+        """前缀缓存失效：实时bar被覆盖/整周期重放后列表内容已变而 cut 数值可能不变，
+        计数器与列表须同时重置（extend 路径假设列表长度==prev，只改计数器会重复追加）。"""
+        self._bars_prefix[res].clear()
+        self._bars_prefix_cut[res] = 0
+
     def _build_bis(self, res, merged, fractals, macd, atr):
         """从分型重建笔并做端点极值修正；返回按时间升序的笔列表。
-        近等双顶/双底平台取后顶/后底与 chan-bi/build_bis 一致：仅 ≥60m（60/240/D）开启。"""
+        近等双顶/双底平台取后顶/后底与 chan-bi/build_bis 一致：仅 ≥60m（60/240/D）开启。
+        重同步路径走批量 buildBi；增量路径走 BiIncBuilder.update。"""
         from .chan_core import fixBiExtremes
         if len(fractals) < 2:
             return []
-        lower = None
-        if str(res) == '60' and '15' in self._cut:
-            raw = self.bars['15']['_list'][:self._cut['15']]
-            lower = makeBiLowerContext(res, raw, cutoff=getattr(self, '_decision_time', float('inf')),
-                                       macd=self._macd['15'].to_list())
-        bis = buildBi(fractals, merged, atr, macd, None, intervalSecOf(res) >= 3600, lower)
+        lower = self._lower_context_for(res)
+        bis = buildBi(fractals, merged, atr, macd, None,
+                      (intervalSecOf(res) or 0) >= 3600, lower)
         bis = fixBiExtremes(bis, merged) or bis
         return bis
 
@@ -539,6 +573,7 @@ class BacktestEngine:
         需随新数据修正，故整周期重放（保证与全量计算一致）。返回 True 触发链路重算。
         """
         # 重放只修正已经推进的前缀；新收盘bar由 _advance_cut 统一按时刻纳入。
+        self._invalidate_prefix(res)  # 整周期重放后内容已换（cut 数值不变也须失效）
         bl = self.bars[res]["_list"][:self._cut[res]]
         macd = MacdAccumulator()
         macd_t = []
@@ -589,6 +624,9 @@ class BacktestEngine:
             self._replay_needed.add(res)
             if str(res) == '15' and '60' in self._cut:
                 self._replay_needed.add('60')
+            # 末根被覆盖时前缀列表仍持旧 dict 引用（覆盖是整槽替换非原地改），
+            # cut 已含末根的场景下 _prefix_bars 会返回过期窗口
+            self._invalidate_prefix(res)
         return "append" if appended else ("override" if overridden else None)
 
     def step_to(self, t, execute=False):
@@ -938,7 +976,8 @@ class BacktestEngine:
         periodMacd = {res: self._macd[res].to_list() for res in self.periods}
         periodAtr = {res: self._atr[res].value for res in self.periods}
         for res in slice_res:
-            barsByPeriod[res] = self.bars[res]["_list"][: self._cut[res]]
+            # cut 增长时原地 extend，避免每次重算 O(n) 切片拷贝
+            barsByPeriod[res] = self._prefix_bars(res)
         # 1. 买卖点（全链路完整性；默认关闭以提速，可由 --with-marks 开启）
         if self.with_marks:
             try:
@@ -972,14 +1011,15 @@ class BacktestEngine:
         srKw.update(self.sr_kwargs)  # 预设 kwargs（含 manualLevels）优先于独立形参
         try:
             self._sr = compute_srflip(periodBis, barsByPeriod, core,
-                                      periodAtrsIn=periodAtr, periodMacdIn=periodMacd, **srKw)
+                                      periodAtrsIn=periodAtr, periodMacdIn=periodMacd,
+                                      work_cache=self._chain_work_cache, **srKw)
         except Exception:
             self._sr = None
         # 3. 交易计划（cfg = 参数中心交易计划模块参数）
         try:
             self._plan = compute_plan(periodBis, barsByPeriod, core,
                                       periodMacd=periodMacd, periodAtr=periodAtr,
-                                      cfg=self.plan_cfg)
+                                      cfg=self.plan_cfg, work_cache=self._chain_work_cache)
         except Exception:
             self._plan = {}
         # 3.5 顺势参考周期方向状态（mark_entry 顺势过滤；与计划同拍重算——

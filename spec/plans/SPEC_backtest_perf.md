@@ -1,8 +1,8 @@
 # 回测性能优化：链路函数内部热点逐位等价优化（SPEC_backtest_perf）
 
-> 状态：第一批见 §4；第二批历史回测优化见 §7；第三批成笔内部等价优化已实施并验证，见 §8。§5 为原路线图。
-> 日期：2026-09-08
-> 范围：`py_chain/chan_core.py`、`py_chain/sr_flip.py`（全部为「输出逐位不变」的纯性能优化，不改任何计算口径/阈值/行为）；`py_chain/SPEC.md` §5.1/§5.2 为同步记录。
+> 状态：第一批见 §4；第二批见 §7；第三批见 §8；第四批见 §9；第五批按周期缓存+BiInc 回溯收紧见 §10。
+> 日期：2026-09-08（§9–§10 更新于 2026-09-16）
+> 范围：`py_chain/chan_core.py`、`py_chain/sr_flip.py`、`py_chain/backtest.py`、`py_chain/bi_inc.py`、`py_chain/mark_entry.py`、`py_chain/trading_plan.py`（全部为「输出逐位不变」的纯性能优化）；`py_chain/SPEC.md` §5.1/§5.2 为同步记录。
 
 ## 1. 背景与问题定位
 
@@ -186,3 +186,77 @@ py_chain/SPEC 记录的 9-05 基准是 11,475 根 = 46s——相差 5~10 倍。�
 - 62信号、50成交、12过滤；完整结果、全部回调事件和最终笔状态摘要仍为
   `824176d4bda9e9de5fcb23b899e01017a379a4f58040ad2dc2c92f43b653d930`。
   数据SHA256与§7正式全量一致，报告为 `.cache/backtest-perf/third-full.json`。
+
+## 9. 第四批：链路重算减负 + 全周期 BiInc（2026-09-16）
+
+### 9.1 定位（优化前）
+
+当前缓存（D/240/60/15/3 = 73/441/1690/6758/20605；3m 跨度短于其它周期，
+fine_res 实际为 15m）。dump_baseline realtime 全量 **98.5s**（7 信号/7 成交）。
+
+后段 1500 根 profile：_advance_cut/buildBi 约 60s，_rebuild_chain 约 37s；
+biStep 454 万次。
+
+### 9.2 已实施（输出逐位不变）
+
+1. **_prefix_bars**：cut 增长时原地 extend，消除 _rebuild_chain 每次 bars[:cut] 整表拷贝。
+2. **countBarsPassing 前缀累加**：同 (bars, price, tol) 在 cut 只增时 = 旧计数 + 新增段。
+3. **zsExitWeak/buildZSByUpper 笔快照缓存**：末笔延伸即失效。
+4. **BiIncBuilder 全周期启用**（原仅 30S）：
+   - nearDouble / lowerContext 与批量 buildBi 同参；
+   - 跳空差值表用当前 ATR 判定；任一已固化对布尔翻转 → 阶段二从 0 重放；
+   - lowerContext 按内容指纹比较（避免切片新对象误触发全量重建）。
+
+### 9.3 验证与收益
+
+- realtime 全量 A/B：summary/stats/signals/trades JSON **逐位一致**
+  （摘要哈希 signals=`fa51b1eae5e5e97b` trades=`3526d967844d13a5`）；
+  耗时 **98.5s → 81.4s（约 1.21×，下降 17%）**。
+- confirm 在优化后自洽（32 信号/30 成交，前后两次 85s 级一致）。
+- 单测：test_sr_flip / test_chan_core_rules / test_near_double /
+  test_exit_rules / test_mark_entry_sink / test_bt_runs 全部通过。
+- engine_consistency 中间检查点差异与改前同量级（wick/增量漂移既有现象），
+  末端重同步点 OK；未引入新回归。
+- 后段 1500 根 profile：99.8s → 82.9s；biStep 454 万 → 268 万；
+  _advance_cut 61.7s → 42.7s。链路重算（支阻/计划）仍是剩余主项。
+
+报告目录：`.cache/backtest-perf/before|after|after2|profile-*.txt`。
+
+## 10. 第五批：按周期缓存 + BiInc 回溯收紧（2026-09-16）
+
+### 10.1 已实施
+
+1. **compute_srflip / compute_plan 按周期 work_cache**：cut/ATR/笔指纹未变的高周期直接复用 cluster/fib 与计划行；BOLL 仍每拍重算（依赖现价）。
+2. **evaluateRealtimeEntries**：同一 (periodX, strategyKey, segStart) 已在 fired 中则跳过背驰链重算。
+3. **BiIncBuilder**：ATR 跳空翻转只回溯到首个受影响 seq；lowerContext 指纹去掉 cutoff，长度变化只尾部重放。
+
+### 10.2 验证
+
+- realtime 相对最初基线：98.5s → **67.5s（1.46×）**，signals/trades JSON 逐位一致。
+- confirm：32 信号/30 成交与上一批优化结果一致（约 75s）。
+- 单测 test_sr_flip / test_near_double / test_mark_entry_sink 通过。
+
+### 10.3 收尾修复（同日，两处正确性隐患）
+
+1. **`_resync_bis` 清空 `_chain_work_cache`**：批量重建可能修正中段笔而 `_bis_fingerprint`
+   （len+末笔端点）不变，sr/plan 按周期复用会拿到漂移期旧结果，破坏「重同步点输出严格
+   等于 batch(前缀)」的既有保证。每 200 根清一次，代价可忽略；`_rewind_res`（实时整周期
+   重放）经 `_resync_bis` 同样覆盖。
+2. **`_invalidate_prefix`**：实时 bar 被覆盖（`bl[-1]=dict(b)` 整槽替换）或 `_rewind_res`
+   重放后，bars 前缀缓存仍持旧 dict 引用且 cut 数值不变——新增失效方法（列表与计数器
+   同时重置）并在 `append_bars` override 分支与 `_rewind_res` 开头调用。
+
+验证：新增 `py_chain/test_backtest_perf.py`（重同步清缓存并可重填 / 覆盖与重放后前缀
+反映新值）；用户真实场景全量 A/B（store 源 + lead_days=60 + ZZ+HJ 预设 fib 开、
+33430 根 3m、13892 步）：stats/signals/trades/lastTime/最终笔数 **逐位一致**
+（`.cache/backtest-perf/batch6-ab/prefix|postfix-lead60.json`）；逐模块单测
+（test_sr_flip/test_chan_core_rules/test_near_double/test_exit_rules/
+test_mark_entry_sink/test_start_ts/test_divergence_fallback）全部通过。
+
+### 10.4 用户真实场景基线（第六批定位用，同日）
+
+Web 方案库最近方案实测（OANDA:XAUUSD、store 源、from=2026-08-02、lead_days=60、
+ZZ+HJ 预设=cluster+fib、realtime）：**810.5~928.9s（≈14~15.5 分钟）**，其中取数仅
+0.06s、预热 27~34s、交易段 783~895s（13892 步 × ~60ms/步）——纯计算瓶颈。
+与 §9/§10 的 67.5s 实测不可比：该口径 fine=15m（仅 ~6700 步）且 fib 关闭，
+比用户场景（fine=3m、33430 根、fib 开）轻一个量级——这是「修了仍慢」的根因。

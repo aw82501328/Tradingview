@@ -458,12 +458,11 @@ def macdAboveZero(macdArr):
 
 def zsExitWeak(bis, upperBis, macdArr, barSec, ratio=1.0, wantDir="short"):
     """出中枢的力度变弱（buildZSByUpper 取最后一个中枢）：
-    离开中枢的笔相对进入中枢的笔 isBiDiverge 为 true，或离开笔 span < 进入笔 span × ratio。"""
-    zss = []
-    try:
-        zss = buildZSByUpper(bis, upperBis or [], barSec)
-    except Exception:
-        return False
+    离开中枢的笔相对进入中枢的笔 isBiDiverge 为 true，或离开笔 span < 进入笔 span × ratio。
+
+    性能：realtime 每根 fine 收盘可能反复进入 wait1Buy/wait1Sell；按笔快照缓存
+    buildZSByUpper 结果（末笔延伸即失效），输出与未缓存路径逐位一致。"""
+    zss = _zs_by_upper_cached(bis, upperBis, barSec)
     if not zss:
         return False
     last = zss[-1]
@@ -488,6 +487,39 @@ def zsExitWeak(bis, upperBis, macdArr, barSec, ratio=1.0, wantDir="short"):
     if exitBi["span"] < enter["span"] * (ratio or 1.0):
         return True
     return False
+
+
+# buildZSByUpper 快照缓存：键含下级/上级笔数量与末笔端点；末笔延伸即 miss。
+_zsByUpperCache = {}
+_ZS_CACHE_MAX = 256
+
+
+def _zs_by_upper_cached(bis, upperBis, barSec):
+    """按笔快照缓存 buildZSByUpper；列表内容未变时复用同一结果。"""
+    upperBis = upperBis or []
+    lb = bis[-1] if bis else None
+    ub = upperBis[-1] if upperBis else None
+    key = (
+        id(bis), len(bis) if bis else 0,
+        lb.get("startTime") if lb else None,
+        lb.get("endTime") if lb else None,
+        lb.get("endPrice") if lb else None,
+        id(upperBis), len(upperBis),
+        ub.get("startTime") if ub else None,
+        ub.get("endTime") if ub else None,
+        barSec or 0,
+    )
+    ent = _zsByUpperCache.get(key)
+    if ent is not None and ent[0] is bis and ent[1] is upperBis:
+        return ent[2]
+    try:
+        zss = buildZSByUpper(bis, upperBis, barSec)
+    except Exception:
+        zss = []
+    if len(_zsByUpperCache) >= _ZS_CACHE_MAX:
+        _zsByUpperCache.clear()
+    _zsByUpperCache[key] = (bis, upperBis, zss)
+    return zss
 
 
 def lowerDiverge(periodData, X, wantDir):
@@ -892,6 +924,10 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
         else:
             segStart = bis[-1]["startTime"]
         if _barsSince(times, segStart, tCut) < min_bars:
+            continue
+        # 该 (periodX, strategyKey, segStart) 已在任一 markRes 发过 → 跳过重算背驰链
+        # （形成段延伸不重发；多 markRes 同段在既有口径下也只会命中一次有效进场路径）
+        if any(f[0] == X and f[1] == key and f[3] == segStart for f in fired):
             continue
         # 策略专属条件（与确认制共用）
         upRes = upperResOf(X)

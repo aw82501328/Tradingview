@@ -399,7 +399,7 @@ run() 批量路径成交 bar 当拍未收盘，存在 ≤1 根 fine bar 的微�
 | `py_chain/mark_entry.py` | ✅ 已完成 | 移植 JS `mark_entry.js`（6 种策略 + `findDivergePoints`/`evaluateEntry`）；`compute_entries` 支持 `periodMacd`/`periodAtr`；**出场纯函数** `stop_ref_of`（方向感知止损参考位）/`find_bi_event`（够笔/破高低点事件源，与 JS `stopRefOf`/`findBiEvent` 对齐）。 |
 | `py_chain/data_loader.py` | ✅ 已完成 | `CDPClient`（HTTP 找 target + websocket `Runtime.evaluate`）、`fetch_bars`/`load_bars`/`load_cached`、`align_periods`；与 `load_all_tf.js` 对齐。 |
 | `py_chain/backtest.py` | ✅ 已完成 | 增量点状回测引擎 `BacktestEngine` + `run_backtest` + `build_bis` + `summarize`；`_append_bars` 用 `extendLastBiFrom` 增量延伸 + 笔结构变化才重算链路（短路）；**出场状态机**（`_advance_exit`/`_close_pos`：止损+三档止盈+同向互斥，见 §2.1）。**2026-09-13 30S 性能修复**：`fine_res` 候选排除 30S（深度回补后 30S 跨度全窗口，曾误当回测时间轴引发平方级放大；时间轴恒为 3m，30S 仅作背驰级别）；30S 笔列表改走 `bi_inc` 增量构建；`_rebuild_chain` 不再为 30S 构造无人消费的前缀切片。 |
-| `py_chain/bi_inc.py` | ✅ 已完成 | **30S 增量笔构建器 `BiIncBuilder`**（2026-09-13）：阶段一同型合并尾部重折叠 + 阶段二不可变栈快照续算（`biStep` 共用规则源）+ 阶段三/端点修正尾部重建（接缝首笔原始 biPair 起点回填）；跳空判定用逐对差值区间扫描、原始K线数用前缀和 O(1)。固定 ATR 差分测试 24210 步 0 差异；ATR ±20%/步压力测试 0 差异。 |
+| `py_chain/bi_inc.py` | ✅ 已完成 | **增量笔构建器 `BiIncBuilder`**（2026-09-13 起用于 30S；**2026-09-16 扩到全周期**）：阶段一同型合并尾部重折叠 + 阶段二不可变栈快照续算（`biStep` 共用规则源）+ 阶段三/端点修正尾部重建；跳空差值用**当前 ATR** 判定，布尔翻转则阶段二重放；`nearDouble`/`lowerContext` 与批量 `buildBi` 同参。 |
 | `py_chain/tv_draw.py` | ✅ 已完成 | `draw_trades` 通过 CDP `createShape` 回画进场箭头（多红空绿、文本 `BT·BUY/SELL + 价`），画前清除旧 `BT·` 标记。 |
 | `py_chain/main.py` | ✅ 已完成 | CLI：`--symbol/--periods/--from/--port/--use-cache/--warmup/--no-draw/--no-marks/--sr-types/--fib-levels/--boll-length/--boll-mult`；串起取数→全链路→回测→回画→统计。 |
 | `py_chain/test_sr_flip.py` | ✅ 已完成 | sr_flip 三类来源（密集区/黄金分割/BOLL）纯函数 + `compute_srflip` 集成单测（unittest，`python -m unittest py_chain.test_sr_flip -v`）。 |
@@ -463,10 +463,17 @@ cProfile 归因后做四项「逐位等价」优化（每项均有新旧直接�
 
 ### 5.2 尚未做的进一步提速项（按预期收益排序，风险递增）
 
-- `_rebuild_chain` 每次 `bars[res][:_cut]` 整体切片拷贝（~3.5 万元素 × 近逐根重算）→ 传视图/复用切片；
-- `buildBi` 分型一变即全量重建（O(n²) 主项）→ 确认笔前缀冻结、仅尾部重建（与 JS 一致性风险最高，需单独严格 A/B）；
+- ~~`_rebuild_chain` 每次 `bars[res][:_cut]` 整体切片拷贝~~ → 2026-09-16 已用 `_prefix_bars` 原地 extend；
+- ~~`buildBi` 分型一变即全量重建~~ → 2026-09-16 `BiIncBuilder` 已扩到全周期（ATR 跳空翻转则阶段二重放；见性能规格 §9）；
 - `detectFlip` 的历史回测时间二分已于2026-09-09实施；其他调用无索引时保留原扫描语义。
-- realtime 模式 `strategyExtraOk` 的 `buildZSByUpper` 每根 O(B_l×B_u) → 按周期缓存、笔变失效。
+- ~~realtime 模式 `buildZSByUpper` 每根 O(B_l×B_u)~~ → 2026-09-16 已按笔快照缓存。
+
+第四批（2026-09-16）：前缀 bars 复用 + countBarsPassing 累加 + zsExitWeak 缓存 + 全周期 BiInc。
+第五批（2026-09-16）：按周期 work_cache（sr/plan）+ realtime fired 早退 + BiInc ATR/lower 回溯收紧。
+dump_baseline realtime **98.5s → 67.5s（1.46×）**，信号/成交 JSON 逐位一致。详见 `spec/plans/SPEC_backtest_perf.md` §9–§10。
+收尾修复（同日）：`_resync_bis` 清空链路 work_cache（防中段笔修正被指纹漏判后复用旧结果）；
+实时覆盖/整周期重放后失效 bars 前缀缓存（`_invalidate_prefix`）。用户真实场景全量 A/B
+（store+lead60+fib 开、33430 根）逐位一致（`SPEC_backtest_perf.md` §10.3–§10.4）。
 
 2026-09-09第二批：`run()` 的 realtime 模式跳过未消费的确认式进场计算，
 按运行复用各周期价格数组并以 `[:cut]` 限制可见数据，突破扫描按时间索引定位。
