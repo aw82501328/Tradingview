@@ -39,6 +39,30 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 .prules ol{margin:0 0 0 18px;color:var(--muted);font-size:12px}
 .prules li{margin:3px 0}
 .prules b{color:var(--text);font-weight:600}
+.plogic{margin-top:14px;max-width:1180px;background:var(--card);border:1px solid var(--border);
+  border-radius:6px;padding:0 14px}
+.plogic summary{cursor:pointer;padding:10px 0;color:#bad4ff;font-size:13px;font-weight:600}
+.plogic summary:hover{color:var(--accent)}
+.plogic .lbody{padding:0 0 12px}
+.plogic h4{font-size:13px;color:#bad4ff;margin:14px 0 6px}
+.plogic h4 .lsub{color:var(--muted);font-weight:400;font-size:11.5px;margin-left:8px}
+.plogic .lcap{color:var(--muted);font-size:11.5px;margin:0 0 6px}
+.plogic .ldiagram{background:var(--card-2,#131c29);border:1px solid var(--border);border-radius:6px;
+  padding:10px;overflow-x:auto}
+.plogic .ldiagram svg{max-width:100%;height:auto;display:block;margin:0 auto}
+.plogic .ldiagram svg foreignObject{overflow:visible}   /* 中文宽度估算偏小时防裁字 */
+.plogic .ldiagram svg span.edgeLabel{padding:1px 3px}
+.plogic .ltable{border-collapse:collapse;width:100%;font-size:12px;margin:4px 0}
+.plogic .ltable th,.plogic .ltable td{border:1px solid var(--border);padding:5px 8px;text-align:left;vertical-align:top}
+.plogic .ltable th{color:#bad4ff;background:var(--card-2,#131c29);font-weight:600}
+.plogic .lnote{color:var(--muted);font-size:11.5px;margin:6px 0 0}
+.plogic .llast{margin-top:12px;padding-top:10px;border-top:1px dashed var(--border)}
+.plogic ol.lrules{margin:2px 0 6px 18px;color:var(--muted);font-size:11.5px}
+.plogic ol.lrules li{margin:3px 0}
+.plogic ol.lrules b{color:var(--text);font-weight:600}
+.plogic .ltable.flash{outline:2px solid var(--accent);outline-offset:2px}
+.plogic .ldiagram .node.tbl-link{cursor:pointer}
+.plogic .ldiagram .node.tbl-link:hover polygon,.plogic .ldiagram .node.tbl-link:hover rect{filter:brightness(1.3)}
 .toast{position:fixed;right:18px;bottom:18px;background:#1f4aa8;color:#fff;border-radius:6px;
   padding:8px 16px;font-size:12.5px;opacity:.96}
 .toast.err{background:#5a1d1d}
@@ -59,6 +83,12 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
   </div>
   <p class="pnote" id="noteLine"></p>
   <div class="prules" id="rulesBlock" hidden></div>
+  <div class="plogic" id="logicBlock" hidden>
+    <details id="logicDetails">
+      <summary>交易计划逻辑图解（怎么判震荡/趋势 → 怎么定方向和策略 → 交给进出场）</summary>
+      <div class="lbody" id="logicBody"></div>
+    </details>
+  </div>
 </div>
 <div class="toast" id="toast" hidden></div>
 <script>
@@ -68,20 +98,194 @@ const PARAM_MODULES = ['chan', 'points', 'entry', 'plan'];
 const TABS = [['sr', '支阻位'], ['chan', '缠论核心'], ['points', '买卖点'], ['entry', '进出场'], ['plan', '交易计划']];
 let modules = {}, active = 'sr', toastTimer;
 
-// 模块逻辑规则说明（renderModule 时渲染在参数网格下方；与 trading_plan.trend_direction 同步维护）
-const MODULE_RULES = {
-  plan: {
-    title: '顺势参考周期方向判定规则（trendRes 开启时生效，实现见 trading_plan.trend_direction）',
-    items: [
-      '取<b>参考周期（默认4小时）最近一个买卖点</b>作方向锚；参考周期自身不再产生进场信号，更低周期（1小时/15分钟/3分钟）只做锚方向的单边',
-      '<b>1买/1卖</b>：端点后出现<b>强分型</b>才确立方向——底分型右肩（第3根合并K）收盘价 &gt; 左肩（第1根合并K）最高价，顶分型镜像',
-      '<b>非一类买卖点</b>（2买/类2买/3买、2卖/类2卖/3卖）：出现即确立方向（点锚定的笔本身已够笔成笔）',
-      '<b>破坏闩锁</b>：确立后参考周期<b>收盘价</b>跌破买点端点价 / 涨破卖点端点价 → 反向（下跌/上涨延续），闩锁至下一个买卖点事件（价格收回也不翻回）',
-      '<b>回退</b>：无买卖点、或1类点强分型未出现时，按最近一笔方向（末笔向上→只做多 / 向下→只做空）',
-      '参考周期无笔数据 → 不过滤（多空照常）；回测信号列表方向列显示锚方向与成因，如 <b>多（4小时2买）</b>',
-    ],
+// 模块逻辑规则说明（renderModule 时渲染在参数网格下方；顺势规则已并入图解表2 标题下方，
+// 与 trading_plan.trend_direction 同步维护）
+const MODULE_RULES = {};
+
+// ============ 交易计划逻辑图解（仅「进出场」页签显示；与 trading_plan.py 同步维护） ============
+// 占位符：{RANGE_REF} 震荡参考周期名 / {TREND_REF} 顺势参考周期名 / {LOWER} 低于参考周期的周期列表
+// （展开时按 modules.plan.effective 的 rangeRes/trendRes 实时替换，配置改动后重开页签即刷新）
+const LOGIC_BODY = `
+<h4>图 · 交易计划主干流程<span class="lsub">每个周期从大到小各判一遍；具体逻辑见表1~表3</span></h4>
+<div class="lcap" id="capRange"></div>
+<div class="ldiagram" id="dia1"></div>
+<p class="lnote">带蓝框的节点可点击，跳到对应的表。</p>
+<p class="lnote">笔窗口：多了只看最近60笔（上限，老结构不参与）；至少2笔（下限，笔太少连高低结构都搭不起来，只能观望）；恰好2笔能判震荡、但找买卖点至少要3笔，找不到即走「没有」分支观望。</p>
+<p class="lnote">「贴着买卖点」＝先看最后一笔终点、再逐笔向前；对得上＝时间差≤1根K、价格差≤max(ATR×0.2, 0.05)。</p>
+<p class="lnote">观望的四种原因：数据不足 / 跟着{RANGE_REF}等 / 无买卖点 / 只作锚——谁说了算见表1。</p>
+<h4>表1 · 怎么判「震荡」<span class="lsub">小周期不自己判，只看参考周期判的结果</span></h4>
+<table class="ltable" id="t1a">
+<tr><th>情况</th><th>怎么判</th></tr>
+<tr><td>周期比参考周期小（{LOWER}）</td><td>自己不判，全听{RANGE_REF}的：震荡→跟着观望；非震荡→直接当趋势；{RANGE_REF}笔不足2笔→直接观望（数据不足）</td></tr>
+<tr><td>{RANGE_REF}自己和比它大的周期（日线）</td><td>固定观望：只作锚（给小周期定震荡结果、给顺势定方向），不参与交易、不做判定</td></tr>
+<tr><td>rangeRes 未配置（必填项，正常配不到这状态）</td><td>全部周期观望</td></tr>
+</table>
+<div class="lcap">{RANGE_REF}怎么判自己震不震荡——下面两个条件满足任意一个就算震荡；小周期跟着这个结果走：</div>
+<table class="ltable" id="t1b">
+<tr><th>条件</th><th>大白话</th><th>具体口径</th></tr>
+<tr><td>① 横盘</td><td>最近40根K挤在一条窄带里，最近几笔涨跌交替没一边倒；但最后一笔已经冲出窄带→正在突破，不算横盘</td><td>①40根K最高−最低 ≤ 5×ATR；②窗口内最近4笔端点极差 ≤ 7×ATR、涨跌都有、无连续3笔同向；③末笔越过窄带另一端 &gt;1×ATR → 直接算趋势</td></tr>
+<tr><td>② 待在箱体里</td><td>价格正待在一个还没走完的箱子里，上不去下不来</td><td>最近一个中枢（至少5笔搭成、不跨上一级笔端点）还没离开，当前价在箱顶箱底之间</td></tr>
+</table>
+<p class="lnote">注：{RANGE_REF}自己也按这两个条件判，数据用它自己的K线和笔（箱体条件的上一级笔=日线笔）；判出震荡时更低周期一并观望。</p>
+<p class="lnote">ATR＝最近14根K平均每根的波动幅度（含跳空），即「一根K正常晃多大」。5×ATR＝总波动不超过5根K的正常波动；行情波动大时窄带自动放宽。</p>
+<h4>表2 · 顺势方向怎么定<span class="lsub">只放行顺着参考周期方向的单</span></h4>
+<ol class="lrules">
+<li>取<b>参考周期（{TREND_REF}）最近一个买卖点</b>作方向锚；参考周期自身不再产生进场信号，更低周期（{LOWER}）只做锚方向的单。</li>
+<li><b>1买/1卖</b>：端点后出现<b>强分型</b>才确立方向——底分型右肩（第3根合并K）收盘价 &gt; 左肩（第1根合并K）最高价，顶分型镜像。</li>
+<li><b>非一类买卖点</b>（2买/类2买/3买、2卖/类2卖/3卖）：出现即确立方向（点锚定的笔本身已够笔成笔）。</li>
+<li><b>破坏闩锁</b>：确立后参考周期<b>收盘价</b>跌破买点端点价 / 涨破卖点端点价 → 反向（下跌/上涨延续），闩锁至下一个买卖点事件（价格收回也不翻回）。</li>
+<li><b>回退</b>：无买卖点、或1类点强分型未出现时，按最近一笔方向（末笔向上→只做多 / 向下→只做空）。</li>
+<li>参考周期无笔数据 → 不过滤（多空照常）；回测信号列表方向列显示锚方向与成因，如 <b>多（{TREND_REF}2买）</b>。</li>
+</ol>
+<div class="lcap" id="capTrend"></div>
+<table class="ltable" id="t2">
+<tr><th>情况（按顺序判断）</th><th>顺势方向</th></tr>
+<tr><td>{TREND_REF}笔不足2笔</td><td>不拦：多空都放行</td></tr>
+<tr><td>最近60笔没有买卖点</td><td>按末笔方向：向上→只做多 / 向下→只做空</td></tr>
+<tr><td>最新是1买/1卖，强分型还没出现</td><td>同上（回退末笔方向）</td></tr>
+<tr><td>最新是1买/1卖，强分型已出现，之后没被收盘破坏</td><td>买点→只做多 / 卖点→只做空</td></tr>
+<tr><td>最新是2/3类买卖点，之后没被收盘破坏</td><td>买点→只做多 / 卖点→只做空</td></tr>
+<tr><td>点之后被收盘破坏</td><td>掉头锁定：反向顺势（收复也不翻回，等下一个买卖点）</td></tr>
+<tr><td>应用</td><td>信号方向与顺势方向同向→保留；反向→剔除。只管比{TREND_REF}小的周期，{TREND_REF}自己和更大周期不发信号；trendRes 关掉则整套不拦</td></tr>
+</table>
+<p class="lnote">强分型（1类点的反转确认）＝底部三根K，右边那根收盘冲过左边那根最高；1卖镜像（右边收盘跌破左边最低）。</p>
+<p class="lnote">「破坏」＝买点后某根收盘跌破买点价 / 卖点后某根收盘涨破卖点价；掉头锁定后价格收回来也不翻回，直到下一个买卖点。</p>
+<p class="lnote" id="trendNote"></p>
+<h4>表3 · 买卖点 → 方向和策略</h4>
+<table class="ltable" id="t3">
+<tr><th>最近贴上的买卖点</th><th>附带条件</th><th>方向</th><th>接下来做什么</th></tr>
+<tr><td>1卖</td><td>—</td><td>空头空（跌势做空）</td><td>等反弹后做2卖</td></tr>
+<tr><td>1买</td><td>—</td><td>多头多（涨势做多）</td><td>等回调后做2买</td></tr>
+<tr><td>2买/类2买/3买</td><td>冲过前高且力度没变弱</td><td>多头多</td><td>等回调后的新买点</td></tr>
+<tr><td>2买/类2买/3买</td><td>没冲过前高，或力度变弱</td><td>多头空（涨势做空）</td><td>等高点附近的一卖</td></tr>
+<tr><td>2卖/类2卖/3卖</td><td>跌破前低且力度没变弱</td><td>空头空</td><td>等反弹后的新卖点</td></tr>
+<tr><td>2卖/类2卖/3卖</td><td>没破前低，或力度变弱</td><td>空头多（跌势做多）</td><td>等低点附近的一买</td></tr>
+</table>
+<p class="lnote">方向命名：前两个字＝现在的结构是涨是跌，后一个字＝做多还是做空。</p>
+<p class="lnote"><b>附带条件怎么判</b>（只对 2类/3类点——上表「附带条件」列的三步判定，卖点全程对称）：</p>
+<p class="lnote">① 找参照：买点之前时间最近的高点（卖点：之前的低点）。</p>
+<p class="lnote">② 冲过了吗：买点后第一波上涨的终点 &gt; 前高（卖点：终点 &lt; 前低）。</p>
+<p class="lnote">③ 力度变弱了吗：这波上涨和前一波同向上涨比 MACD——柱子总面积变小、或 DIF 峰变低、或最高柱变矮，任一个＝变弱（背驰）。</p>
+<p class="lnote">结论：②过了 且 ③没变弱 →「冲过前高且力度没变弱」；任一步不过 →「其他」。</p>
+<p class="lnote llast">观望的周期不出信号；定了策略的周期还要由进出场模块检查进场条件（笔够不够、低级别有没有背驰、离支阻位近不近、策略自己的条件）才发信号——那是「进出场」的事。以上是回测引擎口径；工作台分析页跑的 JS 版暂无「小周期听参考周期」这条，这点两边不同。</p>`;
+
+const DIA_MAIN = `flowchart LR
+    REF["参考周期（{RANGE_REF}）<br/>定方向"]
+    REF --> TRD["趋势（表2）"]
+    REF --> RNG["震荡（表1）"]
+    TRD --> PLAN["小周期交易计划<br/>（{RANGE_REF}方向）（表3）"]
+    RNG --> WAIT["观望"]
+    classDef watch fill:#131c29,stroke:#f0b90b,color:#e7edf7
+    classDef done fill:#13221c,stroke:#92d1b4,color:#e7edf7
+    classDef link stroke:#8eb7ff,stroke-width:2.5px
+    class WAIT watch
+    class PLAN done
+    class TRD,RNG,PLAN,WAIT link`;
+
+const REF_OPTS = { '240': '4小时', 'D': '日线' };
+const LOWER_OPTS = { '240': '1小时/15分钟/3分钟', 'D': '4小时/1小时/15分钟/3分钟' };
+const MERMAID_THEME = {
+  startOnLoad: false,
+  theme: 'base',
+  themeVariables: {
+    background: '#10151e',
+    fontFamily: '"Segoe UI","Microsoft YaHei",sans-serif',
+    fontSize: '13px',
+    primaryColor: '#243247',
+    primaryBorderColor: '#8eb7ff',
+    primaryTextColor: '#e7edf7',
+    secondaryColor: '#19212e',
+    secondaryBorderColor: '#3c4d65',
+    secondaryTextColor: '#e7edf7',
+    tertiaryColor: '#131c29',
+    lineColor: '#99a9c0',
+    edgeLabelBackground: '#19212e',
+    mainBkg: '#19212e',
+    textColor: '#e7edf7',
   },
+  flowchart: { htmlLabels: true, nodeSpacing: 34, rankSpacing: 46, padding: 8 },
 };
+let logicKey = '';
+
+function logicRefs() {
+  const eff = (modules.plan && modules.plan.effective) || {};
+  const rr = String(eff.rangeRes != null ? eff.rangeRes : ''), tr = String(eff.trendRes != null ? eff.trendRes : '');
+  const rOn = !!REF_OPTS[rr], tOn = !!REF_OPTS[tr];
+  return {
+    rr, tr, rOn, tOn,
+    RANGE_REF: rOn ? REF_OPTS[rr] : '参考周期',
+    TREND_REF: tOn ? REF_OPTS[tr] : '参考周期',
+    LOWER: LOWER_OPTS[rr] || '更低周期',
+  };
+}
+
+const fillTpl = (s, refs) => s.replaceAll('{RANGE_REF}', refs.RANGE_REF)
+  .replaceAll('{TREND_REF}', refs.TREND_REF).replaceAll('{LOWER}', refs.LOWER);
+
+function loadMermaid() {
+  if (window.mermaid) return Promise.resolve();
+  if (loadMermaid._p) return loadMermaid._p;
+  loadMermaid._p = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = '/mermaid.min.js';
+    s.onload = resolve;
+    s.onerror = () => { loadMermaid._p = null; reject(new Error('mermaid.min.js 加载失败')); };
+    document.head.appendChild(s);
+  });
+  return loadMermaid._p;
+}
+
+// 图节点 → 对应表（点击跳转并高亮；mermaid 节点组 id 形如 <渲染id->flowchart-<KEY>-<n>，故按尾部匹配）
+const NODE_TABLE = { TRD: 't2', RNG: 't1b', PLAN: 't3', WAIT: 't1a' };
+function bindNodeLinks(svgRoot) {
+  svgRoot.querySelectorAll('.node').forEach(g => {
+    const m = /flowchart-([A-Za-z0-9_]+)-\d+$/.exec(g.id || '');
+    const target = m && NODE_TABLE[m[1]];
+    if (!target) return;
+    g.classList.add('tbl-link');
+    g.addEventListener('click', () => {
+      const t = document.getElementById(target);
+      if (!t) return;
+      t.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      t.classList.remove('flash');
+      void t.offsetWidth;  // 重启高亮过渡
+      t.classList.add('flash');
+      setTimeout(() => t.classList.remove('flash'), 1600);
+    });
+  });
+}
+
+async function ensureLogic() {
+  const refs = logicRefs();
+  const key = refs.rr + '|' + refs.tr;
+  if (key === logicKey) return;  // 已按当前配置渲染过
+  $('logicBody').innerHTML = fillTpl(LOGIC_BODY, refs);
+  $('capRange').textContent = refs.rOn
+    ? `当前配置：震荡判定参考周期 rangeRes ＝ ${refs.RANGE_REF}（必填；可在「交易计划」页签修改）`
+    : '当前配置：rangeRes 未配置（必填项）——全部周期观望，图中小周期分支暂不生效';
+  $('capTrend').textContent = refs.tOn
+    ? `当前配置：顺势参考周期 trendRes ＝ ${refs.TREND_REF}（可在「交易计划」页签修改）`
+    : '当前配置：trendRes 已关闭——整套不拦、多空都放行，下图暂不生效';
+  $('trendNote').textContent = `${refs.TREND_REF}笔不足2笔时不拦（多空照常）；这套只管比${refs.TREND_REF}小的周期发信号的方向，${refs.TREND_REF}自己（及更大的周期）不再发信号。`;
+  await loadMermaid();
+  if (!ensureLogic.inited) { mermaid.initialize(MERMAID_THEME); ensureLogic.inited = true; }
+  for (const [id, src] of [['dia1', DIA_MAIN]]) {
+    const el = $(id);
+    try {
+      const { svg } = await mermaid.render('mmd-' + id, fillTpl(src, refs));
+      el.innerHTML = svg;
+      bindNodeLinks(el);
+    } catch (err) {
+      el.innerHTML = '<pre style="color:var(--warn);font-size:11px;margin:0">图渲染失败：' + String(err.message || err) + '</pre>';
+    }
+  }
+  logicKey = key;  // 渲染成功后才记录，失败下次展开重试
+}
+
+$('logicDetails').addEventListener('toggle', () => {
+  if (!$('logicDetails').open) return;
+  ensureLogic().catch(err => toast('图解渲染失败：' + err.message, true));
+});
 
 function toast(text, err) {
   const el = $('toast');
@@ -115,7 +319,8 @@ function switchTab(name) {
 }
 
 // 枚举参数的选项展示名（choices 原值提交，展示用中文）
-const CHOICE_LABELS = { trendRes: { '': '关闭', '240': '4小时', 'D': '日线' } };
+const CHOICE_LABELS = { trendRes: { '': '关闭', '240': '4小时', 'D': '日线' },
+                        rangeRes: { '240': '4小时', 'D': '日线' } };
 const choiceLabel = (key, v) => (CHOICE_LABELS[key] && CHOICE_LABELS[key][v]) || v;
 
 function rowHtml(key, spec, value, isMod) {
@@ -151,7 +356,7 @@ function renderModule(name) {
     chan: '缠论核心参数保存后立即全局生效（画笔/回测/监控共用的算法阈值）。有任务运行中时会拒绝保存。',
     points: '买卖点参数在工作台「更新全部」与回测运行时读取生效。',
     entry: '进出场参数在工作台分析与回测运行时读取生效；「当下制够笔K线数」仅回测/监控引擎使用（JS 技能无此参数）。',
-    plan: '交易计划参数在工作台分析与回测运行时读取生效；「顺势参考周期」额外过滤进出场信号方向（规则见下方说明）。',
+    plan: '交易计划参数在工作台分析与回测运行时读取生效；「顺势参考周期」额外过滤进出场信号方向（规则见图解表2 标题下方）。下方可展开「交易计划逻辑图解」。',
   }[name] || '';
   const rules = MODULE_RULES[name];
   const rb = $('rulesBlock');
@@ -160,6 +365,11 @@ function renderModule(name) {
     rb.hidden = false;
   } else {
     rb.hidden = true;
+  }
+  $('logicBlock').hidden = name !== 'plan';
+  if (name === 'plan' && $('logicDetails').open) {
+    // 页签切回时参考周期配置可能已改，展开态下直接刷新图解
+    ensureLogic().catch(err => toast('图解渲染失败：' + err.message, true));
   }
 }
 

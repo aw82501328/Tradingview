@@ -1061,7 +1061,7 @@ def make_handler(app):
             if path == "/modes.html":
                 self._serve_file("index.html")
                 return
-            if path in ("/analysis.js", "/service-restart.js", "/analysis-catalog.json", "/shell.css", "/theme.css", "/legacy-theme.css"):
+            if path in ("/analysis.js", "/service-restart.js", "/analysis-catalog.json", "/shell.css", "/theme.css", "/legacy-theme.css", "/mermaid.min.js"):
                 content_type = "text/javascript" if path.endswith(".js") else "application/json" if path.endswith(".json") else "text/css"
                 self._serve_file(path[1:], content_type + "; charset=utf-8")
                 return

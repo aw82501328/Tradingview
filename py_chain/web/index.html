@@ -164,6 +164,15 @@
   #bt-detail-sig-body td[rowspan] { vertical-align: middle; }
   #bt-detail-sig-body tr.exit-continuation td { border-top-style: dashed; }
   #bt-detail-sig-body tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  /* 右击复制交易信息的反馈 toast（主表与明细弹窗共用） */
+  #copy-tip {
+    position: fixed; left: 50%; bottom: 48px; transform: translateX(-50%) translateY(8px);
+    z-index: 60; padding: 6px 14px; border-radius: 6px;
+    background: var(--card); border: 1px solid var(--border); color: var(--text);
+    box-shadow: 0 6px 18px rgba(0,0,0,.4); font-size: 12px;
+    opacity: 0; pointer-events: none; transition: opacity .15s ease, transform .15s ease;
+  }
+  #copy-tip.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   .bt-detail-locate { padding: 8px 16px; color: var(--muted); font-size: 12px;
     border-bottom: 1px solid var(--border); background: var(--card-2); }
   #locate-status { padding: 8px 14px; color: var(--muted); font-size: 12px; }
@@ -928,6 +937,63 @@ function signalRowsHtml(rows, opts = {}) {
   }).join('');
 }
 
+// 行 → 右击复制的交易信息文本：列名：值 用「；」分割，口径与 signalRowsHtml 逐列一致（所见即所得）。
+// 分批出场的交易整笔全展：每条出场行（半平/剩余持仓）的出场五列依次展开，列名重复出现。
+function signalCopyText(r, no) {
+  const px = v => v != null ? Number(v).toFixed(2) : '-';
+  const pnlTxt = v => v == null ? '-' : (v > 0 ? '+' : '') + v.toFixed(2);
+  const parts = [
+    `#：${no}`,
+    `信号时间：${fmtTime(r.time)}`,
+    `方向：${signalDirectionName(r)}`,
+    `检测周期：${r.periodX || '-'}`,
+    `策略：${r.strategyKey || '-'}`,
+    `背驰级别：${r.markRes || '-'}`,
+    `价格：${px(r.price)}`,
+    `近支阻：${px(r.nearSr)}`,
+    `状态：${r.status}`,
+    `成交时间：${fmtTime(r.entryTime)}`,
+    `成交价：${px(r.entryPrice)}`,
+  ];
+  for (const exit of exitDisplayRows(r)) {
+    parts.push(`出场时间：${fmtTime(exit.time)}`, `出场价：${px(exit.price)}`,
+      `出场类型：${exit.label}`, `手数：${exit.lots != null ? exit.lots : '-'}`, `盈亏：${pnlTxt(exit.pnl)}`);
+  }
+  return parts.join('；');
+}
+
+// 右击复制执行：优先 clipboard API（localhost 安全上下文），失败回退 execCommand（局域网 http 访问）
+function copySignalInfo(event, text) {
+  event.preventDefault();
+  const fallback = () => {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0;';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    ta.remove();
+    showCopyTip(ok ? '已复制交易信息' : '复制失败，请手动复制');
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => showCopyTip('已复制交易信息'), fallback);
+  } else fallback();
+}
+let copyTipTimer = null;
+function showCopyTip(msg) {
+  let tip = document.getElementById('copy-tip');
+  if (!tip) {
+    tip = document.createElement('div');
+    tip.id = 'copy-tip';
+    document.body.appendChild(tip);
+  }
+  tip.textContent = msg;
+  tip.classList.add('show');
+  clearTimeout(copyTipTimer);
+  copyTipTimer = setTimeout(() => tip.classList.remove('show'), 1500);
+}
+
 function renderTable() {
   const rows = filteredRows();
   if (!sigRows.some(r=>r.mode===selectedMode&&r.id===selectedSignal[selectedMode])) {
@@ -1060,6 +1126,14 @@ function bindSignalRows() {
   };
   el('sig-body').onclick = activate;
   el('sig-body').onkeydown = activate;
+  // 右击复制交易信息：仅行上拦截默认菜单，表头/空白处保持浏览器默认
+  el('sig-body').oncontextmenu = event => {
+    const tr = event.target.closest('tr[data-signal-id]');
+    if (!tr) return;
+    const row = sigRows.find(r => r.id === Number(tr.dataset.signalId) && r.mode === selectedMode);
+    if (!row) return;
+    copySignalInfo(event, signalCopyText(row, displayNo(row)));
+  };
 }
 
 // ---------- 状态更新 ----------
@@ -1606,6 +1680,15 @@ function onBtDetailSigActivate(event) {
   locateDetailRow(Number(tr.dataset.signalId));
 }
 
+// 明细弹窗右击复制交易信息：# 用方案内序号，行取自快照数组
+function onBtDetailSigCopy(event) {
+  const tr = event.target.closest('#bt-detail-sig-body tr[data-signal-id]');
+  if (!tr) return;
+  const row = btDetailSignals.find(r => r.id === Number(tr.dataset.signalId));
+  if (!row) return;
+  copySignalInfo(event, signalCopyText(row, btDetailLabelOf(row.id)));
+}
+
 function redrawBtDetailEquity() {
   const host = el('bt-detail-equity');
   if (!host || !host._eqSeries?.length) return;
@@ -1720,6 +1803,7 @@ function bindBtRuns() {
   el('bt-detail-max').onclick = toggleBtDetailMax;
   el('bt-detail-body').onclick = onBtDetailSigActivate;
   el('bt-detail-body').onkeydown = onBtDetailSigActivate;
+  el('bt-detail-body').oncontextmenu = onBtDetailSigCopy;
   el('bt-detail-modal').onclick = e => { if (e.target === el('bt-detail-modal')) closeBtDetail(); };
   // Esc 退出浏览器全屏时同步按钮与布局
   document.addEventListener('fullscreenchange', () => {
