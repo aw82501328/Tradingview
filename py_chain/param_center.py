@@ -53,6 +53,7 @@ PARAM_MODULES = {
             "expectBiEnough": ("M4预期够笔", "末笔反向且端点后够K线即视为回调/反弹中", None, None),
             "expectBiMinBars": ("M4够笔K线数", "预期够笔的本级K线数门槛", 1, 100),
             "divergeConfirm": ("M4背驰确认后成交", "开启=分型右邻K收盘后的下一根开盘成交（默认当下）", None, None),
+            "macdZeroTol": ("2买卖0轴容差", "2买 DIF > -该值 / 2卖 DIF < +该值 视为动能还在（0=严格 0 轴）", 0.0, 100.0),
             "debug": ("调试打印", "buildBi/买卖点识别过程打印", None, None),
         },
     },
@@ -86,6 +87,8 @@ PARAM_MODULES = {
             "rangeBreakMult": ("突破跳过阈值(×ATR)", "末笔端点越过窗口另一端 >该值×ATR 视为突破（跳过震荡判定）", 0.0, 10.0),
             "trendRes": ("顺势参考周期", "参考周期方向过滤更低周期进场（关闭/4小时/日线；规则见本页下方说明）",
                          ("", "240", "D"), None),
+            "rangeRes": ("震荡判定参考周期", "更低周期只看该周期结构判震荡；参考周期及以上只作锚不交易（必填：4小时/日线）",
+                         ("240", "D"), None),
         },
     },
 }
@@ -109,7 +112,8 @@ def defaults_of(module):
             "zs_exit_weak_ratio": mark_entry.ZS_EXIT_WEAK_RATIO,
         }
     if module == "plan":
-        return {**trading_plan.RANGE_DEFAULTS, "trendRes": trading_plan.TREND_RES}
+        return {**trading_plan.RANGE_DEFAULTS, "trendRes": trading_plan.TREND_RES,
+                "rangeRes": trading_plan.RANGE_RES}
     raise ValueError(f"未知参数模块：{module}")
 
 

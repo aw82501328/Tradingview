@@ -57,7 +57,8 @@ from .chan_core import (
 from .mark_buy_sell import compute_all_marks
 from .bi_inc import BiIncBuilder
 from .sr_flip import compute_srflip, prepare_bar_arrays
-from .trading_plan import compute_plan, trend_state_of, TREND_RES as DEFAULT_TREND_RES
+from .trading_plan import (compute_plan, trend_state_of,
+                           TREND_RES as DEFAULT_TREND_RES, RANGE_RES as DEFAULT_RANGE_RES)
 from .mark_entry import (
     compute_entries, stop_ref_of, find_bi_event, filterDetectPeriods,
     trend_following_of, forming_seg_ready,
@@ -284,11 +285,14 @@ class BacktestEngine:
         #   marks → compute_all_marks（买卖点 nearAtrRatio/keep）
         #   exit_min_merged / realtime_min_bars / zs_exit_weak_ratio → 出场/够笔/出中枢衰减
         mp = module_params or {}
-        # plan 模块的 trendRes（顺势参考周期）单独取出：不混入震荡阈值 plan_cfg；
-        # "" = 关闭（区分「显式关闭」与「未配置→默认」）
+        # plan 模块的 trendRes（顺势参考周期）/ rangeRes（震荡判定参考周期）单独取出：
+        # 不混入震荡阈值 plan_cfg；trendRes "" = 关闭顺势过滤；rangeRes "" = 未配置
+        # （必填项，防御语义——compute_plan 将全部周期观望；参数面已无关闭选项）
         plan_mp = dict(mp.get("plan") or {})
         tr = plan_mp.pop("trendRes", mp.get("trendRes"))
         self.trend_res = DEFAULT_TREND_RES if tr is None else tr
+        rr = plan_mp.pop("rangeRes", mp.get("rangeRes"))
+        self.range_res = DEFAULT_RANGE_RES if rr is None else rr
         self.plan_cfg = plan_mp or None
         self.marks_params = dict(mp["marks"]) if mp.get("marks") else {}
         self.exit_min_merged = mp.get("exit_min_merged", EXIT_MIN_MERGED)
@@ -1019,7 +1023,8 @@ class BacktestEngine:
         try:
             self._plan = compute_plan(periodBis, barsByPeriod, core,
                                       periodMacd=periodMacd, periodAtr=periodAtr,
-                                      cfg=self.plan_cfg, work_cache=self._chain_work_cache)
+                                      cfg=self.plan_cfg, work_cache=self._chain_work_cache,
+                                      range_res=self.range_res)
         except Exception:
             self._plan = {}
         # 3.5 顺势参考周期方向状态（mark_entry 顺势过滤；与计划同拍重算——

@@ -62,3 +62,6 @@ py_chain/signals.ndjson
 
 # JS 对齐试验工作区（chan_core 对拍用，正式版在 py_chain/）
 chan_strategy/
+
+# 参数中心运行时状态（overrides-only，机器本地，可随时重生成，不入库）
+py_chain/web/module_params.json

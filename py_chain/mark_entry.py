@@ -443,17 +443,21 @@ def brokePrevHigh(bis):
 
 
 def macdBelowZero(macdArr):
-    """MACD 当前在 0 轴之下（dif < 0）：下0轴后反弹不过0轴。"""
+    """MACD 当前未破 0 轴太多（dif < +macdZeroTol，默认容差 5）：下0轴后反弹不过0轴太多，
+    空头动能还在（原严格口径 dif < 0，tol=0 回退；2026-09-16）。"""
     if not macdArr or len(macdArr) == 0:
         return False
-    return macdArr[-1]["dif"] < 0
+    tol = float(CHAN_CFG.get("macdZeroTol", 5.0) or 0.0)
+    return macdArr[-1]["dif"] < tol
 
 
 def macdAboveZero(macdArr):
-    """MACD 当前在 0 轴之上（dif > 0）：上0轴后回调不破0轴。"""
+    """MACD 当前未破 0 轴太多（dif > -macdZeroTol，默认容差 5）：上0轴后回调不破0轴太多，
+    多头动能还在（原严格口径 dif > 0，tol=0 回退；2026-09-16）。"""
     if not macdArr or len(macdArr) == 0:
         return False
-    return macdArr[-1]["dif"] > 0
+    tol = float(CHAN_CFG.get("macdZeroTol", 5.0) or 0.0)
+    return macdArr[-1]["dif"] > -tol
 
 
 def zsExitWeak(bis, upperBis, macdArr, barSec, ratio=1.0, wantDir="short"):

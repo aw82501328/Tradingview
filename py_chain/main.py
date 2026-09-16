@@ -85,10 +85,14 @@ def build_full_chain(bars_by_period, periods, with_marks=True, sr_types=None, fi
     if boll_mult is not None:
         srKw["bollMult"] = boll_mult
     sr = compute_srflip(bis, bars_by_period, core, **srKw)
-    # plan 模块的 trendRes（顺势参考周期）单独取出：不混入震荡阈值 cfg（"" = 关闭）
+    # plan 模块的 trendRes（顺势参考周期）/ rangeRes（震荡判定参考周期）单独取出：
+    # 不混入震荡阈值 cfg；trendRes "" = 关闭顺势过滤，rangeRes "" = 未配置（必填项，
+    # 防御语义——compute_plan 全部周期观望）
     plan_mp = dict(mp.get("plan") or {})
     trend_res = plan_mp.pop("trendRes", None)
-    plan = compute_plan(bis, bars_by_period, core, cfg=plan_mp or None)
+    range_res = plan_mp.pop("rangeRes", None)
+    plan = compute_plan(bis, bars_by_period, core, cfg=plan_mp or None,
+                        range_res=range_res)
     srLevels = (sr or {}).get("merged") or []
     ep = mp.get("entry") or {}
     entries = compute_entries(bis, bars_by_period, plan, srLevels,
