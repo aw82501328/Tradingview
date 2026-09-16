@@ -22,6 +22,8 @@
   （k=0），保证与全量重建同结果。
 - nearDouble / lowerContext 与 buildBi 同参；任一变化触发全量重建。
 - 重同步（BacktestEngine._resync_bis → invalidate + 批量重建）后严格归零。
+  （曾试「批量结果与增量旧值深度相等则换绑续用」：输出相等不足以证明内部栈状态
+  一致，增量漂移会跨重同步点存活导致后续 bis 偏离，已回退——见 SPEC §11。）
 """
 
 from .chan_core import (BiBuildCtx, biSeqStep, biStep, biPair, fixBiExtremes,

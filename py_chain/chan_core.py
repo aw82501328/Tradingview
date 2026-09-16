@@ -1456,7 +1456,13 @@ def isSameAsUpperBi(bi, upperBis, barSec):
         return None
     tEps = barSec if barSec else 900
     pEps = 0.01
-    for ub in upperBis:
+    # 时间带二分（回测链路 fib 热点：find* 每次调用逐笔判定，线性全扫是平方级主项）：
+    # 命中须 |ΔstartTime| ≤ tEps，而同型上级笔 startTime 严格递增 → 带外必不匹配；
+    # 带内按原列表顺序扫描，首个通过全部条件者与原全量扫描完全一致（输出不变）。
+    starts = _ubStartTimes(upperBis)
+    lo = bisect.bisect_left(starts, bi["startTime"] - tEps)
+    hi = bisect.bisect_right(starts, bi["startTime"] + tEps)
+    for ub in upperBis[lo:hi]:
         if ub["type"] != bi["type"]:
             continue
         if abs(ub["startTime"] - bi["startTime"]) <= tEps and \
@@ -1465,6 +1471,25 @@ def isSameAsUpperBi(bi, upperBis, barSec):
            abs(ub["endPrice"] - bi["endPrice"]) <= pEps:
             return ub
     return None
+
+
+# 上级笔 startTime 平行列表缓存（对象身份持强引用防 id 复用 + 长度/末元素校验失效，
+# Fix 3 同款模式）：isSameAsUpperBi 的调用方（findBuy/findSellPoints）每次调用按类型
+# 新建过滤子列表——缓存主要在同一次 find* 调用内命中（~B/2 次），跨调用自然失配重建。
+_ubStartCache = {}
+
+
+def _ubStartTimes(upperBis):
+    n = len(upperBis)
+    ent = _ubStartCache.get(id(upperBis))
+    if (ent is not None and ent[0] is upperBis and len(ent[1]) == n
+            and (n == 0 or ent[1][n - 1] == upperBis[n - 1]["startTime"])):
+        return ent[1]
+    starts = [u["startTime"] for u in upperBis]
+    if len(_ubStartCache) >= 64:
+        _ubStartCache.clear()
+    _ubStartCache[id(upperBis)] = (upperBis, starts)
+    return starts
 
 
 def anchorFirstBuy(cand, upperBis):

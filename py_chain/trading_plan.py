@@ -454,19 +454,24 @@ def trend_direction(res, bis, bars, upperBis, macdArr, tCut=None):
     return ("long" if is_buy else "short"), f"{name}{t_}"
 
 
-def trend_state_of(periodBis, barsByPeriod, trend_res, periodMacd=None):
+def trend_state_of(periodBis, barsByPeriod, trend_res, periodMacd=None, work_cache=None):
     """按配置计算参考周期方向状态（mark_entry 顺势过滤统一入口）。
 
     上级周期取法与 mark_entry.upperResOf 同口径：periodBis 中比参考周期大一级的
     最小周期（240→D），供 findBuyPoints 区间套使用。
 
     @param trend_res 参考周期（"240"/"D"；""/None = 关闭 → 返回 None）
+    @param work_cache 可选：跨次调用复用的 dict（与 compute_plan 同一引擎级缓存；
+             参考周期/上级笔指纹、bars/MACD 长度未变时直接复用——参考周期输入只在
+             其收盘或笔结构变化时才变，两次收盘间（约 80 根 fine）全命中）。重同步
+             后由调用方清空（中段笔修正可能指纹漏判）。
     @returns {"dir": "long"/"short"/None, "reason": str, "res": 参考周期}；
              参考周期无笔数据时 dir=None（不过滤，规则 6）。检测周期的结构性剔除
              由 mark_entry 按 trend_res 字符串独立执行，与本状态无关。
     """
     if not trend_res:
         return None
+    from .sr_flip import _bis_fingerprint
     tr = str(trend_res).upper()
     bis = (periodBis or {}).get(tr) or []
     bars = (barsByPeriod or {}).get(tr) or []
@@ -482,7 +487,16 @@ def trend_state_of(periodBis, barsByPeriod, trend_res, periodMacd=None):
     if best is not None:
         upper = periodBis.get(best)
     macdArr = (periodMacd or {}).get(tr)
+    if work_cache is not None:
+        key = ("trend", tr, _bis_fingerprint(bis), _bis_fingerprint(upper),
+               len(bars), len(macdArr) if macdArr is not None else len(bars))
+        ent = work_cache.get(("trend", tr))
+        if ent is not None and ent[0] == key:
+            return ent[1]
     if macdArr is None:
         macdArr = calcMACD(bars)
     d, reason = trend_direction(tr, bis, bars, upper, macdArr)
-    return {"dir": d, "reason": reason, "res": tr}
+    row = {"dir": d, "reason": reason, "res": tr}
+    if work_cache is not None:
+        work_cache[("trend", tr)] = (key, row)
+    return row

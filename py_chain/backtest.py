@@ -1023,10 +1023,12 @@ class BacktestEngine:
         except Exception:
             self._plan = {}
         # 3.5 顺势参考周期方向状态（mark_entry 顺势过滤；与计划同拍重算——
-        #     每根 fine 链路重算时顺带更新，参考周期收盘/笔结构变化即刻生效）
+        #     每根 fine 链路重算时顺带更新，参考周期收盘/笔结构变化即刻生效；
+        #     挂链路 work_cache：参考周期输入未变时直接复用，重同步后已清空）
         try:
             self._trend_state = trend_state_of(periodBis, barsByPeriod, self.trend_res,
-                                               periodMacd=periodMacd)
+                                               periodMacd=periodMacd,
+                                               work_cache=self._chain_work_cache)
         except Exception:
             self._trend_state = None
         # 4. 进出场（检测周期与 JS 一致：不含日线、不含 30S——30S 仅作背驰级别；

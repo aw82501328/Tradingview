@@ -474,6 +474,11 @@ dump_baseline realtime **98.5s → 67.5s（1.46×）**，信号/成交 JSON 逐�
 收尾修复（同日）：`_resync_bis` 清空链路 work_cache（防中段笔修正被指纹漏判后复用旧结果）；
 实时覆盖/整周期重放后失效 bars 前缀缓存（`_invalidate_prefix`）。用户真实场景全量 A/B
 （store+lead60+fib 开、33430 根）逐位一致（`SPEC_backtest_perf.md` §10.3–§10.4）。
+第六批（同日）：用户场景口径（fib 开、fine=3m、33430 根）定位——compute_srflip 的
+find* 同笔判定 `isSameAsUpperBi` 线性全扫引发 9 亿次 abs；改 startTime 时间带二分
+（输出逐位不变）+ trend_state_of 挂 work_cache + BOLL/人工位尾切片；全量 A/B 逐位
+一致、810→768s。resync×BiInc「相等即换绑」试作因内部栈状态漂移跨重同步点存活而
+回退（详见 `SPEC_backtest_perf.md` §11）。
 
 2026-09-09第二批：`run()` 的 realtime 模式跳过未消费的确认式进场计算，
 按运行复用各周期价格数组并以 `[:cut]` 限制可见数据，突破扫描按时间索引定位。

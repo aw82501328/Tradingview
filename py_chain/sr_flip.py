@@ -410,10 +410,18 @@ def calcBOLL(bars, length, mult):
     """
     if not bars:
         return None
-    closed = bars[:-1]
-    if len(closed) < length:
-        return None
-    closes = [b["close"] for b in closed[-length:]]
+    if length >= 1:
+        # 尾切片恰取末 length 根已收盘K线（等价 closed=bars[:-1] 后 closed[-length:]，
+        # 免 O(n) 整表拷贝）；同元素同序求和，浮点结果逐位不变
+        tail = bars[-(length + 1):-1]
+        if len(tail) < length:
+            return None
+        closes = [b["close"] for b in tail]
+    else:
+        closed = bars[:-1]
+        if len(closed) < length:
+            return None
+        closes = [b["close"] for b in closed[-length:]]
     n = len(closes)
     mid = sum(closes) / n
     variance = sum((c - mid) ** 2 for c in closes) / n  # 总体方差（÷N）
@@ -428,8 +436,8 @@ def buildBollCandidates(bars, length, mult, currentPrice):
     band = calcBOLL(bars, length, mult)
     if band is None:
         return []
-    closed = bars[:-1]
-    anchorTime = closed[-1]["time"]
+    # 锚点 = 末根已收盘K线时间（= bars[:-1] 的末元素，免 O(n) 整表拷贝）
+    anchorTime = bars[-2]["time"] if len(bars) >= 2 else bars[-1]["time"]
     midType = "SUP" if (currentPrice is not None and currentPrice >= band["mid"]) else "RES"
 
     def make(price, type_, tag):
@@ -463,8 +471,7 @@ def buildManualCandidates(prices, bars, currentPrice):
     @returns [{ price, type, manual: True, touchCount: 1, barsPassed: 0,
                firstTouch/lastTouch/breakTime: 末根已收盘K线 time }]
     """
-    closed = bars[:-1]
-    anchorTime = closed[-1]["time"] if closed else bars[-1]["time"]
+    anchorTime = bars[-2]["time"] if len(bars) >= 2 else bars[-1]["time"]
     out = []
     for p in prices:
         typ = "SUP" if (currentPrice is not None and currentPrice >= p) else "RES"

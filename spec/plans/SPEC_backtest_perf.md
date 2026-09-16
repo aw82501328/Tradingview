@@ -260,3 +260,66 @@ ZZ+HJ 预设=cluster+fib、realtime）：**810.5~928.9s（≈14~15.5 分钟）**
 0.06s、预热 27~34s、交易段 783~895s（13892 步 × ~60ms/步）——纯计算瓶颈。
 与 §9/§10 的 67.5s 实测不可比：该口径 fine=15m（仅 ~6700 步）且 fib 关闭，
 比用户场景（fine=3m、33430 根、fib 开）轻一个量级——这是「修了仍慢」的根因。
+
+## 11. 第六批：用户场景口径（fib 开、fine=3m）定位与优化（2026-09-16）
+
+### 11.1 定位（末 3000 根 cProfile，`batch6-profile.txt`）
+
+rebuilds=1643/3000 根（~55% 步触发链路重算）；cumulative 上 `compute_srflip`
+占 86%，其中 `findSellPoints` 265s + `findBuyPoints` 120s；内部 `isSameAsUpperBi`
+336 万次调用（tottime 93.7s），其时间容差比较引发 **9.02 亿次 `abs`**（66.2s）。
+fine/15m 周期末笔每根延伸 → 笔指纹每拍变 → §10 的按周期 work_cache 每拍 miss →
+fib 每次重算全量扫描。注意：profile 占比对调用密集型代码有放大（cProfile 逐调用
+插桩），原始耗时占比低于此——全量实测收益（§11.3）小于 profile 暗示的比例。
+
+### 11.2 已实施（输出逐位不变）
+
+1. **`isSameAsUpperBi` 时间带二分**（chan_core.py）：命中须 |ΔstartTime| ≤ tEps
+   （本级 1 根 bar），同型上级笔 startTime 严格递增 → 带外必不匹配；带内按原列表
+   顺序扫描，首个通过全部条件者与原全量线性扫描完全一致。startTime 平行列按
+   upperBis 对象缓存（持强引用防 id 复用 + 长度/末元素校验，Fix 3 同款）。
+2. **`trend_state_of` 挂 work_cache**（trading_plan.py + backtest.py）：参考周期/
+   上级笔指纹与 bars/MACD 长度未变时复用（两次参考周期收盘间全命中）；重同步清空
+   已由 §10.3 覆盖。
+3. **BOLL/人工位尾切片**（sr_flip.py）：`calcBOLL`/`buildBollCandidates`/
+   `buildManualCandidates` 免 `bars[:-1]` O(n) 整表拷贝，只取末 length+1 根
+   （同元素同序求和，浮点逐位不变；length<1 保留原路径防 -0 切片语义漂移）。
+
+### 11.3 试作回退：resync×BiInc「相等即换绑」（adopt）——不成立
+
+曾实施：`_resync_bis` 批量重建后若 (fractals, merged, bis) 与增量旧值深度相等则
+`BiIncBuilder.adopt_if_equal` 换绑续用（免下次分型变化全量重建）。全量 A/B 出现
+**1 个多出的信号**（15m waitSell 9-9 15:45；`final_bis_len` 仍一致——末端重同步
+收敛掩盖了中途偏离）。根因：**输出相等不足以证明增量构建器内部栈状态（heads/seq）
+与批量重建一致**——engine_consistency 既有的中途漂移正是靠每 200 根的重同步归零，
+adopt 在输出碰巧相同时跳过归零，漂移跨重同步点存活导致后续 bis 偏离。合成数据
+无漂移，白盒等价测试未能捕获。已整体回退；命中率探针（D 111/111、240 141/151、
+60 51/165、15 79/167、3 2/167）显示收益本就集中于低成本周期，弃之不可惜。
+
+### 11.4 验证与收益
+
+- 第一道关：`isSameAsUpperBi` 新旧 3 万组随机对照（含容差带边界/重复起点/空表，
+  命中 11895）；calcBOLL/buildBollCandidates/buildManualCandidates 4000 组行为
+  一致（含 45 组双方同崩病态组合）；trend_state_of 引擎推进 86 拍三路一致
+  （旧实现/新无缓存/新带缓存，缓存命中 75）。
+- 全量 A/B（§10.4 场景）：**stats/signals/trades/lastTime/最终笔数逐位一致**
+  （`batch6-ab/batch6b-lead60.json` vs `prefix-lead60.json`）；
+  耗时 810.5s（基线，同码复跑 863.1s，单次计时离散约 ±6%）→ **768.2s（~8-11%）**。
+  注：预热 42.2s 异于常值属机器噪声。
+- 优化后短窗 profile（`batch6-profile-after.txt`，末 1500 根、更深位置）：
+  `isSameAsUpperBi` tottime 93.7s→2.0s（单次 28µs→1.2µs，~23×）、`abs` 9.02 亿→
+  2.12 亿次；profile 段每根 148.0→117.6ms（-21%）。
+- 单测：test_chan_core_rules / test_sr_flip / test_near_double / test_marks /
+  test_same_bi_mark / test_start_ts / test_backtest_perf / test_divergence_fallback
+  全部通过。
+
+### 11.5 未实施路线图（第六批后剩余热点，按 profile 数据排序）
+
+1. `findSellPoints` 自身循环体（优化后 tottime 仍 ~45ms/bar·profiled）：一卖/二卖
+   候选对全笔线性遍历，可按上级笔时间段 bisect 取窗（Fix 4 已做 2 买侧）；
+2. `biMacdMetrics`/`isBiDiverge`（23+26s·profiled）：背驰判定的 MACD 窗口查询
+   量 inherent（第三批已二分化），需按 (bi对) 记忆化或增量维护才能再降；
+3. `anchorFirstSell`（18.5s·profiled）：上级笔端点线性扫，右锚点沿笔列表单调 →
+   可二分；`_findIndex` 类2买/类2卖去重（11.8s·profiled）可换 (type,time) 集合；
+4. 结构性：fib 对 fine 周期每拍全量重算（末笔延伸即指纹变）——如需再量级提速，
+   须做 find* 的笔前缀冻结/尾部增量（一致性风险最高，须单独 SPEC）。
