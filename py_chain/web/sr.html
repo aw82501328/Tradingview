@@ -106,12 +106,13 @@ tr.edit-sub:hover td{background:#1a2030}
 <div class="statusline">支阻位（系统密集区/人工输入，逐周期二选一）+ 叠加层（黄金分割/BOLL，开关即叠加）· 不合并各周期独立 · 人工位全部画出 ·
   <b id="occupy"></b></div>
 
+<!-- 单网格两列：左=数据+显示/绘图+周期与参数，右=计算设置（列内紧挨无空隙） -->
 <div class="grid">
 <!-- ============ 左列 ============ -->
 <div>
-  <!-- ① 数据 -->
+  <!-- 数据 -->
   <div class="card">
-    <h2>① 数据</h2>
+    <h2>数据</h2>
     <div class="row"><label>品种</label><input type="text" id="cfg-symbol" value="OANDA:XAUUSD">
       <label>起始</label><input type="text" id="cfg-from" value="2026-07-02"></div>
     <div class="row">
@@ -121,9 +122,35 @@ tr.edit-sub:hover td{background:#1a2030}
     <div class="merge-tip" id="cache-note"></div>
   </div>
 
-  <!-- ② 级别矩阵 -->
+  <!-- 显示/绘图 + 预设（紧挨数据下方） -->
   <div class="card">
-    <h2>② 周期与参数 <span class="hint">勾选参与计算 · 子行随来源切换：系统=本周期参数 / 人工=价位输入</span></h2>
+    <h2>显示 / 绘图</h2>
+    <div class="row">
+      <label>线色</label><input type="color" id="d-color" value="#787b86">
+      <label class="chk small"><input type="checkbox" id="d-text" checked> 文本标注</label>
+      <label class="chk small"><input type="checkbox" id="d-raw"> 调试:叠加RAW原始线</label>
+    </div>
+    <div class="row">
+      <button class="primary" id="btn-draw">画图</button>
+      <button class="danger" id="btn-clear">清除本模块线</button>
+    </div>
+    <div class="merge-tip" id="raw-note" style="display:none;">叠加 RAW· 本周期原始候选线：每张图只显示 本图周期 的全部候选（密集区黄 / 黄金分割蓝 / BOLL 青），与灰线同框对照；只画距现价 ≤ 距离上限×本周期ATR 的候选。</div>
+    <div class="row" style="border-top:1px solid var(--border);margin-top:8px;padding-top:7px">
+      <span style="color:#fff;font-size:12px">预设</span>
+      <input type="text" id="preset-name" placeholder="新预设名称" maxlength="40">
+      <button class="sm primary" id="btn-preset-save">新建</button>
+    </div>
+    <div class="merge-tip">点名称载入 · 行内「保存」=用当前参数改写该项</div>
+    <input type="file" id="preset-excel-file" accept=".xlsx" hidden>
+    <div id="preset-excel-status" class="merge-tip" role="status"></div>
+    <button type="button" class="sm" id="preset-excel-new">导入 Excel 为新预设</button>
+    <div class="plist" id="preset-list"></div>
+    <div class="merge-tip" id="loaded-badge"></div>
+  </div>
+
+  <!-- 级别矩阵 -->
+  <div class="card">
+    <h2>周期与参数 <span class="hint">勾选参与计算 · 子行随来源切换：系统=本周期参数 / 人工=价位输入</span></h2>
     <table id="tbl-levels">
       <thead><tr><th></th><th>周期</th><th>ATR</th><th>支阻来源</th></tr></thead>
       <tbody>
@@ -191,32 +218,6 @@ tr.edit-sub:hover td{background:#1a2030}
     </table>
     <div class="merge-tip">显示周期 L 的候选池 = 仅 L 自身周期的候选（各周期独立，不继承其它周期线）。1W/1D 别名与 30S 不入引擎（UI 已归一化为 W/D）。不同周期可混合来源（如 60 人工 + 15 系统）。</div>
   </div>
-
-  <!-- ③ 显示/绘图 + 预设（原⑤，类型开关并入通用计算设置后重编号） -->
-  <div class="card">
-    <h2>③ 显示 / 绘图</h2>
-    <div class="row">
-      <label>线色</label><input type="color" id="d-color" value="#787b86">
-      <label class="chk small"><input type="checkbox" id="d-text" checked> 文本标注</label>
-      <label class="chk small"><input type="checkbox" id="d-raw"> 调试:叠加RAW原始线</label>
-    </div>
-    <div class="row">
-      <button class="primary" id="btn-draw">画图</button>
-      <button class="danger" id="btn-clear">清除本模块线</button>
-    </div>
-    <div class="merge-tip" id="raw-note" style="display:none;">叠加 RAW· 本周期原始候选线：每张图只显示 本图周期 的全部候选（密集区黄 / 黄金分割蓝 / BOLL 青），与灰线同框对照；只画距现价 ≤ 距离上限×本周期ATR 的候选。</div>
-    <div class="row" style="border-top:1px solid var(--border);margin-top:8px;padding-top:7px">
-      <span style="color:#fff;font-size:12px">预设</span>
-      <input type="text" id="preset-name" placeholder="新预设名称" maxlength="40">
-      <button class="sm primary" id="btn-preset-save">新建</button>
-    </div>
-    <div class="merge-tip">点名称载入 · 行内「保存」=用当前参数改写该项</div>
-    <input type="file" id="preset-excel-file" accept=".xlsx" hidden>
-    <div id="preset-excel-status" class="merge-tip" role="status"></div>
-    <button type="button" class="sm" id="preset-excel-new">导入 Excel 为新预设</button>
-    <div class="plist" id="preset-list"></div>
-    <div class="merge-tip" id="loaded-badge"></div>
-  </div>
 </div>
 
 <!-- ============ 右列 ============ -->
@@ -234,17 +235,17 @@ tr.edit-sub:hover td{background:#1a2030}
     <div class="banner" id="banner">⚠ 参数已改动，<b>结果表与图上仍为上次参数</b> —— 请「重算」后再画图。</div>
   </div>
 
-  <!-- ②B 通用计算设置（原④；类型开关已并入：勾选=启用该组件，fib/BOLL 勾选即叠加） -->
+  <!-- 通用计算设置（类型开关已并入：勾选=启用该组件，fib/BOLL 勾选即叠加） -->
   <div class="card sec">
     <h2>通用计算设置 <span class="hint">按生成 → 截断 → 选取；组件前打勾启用；改后重算生效</span></h2>
 
     <fieldset class="step">
       <legend><span class="stepn">1</span> 生成候选</legend>
-      <div class="merge-tip">支阻位来源在②逐周期选择（系统计算=密集区，恒开启；人工输入=手动价位）。fib / BOLL 为<b>叠加层</b>——组件前打勾即叠加，独立于支阻位来源，人工周期照样叠加；密集区才有「截断」子步，fib / BOLL / 手动位不进截断。</div>
+      <div class="merge-tip">支阻位来源在「周期与参数」逐周期选择（系统计算=密集区，恒开启；人工输入=手动价位）。fib / BOLL 为<b>叠加层</b>——组件前打勾即叠加，独立于支阻位来源，人工周期照样叠加；密集区才有「截断」子步，fib / BOLL / 手动位不进截断。</div>
 
       <fieldset class="nest" id="box-cluster">
         <legend>密集区 cluster <span class="tag">支阻位·系统计算</span></legend>
-        <div class="merge-tip">识别参数在②「周期与参数」子行按周期编辑；子类开关：</div>
+        <div class="merge-tip">识别参数在「周期与参数」子行按周期编辑；子类开关：</div>
         <div class="row" style="margin-left:6px">
           <label class="chk small"><input type="checkbox" id="t-flip" checked> 强互换 flip（R2S / S2R）</label>
           <label class="chk small"><input type="checkbox" id="t-recent" checked> 近期极值 recent（RES / SUP）</label>
@@ -291,9 +292,9 @@ tr.edit-sub:hover td{background:#1a2030}
     </fieldset>
   </div>
 
-  <!-- ④ 结果明细表（原⑥） -->
+  <!-- 结果明细表 -->
   <div class="card">
-    <h2>④ 结果明细表
+    <h2>结果明细表
       <span style="float:right;font-weight:400;font-size:12px">
         <span class="muted">过滤:</span>
         <select id="f-family" style="width:92px"><option value="">全部来源</option><option value="cluster">密集区</option><option value="fib">黄金分割</option><option value="boll">BOLL</option><option value="manual">手动位</option></select>
@@ -318,8 +319,8 @@ tr.edit-sub:hover td{background:#1a2030}
   <details class="details">
     <summary>语义速查（生成 / 截断 / 选取）</summary>
     <ul>
-      <li>支阻位来源（②逐周期二选一）= <b>系统计算</b>（密集区：强互换 R2S/S2R 触及≥minTouch 且角色反转或突破 + 近期极值 RES/SUP）或 <b>人工输入</b>（手动价位，type 按现价侧）</li>
-      <li>叠加层（③开关，独立于支阻位来源）= 黄金分割（每方向最新非一类买卖点参照笔×比率，无已形成点走 pending）+ BOLL（每周期最后 <b>一根已收盘K线</b>的 SMA±σ×倍数 三轨，中轨按现价侧）；人工周期照样叠加</li>
+      <li>支阻位来源（「周期与参数」逐周期二选一）= <b>系统计算</b>（密集区：强互换 R2S/S2R 触及≥minTouch 且角色反转或突破 + 近期极值 RES/SUP）或 <b>人工输入</b>（手动价位，type 按现价侧）</li>
+      <li>叠加层（「通用计算设置」开关，独立于支阻位来源）= 黄金分割（每方向最新非一类买卖点参照笔×比率，无已形成点走 pending）+ BOLL（每周期最后 <b>一根已收盘K线</b>的 SMA±σ×倍数 三轨，中轨按现价侧）；人工周期照样叠加</li>
       <li>截断（仅密集区）= 超 maxPerPeriod 按评分留 Top N；评分 = 触及权重×触及 + 经过K线权重×经K线（候选集内 min-max 归一）；fib/boll/manual 豁免</li>
       <li>不合并 = 全部候选逐条进全量候选池（价格=原始识别价，同价位不并条、不做加权平均；手动位与人工/系统支阻位同池）</li>
       <li>选取上图 = 系统周期：距现价最近上/下各 sideCount 条、≤距离上限×本周期ATR；<b>人工周期：输入几条画几条</b>（不受条数/距离限制），叠加层仍就近选取</li>
@@ -461,7 +462,7 @@ function updateButtons() {
 }
 function syncParamDim() {
   // 组件勾选关掉时，通用计算设置内对应子块变淡（仍可改值，改后须重算）；
-  // 密集区恒开启（支阻位来源由②逐周期决定），仅子类开关影响变淡
+  // 密集区恒开启（支阻位来源由「周期与参数」逐周期决定），仅子类开关影响变淡
   const on = id => el(id).checked;
   el('box-cluster').classList.toggle('dim', !on('t-flip') && !on('t-recent'));
   el('box-flip')?.classList.toggle('dim', !on('t-flip'));
@@ -478,7 +479,7 @@ function collectCfg() {
   cfg.minTouchs = {...minTouchsByPeriod};
   Object.assign(cfg, clusterDefaults);
   cfg.clusterParamsByPeriod = cloneJSON(clusterParamsByPeriod);
-  // 密集区恒开启（支阻位来源由②逐周期的 系统计算/人工输入 决定）；fib/boll 为叠加开关
+  // 密集区恒开启（支阻位来源由「周期与参数」逐周期的 系统计算/人工输入 决定）；fib/boll 为叠加开关
   cfg.srTypes = ['cluster'];
   if (el('t-fib').checked) cfg.srTypes.push('fib');
   if (el('t-boll').checked) cfg.srTypes.push('boll');
