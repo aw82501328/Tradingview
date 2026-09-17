@@ -81,7 +81,7 @@ class AnalysisTests(unittest.TestCase):
         self.m.auto = True
         self.m.start()
         self.finish()
-        self.assertEqual(self.calls, ["bi", "points"])
+        self.assertEqual(self.calls, ["bi", "zs", "points"])
         self.assertEqual(self.m.job["state"], "error")
         self.assertFalse(self.m.auto)
         self.assertFalse(self.chart.locked())

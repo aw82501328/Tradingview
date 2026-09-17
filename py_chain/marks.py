@@ -358,7 +358,7 @@ def _clear_single_marks(c):
     return c.evaluate(expr)
 
 
-def draw_single_mark(c, row, colors=None, log=None):
+def draw_single_mark(c, row, colors=None, log=None, purge=True):
     """点击信号行后，在已定位到该行的图表上画单行标记（替换语义）。
 
     画：该行进场箭头 + exits 出场箭头（_draw_chunk 同款视觉，背驰+检测双周期
@@ -374,7 +374,9 @@ def draw_single_mark(c, row, colors=None, log=None):
     @param row    信号行（SignalLog 记录）
     @param colors {'buy','sell','exit','sr'}（可选，缺省 _colors()）
     @param log    日志回调
-    @returns {'drawn': n, 'cleared': n[, 'skipped': 原因]}（各步失败降级不抛出）
+    @param purge  True=画完后删空锚半成品（实时图）；回放态 getPoints() 常为空，
+                  会把刚画上的进场箭头误删，须传 False
+    @returns {'drawn': n, 'cleared': n[, 'skipped'/'error': 原因]}（各步失败降级不抛出）
     """
     log = log or (lambda *a, **k: None)
     colors = _colors(colors)
@@ -389,13 +391,26 @@ def draw_single_mark(c, row, colors=None, log=None):
     if row.get("price") is None or not row.get("direction") or not row.get("time"):
         return {"drawn": 0, "cleared": cleared, "skipped": "缺价格/方向/时间"}
     ids = []
+    draw_err = None
     # 进场 + 出场箭头（与批量标记同款视觉，双周期可见，id 记入单行键）
     try:
         r = _draw_chunk(c, [row], colors, prefix=SINGLE_PREFIX,
                         ids_key=SINGLE_IDS_KEY, dual_tf=True)
         ids += list(r) if isinstance(r, list) else []
     except Exception as e:
+        draw_err = str(e)
         log(f"画单行进出场箭头失败：{e}")
+    # 回放态个别版本会因 intervalsVisibilities 创建失败（返回空 id）——去掉可见性再试一次
+    if not ids:
+        try:
+            r = _draw_chunk(c, [row], colors, prefix=SINGLE_PREFIX,
+                            ids_key=SINGLE_IDS_KEY, dual_tf=True, with_iv=False)
+            ids += list(r) if isinstance(r, list) else []
+            if ids:
+                draw_err = None
+        except Exception as e:
+            draw_err = draw_err or str(e)
+            log(f"画单行进出场箭头（无周期限制）失败：{e}")
     # 近支阻全宽横线（nearSr 缺失/非法则跳过）
     near_sr = row.get("nearSr")
     try:
@@ -412,16 +427,23 @@ def draw_single_mark(c, row, colors=None, log=None):
             log(f"画单行支阻横线失败：{e}")
     # 清理锚点为空的半成品（当前周期=markRes，在 IV 并集内，满足 purge 的周期约束）
     n_broken = 0
-    try:
-        n_broken = int(_purge_broken_marks(c, ids) or 0)
-    except Exception:
-        n_broken = 0
-    if n_broken:
-        log(f"清理锚点异常的单行标记 {n_broken} 个")
-    return {"drawn": max(0, len(ids) - n_broken), "cleared": cleared}
+    if purge:
+        try:
+            n_broken = int(_purge_broken_marks(c, ids) or 0)
+        except Exception:
+            n_broken = 0
+        if n_broken:
+            log(f"清理锚点异常的单行标记 {n_broken} 个")
+    out = {"drawn": max(0, len(ids) - n_broken), "cleared": cleared}
+    if out["drawn"] == 0 and draw_err:
+        out["error"] = draw_err
+    elif out["drawn"] == 0 and n_broken:
+        out["error"] = f"锚点未挂上K线（已清 {n_broken} 个）"
+    return out
 
 
-def _draw_chunk(c, chunk, colors, prefix=MARK_PREFIX, ids_key=IDS_KEY, dual_tf=False):
+def _draw_chunk(c, chunk, colors, prefix=MARK_PREFIX, ids_key=IDS_KEY, dual_tf=False,
+                with_iv=True):
     """一次 CDP 执行画出一批箭头 + 出场标记，并把新 shape id 累积记录到 localStorage。
 
     @param colors  {'buy': '#..', 'sell': '#..', 'exit': '#..'} 做多/做空/出场颜色
@@ -429,6 +451,7 @@ def _draw_chunk(c, chunk, colors, prefix=MARK_PREFIX, ids_key=IDS_KEY, dual_tf=F
     @param ids_key localStorage 记录 shape id 的键（批量/单行隔离）
     @param dual_tf True = 可见性取 [markRes, periodX] 并集（背驰+检测双周期显示）；
                    False = 仅 markRes（旧行为）
+    @param with_iv False = 不写 intervalsVisibilities（回放态个别版本会因此创建失败）
     @returns 新画的 shape id 列表
     """
     calls = []
@@ -436,14 +459,17 @@ def _draw_chunk(c, chunk, colors, prefix=MARK_PREFIX, ids_key=IDS_KEY, dual_tf=F
         shape = "arrow_up" if s["direction"] == "long" else "arrow_down"
         color = colors["buy"] if s["direction"] == "long" else colors["sell"]
         label = "BUY" if s["direction"] == "long" else "SELL"
-        text = f"{prefix}{label} {s['price']:.2f}"
+        text = f"{prefix}{label} {float(s['price']):.2f}"
         # 箭头可见性：背驰周期（markRes）+ 检测周期（periodX）并集；无法识别时保持默认不限
-        iv = _interval_visibility_js(
-            [s.get("markRes"), s.get("periodX")] if dual_tf else s.get("markRes"))
+        iv = None
+        if with_iv:
+            iv = _interval_visibility_js(
+                [s.get("markRes"), s.get("periodX")] if dual_tf else s.get("markRes"))
         iv_part = f", intervalsVisibilities: {iv}" if iv else ""
+        t, p = int(s["time"]), float(s["price"])
         calls.append(
             "chart.createShape("
-            f"{{ time: {s['time']}, price: {s['price']} }}, "
+            f"{{ time: {t}, price: {p} }}, "
             f"{{ shape: '{shape}', text: '{text}', lock: false, "
             f"color: '{color}', textColor: '{color}', "
             # arrow_up/arrow_down 工具的箭头图标颜色是独立字段 arrowColor，
@@ -460,10 +486,11 @@ def _draw_chunk(c, chunk, colors, prefix=MARK_PREFIX, ids_key=IDS_KEY, dual_tf=F
             et = ev.get("type")
             if et not in EXIT_SHAPES or ev.get("price") is None or ev.get("time") is None:
                 continue
-            ex_text = f"{prefix}{EXIT_NAMES[et]} {ev['price']:.2f}"
+            ex_text = f"{prefix}{EXIT_NAMES[et]} {float(ev['price']):.2f}"
+            xt, xp = int(ev["time"]), float(ev["price"])
             calls.append(
                 "chart.createShape("
-                f"{{ time: {ev['time']}, price: {ev['price']} }}, "
+                f"{{ time: {xt}, price: {xp} }}, "
                 f"{{ shape: '{exit_shape}', text: '{ex_text}', lock: false, "
                 f"color: '{colors['exit']}', textColor: '{colors['exit']}', "
                 # 箭头图标颜色独立字段 arrowColor（同进场箭头）

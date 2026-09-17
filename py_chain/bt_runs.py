@@ -188,9 +188,12 @@ def build_cfg_summary(cfg):
 
 
 def default_name(cfg):
-    """默认方案名：品种 + 起始日期 + 保存时刻（月日-时分）。"""
+    """默认方案名：品种 + 起始日期（→结束日期，有则） + 保存时刻（月日-时分）。"""
     symbol = str(cfg.get("symbol") or "?")
     from_s = str(cfg.get("from") or "").strip()
+    to_s = str(cfg.get("to") or "").strip()
+    if to_s:
+        from_s = f"{from_s}→{to_s}"
     return f"{symbol} {from_s}·{time.strftime('%m%d-%H%M')}".strip()
 
 

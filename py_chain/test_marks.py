@@ -189,11 +189,22 @@ class DrawSingleMarkTests(unittest.TestCase):
         self.assertEqual(out, {'drawn': 1, 'cleared': 0})
         self.assertEqual(client.evaluate.call_count, 3)
 
+    def test_purge_false_keeps_shapes_without_broken_check(self):
+        """回放态 getPoints() 常为空，不能按空锚清掉刚画的标记。"""
+        client = Mock()
+        client.evaluate.side_effect = [1, ['a1', 'a2'], {'ids': ['s1'], 'skipped': 0}]
+        out = marks.draw_single_mark(client, dict(self.BASE), purge=False)
+        self.assertEqual(out, {'drawn': 3, 'cleared': 1})
+        self.assertEqual(client.evaluate.call_count, 3)
+        exprs = [call.args[0] for call in client.evaluate.call_args_list]
+        self.assertFalse(any('getPoints' in e for e in exprs))
+
     def test_draw_failures_degrade_not_raise(self):
         client = Mock()
         client.evaluate.side_effect = RuntimeError('cdp down')
         out = marks.draw_single_mark(client, dict(self.BASE))
-        self.assertEqual(out, {'drawn': 0, 'cleared': 0})
+        self.assertEqual(out['drawn'], 0)
+        self.assertEqual(out['cleared'], 0)
 
 
 class PrefixKeyInvariantTests(unittest.TestCase):

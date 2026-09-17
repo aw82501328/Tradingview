@@ -165,8 +165,8 @@ const FIB_LEVELS = (() => {
 // 黄金分割只取「非一类买卖点」（2买/类2买/3买、2卖/类2卖/3卖）。
 // 真1买/真1卖是 mark-buy-sell 层 mergeNearFirstSecond 的合并标注，
 // findBuyPoints/findSellPoints 原始输出不存在，白名单过滤即天然排除一类。
-const FIB_BUY_TYPES = ["2买", "类2买", "3买"];
-const FIB_SELL_TYPES = ["2卖", "类2卖", "3卖"];
+const FIB_BUY_TYPES = ["2买", "类2买", "3买", "类3买"];
+const FIB_SELL_TYPES = ["2卖", "类2卖", "3卖", "类3卖"];
 // 上级周期映射（现算买卖点的区间套用；D 及未收录周期无上级，走结构底分支）。
 // 用固定映射而非 PERIODS 前一元素：--periods 可传子集，而 bis 文件含全部周期。
 const UPPER_OF = { "240": "D", "60": "240", "15": "60", "3": "15" };

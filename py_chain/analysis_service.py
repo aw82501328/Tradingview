@@ -18,8 +18,8 @@ from . import sr_service, sr_draw, param_center
 from .monitor import replay_started
 
 ROOT = Path(__file__).resolve().parent.parent
-ORDER = ["bi", "points", "zs", "sr", "plan", "entry"]
-DEPENDENCIES = {"bi": [], "points": ["bi"], "zs": ["bi"], "sr": ["bi"],
+ORDER = ["bi", "zs", "points", "sr", "plan", "entry"]
+DEPENDENCIES = {"bi": [], "zs": ["bi"], "points": ["bi", "zs"], "sr": ["bi"],
                 "plan": ["bi"], "entry": ["bi", "sr", "plan"]}
 SCRIPTS = {"bi": ("chan-bi", "chan_bi"), "points": ("mark-buy-sell", "mark_buy_sell"),
            "zs": ("chan-zs", "chan_zs"), "plan": ("trading-plan", "trading_plan"),
@@ -341,21 +341,32 @@ class AnalysisManager:
                "CHAN_PORT": str(cfg["port"]), "CHAN_REPORT": str(report), "CHAN_CACHE_DIR": str(folder)}
         command = [shutil.which("node") or "node", "--require", str(ROOT / "py_chain" / "analysis_bridge.cjs"),
                    str(ROOT / ".cursor" / "skills" / skill / "scripts" / (script + ".js")), "--from=" + cfg["from"]]
-        # 参数中心（参数配置页）：--chan-cfg 透传缠论核心 CHAN_CFG（JS 子进程无法共享
-        # 本进程全局 override，未知键在 JS 侧闲置不报错）；各模块专属参数按 stage 追加
+        # 参数中心（参数配置页）：--chan-cfg 透传拼合 CHAN_CFG（画笔/买卖点/进出场；
+        # JS 子进程无法共享本进程全局 override，未知键在 JS 侧闲置不报错）；各模块专属参数按 stage 追加
         pm = param_center.effective_all()
-        command.append("--chan-cfg=" + json.dumps(pm["chan"], separators=(",", ":")))
+        command.append("--chan-cfg=" + json.dumps(param_center.chan_cfg_effective(),
+                                                  separators=(",", ":")))
         if cfg["with30s"] and stage in ("bi", "entry"):
             command.append("--with-30s")
         if stage == "points":
             command.append("--keep=" + str(cfg["keep"]))
             command.append("--nearp=" + str(pm["points"]["nearAtrRatio"]))
+            command.append("--class2-zs-tol=" + str(pm["points"].get("class2ZsTol", 0)))
+            command.append("--third-zs-tol=" + str(pm["points"].get("thirdZsTol", 0)))
+        if stage == "zs":
+            zs_periods, zs_keep = param_center.zs_draw_spec(pm["zs"])
+            # 空列表也传参：JS 清旧中枢并落盘空结果（全部关闭时图上不残留）
+            command.append("--zs-periods=" + (",".join(zs_periods) if zs_periods else ""))
+            command.append("--zs-keep=" + ",".join(f"{r}:{n}" for r, n in zs_keep.items()))
         if stage == "plan":
             command.append("--range-bar-n=" + str(pm["plan"]["rangeBarN"]))
             command.append("--range-bi-n=" + str(pm["plan"]["rangeBiN"]))
             command.append("--range-k-mult=" + str(pm["plan"]["rangeKMult"]))
             command.append("--range-bi-mult=" + str(pm["plan"]["rangeBiMult"]))
             command.append("--range-break-mult=" + str(pm["plan"]["rangeBreakMult"]))
+            # 两类震荡开关：True→1 / False→0（JS 侧 "0" 为关，缺省开）
+            command.append("--range-bound-on=" + ("1" if pm["plan"].get("rangeBoundOn", True) else "0"))
+            command.append("--range-zs-on=" + ("1" if pm["plan"].get("rangeZsOn", True) else "0"))
         if stage == "entry":
             command.append("--near=" + str(cfg["near"]))
             command.append("--slip-stop=" + str(cfg.get("slip_stop", 3.0)))

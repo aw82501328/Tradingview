@@ -222,7 +222,7 @@ def main(argv=None):
     from . import param_center
     from .chan_core import apply_cfg
     pm = param_center.effective_all()
-    apply_cfg(pm["chan"])
+    apply_cfg(param_center.chan_cfg_effective())
     ep = pm["entry"]
     lots = args.lots if args.lots is not None else ep["lots"]
     slip_stop = args.slip_stop if args.slip_stop is not None else ep["slip_stop"]

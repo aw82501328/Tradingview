@@ -12,7 +12,8 @@
  * 参数：
  *   --from=YYYY-MM-DD   起始日期（应与画笔 chan-bi 一致）
  *   --periods=...       周期列表（逗号分隔，默认 D,240,60,15,3）
- *   --zs-periods=...    要画中枢的周期（逗号分隔，默认 60）
+ *   --zs-periods=...    要画中枢的周期（逗号分隔，默认 60；空=全部不画但仍清旧图）
+ *   --zs-keep=60:10,240:5  各周期只保留最近 N 个中枢（省略则该周期全画）
  *   --dry               只计算不绘图
  *   --debug             打印调试信息
  */
@@ -52,9 +53,24 @@ if (FROM_DATE) {
 // 周期列表（从大到小），用于上级笔归属关系
 const PERIODS = getStrArg("periods", "D,240,60,15,3")
   .split(",").map(s => s.trim()).filter(Boolean);
-// 要画中枢的周期（默认仅 1小时 60）
-const ZS_PERIODS = (getStrArg("zs-periods", "60") || "60")
+// 要画中枢的周期（默认仅 1小时 60；空字符串=不画任何周期）
+const ZS_PERIODS = (getStrArg("zs-periods", "60") || "")
   .split(",").map(s => s.trim()).filter(Boolean);
+// 各周期保留最近个数：形如 60:10,240:5；未列出的周期画全部
+const ZS_KEEP = (() => {
+  const map = {};
+  const raw = getStrArg("zs-keep", "") || "";
+  for (const part of raw.split(",")) {
+    const s = part.trim();
+    if (!s) continue;
+    const i = s.indexOf(":");
+    if (i <= 0) continue;
+    const res = s.slice(0, i).trim();
+    const n = parseInt(s.slice(i + 1).trim(), 10);
+    if (res && Number.isFinite(n) && n >= 1) map[res] = n;
+  }
+  return map;
+})();
 // 中枢水平边缘左右各外扩的K线根数（用户规则：进入笔终点-5根K ~ 离开笔起点+5根K）
 const ZS_EDGE_PAD_BARS = 5;
 
@@ -369,15 +385,10 @@ function onlyThisInterval(res) {
     // ============================================================
     // 主流程：按周期计算中枢并绘制
     // 中枢在所有周期笔数据（chan-bi 落盘）基础上统一计算，计算过程不修改任何笔。
-    // 只对 --zs-periods 指定的周期绘制（默认仅 1小时 60）。
-    // ============================================================
-    const drawZSPeriods = PERIODS.filter(res => ZS_PERIODS.includes(res) && periodBis[res] && periodBis[res].length >= 5);
-    if (drawZSPeriods.length === 0) {
-      console.log("没有需要绘制中枢的周期（检查 --zs-periods 与笔数据是否覆盖）");
-      await client.close();
-      return;
-    }
-    console.log("将绘制中枢周期:", drawZSPeriods.join(", "));
+    // 只对 --zs-periods 指定的周期绘制；先清 PERIODS 内旧中枢，避免关闭周期残留。
+    const clearList = PERIODS.filter(res => periodBis[res]);
+    const drawZSPeriods = PERIODS.filter(res => ZS_PERIODS.includes(res) && periodBis[res] && periodBis[res].length >= 3);
+    console.log("将绘制中枢周期:", drawZSPeriods.length ? drawZSPeriods.join(", ") : "(无)");
 
     // 逐周期计算中枢
     const allZS = {};
@@ -390,10 +401,16 @@ function onlyThisInterval(res) {
       // 计算中枢（分解原则：本级别中枢只能构建在「同一个上级笔」内；
       // barSec = 本周期单根K线时长，中枢水平边缘左右各外扩 5 根K线）
       const barSec = intervalSecOf(res);
-      const zss = buildZSByUpper(lowerBis, upperBis, barSec);
+      let zss = buildZSByUpper(lowerBis, upperBis, barSec);
+      const keepN = ZS_KEEP[res];
+      if (keepN != null && zss.length > keepN) {
+        // 按进入笔终点时间保留最近 N 个
+        zss = zss.slice().sort((a, b) => (a.enterEndTime || a.startTime) - (b.enterEndTime || b.startTime));
+        zss = zss.slice(-keepN);
+      }
       allZS[res] = zss;
       if (zss.length > 0) {
-        console.log(`\n=== 缠论中枢 [周期 ${res}]（分解约束：同一上级笔 ${upperRes} 内，至少5笔；水平边缘=[进入笔终点-5根K, 离开笔起点+5根K]）===`);
+        console.log(`\n=== 缠论中枢 [周期 ${res}]（分解约束：同一上级笔 ${upperRes} 内，至少3笔；水平边缘=[进入笔终点-5根K, 离开笔起点+5根K]${keepN != null ? `；保留最近${keepN}个` : ""}）===`);
         zss.forEach((z, idx) => {
           const exitTag = z.exitTime ? ` 离开笔起点[${toT(z.exitTime)}]` : "";
           const edgeTag = ` 左缘=${toT(z.startTime)} 右缘=${toT(z.endTime)}`;
@@ -431,9 +448,9 @@ function onlyThisInterval(res) {
       return;
     }
 
-    // 绘制阶段：先清除所有旧中枢（各周期源周期），再统一创建（基准周期）
+    // 绘制阶段：先清除 PERIODS 内旧中枢（含已关闭周期），再统一创建
     let currentRes = originalRes;
-    for (const res of drawZSPeriods) {
+    for (const res of clearList) {
       if (res !== currentRes) {
         await ensureResolution(res);
         currentRes = res;

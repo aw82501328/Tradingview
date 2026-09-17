@@ -467,7 +467,7 @@ function buildCard(m) {
       ] },
     ],
     replay: [
-      { k: 'start', label: '回放起点', type: 'text', def: '2026-08-01' },
+      { k: 'start', label: '回放起点', type: 'date', def: '2026-08-01' },
       { k: 'speed', label: '速度 ms/bar', type: 'text', def: '1000' },
       { k: 'hold', label: '信号停留 s', type: 'text', def: '2' },
     ],
@@ -488,13 +488,14 @@ function buildCard(m) {
   rows.push(`<div class="row">
     <div class="field"><label>品种</label><input data-cfg="symbol" value="OANDA:XAUUSD"></div>
     ${periodsHtml}
-    <div class="field"><label>${m.id === 'backtest' ? '起始日期（开始交易）' : '起始日期'}</label><input data-cfg="from" value="2026-07-02"></div>
+    <div class="field"><label>${m.id === 'backtest' ? '起始日期（开始交易）' : '起始日期'}</label><input type="date" data-cfg="from" value="2026-07-02"></div>
+    ${m.id === 'backtest' ? '<div class="field"><label>结束日期（空=到最新）</label><input type="date" data-cfg="to"></div>' : ''}
   </div>`);
   const extraHtml = (extras[m.id] || []).map(f => {
     const ctrl = (f.type === 'select')
       ? `<select data-cfg="${f.k}">${(f.options || []).map(([v, t]) =>
           `<option value="${v}"${v === f.def ? ' selected' : ''}>${t}</option>`).join('')}</select>`
-      : `<input data-cfg="${f.k}" value="${f.def}">`;
+      : `<input type="${f.type || 'text'}" data-cfg="${f.k}" value="${f.def}">`;
     return `<div class="field"><label>${f.label}</label>${ctrl}</div>`;
   }).join('');
   // 回测卡片：数据源三选，默认 store=本地SQLite存储（无需 TradingView）；回放/实时沿用缓存开关
@@ -511,7 +512,7 @@ function buildCard(m) {
   </div>`);
   // 手数/滑点/近支阻/背驰进场/够笔等算法参数已移至「参数配置」页分模块统一管理（2026-09-15 去重）
   if (m.id === 'backtest') {
-    rows.push(`<div class="row" style="font-size:11px;color:var(--muted);">手数、止损/保本滑点、近支阻阈值、缠论核心阈值（含背驰进场/检测周期够笔）等算法参数在「参数配置」页统一设置，启动时读取生效；历史方案对比表仍显示各方案保存时的取值。</div>`);
+    rows.push(`<div class="row" style="font-size:11px;color:var(--muted);">手数、止损/保本滑点、近支阻阈值、画笔/买卖点/进出场算法阈值（含背驰进场/检测周期够笔）等在「参数配置」页统一设置，启动时读取生效；历史方案对比表仍显示各方案保存时的取值。</div>`);
   }
   return `
   <div class="card" id="card-${m.id}">
@@ -1041,7 +1042,8 @@ function finishLocate(job) {
     const markTxt = mk?.error ? `（标记未画：${mk.error}）`
       : mk?.skipped ? `（${mk.skipped}，不画标记）`
       : mk ? `并标记 ${mk.drawn} 个` : '';
-    const msg = `${source === 'detail' ? `#${btDetailLabelOf(id)}` : locateLabel(mode, id)} 已定位${markTxt} · ${job.result.symbol} · ${job.result.markRes} · ${fmtTime(job.result.time)}`;
+    const replayTxt = job.result.replay ? '（K线回放）' : '';
+    const msg = `${source === 'detail' ? `#${btDetailLabelOf(id)}` : locateLabel(mode, id)} 已定位${replayTxt}${markTxt} · ${job.result.symbol} · ${job.result.markRes} · ${fmtTime(job.result.time)}`;
     if (source === 'detail') setBtDetailLocateMsg(msg);
     else locateMessages[mode] = msg;
   } else {
@@ -1092,7 +1094,7 @@ async function locateRow(id) {
   }
   const pending = {mode,id};
   locatePending = pending;
-  locateMessages[mode] = `${locateLabel(mode, id)} 定位并标记中…（历史数据加载最多等待360秒）`;
+  locateMessages[mode] = `${locateLabel(mode, id)} 定位并标记中…（实时历史不够时会用K线回放跳转，最多等待360秒）`;
   renderTable();
   updateMarkButtons();
   try {
@@ -1331,14 +1333,16 @@ function updateBtSaveButton() {
   btn.disabled = !['done', 'stopped'].includes(st) || !sigRows.some(r => r.mode === 'backtest');
 }
 
-// 表单默认名与服务端 default_name 同式：品种 + 起始日期 + 保存时刻
+// 表单默认名与服务端 default_name 同式：品种 + 起始日期（→结束日期，有则） + 保存时刻
 function btDefaultName() {
   const card = el('card-backtest');
   const sym = card.querySelector('[data-cfg="symbol"]')?.value || '';
   const from = card.querySelector('[data-cfg="from"]')?.value || '';
+  const to = card.querySelector('[data-cfg="to"]')?.value || '';
   const p = n => String(n).padStart(2, '0');
   const d = new Date();
-  return `${sym} ${from}·${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+  const range = to ? `${from}→${to}` : from;
+  return `${sym} ${range}·${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
 }
 
 async function saveBtRun() {
@@ -1459,15 +1463,16 @@ const BT_METRICS = [
   ['同向过滤', s => s.cnt_filtered ?? '-'],
 ];
 // 参数对比展示顺序与汉化（键为保存的规范化 cfg 字段名）
-const BT_CFG_KEYS = ['symbol', 'from', 'periods', 'data_source', 'lead_days', 'warmup', 'lots',
+const BT_CFG_KEYS = ['symbol', 'from', 'to', 'periods', 'data_source', 'lead_days', 'warmup', 'lots',
                      'slip_stop', 'slip_fallback', 'slip_be', 'near', 'sr_preset',
                      'diverge_confirm', 'expect_bi', 'with_30s'];
-const BT_CFG_LABELS = { symbol: '品种', from: '起始日期', periods: '周期', data_source: '数据源',
+const BT_CFG_LABELS = { symbol: '品种', from: '起始日期', to: '结束日期', periods: '周期', data_source: '数据源',
                         lead_days: '预热提前(天)', warmup: '预热根数', lots: '手数', slip_stop: '止损滑点', slip_fallback: '兜底止损滑点',
                         slip_be: '保本滑点', near: '近支阻阈值', sr_preset: '支阻预设', diverge_confirm: '背驰进场', expect_bi: '检测周期够笔', with_30s: '30秒级别' };
 function btCfgVal(k, v) {
   if (k === 'periods') return Array.isArray(v) ? v.join('+') : (v ?? '—');
   if (k === 'data_source') return { store: '本地数据存储', live: '实时拉取', cache: '本地缓存' }[v] || v || '—';
+  if (k === 'to') return v || '到最新';
   if (typeof v === 'boolean') return v ? '开' : '关';
   return v ?? '—';
 }
@@ -1646,7 +1651,7 @@ async function locateDetailRow(id) {
   const mode = row.mode === 'replay' || row.mode === 'live' ? row.mode : 'backtest';
   const pending = { mode, id, source: 'detail' };
   locatePending = pending;
-  setBtDetailLocateMsg(`#${btDetailLabelOf(id)} 定位并标记中…（历史数据加载最多等待360秒）`);
+  setBtDetailLocateMsg(`#${btDetailLabelOf(id)} 定位并标记中…（实时历史不够时会用K线回放跳转，最多等待360秒）`);
   renderBtDetailRows();
   updateMarkButtons();
   try {
@@ -1769,6 +1774,8 @@ function loadBtCfg(run) {
   card.querySelectorAll('[data-ms-opt]').forEach(c => { c.checked = periods.includes(c.value); });
   syncMs(card.querySelector('.ms'));
   card.querySelector('[data-cfg="with_30s"]').value = String(periods.includes('30S'));
+  // 结束日期显式清空/回填：旧方案 cfg 无 to 键，通用循环会跳过——不清空则上次手填值残留、悄悄截断复现回测
+  card.querySelector('[data-cfg="to"]').value = cfg.to || '';
   addLog('backtest', `已载入方案参数：${run.name}（未自动启动，确认后点「启动」）`);
 }
 

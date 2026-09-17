@@ -23,11 +23,13 @@ from .chan_core import (
 
 # 震荡判定参数默认值（参数中心 param_center 的默认值单一来源；cfg 逐键覆盖）
 RANGE_DEFAULTS = {
+    "rangeBoundOn": True,  # ①横盘判定开关（关闭后跳过 isRangeBound）
     "rangeBarN": 40,       # 震荡判定窗口K线数
     "rangeBiN": 4,         # 震荡判定最近笔数
     "rangeKMult": 5.0,     # K线区间阈值（≤5×ATR 判震荡）
     "rangeBiMult": 7.0,    # 笔端点极差阈值（≤7×ATR）
     "rangeBreakMult": 1.0, # 突破跳过：末笔端点越过窗口另一端 >1×ATR 视为突破
+    "rangeZsOn": True,     # ②中枢内判定开关（关闭后跳过未离开中枢+现价在箱内）
 }
 
 
@@ -116,11 +118,11 @@ def strategyOf(res, type_, reason, label, cls):
         return dict(base, direction="空头空", strategy="等待反弹后做2卖")
     if type_ == "1买":
         return dict(base, direction="多头多", strategy="等待回调后做2买")
-    if type_ in ("2买", "类2买", "3买"):
+    if type_ in ("2买", "类2买", "3买", "类3买"):
         if cls == "过左高不背驰":
             return dict(base, direction="多头多", strategy="等待回调后的新买点")
         return dict(base, direction="多头空", strategy="等待高点附近的一卖")
-    if type_ in ("2卖", "类2卖", "3卖"):
+    if type_ in ("2卖", "类2卖", "3卖", "类3卖"):
         if cls == "过左低不背驰":
             return dict(base, direction="空头空", strategy="等待反弹后的新卖点")
         return dict(base, direction="空头多", strategy="等待低点附近的一买")
@@ -189,17 +191,21 @@ def classifySecond(bis, macdArr, p):
 def _rangeVerdict(bis, bars, atr, upperBis, lastPrice, barSec, range_cfg):
     """A/B 两支震荡判定（原 predictPlan 1/1b 抽取；本周期自身判定与参考周期 regime 复用）。
     @returns 震荡观望行 dict（direction/strategy/reason/label）或 None（非震荡）。"""
-    # A 支：isRangeBound 横盘判定（range_cfg 来自参数中心逐键覆盖）
-    rb = isRangeBound(bis, bars, atr, range_cfg)
-    if rb and rb["range"]:
-        reason = (f"最近 {rb['rangeBarN']} 根K线区间 {rb['kSpan']:.2f}（{rb['kAtr']:.1f}×ATR）"
-                  + (f"，笔端点区间 {rb['biSpan']:.2f}（{rb['biAtr']:.1f}×ATR），涨跌交替无明确方向"
-                     if rb["winBiCount"] > 0 else "，窗口内无笔")
-                  + "，判定为震荡整理")
-        return {"direction": "观望", "strategy": "震荡整理，观望等待方向选择",
-                "reason": reason, "label": "震荡观望"}
+    cfg = range_cfg or RANGE_DEFAULTS
+    # A 支：isRangeBound 横盘判定（range_cfg 来自参数中心逐键覆盖；rangeBoundOn 关闭则跳过）
+    if cfg.get("rangeBoundOn", RANGE_DEFAULTS["rangeBoundOn"]):
+        rb = isRangeBound(bis, bars, atr, cfg)
+        if rb and rb["range"]:
+            reason = (f"最近 {rb['rangeBarN']} 根K线区间 {rb['kSpan']:.2f}（{rb['kAtr']:.1f}×ATR）"
+                      + (f"，笔端点区间 {rb['biSpan']:.2f}（{rb['biAtr']:.1f}×ATR），涨跌交替无明确方向"
+                         if rb["winBiCount"] > 0 else "，窗口内无笔")
+                      + "，判定为震荡整理")
+            return {"direction": "观望", "strategy": "震荡整理，观望等待方向选择",
+                    "reason": reason, "label": "震荡观望"}
 
-    # B 支：存在未离开的中枢且当前价在中枢区间内
+    # B 支：存在未离开的中枢且当前价在中枢区间内（rangeZsOn 关闭则跳过）
+    if not cfg.get("rangeZsOn", RANGE_DEFAULTS["rangeZsOn"]):
+        return None
     zss = []
     try:
         if upperBis and len(upperBis) > 0:
@@ -309,7 +315,7 @@ def predictPlan(res, bis, upperBis, macdArr, lastPrice, bars, atr=0, barSec=None
     if lastMatch:
         p = lastMatch["point"]
         reason = f"找到最近买卖点 {p['type']} @ {fmtT(p['time'])} {p['price']:.2f}（最后一笔端点）"
-        cls = classifySecond(bis, macdArr, p) if p["type"] in ("2买", "类2买", "3买", "2卖", "类2卖", "3卖") else "其他"
+        cls = classifySecond(bis, macdArr, p) if p["type"] in ("2买", "类2买", "3买", "类3买", "2卖", "类2卖", "3卖", "类3卖") else "其他"
         out = strategyOf(res, p["type"], reason, f"趋势|{p['type']}", cls)
         out["strategyLabel"] = out["strategy"]
         out["pointDesc"] = f"{p['type']}@{fmtT(p['time'])}({p['price']:.2f})"
@@ -324,7 +330,7 @@ def predictPlan(res, bis, upperBis, macdArr, lastPrice, bars, atr=0, barSec=None
     if prevMatch:
         p = prevMatch["point"]
         reason = f"找到最近买卖点 {p['type']} @ {fmtT(p['time'])} {p['price']:.2f}（向前扫描最近笔端点）"
-        cls = classifySecond(bis, macdArr, p) if p["type"] in ("2买", "类2买", "3买", "2卖", "类2卖", "3卖") else "其他"
+        cls = classifySecond(bis, macdArr, p) if p["type"] in ("2买", "类2买", "3买", "类3买", "2卖", "类2卖", "3卖", "类3卖") else "其他"
         out = strategyOf(res, p["type"], reason, f"趋势|{p['type']}", cls)
         out["strategyLabel"] = out["strategy"]
         out["pointDesc"] = f"{p['type']}@{fmtT(p['time'])}({p['price']:.2f})"
@@ -537,7 +543,7 @@ def trend_direction(res, bis, bars, upperBis, macdArr, tCut=None):
         return fallback
     p = pts[-1]
     t_ = p["type"]
-    is_buy = t_ in ("1买", "2买", "类2买", "3买")
+    is_buy = t_ in ("1买", "2买", "类2买", "3买", "类3买")
     if t_ in ("1买", "1卖"):
         # 1类点须先出现强分型（合并K链与 buildBi 同源；懒计算——仅 1类点需要）
         merged = mergeBars(markWickBars(bars or []))

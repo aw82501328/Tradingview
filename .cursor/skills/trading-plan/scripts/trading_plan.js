@@ -51,11 +51,13 @@ const numArg = (name, def) => {
   return Number.isFinite(v) ? v : def;
 };
 const RANGE_CFG = {
+  rangeBoundOn: getStrArg("range-bound-on", "1") !== "0",
   rangeBarN: Math.round(numArg("range-bar-n", 40)),
   rangeBiN: Math.round(numArg("range-bi-n", 4)),
   rangeKMult: numArg("range-k-mult", 5.0),
   rangeBiMult: numArg("range-bi-mult", 7.0),
   rangeBreakMult: numArg("range-break-mult", 1.0),
+  rangeZsOn: getStrArg("range-zs-on", "1") !== "0",
 };
 // 参数中心（WEB 参数配置页）整体覆盖；未知键在 JS 侧闲置无害
 const CHAN_CFG_JSON = getStrArg("chan-cfg", "");
@@ -174,11 +176,11 @@ function strategyOf(res, type, reason, label, cls) {
   const base = { res, reason, label };
   if (type === "1卖") return { ...base, direction: "空头空", strategy: "等待反弹后做2卖" };
   if (type === "1买") return { ...base, direction: "多头多", strategy: "等待回调后做2买" };
-  if (type === "2买" || type === "类2买" || type === "3买") {
+  if (type === "2买" || type === "类2买" || type === "3买" || type === "类3买") {
     if (cls === "过左高不背驰") return { ...base, direction: "多头多", strategy: "等待回调后的新买点" };
     return { ...base, direction: "多头空", strategy: "等待高点附近的一卖" };
   }
-  if (type === "2卖" || type === "类2卖" || type === "3卖") {
+  if (type === "2卖" || type === "类2卖" || type === "3卖" || type === "类3卖") {
     if (cls === "过左低不背驰") return { ...base, direction: "空头空", strategy: "等待反弹后的新卖点" };
     return { ...base, direction: "空头多", strategy: "等待低点附近的一买" };
   }
@@ -275,37 +277,41 @@ function predictPlan(opts) {
   const empty = { res, direction: "观望", strategy: "数据不足", reason: "笔数量不足，无法判断", label: "数据不足" };
   if (!bis || bis.length < 2) return empty;
 
-  // 1. 震荡优先（A：isRangeBound 横盘判定，RANGE_CFG 来自参数中心/CLI）
-  const rb = isRangeBound(bis, bars, atr, RANGE_CFG);
-  if (rb && rb.range) {
-    const reason = `最近 ${rb.rangeBarN} 根K线区间 ${rb.kSpan.toFixed(2)}（${rb.kAtr.toFixed(1)}×ATR）${rb.winBiCount > 0
-      ? `，笔端点区间 ${rb.biSpan.toFixed(2)}（${rb.biAtr.toFixed(1)}×ATR），涨跌交替无明确方向`
-      : `，窗口内无笔`}，判定为震荡整理`;
-    return { res, direction: "观望", strategy: "震荡整理，观望等待方向选择", reason, label: "震荡观望" };
+  // 1. 震荡优先（A：isRangeBound 横盘判定，RANGE_CFG 来自参数中心/CLI；rangeBoundOn 关闭则跳过）
+  if (RANGE_CFG.rangeBoundOn !== false) {
+    const rb = isRangeBound(bis, bars, atr, RANGE_CFG);
+    if (rb && rb.range) {
+      const reason = `最近 ${rb.rangeBarN} 根K线区间 ${rb.kSpan.toFixed(2)}（${rb.kAtr.toFixed(1)}×ATR）${rb.winBiCount > 0
+        ? `，笔端点区间 ${rb.biSpan.toFixed(2)}（${rb.biAtr.toFixed(1)}×ATR），涨跌交替无明确方向`
+        : `，窗口内无笔`}，判定为震荡整理`;
+      return { res, direction: "观望", strategy: "震荡整理，观望等待方向选择", reason, label: "震荡观望" };
+    }
   }
 
-  // 1b. 震荡判定（B：存在未离开的中枢且当前价在中枢区间内）
+  // 1b. 震荡判定（B：存在未离开的中枢且当前价在中枢区间内；rangeZsOn 关闭则跳过）
   // 中枢必须构建在「上一级别同一笔」内（buildZSByUpper 分解约束，与 chan-zs 中枢 SKILL 一致）：
   // 用上级笔时间区间把本级别笔切段，每段内独立构建中枢，保证中枢不跨上级笔端点。
   // 只取「上一级别最后一笔」对应段的中枢（无上级笔时退化为本级别全量 buildZS）。
-  let zss = [];
-  try {
-    if (upperBis && upperBis.length > 0) {
-      zss = buildZSByUpper(bis, upperBis, barSec);
-    } else {
-      zss = buildZS(bis, barSec);
+  if (RANGE_CFG.rangeZsOn !== false) {
+    let zss = [];
+    try {
+      if (upperBis && upperBis.length > 0) {
+        zss = buildZSByUpper(bis, upperBis, barSec);
+      } else {
+        zss = buildZS(bis, barSec);
+      }
+    } catch (e) {
+      if (DEBUG) console.log(`[计划] ${res} buildZS 失败: ${e.message}`);
     }
-  } catch (e) {
-    if (DEBUG) console.log(`[计划] ${res} buildZS 失败: ${e.message}`);
-  }
-  const upperLast = upperBis && upperBis.length > 0 ? upperBis[upperBis.length - 1] : null;
-  const zsList = upperLast
-    ? zss.filter(z => z.upperStart != null && z.upperStart >= upperLast.startTime - barSec)
-    : zss;
-  const lastZS = zsList[zsList.length - 1];
-  if (lastZS && lastZS.exitTime == null && lastPrice != null && lastPrice >= lastZS.zd && lastPrice <= lastZS.zg) {
-    const reason = `存在未离开中枢 [${lastZS.zd.toFixed(2)}, ${lastZS.zg.toFixed(2)}]（归属上一级别同一笔内），当前价 ${lastPrice.toFixed(2)} 位于中枢内，判定为震荡整理`;
-    return { res, direction: "观望", strategy: "震荡整理（中枢内），观望等待方向选择", reason, label: "震荡观望" };
+    const upperLast = upperBis && upperBis.length > 0 ? upperBis[upperBis.length - 1] : null;
+    const zsList = upperLast
+      ? zss.filter(z => z.upperStart != null && z.upperStart >= upperLast.startTime - barSec)
+      : zss;
+    const lastZS = zsList[zsList.length - 1];
+    if (lastZS && lastZS.exitTime == null && lastPrice != null && lastPrice >= lastZS.zd && lastPrice <= lastZS.zg) {
+      const reason = `存在未离开中枢 [${lastZS.zd.toFixed(2)}, ${lastZS.zg.toFixed(2)}]（归属上一级别同一笔内），当前价 ${lastPrice.toFixed(2)} 位于中枢内，判定为震荡整理`;
+      return { res, direction: "观望", strategy: "震荡整理（中枢内），观望等待方向选择", reason, label: "震荡观望" };
+    }
   }
 
   // 2. 趋势 → 获取本周期买卖点
@@ -342,7 +348,7 @@ function predictPlan(opts) {
   if (lastMatch) {
     const p = lastMatch.point;
     const reason = `找到最近买卖点 ${p.type} @ ${fmtT(p.time)} ${p.price.toFixed(2)}（最后一笔端点）`;
-    const cls = /^(2买|类2买|3买|2卖|类2卖|3卖)$/.test(p.type) ? classifySecond(bis, macdArr, p) : "其他";
+    const cls = /^(2买|类2买|3买|类3买|2卖|类2卖|3卖|类3卖)$/.test(p.type) ? classifySecond(bis, macdArr, p) : "其他";
     const out = strategyOf(res, p.type, reason, `趋势|${p.type}`, cls);
     out.strategyLabel = out.strategy;
     out.pointDesc = `${p.type}@${fmtT(p.time)}(${p.price.toFixed(2)})`;
@@ -360,7 +366,7 @@ function predictPlan(opts) {
   if (prevMatch) {
     const p = prevMatch.point;
     const reason = `找到最近买卖点 ${p.type} @ ${fmtT(p.time)} ${p.price.toFixed(2)}（向前扫描最近笔端点）`;
-    const cls = /^(2买|类2买|3买|2卖|类2卖|3卖)$/.test(p.type) ? classifySecond(bis, macdArr, p) : "其他";
+    const cls = /^(2买|类2买|3买|类3买|2卖|类2卖|3卖|类3卖)$/.test(p.type) ? classifySecond(bis, macdArr, p) : "其他";
     const out = strategyOf(res, p.type, reason, `趋势|${p.type}`, cls);
     out.strategyLabel = out.strategy;
     out.pointDesc = `${p.type}@${fmtT(p.time)}(${p.price.toFixed(2)})`;
@@ -483,7 +489,7 @@ function trendDirection(res, bis, bars, upperBis, macdArr, tCut = null) {
   if (!pts.length) return fallback;
   const p = pts[pts.length - 1];
   const t = p.type;
-  const isBuy = ["1买", "2买", "类2买", "3买"].includes(t);
+  const isBuy = ["1买", "2买", "类2买", "3买", "类3买"].includes(t);
   if (t === "1买" || t === "1卖") {
     // 1类点须先出现强分型（合并K链与 buildBi 同源；懒计算——仅 1类点需要）
     const merged = mergeBars(markWickBars(bars || []));

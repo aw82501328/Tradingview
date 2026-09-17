@@ -815,10 +815,8 @@ function buildZS(bis, barSec) {
       }
       // 笔数 = 构成中枢的笔（i..j-1）+ 离开笔（若有 1 笔）
       const biCount = (exitTime !== null ? 1 : 0) + (j - i);
-      // 新增：至少 5 笔才画中枢（用户要求：只有上下上/下上下 3 笔的不画）。
-      // 3~4 笔的中枢是最基础的重叠结构（单一上下上/下上下及一次延伸），中枢强度不足，
-      // 不输出；仍保留原有扫描/延伸逻辑，仅在输出时过滤。跳过这些笔继续向后扫描。
-      if (biCount < 5) { i = j; continue; }
+      // 至少 3 笔即可输出中枢（三笔重叠即成）
+      if (biCount < 3) { i = j; continue; }
       // 中枢区间 = 构成中枢的全部笔（i..i+biCount-1，含离开笔）的重叠部分：
       //   ZG = min(全部笔高点)，ZD = max(全部笔低点)。
       // 这样中枢上沿会收敛到离开笔/次高笔的高点，如 8-25~8-27 中枢的 5 笔
@@ -1252,22 +1250,81 @@ function snapToOwnBar(price, refTime, bars) {
 }
 
 /**
- * 买点识别（含区间套与 MACD 背驰）：
- *   1买：下跌笔创新低 + MACD 背驰（绿柱面积变小 或 黄白线低点抬高）
- *   2买/类2买：上一级别上涨笔段内的抬高低点
- *   3买：2买过后的上涨段未出现背驰（创新高突破前顶），其后回调不破前顶
+ * 取与上级笔段重叠的中枢（优先 upperStart/End 精确匹配）。
  */
-function findBuyPoints(bis, upperBis, macdArr, barSec) {
+function pickZsForSeg(zss, segStart, segEnd) {
+  if (!zss || !zss.length) return null;
+  let exact = zss.filter(z => z.upperStart === segStart && z.upperEnd === segEnd);
+  let pool = exact;
+  if (!pool.length) {
+    pool = [];
+    for (const z of zss) {
+      if (z.upperStart != null && z.upperEnd != null) {
+        if (z.upperStart <= segEnd && z.upperEnd >= segStart) pool.push(z);
+      } else if (z.startTime <= segEnd && z.endTime >= segStart) {
+        pool.push(z);
+      }
+    }
+  }
+  if (!pool.length) return null;
+  return pool.reduce((a, b) => ((a.enterEndTime || a.startTime) >= (b.enterEndTime || b.startTime) ? a : b));
+}
+
+/** 为 2买/2卖选取关联中枢：优先覆盖该点，否则取其后最早形成。 */
+function pickZsForTwo(zss, segStart, segEnd, twoTime) {
+  if (!zss || !zss.length) return null;
+  const pool = [];
+  for (const z of zss) {
+    if (z.upperStart != null && z.upperEnd != null) {
+      if (!(z.upperStart <= segEnd && z.upperEnd >= segStart)) continue;
+    } else if (!(z.startTime <= segEnd && z.endTime >= segStart)) continue;
+    pool.push(z);
+  }
+  if (!pool.length) return null;
+  const t0 = z => (z.enterEndTime != null ? z.enterEndTime : z.startTime);
+  const t1 = z => (z.exitTime != null ? z.exitTime : (z.exitStartTime != null ? z.exitStartTime : z.endTime));
+  const containing = pool.filter(z => t0(z) <= twoTime && twoTime <= t1(z));
+  if (containing.length) return containing.reduce((a, b) => (t0(a) <= t0(b) ? a : b));
+  const after = pool.filter(z => t0(z) >= twoTime);
+  if (after.length) return after.reduce((a, b) => (t0(a) <= t0(b) ? a : b));
+  return pool.reduce((a, b) => (t0(a) >= t0(b) ? a : b));
+}
+
+function appendThirdPoints(points, thirdList, mainType, classType, class2Type) {
+  for (const t of thirdList) {
+    if (points.some(p => (p.type === mainType || p.type === classType) && p.time === t.time)) continue;
+    const dup = points.findIndex(p => p.type === class2Type && p.time === t.time);
+    if (dup >= 0) points.splice(dup, 1);
+    points.push(t);
+  }
+}
+
+/**
+ * 买点识别：2买抬高结构（不依赖中枢）；类2/3/类3 依赖中枢；1买不变。
+ */
+function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) {
   if (bis.length < 3) return [];
+  const c2tol = +(class2ZsTol || 0);
+  const t3tol = +(thirdZsTol || 0);
   const downIdx = [];
   bis.forEach((b, i) => { if (b.type === "down") downIdx.push(i); });
-  // 候选一买：创新低 + MACD 背驰
+  const downLows = downIdx.map(i => ({ biIdx: i, time: bis[i].endTime, price: bis[i].endPrice }));
+  const idxByEndTime = {};
+  bis.forEach((b, i) => { if (idxByEndTime[b.endTime] == null) idxByEndTime[b.endTime] = i; });
+  let upperByType = null;
+  if (upperBis && upperBis.length > 0) {
+    upperByType = {
+      up: upperBis.filter(u => u.type === "up"),
+      down: upperBis.filter(u => u.type === "down"),
+    };
+  }
+
   const firstBuys = [];
   for (let k = 1; k < downIdx.length; k++) {
     const cur = bis[downIdx[k]];
-    // 与上级某笔完全重合（同笔）：上级笔已结束（非末笔）→ 纯结构标记 1买；
-    // 上级末笔（延伸中，反向笔未确认进列表）→ 维持跳过（时序护栏）
-    const sameUpper = isSameAsUpperBi(cur, upperBis, barSec);
+    const sameUpper = upperByType != null
+      ? isSameAsUpperBi(cur, upperByType[cur.type] || [], barSec)
+      : null;
     if (sameUpper) {
       if (upperBis && sameUpper === upperBis[upperBis.length - 1]) {
         if (CHAN_CFG.debug) console.log(`[一买跳过-上级末笔延伸中] ${fmtT(cur.endTime)}(${cur.endPrice}) 与上级末笔重合，上级反向笔未确认`);
@@ -1292,44 +1349,44 @@ function findBuyPoints(bis, upperBis, macdArr, barSec) {
         console.log(
           `[一买候选] ${fmtT(cur.endTime)}(${cur.endPrice}) vs 参照 ${fmtT(refer.endTime)}(${refer.endPrice}) ` +
           `| 创新低=${cur.endPrice < refer.endPrice} ` +
-          `| 绿柱面积 ${cm ? cm.greenArea.toFixed(2) : "-"} vs ${rm ? rm.greenArea.toFixed(2) : "-"} (变小=${cm && rm ? cm.greenArea < rm.greenArea : false}) ` +
-          `| DIF低点 ${cm ? cm.difLow.toFixed(3) : "-"} vs ${rm ? rm.difLow.toFixed(3) : "-"} (抬高=${cm && rm ? cm.difLow > rm.difLow : false}) ` +
-          `| 绿柱最大高度 ${cm ? cm.greenMax.toFixed(2) : "-"} vs ${rm ? rm.greenMax.toFixed(2) : "-"} (变小=${cm && rm ? cm.greenMax < rm.greenMax : false}) ` +
-          `| 背驰=${diverge}`
+          `| 绿柱面积 ${cm ? cm.greenArea.toFixed(2) : "-"} vs ${rm ? rm.greenArea.toFixed(2) : "-"} ` +
+          `| DIF低点 ${cm ? cm.difLow.toFixed(3) : "-"} vs ${rm ? rm.difLow.toFixed(3) : "-"} | 背驰=${diverge}`
         );
       }
-      if (diverge) {
-        firstBuys.push({ biIdx: downIdx[k], time: cur.endTime, price: cur.endPrice });
-      }
+      if (diverge) firstBuys.push({ biIdx: downIdx[k], time: cur.endTime, price: cur.endPrice });
     }
   }
-  const firstBuy = firstBuys.length > 0 ? firstBuys[firstBuys.length - 1] : null;
+  const firstBuy = firstBuys.length ? firstBuys[firstBuys.length - 1] : null;
 
   const points = [];
+  const twoBuyMeta = [];
 
-  // 2买 / 类2买（区间套）：只在「上一级别上涨笔」段内找抬高低点
   if (upperBis && upperBis.length > 0) {
+    const zss = buildZSByUpper(bis, upperBis, barSec);
     for (const up of upperBis) {
       if (up.type !== "up") continue;
-      const lows = [];
-      for (let i = 0; i < bis.length; i++) {
-        const b = bis[i];
-        if (b.type !== "down") continue;
-        if (b.endTime >= up.startTime && b.endTime <= up.endTime + 1) {
-          lows.push({ biIdx: i, time: b.endTime, price: b.endPrice });
-        }
-      }
-      if (lows.length === 0) continue;
-      lows.sort((a, b2) => a.time - b2.time);
+      const lows = downLows
+        .filter(l => l.time >= up.startTime && l.time <= up.endTime + 1)
+        .slice()
+        .sort((a, b) => a.time - b.time);
+      if (!lows.length) continue;
       const firstLow = lows.find(l => l.price > up.startPrice);
-      if (firstLow) {
-        points.push({ type: "2买", time: firstLow.time, price: firstLow.price });
-        const laterHigh = lows.find(l => l.time > firstLow.time && l.price > firstLow.price);
-        if (laterHigh) points.push({ type: "类2买", time: laterHigh.time, price: laterHigh.price });
-      }
+      if (!firstLow) continue;
+      points.push({ type: "2买", time: firstLow.time, price: firstLow.price });
+      const zs = pickZsForTwo(zss, up.startTime, up.endTime, firstLow.time);
+      if (!zs) continue;
+      const zd = zs.zd, zg = zs.zg;
+      twoBuyMeta.push({
+        time: firstLow.time, price: firstLow.price,
+        zg, segStart: up.startTime, segEnd: up.endTime,
+      });
+      const later = lows.find(l =>
+        l.time > firstLow.time && l.price > firstLow.price &&
+        l.price >= (zd - c2tol) && l.price <= zg
+      );
+      if (later) points.push({ type: "类2买", time: later.time, price: later.price });
     }
   } else {
-    // 结构底：最近一买之前（或全窗口）的最低底，作为上涨段的起点
     let structBottomIdx = null;
     if (firstBuy) {
       let minP = Infinity;
@@ -1338,13 +1395,13 @@ function findBuyPoints(bis, upperBis, macdArr, barSec) {
         if (bis[i].endPrice < minP) { minP = bis[i].endPrice; structBottomIdx = i; }
       }
     }
-    if (structBottomIdx === null) {
+    if (structBottomIdx == null) {
       let minP = Infinity;
       for (const i of downIdx) {
         if (bis[i].endPrice < minP) { minP = bis[i].endPrice; structBottomIdx = i; }
       }
     }
-    if (structBottomIdx !== null) {
+    if (structBottomIdx != null) {
       const bottom = bis[structBottomIdx];
       let secondBuy = null;
       for (let i = structBottomIdx + 1; i < bis.length; i++) {
@@ -1356,90 +1413,97 @@ function findBuyPoints(bis, upperBis, macdArr, barSec) {
       }
       if (secondBuy) {
         points.push({ type: "2买", time: secondBuy.time, price: secondBuy.price });
-        let classSecond = null;
-        for (let i = secondBuy.biIdx + 1; i < bis.length; i++) {
-          if (bis[i].type !== "down") continue;
-          if (bis[i].endPrice > secondBuy.price) {
-            classSecond = { time: bis[i].endTime, price: bis[i].endPrice };
-            break;
+        const zss = buildZS(bis, barSec);
+        const zs = pickZsForTwo(zss, secondBuy.time, secondBuy.time, secondBuy.time);
+        if (zs) {
+          const zd = zs.zd, zg = zs.zg;
+          const t0 = zs.enterEndTime != null ? zs.enterEndTime : zs.startTime;
+          const t1 = zs.exitTime != null ? zs.exitTime : zs.endTime;
+          twoBuyMeta.push({
+            time: secondBuy.time, price: secondBuy.price,
+            zg, segStart: t0, segEnd: t1,
+          });
+          let classSecond = null;
+          for (let i = secondBuy.biIdx + 1; i < bis.length; i++) {
+            if (bis[i].type !== "down") continue;
+            const p = bis[i].endPrice;
+            if (p > secondBuy.price && p >= (zd - c2tol) && p <= zg) {
+              classSecond = { time: bis[i].endTime, price: p };
+              break;
+            }
           }
+          if (classSecond) points.push({ type: "类2买", time: classSecond.time, price: classSecond.price });
         }
-        if (classSecond) points.push({ type: "类2买", time: classSecond.time, price: classSecond.price });
       }
     }
   }
 
-  // 1买：所有 MACD 背驰底（全部保留）
-  for (const fb of firstBuys) {
-    points.push({ type: "1买", time: fb.time, price: fb.price });
-  }
+  for (const fb of firstBuys) points.push({ type: "1买", time: fb.time, price: fb.price });
 
-  // 3买：2买过后的上涨段未出现背驰（上涨笔创新高、突破前顶），其后的回调就是 3买。
-  // 对每一笔 2买 检查其后的上涨段（扫描范围限制到下一个 2买 之前，每段最多标一个），
-  // 前顶 = 2买 之前最近一个上涨笔的结束点；区间套要求回调位于上级上涨笔段内且高于该笔起点价。
-  const twoBuys = points.filter(p => p.type === "2买").sort((a, b) => a.time - b.time);
-  const thirdBuys = [];
-  for (let k = 0; k < twoBuys.length; k++) {
-    const tb = twoBuys[k];
-    const twoIdx = bis.findIndex(b => b.endTime === tb.time);
+  twoBuyMeta.sort((a, b) => a.time - b.time);
+  const allTwoBuy = points.filter(p => p.type === '2买').slice().sort((a, b) => a.time - b.time);
+  const thirdOut = [];
+  for (const tb of twoBuyMeta) {
+    let twoIdx = idxByEndTime[tb.time];
+    if (twoIdx == null) twoIdx = -1;
     if (twoIdx < 0) continue;
-    const endScan = k + 1 < twoBuys.length
-      ? bis.findIndex(b => b.endTime === twoBuys[k + 1].time)
-      : bis.length;
-    let prevTop = null;
-    for (let j = twoIdx - 1; j >= 0; j--) {
-      if (bis[j].type === "up") { prevTop = bis[j].endPrice; break; }
+    let endScan = bis.length;
+    for (const nxt of allTwoBuy) {
+      if (nxt.time > tb.time) {
+        endScan = idxByEndTime[nxt.time];
+        if (endScan == null) endScan = bis.length;
+        break;
+      }
     }
-    if (prevTop === null) continue;
-    let lastValid = null;
+    const zg = tb.zg;
+    const valids = [];
     for (let i = twoIdx + 1; i < endScan; i++) {
       if (bis[i].type !== "up") continue;
-      if (bis[i].endPrice <= prevTop) continue;
+      if (bis[i].endPrice <= zg) continue;
       for (let mm = i + 1; mm < endScan; mm++) {
         if (bis[mm].type !== "down") continue;
         const bt = bis[mm].endTime, bp = bis[mm].endPrice;
-        if (bp > prevTop) {
-          let inUp = true;
-          if (upperBis && upperBis.length > 0) {
-            inUp = false;
-            for (const up of upperBis) {
-              if (up.type === "up" && bt >= up.startTime && bt <= up.endTime && bp > up.startPrice) { inUp = true; break; }
-            }
-          }
-          if (inUp) lastValid = { time: bt, price: bp };
+        if (bp > zg - t3tol && bt >= tb.segStart && bt <= tb.segEnd + 1) {
+          valids.push({ time: bt, price: bp });
         }
         break;
       }
     }
-    if (lastValid) thirdBuys.push(lastValid);
+    if (valids.length > 0) {
+      thirdOut.push({ type: "3买", time: valids[0].time, price: valids[0].price });
+      if (valids.length >= 2) thirdOut.push({ type: "类3买", time: valids[1].time, price: valids[1].price });
+    }
   }
-  // 按时间去重后加入（同一位置同时满足类2买时，保留 3买）
-  for (const t of thirdBuys) {
-    if (points.some(p => p.type === "3买" && p.time === t.time)) continue;
-    const dup = points.findIndex(p => p.type === "类2买" && p.time === t.time);
-    if (dup >= 0) points.splice(dup, 1);
-    points.push({ type: "3买", time: t.time, price: t.price });
-  }
+  appendThirdPoints(points, thirdOut, "3买", "类3买", "类2买");
   return points;
 }
 
 /**
- * 卖点识别（含区间套与 MACD 背驰，与买点对称）：
- *   1卖：上涨笔创新高 + MACD 背驰（红柱面积变小 或 黄白线高点变低），锚定到上级上涨笔结束点
- *   2卖/类2卖：上一级别下跌笔段内的次高点
- *   3卖：2卖过后的下跌段未出现背驰（创新低跌破前底），其后反弹不破前底
+ * 卖点识别：2卖次高结构（不依赖中枢）；类2/3/类3 依赖中枢；与买点对称。
  */
-function findSellPoints(bis, upperBis, macdArr, barSec) {
+function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) {
   if (bis.length < 3) return [];
+  const c2tol = +(class2ZsTol || 0);
+  const t3tol = +(thirdZsTol || 0);
   const upIdx = [];
   bis.forEach((b, i) => { if (b.type === "up") upIdx.push(i); });
-  // 候选一卖：创新高 + MACD 背驰
+  const upHighs = upIdx.map(i => ({ biIdx: i, time: bis[i].endTime, price: bis[i].endPrice }));
+  const idxByEndTime = {};
+  bis.forEach((b, i) => { if (idxByEndTime[b.endTime] == null) idxByEndTime[b.endTime] = i; });
+  let upperByType = null;
+  if (upperBis && upperBis.length > 0) {
+    upperByType = {
+      up: upperBis.filter(u => u.type === "up"),
+      down: upperBis.filter(u => u.type === "down"),
+    };
+  }
+
   const firstSells = [];
   for (let k = 1; k < upIdx.length; k++) {
     const cur = bis[upIdx[k]];
-    // 与上级某笔完全重合（同笔）：上级笔已结束（非末笔）→ 纯结构标记 1卖；
-    // 上级末笔（延伸中，反向笔未确认进列表）→ 维持跳过（时序护栏）
-    const sameUpper = isSameAsUpperBi(cur, upperBis, barSec);
+    const sameUpper = upperByType != null
+      ? isSameAsUpperBi(cur, upperByType[cur.type] || [], barSec)
+      : null;
     if (sameUpper) {
       if (upperBis && sameUpper === upperBis[upperBis.length - 1]) {
         if (CHAN_CFG.debug) console.log(`[一卖跳过-上级末笔延伸中] ${fmtT(cur.endTime)}(${cur.endPrice}) 与上级末笔重合，上级反向笔未确认`);
@@ -1464,20 +1528,15 @@ function findSellPoints(bis, upperBis, macdArr, barSec) {
         console.log(
           `[一卖候选] ${fmtT(cur.endTime)}(${cur.endPrice}) vs 参照 ${fmtT(refer.endTime)}(${refer.endPrice}) ` +
           `| 创新高=${cur.endPrice > refer.endPrice} ` +
-          `| 红柱面积 ${cm ? cm.redArea.toFixed(2) : "-"} vs ${rm ? rm.redArea.toFixed(2) : "-"} (变小=${cm && rm ? cm.redArea < rm.redArea : false}) ` +
-          `| DIF高点 ${cm ? cm.difHigh.toFixed(3) : "-"} vs ${rm ? rm.difHigh.toFixed(3) : "-"} (变低=${cm && rm ? cm.difHigh < rm.difHigh : false}) ` +
-          `| 红柱最大高度 ${cm ? cm.redMax.toFixed(2) : "-"} vs ${rm ? rm.redMax.toFixed(2) : "-"} (变小=${cm && rm ? cm.redMax < rm.redMax : false}) ` +
-          `| 背驰=${diverge}`
+          `| 红柱面积 ${cm ? cm.redArea.toFixed(2) : "-"} vs ${rm ? rm.redArea.toFixed(2) : "-"} ` +
+          `| DIF高点 ${cm ? cm.difHigh.toFixed(3) : "-"} vs ${rm ? rm.difHigh.toFixed(3) : "-"} | 背驰=${diverge}`
         );
       }
-      if (diverge) {
-        firstSells.push({ biIdx: upIdx[k], time: cur.endTime, price: cur.endPrice });
-      }
+      if (diverge) firstSells.push({ biIdx: upIdx[k], time: cur.endTime, price: cur.endPrice });
     }
   }
-  const firstSell = firstSells.length > 0 ? firstSells[firstSells.length - 1] : null;
+  const firstSell = firstSells.length ? firstSells[firstSells.length - 1] : null;
 
-  // 1卖 锚定：对**每一个**候选一卖都做锚定，全部保留；多个候选锚定到同一位置时去重
   const anchoredSells = [];
   const seenSellPos = new Set();
   for (const fs of firstSells) {
@@ -1505,30 +1564,34 @@ function findSellPoints(bis, upperBis, macdArr, barSec) {
   }
 
   const points = [];
+  const twoSellMeta = [];
 
-  // 2卖 / 类2卖（区间套）：只在「上一级别下跌笔」段内找次高点
   if (upperBis && upperBis.length > 0) {
+    const zss = buildZSByUpper(bis, upperBis, barSec);
     for (const dn of upperBis) {
       if (dn.type !== "down") continue;
-      const highs = [];
-      for (let i = 0; i < bis.length; i++) {
-        const b = bis[i];
-        if (b.type !== "up") continue;
-        if (b.endTime >= dn.startTime && b.endTime <= dn.endTime + 1) {
-          highs.push({ biIdx: i, time: b.endTime, price: b.endPrice });
-        }
-      }
-      if (highs.length === 0) continue;
-      highs.sort((a, b2) => a.time - b2.time);
+      const highs = upHighs
+        .filter(h => h.time >= dn.startTime && h.time <= dn.endTime + 1)
+        .slice()
+        .sort((a, b) => a.time - b.time);
+      if (!highs.length) continue;
       const firstHigh = highs.find(h => h.price < dn.startPrice);
-      if (firstHigh) {
-        points.push({ type: "2卖", time: firstHigh.time, price: firstHigh.price });
-        const laterLow = highs.find(h => h.time > firstHigh.time && h.price < firstHigh.price);
-        if (laterLow) points.push({ type: "类2卖", time: laterLow.time, price: laterLow.price });
-      }
+      if (!firstHigh) continue;
+      points.push({ type: "2卖", time: firstHigh.time, price: firstHigh.price });
+      const zs = pickZsForTwo(zss, dn.startTime, dn.endTime, firstHigh.time);
+      if (!zs) continue;
+      const zd = zs.zd, zg = zs.zg;
+      twoSellMeta.push({
+        time: firstHigh.time, price: firstHigh.price,
+        zd, segStart: dn.startTime, segEnd: dn.endTime,
+      });
+      const later = highs.find(h =>
+        h.time > firstHigh.time && h.price < firstHigh.price &&
+        h.price >= zd && h.price <= (zg + c2tol)
+      );
+      if (later) points.push({ type: "类2卖", time: later.time, price: later.price });
     }
   } else {
-    // 结构顶：最近一卖之前（或全窗口）的最高顶，作为下跌段的起点
     let structTopIdx = null;
     if (firstSell) {
       let maxP = -Infinity;
@@ -1537,13 +1600,13 @@ function findSellPoints(bis, upperBis, macdArr, barSec) {
         if (bis[i].endPrice > maxP) { maxP = bis[i].endPrice; structTopIdx = i; }
       }
     }
-    if (structTopIdx === null) {
+    if (structTopIdx == null) {
       let maxP = -Infinity;
       for (const i of upIdx) {
         if (bis[i].endPrice > maxP) { maxP = bis[i].endPrice; structTopIdx = i; }
       }
     }
-    if (structTopIdx !== null) {
+    if (structTopIdx != null) {
       const top = bis[structTopIdx];
       let secondSell = null;
       for (let i = structTopIdx + 1; i < bis.length; i++) {
@@ -1555,72 +1618,71 @@ function findSellPoints(bis, upperBis, macdArr, barSec) {
       }
       if (secondSell) {
         points.push({ type: "2卖", time: secondSell.time, price: secondSell.price });
-        let classSecond = null;
-        for (let i = secondSell.biIdx + 1; i < bis.length; i++) {
-          if (bis[i].type !== "up") continue;
-          if (bis[i].endPrice < secondSell.price) {
-            classSecond = { time: bis[i].endTime, price: bis[i].endPrice };
-            break;
+        const zss = buildZS(bis, barSec);
+        const zs = pickZsForTwo(zss, secondSell.time, secondSell.time, secondSell.time);
+        if (zs) {
+          const zd = zs.zd, zg = zs.zg;
+          const t0 = zs.enterEndTime != null ? zs.enterEndTime : zs.startTime;
+          const t1 = zs.exitTime != null ? zs.exitTime : zs.endTime;
+          twoSellMeta.push({
+            time: secondSell.time, price: secondSell.price,
+            zd, segStart: t0, segEnd: t1,
+          });
+          let classSecond = null;
+          for (let i = secondSell.biIdx + 1; i < bis.length; i++) {
+            if (bis[i].type !== "up") continue;
+            const p = bis[i].endPrice;
+            if (p < secondSell.price && p >= zd && p <= (zg + c2tol)) {
+              classSecond = { time: bis[i].endTime, price: p };
+              break;
+            }
           }
+          if (classSecond) points.push({ type: "类2卖", time: classSecond.time, price: classSecond.price });
         }
-        if (classSecond) points.push({ type: "类2卖", time: classSecond.time, price: classSecond.price });
       }
     }
   }
 
-  // 1卖：所有 MACD 背驰顶（锚定到上级上涨笔结束点），全部保留
-  for (const as of anchoredSells) {
-    points.push({ type: "1卖", time: as.time, price: as.price });
-  }
+  for (const as_ of anchoredSells) points.push({ type: "1卖", time: as_.time, price: as_.price });
 
-  // 3卖：2卖过后的下跌段未出现背驰（下跌笔创新低、跌破前底），其后的反弹就是 3卖。
-  // 与 3买 对称：对每一笔 2卖 检查其后的下跌段（扫描范围限制到下一个 2卖 之前），
-  // 前底 = 2卖 之前最近一个下跌笔的结束点；区间套要求反弹位于上级下跌笔段内且低于该笔起点价。
-  const twoSells = points.filter(p => p.type === "2卖").sort((a, b) => a.time - b.time);
-  const thirdSells = [];
-  for (let k = 0; k < twoSells.length; k++) {
-    const ts = twoSells[k];
-    const twoIdx = bis.findIndex(b => b.endTime === ts.time);
+  twoSellMeta.sort((a, b) => a.time - b.time);
+  const allTwoSell = points.filter(p => p.type === '2卖').slice().sort((a, b) => a.time - b.time);
+  const thirdOut = [];
+  for (const ts of twoSellMeta) {
+    let twoIdx = idxByEndTime[ts.time];
+    if (twoIdx == null) twoIdx = -1;
     if (twoIdx < 0) continue;
-    const endScan = k + 1 < twoSells.length
-      ? bis.findIndex(b => b.endTime === twoSells[k + 1].time)
-      : bis.length;
-    let prevLow = null;
-    for (let j = twoIdx - 1; j >= 0; j--) {
-      if (bis[j].type === "down") { prevLow = bis[j].endPrice; break; }
+    let endScan = bis.length;
+    for (const nxt of allTwoSell) {
+      if (nxt.time > ts.time) {
+        endScan = idxByEndTime[nxt.time];
+        if (endScan == null) endScan = bis.length;
+        break;
+      }
     }
-    if (prevLow === null) continue;
-    let lastValid = null;
+    const zd = ts.zd;
+    const valids = [];
     for (let i = twoIdx + 1; i < endScan; i++) {
       if (bis[i].type !== "down") continue;
-      if (bis[i].endPrice >= prevLow) continue;
+      if (bis[i].endPrice >= zd) continue;
       for (let mm = i + 1; mm < endScan; mm++) {
         if (bis[mm].type !== "up") continue;
         const st = bis[mm].endTime, sp = bis[mm].endPrice;
-        if (sp < prevLow) {
-          let inDown = true;
-          if (upperBis && upperBis.length > 0) {
-            inDown = false;
-            for (const dn of upperBis) {
-              if (dn.type === "down" && st >= dn.startTime && st <= dn.endTime && sp < dn.startPrice) { inDown = true; break; }
-            }
-          }
-          if (inDown) lastValid = { time: st, price: sp };
+        if (sp < zd + t3tol && st >= ts.segStart && st <= ts.segEnd + 1) {
+          valids.push({ time: st, price: sp });
         }
         break;
       }
     }
-    if (lastValid) thirdSells.push(lastValid);
+    if (valids.length > 0) {
+      thirdOut.push({ type: "3卖", time: valids[0].time, price: valids[0].price });
+      if (valids.length >= 2) thirdOut.push({ type: "类3卖", time: valids[1].time, price: valids[1].price });
+    }
   }
-  // 按时间去重后加入（同一位置同时满足类2卖时，保留 3卖）
-  for (const t of thirdSells) {
-    if (points.some(p => p.type === "3卖" && p.time === t.time)) continue;
-    const dup = points.findIndex(p => p.type === "类2卖" && p.time === t.time);
-    if (dup >= 0) points.splice(dup, 1);
-    points.push({ type: "3卖", time: t.time, price: t.price });
-  }
+  appendThirdPoints(points, thirdOut, "3卖", "类3卖", "类2卖");
   return points;
 }
+
 
 /** 低级别每类买卖点只保留时间上最近的一个（历史策略保留，现主流程已不调用） */
 function keepRecentEach(points, keep = 1) {

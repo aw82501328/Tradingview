@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """参数中心 HTTP 适配器：GET /api/params、POST /api/params/{module}[/reset]。
 
-chan（缠论核心）模块的保存/恢复会全局变更 CHAN_CFG——任一计算任务运行中返回 409，
-防止单次计算中途混用两套参数（points/entry/plan 在每次任务启动时读取，无此约束）。
+画笔 / 标记买卖点 / 标记进出场 的保存/恢复会拼合写回 CHAN_CFG——任一计算任务运行中返回 409，
+防止单次计算中途混用两套参数（zs/plan 在每次任务启动时读取，无此约束）。
 """
 
 from urllib.parse import urlparse
@@ -28,9 +28,9 @@ def handle(handler, app, method, busy=None):
             if module not in param_center.PARAM_MODULES:
                 handler._send_json({"ok": False, "error": "未知参数模块"}, 404)
                 return True
-            if module == "chan" and busy and busy():
+            if module in param_center.CHAN_CFG_MODULES and busy and busy():
                 handler._send_json({"ok": False, "error":
-                                    "有任务运行中，无法修改缠论核心参数，请停止任务后再试"}, 409)
+                                    "有任务运行中，无法修改画笔/买卖点/进出场参数，请停止任务后再试"}, 409)
                 return True
             if action == "reset":
                 effective = param_center.reset(module)

@@ -202,7 +202,7 @@
 - 取连续三笔的重叠区间构成中枢：`ZG = min(三笔高点)`、`ZD = max(三笔低点)`，`ZG > ZD` 才成立；
 - 延伸：后续笔与 `[ZD, ZG]` 有重叠则纳入（`dd/gg` 扩展）；
 - 离开：笔与中枢区间完全无重叠；或笔起点在中枢内、终点突破中枢边界（`startIn && endBreak`）→ 中枢结束；
-- **最少 5 笔才输出**（用户要求：只有上下上/下上下 3 笔的不画）；`biCount < 5` 跳过并继续向后扫描；
+- **最少 3 笔即可输出**（三笔重叠即成中枢）；`biCount < 3` 跳过并继续向后扫描；
 - 中枢区间 = 构成中枢全部笔（含离开笔）的重叠：`ZG = min(全部笔高点)`、`ZD = max(全部笔低点)`；`zsZg <= zsZd` 时防御性跳过；
 - 水平边缘：左 = 进入笔终点 - 5×barSec，右 = 离开笔起点 + 5×barSec（无离开笔时 = 最后一笔终点 + 5×barSec）；
 - 输出：`{ startTime, endTime, zd, zg, dd, gg, biCount, extended, exitTime, enterEndTime, exitStartTime }`。
@@ -256,14 +256,15 @@
 **`findBuyPoints(bis, upperBis, macdArr, barSec) → points[]`**
 
 - **1买**：下跌笔创新低（`cur.endPrice < refer.endPrice`，参照为之前最近的幅度 ≥ 当前 50% 的下跌笔）+ MACD 背驰；**同笔例外**（2026-09-15）：与上级笔完全重合且命中的上级笔已结束（非末笔）→ 纯结构标记 1买（不选参照、不比创新低/背驰——本级无内部结构，跨上级笔边界的比较无意义）；命中上级末笔（延伸中、反向笔未确认）仍跳过；全部保留；
-- **2买/类2买**（区间套）：在「上一级别上涨笔」段内找抬高低点——首个 `price > up.startPrice` 的下跌笔终点为 2买，其后更低的抬高低点为类2买；无上级笔时用「结构底」（最近一买之前或全窗口最低底）作为上涨段起点找抬高低点；
-- **3买**：2买过后的上涨段未出现背驰（上涨笔创新高、突破前顶，`prevTop`=2买前最近上涨笔终点），其后的回调不破前顶（`bp > prevTop`）且位于上级上涨笔段内（`bt ∈ [up.startTime, up.endTime]` 且 `bp > up.startPrice`）；每段最多标一个；
-- 输出类型：`{ type: "1买"|"2买"|"类2买"|"3买", time, price }`。
+- **2买**（区间套，不依赖中枢）：上级上涨笔内首个 `price > up.startPrice`；无上级用「结构底」；
+- **类2买**（依赖中枢）：2买后更高抬高且 `price ∈ [zd - class2ZsTol, zg]`；无中枢不标；
+- **3买 / 类3买**（依赖中枢）：上涨破 `zg` 后回踩 `price > zg - thirdZsTol`；同段第1个=3买、第2个=类3买；无中枢不标；
+- 输出类型：`{ type: "1买"|"2买"|"类2买"|"3买"|"类3买", time, price }`。
 
-**`findSellPoints(bis, upperBis, macdArr, barSec) → points[]`**（与买点对称）
+**`findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) → points[]`**（与买点对称）
 - **1卖**：上涨笔创新高 + MACD 背驰；**锚定**（`anchorFirstSell`）到上级上涨笔结束点，多个候选锚到同一位置去重；同笔例外与 1买 对称（上级笔已结束 → 纯结构标记，命中上级末笔仍跳过）；
-- **2卖/类2卖**：在「上一级别下跌笔」段内找次高点（首个 `price < dn.startPrice` 的上涨笔终点），其后更高的次高点为类2卖；无上级笔时用「结构顶」；
-- **3卖**：2卖过后的下跌段未出现背驰（下跌笔创新低、跌破前底），其后的反弹不破前底且位于上级下跌笔段内（`sp < dn.startPrice`）；每段最多标一个。
+- **2卖**（不依赖中枢）：上级下跌笔内首个 `price < dn.startPrice`；无上级用「结构顶」；
+- **类2卖 / 3卖 / 类3卖**：依赖中枢（类2可破上沿 `class2ZsTol`；3/类3 反弹 `< zd + thirdZsTol`）。
 
 **`anchorFirstBuy(cand, upperBis) → {time, price}|null`**
 - 低级别一买锚定到「上一级别某笔的起点」（时间上最近的一个底部端点）；找不到返回 null。

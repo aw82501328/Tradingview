@@ -434,19 +434,29 @@ def load_cached(cache_file=CACHE_FILE):
         return json.load(f)
 
 
-def load_bars(periods=None, from_ts=0, use_cache=False, cache_file=CACHE_FILE, symbol=None, log=None):
+def load_bars(periods=None, from_ts=0, to_ts=None, use_cache=False, cache_file=CACHE_FILE, symbol=None, log=None):
     """统一入口：优先读缓存，缓存缺失或 use_cache=False 时走 CDP。
 
+    @param to_ts  可选结束时间戳：逐周期滤掉 time > to_ts 的K线（回测结束日期，None=不截断）。
+                  cache 路径与 from_ts 现状一致（起点不滤），仅做结束截断
     @param log  可选日志回调（默认 print），透传给 fetch_bars / CDPClient
     """
     if use_cache:
         try:
-            return load_cached(cache_file)
+            return _trim_to_ts(load_cached(cache_file), to_ts)
         except (OSError, json.JSONDecodeError):
             pass
     cfg = CDPConfig(periods=periods)
-    return fetch_bars(cfg=cfg, from_ts=from_ts, cache=True, cache_file=cache_file,
-                      symbol=symbol, log=log)
+    return _trim_to_ts(fetch_bars(cfg=cfg, from_ts=from_ts, cache=True,
+                                  cache_file=cache_file, symbol=symbol, log=log), to_ts)
+
+
+def _trim_to_ts(bars_by_period, to_ts):
+    """按结束时间戳截断 {周期: [bars]}（保留 time <= to_ts；to_ts 空 → 原样返回）。"""
+    if not to_ts:
+        return bars_by_period
+    return {res: [b for b in bars if b["time"] <= to_ts]
+            for res, bars in bars_by_period.items()}
 
 
 def align_periods(bars_by_period, periods=None):

@@ -28,9 +28,12 @@ GREEN = "#089981"
 NEAR_ATR_RATIO = 0.3
 # 每周期保留的标记总数（不分类：买+卖合并后只保留时间上最近 keep 个，减少图上标记数量）
 KEEP = 10
+# 类2破中枢 / 3类进中枢绝对点位容差（参数中心 points 模块默认）
+CLASS2_ZS_TOL = 0.0
+THIRD_ZS_TOL = 0.0
 
-# 跨周期共振匹配的正则：上级 1/2/3 类与类2 买卖点
-_CLASS_RE = re.compile(r"^([123]买|[123]卖|类2买|类2卖)$")
+# 跨周期共振匹配的正则：上级 1/2/3 类与类2/类3 买卖点
+_CLASS_RE = re.compile(r"^([123]买|[123]卖|类[23]买|类[23]卖)$")
 
 
 def mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPrice):
@@ -69,7 +72,8 @@ def mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPrice):
 
 
 def compute_period_marks(res, bis, upperBis, rawBars, atr, macdArr, pi, periodMarks, periods,
-                         nearAtrRatio=NEAR_ATR_RATIO, keep=KEEP):
+                         nearAtrRatio=NEAR_ATR_RATIO, keep=KEEP,
+                         class2ZsTol=CLASS2_ZS_TOL, thirdZsTol=THIRD_ZS_TOL):
     """计算单个周期的买卖点标记列表。
 
     @param res          周期名（如 "60"）
@@ -85,8 +89,8 @@ def compute_period_marks(res, bis, upperBis, rawBars, atr, macdArr, pi, periodMa
     """
     barSec = intervalSecOf(res)
 
-    buyPts = findBuyPoints(bis, upperBis, macdArr, barSec)
-    sellPts = findSellPoints(bis, upperBis, macdArr, barSec)
+    buyPts = findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol)
+    sellPts = findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol)
 
     # 一买锚定：除最大周期外，每个一买都锚定到上一级某笔的底部端点
     anchoredBuyPts = buyPts
@@ -150,7 +154,8 @@ def compute_period_marks(res, bis, upperBis, rawBars, atr, macdArr, pi, periodMa
 
 def compute_all_marks(bisByPeriod, barsByPeriod, periods, fromTs=None,
                       nearAtrRatio=NEAR_ATR_RATIO, keep=KEEP,
-                      periodMacd=None, periodAtr=None):
+                      periodMacd=None, periodAtr=None,
+                      class2ZsTol=CLASS2_ZS_TOL, thirdZsTol=THIRD_ZS_TOL):
     """按周期从大到小计算全部买卖点标记。
 
     @param bisByPeriod   各周期笔 { 周期: [bis] }
@@ -182,7 +187,8 @@ def compute_all_marks(bisByPeriod, barsByPeriod, periods, fromTs=None,
         if macdArr is None:
             macdArr = calcMACD(rawBars)
         marks = compute_period_marks(res, curBis, upperBis, rawBars, atr, macdArr,
-                                     pi, periodMarks, periods, nearAtrRatio, keep)
+                                     pi, periodMarks, periods, nearAtrRatio, keep,
+                                     class2ZsTol, thirdZsTol)
         if marks:
             periodMarks[res] = marks
     return periodMarks

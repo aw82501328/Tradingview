@@ -87,13 +87,57 @@ class SignalLocatorTests(unittest.TestCase):
             client.evaluate.return_value = data
             with patch.object(locator, 'CDPClient') as cls:
                 cls.return_value.__enter__.return_value = client
-                with self.assertRaises(locator.CDPError):
-                    locator.locate_signal(self.row, timeout=timeout)
+                with patch.object(locator, '_replay_to_signal', side_effect=locator.CDPError('replay down')):
+                    with self.assertRaises(locator.CDPError):
+                        locator.locate_signal(self.row, timeout=timeout)
             self.assertFalse(any('setTimeViewport' in str(call) for call in client.evaluate.call_args_list))
         with patch.object(locator, 'CDPClient') as cls:
             cls.return_value.__enter__.side_effect = locator.CDPError('disconnected')
             with self.assertRaises(locator.CDPError):
                 locator.locate_signal(self.row)
+
+    def test_live_history_exhausted_jumps_via_replay(self):
+        client = Mock()
+        client.evaluate.side_effect = [
+            None, None,
+            {'bar': None, 'end': True, 'first': 1000},
+            {'bar': {'time': 100, 'index': 9}, 'last': 100, 'barEnd': 280, 'end': True},
+            {'time': 100, 'index': 9, 'symbol': 'OANDA:XAUUSD', 'markRes': '30S'},
+        ]
+        with patch.object(locator, 'CDPClient') as cls:
+            cls.return_value.__enter__.return_value = client
+            with patch.object(locator, '_replay_to_signal') as jump:
+                with patch.object(locator, '_draw_after_locate', return_value={'drawn': 1, 'cleared': 0}) as draw:
+                    result = locator.locate_signal({**self.row, 'time': 110, 'markRes': '30S'})
+        jump.assert_called_once()
+        self.assertEqual(result['time'], 100)
+        self.assertTrue(result['replay'])
+        self.assertEqual(draw.call_args.args[2], 100)
+        self.assertEqual(draw.call_args.kwargs.get('last_time'), 100)
+        self.assertTrue(any('setTimeViewport' in str(call) for call in client.evaluate.call_args_list))
+
+    def test_after_last_bar_jumps_via_replay_and_marks(self):
+        """晚于已加载末根（回放停在更早位置/未纳入信号开盘根）应跳转后再画标记。"""
+        client = Mock()
+        client.evaluate.side_effect = [
+            None, None,
+            {'bar': {'time': 100, 'index': 9}, 'last': 100, 'barEnd': 280},
+            {'bar': {'time': 270, 'index': 20}, 'last': 270, 'barEnd': 300, 'end': True},
+            {'time': 270, 'index': 20, 'symbol': 'OANDA:XAUUSD', 'markRes': '3'},
+        ]
+        row = {**self.row, 'time': 290}
+        with patch.object(locator, 'CDPClient') as cls:
+            cls.return_value.__enter__.return_value = client
+            with patch.object(locator, '_replay_to_signal') as jump:
+                with patch.object(locator, '_draw_after_locate', return_value={'drawn': 2, 'cleared': 0}) as draw:
+                    result = locator.locate_signal(row)
+        jump.assert_called_once()
+        draw.assert_called_once()
+        self.assertEqual(result['time'], 270)
+        self.assertTrue(result['replay'])
+        self.assertEqual(result['mark']['drawn'], 2)
+        self.assertEqual(draw.call_args.args[2], 270)
+        self.assertEqual(draw.call_args.kwargs.get('last_time'), 270)
 
     def test_timestamp_inside_latest_candle_and_unavailable_gap(self):
         for stamp, valid in ((110, True), (300, False)):
@@ -103,7 +147,7 @@ class SignalLocatorTests(unittest.TestCase):
                 {'time': 100, 'index': 9}]
             with patch.object(locator, 'CDPClient') as cls:
                 cls.return_value.__enter__.return_value = client
-                with patch.object(locator, 'draw_single_mark', return_value={'drawn': 2, 'cleared': 1}) as draw:
+                with patch.object(locator, '_draw_after_locate', return_value={'drawn': 2, 'cleared': 1}) as draw:
                     if valid:
                         result = locator.locate_signal({**self.row, 'time': stamp})
                         self.assertEqual(result['time'], 100)
@@ -125,10 +169,15 @@ class SignalLocatorTests(unittest.TestCase):
         with patch.object(locator, 'CDPClient') as cls:
             client = make_client()
             cls.return_value.__enter__.return_value = client
-            with patch.object(locator, 'draw_single_mark') as draw:
+            with patch.object(locator, '_draw_after_locate') as draw:
                 draw.return_value = {'drawn': 3, 'cleared': 0}
                 result = locator.locate_signal(self.row, colors=colors)
-                draw.assert_called_once_with(client, self.row, colors=colors)
+                draw.assert_called_once()
+                args, kwargs = draw.call_args
+                self.assertIs(args[0], client)
+                self.assertEqual(args[2], 100)
+                self.assertEqual(kwargs.get('colors'), colors)
+                self.assertEqual(kwargs.get('last_time'), 100)
                 self.assertEqual(result['mark'], {'drawn': 3, 'cleared': 0})
                 # 标记失败不否定定位本身：错误进 result['mark']['error']
                 cls.return_value.__enter__.return_value = make_client()
@@ -136,6 +185,26 @@ class SignalLocatorTests(unittest.TestCase):
                 result = locator.locate_signal(self.row, colors=None)
                 self.assertEqual(result['mark']['drawn'], 0)
                 self.assertIn('cdp down', result['mark']['error'])
+
+    def test_view_until_covers_exit_and_looks_ahead_without_exit(self):
+        row = {**self.row, 'exits': [{'type': 'close', 'time': 500, 'price': 1}],
+               'exitTime': 500}
+        u = locator._view_until(row, 100, '3')
+        self.assertEqual(u, 500 + 180 * 60)
+        u2 = locator._view_until(self.row, 100, '3')
+        self.assertEqual(u2, 100 + 180 * 60)
+
+    def test_draw_after_locate_uses_chart_bar_and_no_interval_visibility(self):
+        client = Mock()
+        client.evaluate.side_effect = [1, {'drawn': 1, 'ids': ['x'], 'barTime': 100}]
+        row = {**self.row, 'price': 2663.25, 'nearSr': 2650.0}
+        out = locator._draw_after_locate(client, row, 100, colors={'buy': '#111'})
+        self.assertEqual(out['drawn'], 1)
+        self.assertEqual(out['cleared'], 1)
+        expr = client.evaluate.call_args.args[0]
+        self.assertIn('createShape', expr)
+        self.assertNotIn('intervalsVisibilities', expr)
+        self.assertIn('arrow_mark_up', expr)
 
     def test_api_validates_input_and_uses_server_record(self):
         app = SimpleNamespace(locator=self.manager)

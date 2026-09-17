@@ -29,7 +29,9 @@ class ParamCenterTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             param_center.normalize("chan", {"unknownKey": 1})        # 未知键
         with self.assertRaises(ValueError):
-            param_center.normalize("chan", {"sinkFallback": "yes"})  # 布尔传字符串
+            param_center.normalize("chan", {"sinkFallback": True})   # 已迁出到 entry
+        with self.assertRaises(ValueError):
+            param_center.normalize("entry", {"sinkFallback": "yes"})  # 布尔传字符串
         with self.assertRaises(ValueError):
             param_center.normalize("plan", {"rangeBarN": 5.5})       # 整数传小数
         with self.assertRaises(ValueError):
@@ -47,17 +49,69 @@ class ParamCenterTests(unittest.TestCase):
         self.assertEqual(chan_core.active_overrides(), {"wickRatio": 0.9})
 
     def test_chan_apply_and_reset_roundtrip(self):
-        param_center.update("chan", {"wickRatio": 0.95, "expectBiEnough": False})
+        # 画笔与进出场分别写 CHAN_CFG；reset 画笔不清进出场覆盖
+        param_center.update("chan", {"wickRatio": 0.95})
+        param_center.update("entry", {"expectBiEnough": False})
         self.assertEqual(chan_core.CHAN_CFG["wickRatio"], 0.95)       # 全局立即生效
         self.assertFalse(chan_core.CHAN_CFG["expectBiEnough"])
         self.assertEqual(chan_core.CHAN_CFG["gapFilter"],
                          chan_core.CHAN_CFG_DEFAULTS["gapFilter"])    # 未改键不受影响
         param_center.reset("chan")
-        self.assertEqual(chan_core.CHAN_CFG, chan_core.CHAN_CFG_DEFAULTS)
+        self.assertEqual(chan_core.CHAN_CFG["wickRatio"],
+                         chan_core.CHAN_CFG_DEFAULTS["wickRatio"])
+        self.assertFalse(chan_core.CHAN_CFG["expectBiEnough"])        # entry 覆盖仍在
         self.assertEqual(param_center.effective("chan"),
-                         dict(chan_core.CHAN_CFG_DEFAULTS))
+                         param_center.defaults_of("chan"))
+        self.assertNotEqual(param_center.effective("chan"),
+                            dict(chan_core.CHAN_CFG_DEFAULTS))        # 画笔 ≠ 整表 CHAN_CFG
         with open(param_center.PARAMS_FILE, encoding="utf-8") as f:
             self.assertEqual(json.load(f)["modules"]["chan"], {})
+        param_center.reset("entry")
+        self.assertEqual(chan_core.CHAN_CFG["expectBiEnough"],
+                         chan_core.CHAN_CFG_DEFAULTS["expectBiEnough"])
+
+    def test_legacy_chan_keys_migrate_on_load(self):
+        # 旧文件把 divergeDurRatio / expectBiEnough 写在 modules.chan 下 → 读入归到 points/entry
+        Path(param_center.PARAMS_FILE).write_text(json.dumps({
+            "version": 1,
+            "modules": {
+                "chan": {"wickRatio": 0.9, "divergeDurRatio": 5, "expectBiEnough": False},
+                "points": {},
+                "zs": {},
+                "entry": {},
+                "plan": {},
+            },
+            "savedAt": {},
+        }), encoding="utf-8")
+        self.assertEqual(param_center.effective("chan")["wickRatio"], 0.9)
+        self.assertNotIn("divergeDurRatio", param_center.effective("chan"))
+        self.assertEqual(param_center.effective("points")["divergeDurRatio"], 5)
+        self.assertFalse(param_center.effective("entry")["expectBiEnough"])
+        cfg = param_center.chan_cfg_effective()
+        self.assertEqual(cfg["wickRatio"], 0.9)
+        self.assertEqual(cfg["divergeDurRatio"], 5)
+        self.assertFalse(cfg["expectBiEnough"])
+        # 目标模块已有同键时不覆盖
+        Path(param_center.PARAMS_FILE).write_text(json.dumps({
+            "version": 1,
+            "modules": {
+                "chan": {"expectBiEnough": False},
+                "entry": {"expectBiEnough": True},
+            },
+            "savedAt": {},
+        }), encoding="utf-8")
+        self.assertTrue(param_center.effective("entry")["expectBiEnough"])
+
+    def test_chan_cfg_effective_merges_modules(self):
+        param_center.update("chan", {"gapFilter": 0.5})
+        param_center.update("points", {"divergeDurRatio": 7})
+        param_center.update("entry", {"macdZeroTol": 8.0})
+        cfg = param_center.chan_cfg_effective()
+        self.assertEqual(cfg["gapFilter"], 0.5)
+        self.assertEqual(cfg["divergeDurRatio"], 7)
+        self.assertEqual(cfg["macdZeroTol"], 8.0)
+        self.assertEqual(cfg["wickRatio"], chan_core.CHAN_CFG_DEFAULTS["wickRatio"])
+        self.assertEqual(set(cfg), set(chan_core.CHAN_CFG_DEFAULTS))
 
     def test_effective_merge_priority(self):
         param_center.update("entry", {"near": 2})
@@ -100,6 +154,19 @@ class ParamCenterTests(unittest.TestCase):
                 self.assertEqual(spec["default"], defaults[key])
                 self.assertIn(spec["type"], ("bool", "int", "float", "str"))
                 self.assertTrue(spec["label"])
+        # 归属：成笔键在画笔；背驰时长在买卖点；进场扩展在进出场
+        self.assertIn("gapFilter", param_center.defaults_of("chan"))
+        self.assertIn("divergeDurRatio", param_center.defaults_of("points"))
+        self.assertIn("expectBiEnough", param_center.defaults_of("entry"))
+        self.assertNotIn("expectBiEnough", param_center.defaults_of("chan"))
+
+    def test_module_titles_align_workbench(self):
+        titles = {k: v["title"] for k, v in param_center.PARAM_MODULES.items()}
+        self.assertEqual(titles["chan"], "画笔")
+        self.assertEqual(titles["zs"], "画中枢")
+        self.assertEqual(titles["points"], "标记买卖点")
+        self.assertEqual(titles["entry"], "标记进出场")
+        self.assertEqual(titles["plan"], "交易计划")
 
     def test_trend_res_enum(self):
         # plan.trendRes 字符串枚举：合法值通过、非法值/非字符串 raise；默认 = TREND_RES

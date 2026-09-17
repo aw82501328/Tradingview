@@ -551,20 +551,25 @@ class BacktestWorker(ModeWorker):
         from_ts = int(cfg.get("from_ts", 0))
         data_from_ts = max(0, from_ts - lead_days * 86400)
         start_ts = from_ts if lead_days > 0 else None
+        # 结束日期：在加载层截断（含当日全天），三源一致——fine 时间轴/高周期/支阻/未平仓
+        # mark-to-market（_finish 按加载末根结算）全部随之止于结束日；旧 cfg 无此键 → None=到最新
+        to_ts = int(cfg.get("to_ts") or 0) or None
         # 数据源：store=本地SQLite存储（不连CDP，TV关闭可跑）；cache=bars_all_tf.json；live=CDP实时
         src = cfg.get("data_source") or ("cache" if cfg.get("use_cache") else "live")
         if lead_days > 0:
             self.log(f"预热提前 {lead_days} 天：数据起点 {fmtT(data_from_ts)}，交易起点 {fmtT(from_ts)}")
         if src == "store":
             self.log(f"取数：数据源=本地存储 symbol={cfg.get('symbol')} "
-                     f"periods={periods} from_ts={data_from_ts}")
+                     f"periods={periods} from_ts={data_from_ts}"
+                     f"{' to_ts=' + str(to_ts) if to_ts else ''}")
             bars = data_store.load_store(cfg.get("symbol"), periods=periods,
-                                         from_ts=data_from_ts)
+                                         from_ts=data_from_ts, to_ts=to_ts)
         else:
             self.log(f"取数：数据源={'本地缓存' if src == 'cache' else 'CDP实时'} "
                      f"symbol={cfg.get('symbol')} periods={periods} "
-                     f"use_cache={cfg.get('use_cache')}")
-            bars = load_bars(periods=periods, from_ts=data_from_ts,
+                     f"use_cache={cfg.get('use_cache')}"
+                     f"{' to_ts=' + str(to_ts) if to_ts else ''}")
+            bars = load_bars(periods=periods, from_ts=data_from_ts, to_ts=to_ts,
                              use_cache=cfg.get("use_cache", False),
                              symbol=cfg.get("symbol"), log=self.log)
         for res in periods:
@@ -573,9 +578,9 @@ class BacktestWorker(ModeWorker):
                 self.log(f"  {res:>4}: {n} 根（{fmtT(bars[res][-1]['time'])} 止）")
         # 参数中心（参数配置页统一管理）：API 显式值优先（历史方案复现/后端覆盖能力），
         # 缺省用参数中心当前值；回写 cfg 保证 bt_runs 历史方案快照/对比表显示实际生效参数。
-        # diverge_confirm/expect_bi 页面不再传入（None → 引擎读 CHAN_CFG，由缠论核心模块控制）。
+        # diverge_confirm/expect_bi 页面不再传入（None → 引擎读 CHAN_CFG，由画笔/买卖点/进出场拼合）。
         pm = param_center.effective_all()
-        chan_core.apply_cfg(pm["chan"])   # 幂等重放（启动已应用；防参数文件被手改）
+        chan_core.apply_cfg(param_center.chan_cfg_effective())  # 幂等重放（启动已应用；防参数文件被手改）
         ep = pm["entry"]
         for k in ("lots", "slip_stop", "slip_fallback", "slip_be", "near"):
             if cfg.get(k) is None:
@@ -638,7 +643,7 @@ class LiveWorker(ModeWorker):
         cfg = self.cfg
         periods = cfg.get("periods") or DEFAULT_PERIODS
         pm = param_center.effective_all()
-        chan_core.apply_cfg(pm["chan"])
+        chan_core.apply_cfg(param_center.chan_cfg_effective())
         m = LiveMonitor(symbol=cfg.get("symbol"), periods=periods,
                         from_ts=cfg.get("from_ts", 0), port=cfg.get("port", DEFAULT_CDP_PORT),
                         interval=cfg.get("interval", 15.0), tail=cfg.get("tail", 100),
@@ -683,7 +688,7 @@ class ReplayWorker(ModeWorker):
         cfg = self.cfg
         periods = cfg.get("periods") or DEFAULT_PERIODS
         pm = param_center.effective_all()
-        chan_core.apply_cfg(pm["chan"])
+        chan_core.apply_cfg(param_center.chan_cfg_effective())
         m = ReplayMonitor(symbol=cfg.get("symbol"), periods=periods,
                           from_ts=cfg.get("from_ts", 0), port=cfg.get("port", DEFAULT_CDP_PORT),
                           start_ts=cfg.get("start_ts"),
@@ -769,9 +774,9 @@ class ControlApp:
         self.analysis = analysis_service.AnalysisManager(
             self.broadcaster.emit, acquire_active, release_active, _marks_lock,
             self.normalize_sr_cfg, self.publish_analysis_sr)
-        # 参数中心：启动时恢复持久化的缠论核心参数（进程内全局生效；
-        # points/entry/plan 在每次任务启动时读取，无需预热应用）
-        chan_core.apply_cfg(param_center.effective("chan"))
+        # 参数中心：启动时恢复拼合后的 CHAN_CFG（画笔/买卖点/进出场；进程内全局生效；
+        # zs/plan 在每次任务启动时读取，无需预热应用）
+        chan_core.apply_cfg(param_center.chan_cfg_effective())
 
     def publish_analysis_sr(self, cfg, result, meta):
         with _sr_result_lock:
@@ -933,6 +938,15 @@ class ControlApp:
                 out["from_ts"] = parse_from(str(out["from"]))
             except Exception:
                 out["from_ts"] = 0
+        # 结束日期（回测限定历史区间；空=到最新）。含当日全天：to_ts=该日 23:59:59 UTC，
+        # 复用加载层 time<=to_ts 口径且不漏进次日 00:00 整点开的K线；旧方案 cfg 无此键 → 不设 → 行为不变
+        if out.get("to"):
+            try:
+                out["to_ts"] = parse_from(str(out["to"])) + 86400 - 1
+            except Exception:
+                raise ValueError("结束日期非法（YYYY-MM-DD）")
+            if out.get("from_ts") and out["to_ts"] <= out["from_ts"]:
+                raise ValueError("结束日期须晚于起始日期")
         if mode == "replay":
             if out.get("start"):
                 try:
@@ -1666,7 +1680,11 @@ def make_handler(app):
                 body = self._read_body()
                 if action == "start":
                     cfg = body.get("cfg") or body
-                    cfg = ControlApp.normalize_cfg(cfg, mode)
+                    try:
+                        cfg = ControlApp.normalize_cfg(cfg, mode)
+                    except ValueError as e:   # 日期等配置非法：拒绝启动
+                        self._send_json({"ok": False, "error": str(e)}, 400)
+                        return
                     r = worker.start(cfg)
                 elif action == "pause":
                     r = worker.pause()

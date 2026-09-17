@@ -13,6 +13,8 @@
  *   --debug             打印锚定过程、标记列表等调试信息
  *   --nearp=0.3         1买与2买（1卖与2卖）价差阈值（ATR 倍数），价差不超过该值视为很近并合并标注「真1买/真1卖」
  *   --keep=10           每周期保留的标记总数（不分类，买+卖合并后按时间取最近 N 个）
+ *   --class2-zs-tol=0   类2买/类2卖允许越过中枢边界的绝对点数（0=严格）
+ *   --third-zs-tol=0    3买/类3买/3卖/类3卖允许进入中枢的绝对点数（0=严格）
  */
 const fs = require("fs");
 const path = require("path");
@@ -75,6 +77,8 @@ const PERIODS = getStrArg("periods", "D,240,60,15,3")
   .split(",").map(s => s.trim()).filter(Boolean);
 // 每周期保留的标记总数（默认 10，不分类：买+卖合并后只保留时间上最近 N 个，减少图上标记数量）
 const KEEP = Math.max(1, parseInt(getStrArg("keep", "10"), 10) || 10);
+const CLASS2_ZS_TOL = Math.max(0, parseFloat(getArg("class2-zs-tol", 0)) || 0);
+const THIRD_ZS_TOL = Math.max(0, parseFloat(getArg("third-zs-tol", 0)) || 0);
 
 const ANCHOR_BUFFER = 30;
 
@@ -519,8 +523,8 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
 
       // 计算买卖点（区间套：2买/类2买 只在上级上涨笔段内，2卖/类2卖 只在上级下跌笔段内）
       // 1买/1卖 必须满足 MACD 背驰（柱状体面积变小 或 黄白线动能减弱）才标记
-      let buyPts = findBuyPoints(curBis, upperBis, macdArr, intervalSecOf(res));
-      let sellPts = findSellPoints(curBis, upperBis, macdArr, intervalSecOf(res));
+      let buyPts = findBuyPoints(curBis, upperBis, macdArr, intervalSecOf(res), CLASS2_ZS_TOL, THIRD_ZS_TOL);
+      let sellPts = findSellPoints(curBis, upperBis, macdArr, intervalSecOf(res), CLASS2_ZS_TOL, THIRD_ZS_TOL);
 
       // 保留区间套下识别出的全部买卖点，再做邻近合并，最后每周期不分类只保留最近 N 个（默认 10，减少图上标记数量）
 
@@ -584,7 +588,7 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
       const RED = '#F23645', GREEN = '#089981';
       const upperRes = pi > 0 ? PERIODS[pi - 1] : null;
       const upperMarks = upperRes ? periodMarks[upperRes] : null;
-      const upperClassRe = /^([123]买|[123]卖|类2买|类2卖)$/;
+      const upperClassRe = /^([123]买|[123]卖|类[23]买|类[23]卖)$/;
       for (const mk of marks) {
         mk.color = RED;
         if ((mk.label === '1买' || mk.label === '1卖') && upperMarks) {

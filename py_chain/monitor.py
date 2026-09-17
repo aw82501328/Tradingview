@@ -220,13 +220,15 @@ def replay_show_toolbar(c):
     return c.evaluate(replay_api_expr("showReplayToolbar"))
 
 
-def replay_select_date(c, ts_ms, log=None):
-    """selectDate(毫秒) 进入回放；失败 fallback selectFirstAvailableDate()。
+def replay_select_date(c, ts_ms, log=None, fallback=True):
+    """selectDate(毫秒) 进入回放；失败时可 fallback selectFirstAvailableDate()。
 
-    @param ts_ms  回放起点（毫秒时间戳）
+    @param ts_ms    回放起点（毫秒时间戳）
+    @param fallback 失败时是否改跳数据地板（深拉可用；定位必须关，避免跳到 2006）
     @returns dict：{ value } 或 { error }
     """
     log = log or (lambda *a, **k: None)
+    fb = 'true' if fallback else 'false'
     expr = (
         "(function() { "
         "  const ra = " + REPLAY_API + "; "
@@ -236,7 +238,7 @@ def replay_select_date(c, ts_ms, log=None):
         "  return t.selectDate(" + str(int(ts_ms)) + ") "
         "    .then(function() { return { value: true }; }) "
         "    .catch(function(err) { "
-        "      if (typeof t.selectFirstAvailableDate === 'function') "
+        "      if (" + fb + " && typeof t.selectFirstAvailableDate === 'function') "
         "        return t.selectFirstAvailableDate().then(function() { return { value: 'fallback' }; }); "
         "      return { error: String(err) }; "
         "    }); "
@@ -296,19 +298,21 @@ def replay_stop(c):
     return c.evaluate(replay_api_expr("stopReplay"))
 
 
-def replay_enter(c, ts_sec, log=None):
+def replay_enter(c, ts_sec, log=None, fallback=True, timeout=10.0):
     """完整进入回放：showReplayToolbar → selectDate(毫秒) → 等 isReplayStarted + currentDate 就绪。
 
-    @param ts_sec  回放起点（秒时间戳）
+    @param ts_sec   回放起点（秒时间戳）
+    @param fallback 同 replay_select_date：定位跳转须 False，避免选不到日期时落到数据地板
+    @param timeout  等待回放就绪的秒数
     @returns 实际生效的回放起点（秒）；失败抛 RuntimeError
     """
     log = log or (lambda *a, **k: None)
     replay_show_toolbar(c)
-    r = replay_select_date(c, ts_sec * 1000, log=log)
+    r = replay_select_date(c, ts_sec * 1000, log=log, fallback=fallback)
     if r and "error" in r and r["error"] != "fallback":
         raise RuntimeError(f"进入回放失败：{r['error']}")
     # 轮询等待回放就绪（isReplayStarted + currentDate 返回有效位置）
-    deadline = time.time() + 10.0
+    deadline = time.time() + max(0.5, float(timeout))
     pos = None
     while time.time() < deadline:
         if replay_started(c):

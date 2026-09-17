@@ -90,7 +90,7 @@ let bis = core.buildBi(fractals, merged, atr, macdArr); // ③ 笔构建
 
 | 函数 | 说明 |
 |------|------|
-| `buildZS(bis, barSec)` | 构建笔中枢：三笔重叠形成 → 向后延伸 → 离开笔结束；垂直区间=全部笔重叠（ZG=min高点，ZD=max低点）；水平边缘=[进入笔终点−5×barSec, 离开笔起点+5×barSec]（barSec 为本周期单根K线秒数，左右各外扩5根K线）；至少 5 笔才输出 |
+| `buildZS(bis, barSec)` | 构建笔中枢：三笔重叠形成 → 向后延伸 → 离开笔结束；垂直区间=全部笔重叠（ZG=min高点，ZD=max低点）；水平边缘=[进入笔终点−5×barSec, 离开笔起点+5×barSec]；至少 3 笔即可输出 |
 | `buildZSByUpper(lowerBis, upperBis, tolSec)` | 按上级笔分解构建中枢（分解原则不跨周期）：用上级笔时间区间把本级别笔切段，每段内独立运行 buildZS；tolSec 同时用作 buildZS 的 barSec（外扩时长） |
 
 ## 数据约定

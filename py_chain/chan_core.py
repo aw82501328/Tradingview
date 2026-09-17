@@ -923,7 +923,7 @@ def buildZS(bis, barSec=0):
     中枢形成后支持延伸：后续笔与 [ZD, ZG] 有重叠则纳入中枢（GG/DD 扩展），
     出现离开中枢的笔时中枢结束（笔与中枢区间完全无重叠 → 离开；笔的起点在中枢
     区间内、终点突破中枢边界 → 也视为离开）。
-    至少 5 笔才画中枢（3~4 笔的中枢强度不足，不输出，但保留扫描逻辑）。
+    至少 3 笔即可输出中枢（三笔重叠即成）。
     中枢区间 [zd, zg] 取「构成中枢的全部笔（含离开笔）的重叠部分」。
     中枢水平边缘：左边缘 = 进入笔终点 - 5×barSec；右边缘 = 离开笔起点 + 5×barSec；
     无离开笔时右边缘 = 构成中枢最后一笔的终点 + 5×barSec。
@@ -971,8 +971,8 @@ def buildZS(bis, barSec=0):
                     break
             # 笔数 = 构成中枢的笔（i..j-1）+ 离开笔（若有 1 笔）
             biCount = (1 if exitTime is not None else 0) + (j - i)
-            # 至少 5 笔才画中枢（3~4 笔的基础重叠结构强度不足，不输出；保留扫描逻辑）
-            if biCount < 5:
+            # 至少 3 笔即可输出中枢（三笔重叠即成）
+            if biCount < 3:
                 i = j
                 continue
             # 中枢区间 = 构成中枢的全部笔（i..i+biCount-1，含离开笔）的重叠部分
@@ -1553,16 +1553,76 @@ def snapToOwnBar(price, refTime, bars):
     return nearest
 
 
-def findBuyPoints(bis, upperBis, macdArr, barSec):
-    """买点识别（含区间套与 MACD 背驰）。"""
+def _pick_zs_for_seg(zss, seg_start, seg_end):
+    """取与上级笔段重叠的中枢（优先 upperStart/End 精确匹配，否则时间相交、取最晚形成）。"""
+    if not zss:
+        return None
+    exact = [z for z in zss
+             if z.get("upperStart") == seg_start and z.get("upperEnd") == seg_end]
+    pool = exact
+    if not pool:
+        pool = []
+        for z in zss:
+            us, ue = z.get("upperStart"), z.get("upperEnd")
+            if us is not None and ue is not None:
+                if us <= seg_end and ue >= seg_start:
+                    pool.append(z)
+            elif z["startTime"] <= seg_end and z["endTime"] >= seg_start:
+                pool.append(z)
+    if not pool:
+        return None
+    return max(pool, key=lambda z: z.get("enterEndTime") or z["startTime"])
+
+
+def _pick_zs_for_two(zss, seg_start, seg_end, two_time):
+    """为 2买/2卖选取关联中枢：优先时间覆盖该点的中枢，否则取其后最早形成的中枢。"""
+    if not zss:
+        return None
+    pool = []
+    for z in zss:
+        us, ue = z.get("upperStart"), z.get("upperEnd")
+        if us is not None and ue is not None:
+            if not (us <= seg_end and ue >= seg_start):
+                continue
+        elif not (z["startTime"] <= seg_end and z["endTime"] >= seg_start):
+            continue
+        pool.append(z)
+    if not pool:
+        return None
+    t0 = lambda z: z.get("enterEndTime") or z["startTime"]
+    t1 = lambda z: z.get("exitTime") or z.get("exitStartTime") or z["endTime"]
+    containing = [z for z in pool if t0(z) <= two_time <= t1(z)]
+    if containing:
+        return min(containing, key=t0)
+    after = [z for z in pool if t0(z) >= two_time]
+    if after:
+        return min(after, key=t0)
+    return max(pool, key=t0)
+
+
+def _append_third_points(points, third_list, main_type, class_type, class2_type):
+    """写入 3/类3；与类2同点时删类2保留 3/类3。"""
+    for t in third_list:
+        if any(p["type"] in (main_type, class_type) and p["time"] == t["time"] for p in points):
+            continue
+        dup = _findIndex(points, lambda p: p["type"] == class2_type and p["time"] == t["time"])
+        if dup >= 0:
+            del points[dup]
+        points.append({"type": t["type"], "time": t["time"], "price": t["price"]})
+
+
+def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.0):
+    """买点识别（MACD 背驰 + 抬高结构 + 中枢类2/3）。
+    2买：上级上涨笔内首个 price > up.startPrice（无上级：结构底抬高），不读 zd/zg。
+    类2买：2买后更高抬高且落在中枢 [zd-class2ZsTol, zg]；无中枢不标。
+    3买/类3买：离 zg 后回踩 > zg-thirdZsTol；同段第1/第2个；无中枢不标。
+    1买逻辑不变。
+    """
     if len(bis) < 3:
         return []
+    c2tol = float(class2ZsTol or 0)
+    t3tol = float(thirdZsTol or 0)
     downIdx = [i for i, b in enumerate(bis) if b["type"] == "down"]
-    # 性能预计算（回测链路每次重算都会调用本函数，逐根全量扫描是长窗口热点）：
-    #   downLows/downTimes：down 笔端点按时间升序（bis 有序），2买 区间套按上级笔时间段
-    #     bisect 取窗，替代对全部笔的逐根扫描（选出的集合与顺序和原逐根过滤完全一致）；
-    #   idxByEndTime：endTime → 首次出现下标（与 _findIndex 等值查找的首个匹配语义一致）；
-    #   upperByType：上级笔按类型分组（isSameAsUpperBi 内部本来就跳过异类型笔）。
     downLows = [(i, bis[i]["endTime"], bis[i]["endPrice"]) for i in downIdx]
     downTimes = [t for _, t, _ in downLows]
     idxByEndTime = {}
@@ -1574,7 +1634,7 @@ def findBuyPoints(bis, upperBis, macdArr, barSec):
         upperByType = {"up": [u for u in upperBis if u["type"] == "up"],
                        "down": [u for u in upperBis if u["type"] == "down"]}
 
-    # 候选一买：创新低 + MACD 背驰；同笔例外（与已结束的上级下跌笔整体重合 → 纯结构标记）
+    # 候选一买：创新低 + MACD 背驰；同笔例外
     firstBuys = []
     for k in range(1, len(downIdx)):
         cur = bis[downIdx[k]]
@@ -1582,14 +1642,10 @@ def findBuyPoints(bis, upperBis, macdArr, barSec):
             if upperByType is not None else None
         if sameUpper is not None:
             if sameUpper is upperBis[-1]:
-                # 时序护栏：命中上级末笔（延伸中的形成笔，反向笔未确认进列表）→ 维持跳过
                 if CHAN_CFG["debug"]:
                     print(f"[一买跳过-上级末笔延伸中] {fmtT(cur['endTime'])}({cur['endPrice']}) "
                           f"与上级末笔重合，上级反向笔未确认")
                 continue
-            # 同笔1买：本级下跌笔与已结束上级下跌笔整体重合，本级无内部结构、有效参照
-            # 须同处上级笔内部（跨上级笔边界的比较无意义）→ 纯结构标记（不选参照笔、
-            # 不比创新低/背驰）；安全闸由进场侧 wait2Buy（破前高等）承担
             if CHAN_CFG["debug"]:
                 print(f"[一买同笔] {fmtT(cur['endTime'])}({cur['endPrice']}) "
                       f"与上级已结束下跌笔重合，结构同笔标记1买")
@@ -1615,12 +1671,13 @@ def findBuyPoints(bis, upperBis, macdArr, barSec):
                 )
             if diverge:
                 firstBuys.append({"biIdx": downIdx[k], "time": cur["endTime"], "price": cur["endPrice"]})
-    firstBuy = firstBuys[-1] if len(firstBuys) > 0 else None
+    firstBuy = firstBuys[-1] if firstBuys else None
 
     points = []
+    twoBuyMeta = []  # 有中枢的 2买，供类2/3/类3
 
-    # 2买 / 类2买（区间套）
     if upperBis is not None and len(upperBis) > 0:
+        zss = buildZSByUpper(bis, upperBis, barSec)
         for up in upperBis:
             if up["type"] != "up":
                 continue
@@ -1629,15 +1686,25 @@ def findBuyPoints(bis, upperBis, macdArr, barSec):
             if lo >= hi:
                 continue
             lows = [{"biIdx": i, "time": t, "price": p} for i, t, p in downLows[lo:hi]]
-            lows.sort(key=lambda x: x["time"])  # 已升序，保留与原实现一致的显式排序
+            lows.sort(key=lambda x: x["time"])
+            # 2买：抬高结构，不依赖中枢
             firstLow = next((l for l in lows if l["price"] > up["startPrice"]), None)
-            if firstLow is not None:
-                points.append({"type": "2买", "time": firstLow["time"], "price": firstLow["price"]})
-                laterHigh = next((l for l in lows if l["time"] > firstLow["time"] and l["price"] > firstLow["price"]), None)
-                if laterHigh is not None:
-                    points.append({"type": "类2买", "time": laterHigh["time"], "price": laterHigh["price"]})
+            if firstLow is None:
+                continue
+            points.append({"type": "2买", "time": firstLow["time"], "price": firstLow["price"]})
+            zs = _pick_zs_for_two(zss, up["startTime"], up["endTime"], firstLow["time"])
+            if zs is None:
+                continue
+            zd, zg = zs["zd"], zs["zg"]
+            twoBuyMeta.append({"time": firstLow["time"], "price": firstLow["price"],
+                               "zg": zg, "segStart": up["startTime"], "segEnd": up["endTime"]})
+            later = next((l for l in lows
+                          if l["time"] > firstLow["time"] and l["price"] > firstLow["price"]
+                          and (zd - c2tol) <= l["price"] <= zg), None)
+            if later is not None:
+                points.append({"type": "类2买", "time": later["time"], "price": later["price"]})
     else:
-        # 结构底
+        # 结构底 → 2买（不依赖中枢）
         structBottomIdx = None
         if firstBuy is not None:
             minP = float("inf")
@@ -1664,81 +1731,74 @@ def findBuyPoints(bis, upperBis, macdArr, barSec):
                     break
             if secondBuy is not None:
                 points.append({"type": "2买", "time": secondBuy["time"], "price": secondBuy["price"]})
-                classSecond = None
-                for i in range(secondBuy["biIdx"] + 1, len(bis)):
-                    if bis[i]["type"] != "down":
-                        continue
-                    if bis[i]["endPrice"] > secondBuy["price"]:
-                        classSecond = {"time": bis[i]["endTime"], "price": bis[i]["endPrice"]}
-                        break
-                if classSecond is not None:
-                    points.append({"type": "类2买", "time": classSecond["time"], "price": classSecond["price"]})
+                zss = buildZS(bis, barSec)
+                zs = _pick_zs_for_two(zss, secondBuy["time"], secondBuy["time"], secondBuy["time"])
+                if zs is not None:
+                    zd, zg = zs["zd"], zs["zg"]
+                    t0 = zs.get("enterEndTime") or zs["startTime"]
+                    t1 = zs.get("exitTime") or zs["endTime"]
+                    twoBuyMeta.append({"time": secondBuy["time"], "price": secondBuy["price"],
+                                       "zg": zg, "segStart": t0, "segEnd": t1})
+                    classSecond = None
+                    for i in range(secondBuy["biIdx"] + 1, len(bis)):
+                        if bis[i]["type"] != "down":
+                            continue
+                        p = bis[i]["endPrice"]
+                        if p > secondBuy["price"] and (zd - c2tol) <= p <= zg:
+                            classSecond = {"time": bis[i]["endTime"], "price": p}
+                            break
+                    if classSecond is not None:
+                        points.append({"type": "类2买", "time": classSecond["time"],
+                                       "price": classSecond["price"]})
 
-    # 1买：所有 MACD 背驰底
     for fb in firstBuys:
         points.append({"type": "1买", "time": fb["time"], "price": fb["price"]})
 
-    # 3买
-    twoBuys = sorted([p for p in points if p["type"] == "2买"], key=lambda x: x["time"])
-    thirdBuys = []
-    for k in range(len(twoBuys)):
-        tb = twoBuys[k]
+    # 3买 / 类3买：仅对有中枢的 2买段；扫到「下一个 2买」（含无中枢的 2买）之前
+    all_two = sorted([p for p in points if p["type"] == "2买"], key=lambda x: x["time"])
+    twoBuyMeta.sort(key=lambda x: x["time"])
+    third_out = []
+    for tb in twoBuyMeta:
         twoIdx = idxByEndTime.get(tb["time"], -1)
         if twoIdx < 0:
             continue
-        if k + 1 < len(twoBuys):
-            endScan = idxByEndTime.get(twoBuys[k + 1]["time"], -1)
-        else:
-            endScan = len(bis)
-        prevTop = None
-        for j in range(twoIdx - 1, -1, -1):
-            if bis[j]["type"] == "up":
-                prevTop = bis[j]["endPrice"]
+        endScan = len(bis)
+        for nxt in all_two:
+            if nxt["time"] > tb["time"]:
+                endScan = idxByEndTime.get(nxt["time"], len(bis))
+                if endScan < 0:
+                    endScan = len(bis)
                 break
-        if prevTop is None:
-            continue
-        lastValid = None
+        zg = tb["zg"]
+        valids = []
         for i in range(twoIdx + 1, endScan):
             if bis[i]["type"] != "up":
                 continue
-            if bis[i]["endPrice"] <= prevTop:
+            if bis[i]["endPrice"] <= zg:
                 continue
             for mm in range(i + 1, endScan):
                 if bis[mm]["type"] != "down":
                     continue
                 bt = bis[mm]["endTime"]
                 bp = bis[mm]["endPrice"]
-                if bp > prevTop:
-                    inUp = True
-                    if upperBis is not None and len(upperBis) > 0:
-                        inUp = False
-                        for up in upperBis:
-                            if up["type"] == "up" and bt >= up["startTime"] and bt <= up["endTime"] and bp > up["startPrice"]:
-                                inUp = True
-                                break
-                    if inUp:
-                        lastValid = {"time": bt, "price": bp}
+                if bp > zg - t3tol and bt >= tb["segStart"] and bt <= tb["segEnd"] + 1:
+                    valids.append({"time": bt, "price": bp})
                 break
-        if lastValid is not None:
-            thirdBuys.append(lastValid)
-    # 按时间去重后加入
-    for t in thirdBuys:
-        if any(p["type"] == "3买" and p["time"] == t["time"] for p in points):
-            continue
-        dup = _findIndex(points, lambda p: p["type"] == "类2买" and p["time"] == t["time"])
-        if dup >= 0:
-            del points[dup]
-        points.append({"type": "3买", "time": t["time"], "price": t["price"]})
+        if valids:
+            third_out.append({"type": "3买", "time": valids[0]["time"], "price": valids[0]["price"]})
+            if len(valids) >= 2:
+                third_out.append({"type": "类3买", "time": valids[1]["time"], "price": valids[1]["price"]})
+    _append_third_points(points, third_out, "3买", "类3买", "类2买")
     return points
 
 
-def findSellPoints(bis, upperBis, macdArr, barSec):
-    """卖点识别（含区间套与 MACD 背驰，与买点对称）。"""
+def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.0):
+    """卖点识别（与买点对称）：2卖不依赖中枢；类2/3/类3 依赖中枢。"""
     if len(bis) < 3:
         return []
+    c2tol = float(class2ZsTol or 0)
+    t3tol = float(thirdZsTol or 0)
     upIdx = [i for i, b in enumerate(bis) if b["type"] == "up"]
-    # 性能预计算（与 findBuyPoints 对称）：up 笔端点按时间升序供 2卖 区间套 bisect 取窗、
-    # endTime 首次出现下标字典、上级笔按类型分组。
     upHighs = [(i, bis[i]["endTime"], bis[i]["endPrice"]) for i in upIdx]
     upTimes = [t for _, t, _ in upHighs]
     idxByEndTime = {}
@@ -1750,7 +1810,6 @@ def findSellPoints(bis, upperBis, macdArr, barSec):
         upperByType = {"up": [u for u in upperBis if u["type"] == "up"],
                        "down": [u for u in upperBis if u["type"] == "down"]}
 
-    # 候选一卖：创新高 + MACD 背驰；同笔例外（与已结束的上级上涨笔整体重合 → 纯结构标记）
     firstSells = []
     for k in range(1, len(upIdx)):
         cur = bis[upIdx[k]]
@@ -1758,13 +1817,10 @@ def findSellPoints(bis, upperBis, macdArr, barSec):
             if upperByType is not None else None
         if sameUpper is not None:
             if sameUpper is upperBis[-1]:
-                # 时序护栏：命中上级末笔（延伸中的形成笔，反向笔未确认进列表）→ 维持跳过
                 if CHAN_CFG["debug"]:
                     print(f"[一卖跳过-上级末笔延伸中] {fmtT(cur['endTime'])}({cur['endPrice']}) "
                           f"与上级末笔重合，上级反向笔未确认")
                 continue
-            # 同笔1卖：本级上涨笔与已结束上级上涨笔整体重合 → 纯结构标记（不选参照笔、
-            # 不比创新高/背驰）；安全闸由进场侧 wait2Sell（破前低等）承担
             if CHAN_CFG["debug"]:
                 print(f"[一卖同笔] {fmtT(cur['endTime'])}({cur['endPrice']}) "
                       f"与上级已结束上涨笔重合，结构同笔标记1卖")
@@ -1790,9 +1846,8 @@ def findSellPoints(bis, upperBis, macdArr, barSec):
                 )
             if diverge:
                 firstSells.append({"biIdx": upIdx[k], "time": cur["endTime"], "price": cur["endPrice"]})
-    firstSell = firstSells[-1] if len(firstSells) > 0 else None
+    firstSell = firstSells[-1] if firstSells else None
 
-    # 1卖 锚定：对每一个候选一卖都做锚定，全部保留；去重
     anchoredSells = []
     seenSellPos = set()
     for fs in firstSells:
@@ -1820,9 +1875,10 @@ def findSellPoints(bis, upperBis, macdArr, barSec):
         anchoredSells.append(anchored)
 
     points = []
+    twoSellMeta = []
 
-    # 2卖 / 类2卖（区间套）
     if upperBis is not None and len(upperBis) > 0:
+        zss = buildZSByUpper(bis, upperBis, barSec)
         for dn in upperBis:
             if dn["type"] != "down":
                 continue
@@ -1831,15 +1887,25 @@ def findSellPoints(bis, upperBis, macdArr, barSec):
             if lo >= hi:
                 continue
             highs = [{"biIdx": i, "time": t, "price": p} for i, t, p in upHighs[lo:hi]]
-            highs.sort(key=lambda x: x["time"])  # 已升序，保留与原实现一致的显式排序
+            highs.sort(key=lambda x: x["time"])
+            # 2卖：次高结构，不依赖中枢
             firstHigh = next((h for h in highs if h["price"] < dn["startPrice"]), None)
-            if firstHigh is not None:
-                points.append({"type": "2卖", "time": firstHigh["time"], "price": firstHigh["price"]})
-                laterLow = next((h for h in highs if h["time"] > firstHigh["time"] and h["price"] < firstHigh["price"]), None)
-                if laterLow is not None:
-                    points.append({"type": "类2卖", "time": laterLow["time"], "price": laterLow["price"]})
+            if firstHigh is None:
+                continue
+            points.append({"type": "2卖", "time": firstHigh["time"], "price": firstHigh["price"]})
+            zs = _pick_zs_for_two(zss, dn["startTime"], dn["endTime"], firstHigh["time"])
+            if zs is None:
+                continue
+            zd, zg = zs["zd"], zs["zg"]
+            twoSellMeta.append({"time": firstHigh["time"], "price": firstHigh["price"],
+                                "zd": zd, "segStart": dn["startTime"], "segEnd": dn["endTime"]})
+            later = next((h for h in highs
+                          if h["time"] > firstHigh["time"] and h["price"] < firstHigh["price"]
+                          and zd <= h["price"] <= (zg + c2tol)), None)
+            if later is not None:
+                points.append({"type": "类2卖", "time": later["time"], "price": later["price"]})
     else:
-        # 结构顶
+        # 结构顶 → 2卖
         structTopIdx = None
         if firstSell is not None:
             maxP = float("-inf")
@@ -1866,71 +1932,63 @@ def findSellPoints(bis, upperBis, macdArr, barSec):
                     break
             if secondSell is not None:
                 points.append({"type": "2卖", "time": secondSell["time"], "price": secondSell["price"]})
-                classSecond = None
-                for i in range(secondSell["biIdx"] + 1, len(bis)):
-                    if bis[i]["type"] != "up":
-                        continue
-                    if bis[i]["endPrice"] < secondSell["price"]:
-                        classSecond = {"time": bis[i]["endTime"], "price": bis[i]["endPrice"]}
-                        break
-                if classSecond is not None:
-                    points.append({"type": "类2卖", "time": classSecond["time"], "price": classSecond["price"]})
+                zss = buildZS(bis, barSec)
+                zs = _pick_zs_for_two(zss, secondSell["time"], secondSell["time"], secondSell["time"])
+                if zs is not None:
+                    zd, zg = zs["zd"], zs["zg"]
+                    t0 = zs.get("enterEndTime") or zs["startTime"]
+                    t1 = zs.get("exitTime") or zs["endTime"]
+                    twoSellMeta.append({"time": secondSell["time"], "price": secondSell["price"],
+                                        "zd": zd, "segStart": t0, "segEnd": t1})
+                    classSecond = None
+                    for i in range(secondSell["biIdx"] + 1, len(bis)):
+                        if bis[i]["type"] != "up":
+                            continue
+                        p = bis[i]["endPrice"]
+                        if p < secondSell["price"] and zd <= p <= (zg + c2tol):
+                            classSecond = {"time": bis[i]["endTime"], "price": p}
+                            break
+                    if classSecond is not None:
+                        points.append({"type": "类2卖", "time": classSecond["time"],
+                                       "price": classSecond["price"]})
 
-    # 1卖：所有 MACD 背驰顶（锚定到上级上涨笔结束点）
     for as_ in anchoredSells:
         points.append({"type": "1卖", "time": as_["time"], "price": as_["price"]})
 
-    # 3卖
-    twoSells = sorted([p for p in points if p["type"] == "2卖"], key=lambda x: x["time"])
-    thirdSells = []
-    for k in range(len(twoSells)):
-        ts = twoSells[k]
+    twoSellMeta.sort(key=lambda x: x["time"])
+    all_two = sorted([p for p in points if p["type"] == "2卖"], key=lambda x: x["time"])
+    third_out = []
+    for ts in twoSellMeta:
         twoIdx = idxByEndTime.get(ts["time"], -1)
         if twoIdx < 0:
             continue
-        if k + 1 < len(twoSells):
-            endScan = idxByEndTime.get(twoSells[k + 1]["time"], -1)
-        else:
-            endScan = len(bis)
-        prevLow = None
-        for j in range(twoIdx - 1, -1, -1):
-            if bis[j]["type"] == "down":
-                prevLow = bis[j]["endPrice"]
+        endScan = len(bis)
+        for nxt in all_two:
+            if nxt["time"] > ts["time"]:
+                endScan = idxByEndTime.get(nxt["time"], len(bis))
+                if endScan < 0:
+                    endScan = len(bis)
                 break
-        if prevLow is None:
-            continue
-        lastValid = None
+        zd = ts["zd"]
+        valids = []
         for i in range(twoIdx + 1, endScan):
             if bis[i]["type"] != "down":
                 continue
-            if bis[i]["endPrice"] >= prevLow:
+            if bis[i]["endPrice"] >= zd:
                 continue
             for mm in range(i + 1, endScan):
                 if bis[mm]["type"] != "up":
                     continue
                 st = bis[mm]["endTime"]
                 sp = bis[mm]["endPrice"]
-                if sp < prevLow:
-                    inDown = True
-                    if upperBis is not None and len(upperBis) > 0:
-                        inDown = False
-                        for dn in upperBis:
-                            if dn["type"] == "down" and st >= dn["startTime"] and st <= dn["endTime"] and sp < dn["startPrice"]:
-                                inDown = True
-                                break
-                    if inDown:
-                        lastValid = {"time": st, "price": sp}
+                if sp < zd + t3tol and st >= ts["segStart"] and st <= ts["segEnd"] + 1:
+                    valids.append({"time": st, "price": sp})
                 break
-        if lastValid is not None:
-            thirdSells.append(lastValid)
-    # 按时间去重后加入
-    for t in thirdSells:
-        if any(p["type"] == "3卖" and p["time"] == t["time"] for p in points):
-            continue
-        dup = _findIndex(points, lambda p: p["type"] == "类2卖" and p["time"] == t["time"])
-        if dup >= 0:
-            del points[dup]
-        points.append({"type": "3卖", "time": t["time"], "price": t["price"]})
+        if valids:
+            third_out.append({"type": "3卖", "time": valids[0]["time"], "price": valids[0]["price"]})
+            if len(valids) >= 2:
+                third_out.append({"type": "类3卖", "time": valids[1]["time"], "price": valids[1]["price"]})
+    _append_third_points(points, third_out, "3卖", "类3卖", "类2卖")
     return points
 
 

@@ -30,6 +30,13 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 .prow input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px}
 .prow select{background:var(--bg);color:var(--text);border:1px solid var(--border);
   border-radius:4px;padding:3px 6px;font-size:12px}
+.prow.dim{opacity:.45}
+.prow.dim input,.prow.dim select{pointer-events:none}
+.prow .zs-side{display:flex;align-items:center;gap:12px;flex-shrink:0}
+.prow .zs-side .zs-draw{display:flex;align-items:center;gap:6px;color:var(--text);font-size:12.5px;white-space:nowrap}
+.prow .zs-side .zs-keep{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px;white-space:nowrap}
+.prow .zs-side .zs-keep.dim{opacity:.45}
+.prow .zs-side .zs-keep.dim input{pointer-events:none}
 .pfoot{display:flex;gap:10px;align-items:center;margin:14px 0 0;flex-wrap:wrap}
 .pfoot .state{color:var(--muted);font-size:11px}
 .pnote{color:var(--muted);font-size:12px;margin-top:10px;max-width:1180px}
@@ -71,10 +78,10 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 <link rel="stylesheet" href="/legacy-theme.css">
 </head>
 <body>
-<h1>参数配置<span class="sub">分模块统一管理；保存后进入分析与回测计算链路（缠论核心全局即时生效，其余下一轮任务生效）</span></h1>
+<h1>参数配置<span class="sub">分模块统一管理，页签顺序与工作台一致；画笔/买卖点/进出场中的算法阈值保存后全局即时生效，其余下一轮任务生效</span></h1>
 <nav class="ptabs" id="tabs" aria-label="参数模块"></nav>
-<div class="pane" id="pane-sr"><iframe id="srFrame" title="支阻位参数" loading="lazy"></iframe></div>
-<div class="pane" id="pane-form" hidden>
+<div class="pane" id="pane-sr" hidden><iframe id="srFrame" title="支阻位参数" loading="lazy"></iframe></div>
+<div class="pane" id="pane-form">
   <div class="pgrid" id="pgrid"></div>
   <div class="pfoot">
     <button class="primary" id="saveBtn">保存本模块</button>
@@ -94,9 +101,10 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
-const PARAM_MODULES = ['chan', 'points', 'entry', 'plan'];
-const TABS = [['sr', '支阻位'], ['chan', '缠论核心'], ['points', '买卖点'], ['entry', '进出场'], ['plan', '交易计划']];
-let modules = {}, active = 'sr', toastTimer;
+const PARAM_MODULES = ['chan', 'zs', 'points', 'entry', 'plan'];
+const TAB_IDS = ['chan', 'zs', 'points', 'sr', 'plan', 'entry'];
+const TABS = [['chan', '画笔'], ['zs', '画中枢'], ['points', '标记买卖点'], ['sr', '支阻位'], ['plan', '交易计划'], ['entry', '标记进出场']];
+let modules = {}, active = 'chan', toastTimer;
 
 // 模块逻辑规则说明（renderModule 时渲染在参数网格下方；顺势规则已并入图解表2 标题下方，
 // 与 trading_plan.trend_direction 同步维护）
@@ -120,19 +128,19 @@ const LOGIC_BODY = `
 <tr><td>{RANGE_REF}自己和比它大的周期（日线）</td><td>固定观望：只作锚（给小周期定震荡结果、给顺势定方向），不参与交易、不做判定</td></tr>
 <tr><td>rangeRes 未配置（必填项，正常配不到这状态）</td><td>全部周期观望</td></tr>
 </table>
-<div class="lcap">{RANGE_REF}怎么判自己震不震荡——下面两个条件满足任意一个就算震荡；小周期跟着这个结果走：</div>
+<div class="lcap">{RANGE_REF}怎么判自己震不震荡——下面两个条件满足任意一个就算震荡；小周期跟着这个结果走（本页可分别开关关闭某一类）：</div>
 <table class="ltable" id="t1b">
 <tr><th>条件</th><th>大白话</th><th>具体口径</th></tr>
 <tr><td>① 横盘</td><td>最近40根K挤在一条窄带里，最近几笔涨跌交替没一边倒；但最后一笔已经冲出窄带→正在突破，不算横盘</td><td>①40根K最高−最低 ≤ 5×ATR；②窗口内最近4笔端点极差 ≤ 7×ATR、涨跌都有、无连续3笔同向；③末笔越过窄带另一端 &gt;1×ATR → 直接算趋势</td></tr>
 <tr><td>② 待在箱体里</td><td>价格正待在一个还没走完的箱子里，上不去下不来</td><td>最近一个中枢（至少5笔搭成、不跨上一级笔端点）还没离开，当前价在箱顶箱底之间</td></tr>
 </table>
-<p class="lnote">注：{RANGE_REF}自己也按这两个条件判，数据用它自己的K线和笔（箱体条件的上一级笔=日线笔）；判出震荡时更低周期一并观望。</p>
+<p class="lnote">注：{RANGE_REF}自己也按这两个条件判，数据用它自己的K线和笔（箱体条件的上一级笔=日线笔）；判出震荡时更低周期一并观望。参数配置页「①横盘判定 / ②中枢内判定」开关可独立关闭某一类（关闭横盘后其阈值变灰仍保留数值）。</p>
 <p class="lnote">ATR＝最近14根K平均每根的波动幅度（含跳空），即「一根K正常晃多大」。5×ATR＝总波动不超过5根K的正常波动；行情波动大时窄带自动放宽。</p>
 <h4>表2 · 顺势方向怎么定<span class="lsub">只放行顺着参考周期方向的单</span></h4>
 <ol class="lrules">
 <li>取<b>参考周期（{TREND_REF}）最近一个买卖点</b>作方向锚；参考周期自身不再产生进场信号，更低周期（{LOWER}）只做锚方向的单。</li>
 <li><b>1买/1卖</b>：端点后出现<b>强分型</b>才确立方向——底分型右肩（第3根合并K）收盘价 &gt; 左肩（第1根合并K）最高价，顶分型镜像。</li>
-<li><b>非一类买卖点</b>（2买/类2买/3买、2卖/类2卖/3卖）：出现即确立方向（点锚定的笔本身已够笔成笔）。</li>
+<li><b>非一类买卖点</b>（2买/类2买/3买/类3买、2卖/类2卖/3卖/类3卖）：出现即确立方向（点锚定的笔本身已够笔成笔）。</li>
 <li><b>破坏闩锁</b>：确立后参考周期<b>收盘价</b>跌破买点端点价 / 涨破卖点端点价 → 反向（下跌/上涨延续），闩锁至下一个买卖点事件（价格收回也不翻回）。</li>
 <li><b>回退</b>：无买卖点、或1类点强分型未出现时，按最近一笔方向（末笔向上→只做多 / 向下→只做空）。</li>
 <li>参考周期无笔数据 → 不过滤（多空照常）；回测信号列表方向列显示锚方向与成因，如 <b>多（{TREND_REF}2买）</b>。</li>
@@ -144,7 +152,7 @@ const LOGIC_BODY = `
 <tr><td>最近60笔没有买卖点</td><td>按末笔方向：向上→只做多 / 向下→只做空</td></tr>
 <tr><td>最新是1买/1卖，强分型还没出现</td><td>同上（回退末笔方向）</td></tr>
 <tr><td>最新是1买/1卖，强分型已出现，之后没被收盘破坏</td><td>买点→只做多 / 卖点→只做空</td></tr>
-<tr><td>最新是2/3类买卖点，之后没被收盘破坏</td><td>买点→只做多 / 卖点→只做空</td></tr>
+<tr><td>最新是2买/类2买/3买/类3买或2卖/类2卖/3卖/类3卖，之后没被收盘破坏</td><td>买点→只做多 / 卖点→只做空</td></tr>
 <tr><td>点之后被收盘破坏</td><td>掉头锁定：反向顺势（收复也不翻回，等下一个买卖点）</td></tr>
 <tr><td>应用</td><td>信号方向与顺势方向同向→保留；反向→剔除。只管比{TREND_REF}小的周期，{TREND_REF}自己和更大周期不发信号；trendRes 关掉则整套不拦</td></tr>
 </table>
@@ -156,10 +164,10 @@ const LOGIC_BODY = `
 <tr><th>最近贴上的买卖点</th><th>附带条件</th><th>方向</th><th>接下来做什么</th></tr>
 <tr><td>1卖</td><td>—</td><td>空头空（跌势做空）</td><td>等反弹后做2卖</td></tr>
 <tr><td>1买</td><td>—</td><td>多头多（涨势做多）</td><td>等回调后做2买</td></tr>
-<tr><td>2买/类2买/3买</td><td>冲过前高且力度没变弱</td><td>多头多</td><td>等回调后的新买点</td></tr>
-<tr><td>2买/类2买/3买</td><td>没冲过前高，或力度变弱</td><td>多头空（涨势做空）</td><td>等高点附近的一卖</td></tr>
-<tr><td>2卖/类2卖/3卖</td><td>跌破前低且力度没变弱</td><td>空头空</td><td>等反弹后的新卖点</td></tr>
-<tr><td>2卖/类2卖/3卖</td><td>没破前低，或力度变弱</td><td>空头多（跌势做多）</td><td>等低点附近的一买</td></tr>
+<tr><td>2买/类2买/3买/类3买</td><td>冲过前高且力度没变弱</td><td>多头多</td><td>等回调后的新买点</td></tr>
+<tr><td>2买/类2买/3买/类3买</td><td>没冲过前高，或力度变弱</td><td>多头空（涨势做空）</td><td>等高点附近的一卖</td></tr>
+<tr><td>2卖/类2卖/3卖/类3卖</td><td>跌破前低且力度没变弱</td><td>空头空</td><td>等反弹后的新卖点</td></tr>
+<tr><td>2卖/类2卖/3卖/类3卖</td><td>没破前低，或力度变弱</td><td>空头多（跌势做多）</td><td>等低点附近的一买</td></tr>
 </table>
 <p class="lnote">方向命名：前两个字＝现在的结构是涨是跌，后一个字＝做多还是做空。</p>
 <p class="lnote"><b>附带条件怎么判</b>（只对 2类/3类点——上表「附带条件」列的三步判定，卖点全程对称）：</p>
@@ -344,18 +352,47 @@ function rowHtml(key, spec, value, isMod) {
     <span class="pdef">${defText} · ${spec.desc}</span></span>${control}</div>`;
 }
 
+// 画中枢：同周期「是否画 + 最近个数」同一行
+const ZS_PERIOD_ROWS = [
+  ['D', '日线', 'drawD', 'keepD'],
+  ['240', '4小时', 'draw240', 'keep240'],
+  ['60', '1小时', 'draw60', 'keep60'],
+  ['15', '15分钟', 'draw15', 'keep15'],
+  ['3', '3分钟', 'draw3', 'keep3'],
+];
+function zsRowsHtml(m) {
+  return ZS_PERIOD_ROWS.map(([, name, drawKey, keepKey]) => {
+    const dSpec = m.schema[drawKey], kSpec = m.schema[keepKey];
+    const dVal = m.effective[drawKey], kVal = m.effective[keepKey];
+    const isMod = m.overrides[drawKey] !== undefined || m.overrides[keepKey] !== undefined;
+    const defText = `画默认${dSpec.default ? '开' : '关'} · 最近默认 ${kSpec.default}`;
+    return `<div class="prow ${isMod ? 'mod' : ''}" title="${dSpec.desc}；${kSpec.desc}">
+      <span class="pname"><span class="plabel">${name}<span class="badge">已修改</span></span>
+      <span class="pdef">${defText}</span></span>
+      <span class="zs-side">
+        <label class="zs-draw"><input type="checkbox" data-k="${drawKey}" ${dVal ? 'checked' : ''}>画中枢</label>
+        <span class="zs-keep" data-keep-for="${drawKey}">最近
+          <input type="number" step="1" min="${kSpec.min}" max="${kSpec.max}" data-k="${keepKey}" value="${kVal}">
+        </span>
+      </span></div>`;
+  }).join('');
+}
+
 function renderModule(name) {
   const m = modules[name];
   if (!m) return;
-  $('pgrid').innerHTML = Object.entries(m.schema)
-    .map(([key, spec]) => rowHtml(key, spec, m.effective[key], m.overrides[key] !== undefined))
-    .join('');
+  $('pgrid').innerHTML = name === 'zs'
+    ? zsRowsHtml(m)
+    : Object.entries(m.schema)
+      .map(([key, spec]) => rowHtml(key, spec, m.effective[key], m.overrides[key] !== undefined))
+      .join('');
   const n = Object.keys(m.overrides).length;
   $('stateLine').textContent = `已修改 ${n} 项 · 最近保存 ${timeText(m.savedAt)}`;
   $('noteLine').textContent = {
-    chan: '缠论核心参数保存后立即全局生效（画笔/回测/监控共用的算法阈值）。有任务运行中时会拒绝保存。',
-    points: '买卖点参数在工作台「更新全部」与回测运行时读取生效。',
-    entry: '进出场参数在工作台分析与回测运行时读取生效；「当下制够笔K线数」仅回测/监控引擎使用（JS 技能无此参数）。',
+    chan: '画笔参数保存后立即全局生效（成笔阈值，画笔/回测/监控共用）。有任务运行中时会拒绝保存。',
+    points: '标记买卖点参数：邻近合并/保留数/中枢容差在工作台与回测读取；背驰时长可比上限写入 CHAN_CFG，保存后立即全局生效。有任务运行中时会拒绝保存。',
+    zs: '画中枢参数在工作台「画中枢 / 更新全部」时读取：控制各周期是否绘制、以及每周期只保留最近几个中枢。',
+    entry: '标记进出场参数在工作台分析与回测读取生效；进场扩展（M1/M2/M4、0轴容差）写入 CHAN_CFG，保存后立即全局生效。「当下制够笔K线数」仅回测/监控引擎使用。有任务运行中时会拒绝保存。',
     plan: '交易计划参数在工作台分析与回测运行时读取生效；「顺势参考周期」额外过滤进出场信号方向（规则见图解表2 标题下方）。下方可展开「交易计划逻辑图解」。',
   }[name] || '';
   const rules = MODULE_RULES[name];
@@ -367,9 +404,42 @@ function renderModule(name) {
     rb.hidden = true;
   }
   $('logicBlock').hidden = name !== 'plan';
-  if (name === 'plan' && $('logicDetails').open) {
-    // 页签切回时参考周期配置可能已改，展开态下直接刷新图解
-    ensureLogic().catch(err => toast('图解渲染失败：' + err.message, true));
+  if (name === 'zs') applyZsKeepDim();
+  if (name === 'plan') {
+    applyPlanRangeDim();
+    if ($('logicDetails').open) {
+      // 页签切回时参考周期配置可能已改，展开态下直接刷新图解
+      ensureLogic().catch(err => toast('图解渲染失败：' + err.message, true));
+    }
+  }
+}
+
+// 某周期关闭绘制时：仅「最近个数」变灰（同周期开关仍可点）
+const ZS_KEEP_PAIR = { drawD: 'keepD', draw240: 'keep240', draw60: 'keep60', draw15: 'keep15', draw3: 'keep3' };
+function applyZsKeepDim() {
+  for (const drawKey of Object.keys(ZS_KEEP_PAIR)) {
+    const on = document.querySelector(`#pgrid [data-k="${drawKey}"]`);
+    const keepWrap = document.querySelector(`#pgrid .zs-keep[data-keep-for="${drawKey}"]`);
+    if (!on || !keepWrap) continue;
+    const enabled = !!on.checked;
+    keepWrap.classList.toggle('dim', !enabled);
+    const inp = keepWrap.querySelector('input');
+    if (inp) inp.disabled = !enabled;
+  }
+}
+
+// 横盘判定关闭时：5 个阈值变灰不可改（数值仍随表单保存）
+const RANGE_BOUND_KEYS = ['rangeBarN', 'rangeBiN', 'rangeKMult', 'rangeBiMult', 'rangeBreakMult'];
+function applyPlanRangeDim() {
+  const on = document.querySelector('#pgrid [data-k="rangeBoundOn"]');
+  if (!on) return;
+  const enabled = !!on.checked;
+  for (const key of RANGE_BOUND_KEYS) {
+    const inp = document.querySelector(`#pgrid [data-k="${key}"]`);
+    if (!inp) continue;
+    inp.disabled = !enabled;
+    const row = inp.closest('.prow');
+    if (row) row.classList.toggle('dim', !enabled);
   }
 }
 
@@ -413,6 +483,11 @@ document.addEventListener('click', e => {
   if (!b) return;
   if (b.dataset.tab) switchTab(b.dataset.tab);
 });
+// 横盘开关变化时即时变灰/恢复（不立刻保存，点「保存本模块」才落盘）
+document.addEventListener('change', e => {
+  if (e.target && e.target.dataset && e.target.dataset.k === 'rangeBoundOn') applyPlanRangeDim();
+  if (e.target && e.target.dataset && ZS_KEEP_PAIR[e.target.dataset.k]) applyZsKeepDim();
+});
 $('saveBtn').onclick = () => save(active).catch(err => toast(err.message, true));
 $('resetBtn').onclick = () => reset(active).catch(err => toast(err.message, true));
 
@@ -421,7 +496,7 @@ $('resetBtn').onclick = () => reset(active).catch(err => toast(err.message, true
   await refresh();
   drawTabs();
   const saved = new URLSearchParams(location.search).get('tab');
-  switchTab(PARAM_MODULES.includes(saved) ? saved : 'sr');
+  switchTab(TAB_IDS.includes(saved) ? saved : 'chan');
 })().catch(err => toast(err.message, true));
 </script>
 </body>
