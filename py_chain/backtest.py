@@ -58,7 +58,8 @@ from .mark_buy_sell import compute_all_marks
 from .bi_inc import BiIncBuilder
 from .sr_flip import compute_srflip, prepare_bar_arrays
 from .trading_plan import (compute_plan, trend_state_of,
-                           TREND_RES as DEFAULT_TREND_RES, RANGE_RES as DEFAULT_RANGE_RES)
+                           TREND_RES as DEFAULT_TREND_RES, RANGE_RES as DEFAULT_RANGE_RES,
+                           TREND_REBOUND, REBOUND_NEAR_PTS, REBOUND_ANGLE_REF)
 from .mark_entry import (
     compute_entries, stop_ref_of, find_bi_event, filterDetectPeriods,
     trend_following_of, forming_seg_ready,
@@ -293,6 +294,13 @@ class BacktestEngine:
         self.trend_res = DEFAULT_TREND_RES if tr is None else tr
         rr = plan_mp.pop("rangeRes", mp.get("rangeRes"))
         self.range_res = DEFAULT_RANGE_RES if rr is None else rr
+        # 方向相位判定参数（2026-09-17；与 trendRes 同模式 pop，不混入震荡阈值 cfg）
+        rb_on = plan_mp.pop("trendRebound", None)
+        self.rebound_cfg = {
+            "trendRebound": TREND_REBOUND if rb_on is None else rb_on,
+            "reboundNearPts": plan_mp.pop("reboundNearPts", REBOUND_NEAR_PTS),
+            "reboundAngleRef": plan_mp.pop("reboundAngleRef", REBOUND_ANGLE_REF),
+        }
         self.plan_cfg = plan_mp or None
         self.marks_params = dict(mp["marks"]) if mp.get("marks") else {}
         self.exit_min_merged = mp.get("exit_min_merged", EXIT_MIN_MERGED)
@@ -950,6 +958,7 @@ class BacktestEngine:
             if k != old:
                 self._cut[res] = k
                 new_bars = self.bars[res]["_list"][old:k]
+                changed = True
                 if self._append_bars(res, new_bars):
                     changed = True
         # 周期性批量重同步：消除增量 wick 阈值漂移（见 RESYNC_EVERY），重同步点上
@@ -982,6 +991,10 @@ class BacktestEngine:
         for res in slice_res:
             # cut 增长时原地 extend，避免每次重算 O(n) 切片拷贝
             barsByPeriod[res] = self._prefix_bars(res)
+        from .chan_core import structurePeriods
+        periodBis = structurePeriods(self._bis, barsByPeriod, self._decision_time,
+                                     self._merged, self._fractals, self._chain_work_cache)
+        self._structure_bis = periodBis
         # 1. 买卖点（全链路完整性；默认关闭以提速，可由 --with-marks 开启）
         if self.with_marks:
             try:
@@ -1033,7 +1046,8 @@ class BacktestEngine:
         try:
             self._trend_state = trend_state_of(periodBis, barsByPeriod, self.trend_res,
                                                periodMacd=periodMacd,
-                                               work_cache=self._chain_work_cache)
+                                               work_cache=self._chain_work_cache,
+                                               cfg=self.rebound_cfg)
         except Exception:
             self._trend_state = None
         # 4. 进出场（检测周期与 JS 一致：不含日线、不含 30S——30S 仅作背驰级别；
@@ -1093,12 +1107,13 @@ class BacktestEngine:
         srLevels = (self._sr or {}).get("merged") or []
         detectPeriods = filterDetectPeriods(self.periods)  # 与确认制一致：须有已加载更低级别
         sigs = evaluateRealtimeEntries(
-            self._bis,
+            getattr(self, "_structure_bis", self._bis),
             {res: self._macd[res].entries for res in self.periods},
             {res: self._atr[res].value for res in self.periods},
             self._plan, srLevels, detectPeriods,
             near=self.near, tCut=t, fired=self._rt_fired,
             periodTimes=self._times, periodMacdTimes=self._macd_times,
+            periodMerged=self._merged,
             divergeConfirm=self.diverge_confirm,
             expectBiEnabled=self.expect_bi,
             realtimeMinBars=self.realtime_min_bars,

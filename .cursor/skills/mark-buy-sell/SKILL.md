@@ -198,3 +198,8 @@ node .cursor/skills/mark-buy-sell/scripts/mark_buy_sell.js --from=2026-07-02 --p
 - **必须先对该品种运行「画笔」**（chan-bi SKILL）生成笔数据文件，本脚本才能标记；否则报错退出。
 - 本 SKILL 只负责买卖点标记，**不画笔、不清除笔**（画笔用 `chan-bi` SKILL）。
 - 标记前会清除所有周期的旧买卖点（`CHAN_BUYSELL_*`），旧笔（`CHAN_BI_*`）不受影响。
+
+
+## 预期笔与够笔运行笔（2026-09-17 更新）
+
+下跌够笔且普通底分型右肩收盘后，预期上涨段立即参与下级买卖点、中枢归属和方向判断；卖侧镜像。合并后从起点块起满5块（含起点）才通过够笔门槛；进场预期够笔同样使用合并K线。活动端点不锚定已确认一类点，原始画笔缓存与结构视图分开。Python与JS共用同构 `buildStructureContext` / `mergedSegmentCount` 规则，详见 [统一规范](../../../../spec/plans/SPEC_structure_context.md)。

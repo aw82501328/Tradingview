@@ -22,6 +22,7 @@ import bisect
 from .chan_core import (
     calcATR, calcMACD, isBiDiverge, lowerResOf, buildZSByUpper, intervalSecOf,
     CHAN_CFG, biMacdMetrics, _areaDurComparable,
+    mergeBars, markWickBars, mergedSegmentCount, structurePeriods, pointEligibleBis,
 )
 from .trading_plan import TREND_RES, trend_state_of
 
@@ -64,6 +65,7 @@ def findDivergePoints(bis, macdArr):
     参照笔 = 向前最近同向笔（跳过幅度 < 当前 50% 的次级别回调）。
     @returns [{ time, price, direction }] direction='long'（做多）|'short'（做空）
     """
+    bis = pointEligibleBis(bis)
     if not bis or len(bis) < 3:
         return []
     points = []
@@ -241,24 +243,25 @@ def _virtualBi(afterBi, pTime):
             "startPrice": afterBi["endPrice"], "endPrice": None}
 
 
-def counterMoveQualifies(times, lastBi, tCut, enabled=None):
-    """检测周期「预期够笔」（回测页面可选，默认开，SPEC_divergence_fallback M4）：
-    末笔方向与策略方向相反（回调/反弹的反向段尚未确认为笔——笔端点分型需右邻K线收盘，
-    固有 1 根本级K线滞后）时，末笔端点后已走出 ≥ expectBiMinBars 根本级K线即视为
-    「回调中/反弹中」。安全性：末笔未被延伸（无同向新极值）说明反向段未被否定；
-    反向段的成笔质量由下沉链展开 ≥3 与背驰/支阻闸门保证。
-    @param enabled 显式开关（页面参数）；None → 读 CHAN_CFG.expectBiEnough（默认开）。
-           False = 恢复旧口径：末笔必须已是确认的反向笔（分型右邻收盘）。
-    @returns True/False（开关关闭或 K线数不足 → False）"""
+def _mergedFor(pd, res, tCut):
+    """Closed merged prefix only; raw time arrays cannot prove merged sufficiency."""
+    if pd.get("merged") is not None:
+        return pd["merged"]
+    sec = intervalSecOf(res) or 0
+    raw = [b for b in (pd.get("bars") or []) if tCut is None or b["time"] + sec <= tCut]
+    return mergeBars(markWickBars(raw))
+
+
+def counterMoveQualifies(times, lastBi, tCut, enabled=None, merged=None, barSec=0):
+    """预期够笔：从末笔极值所在合并块起计数，包含起点块；只接收已收盘前缀。
+
+    times 保留兼容调用签名，但不再用原始K时间推断够笔；缺少合并数据返回 False。
+    """
     if enabled is None:
         enabled = CHAN_CFG.get("expectBiEnough")
     if not enabled:
         return False
-    minBars = int(CHAN_CFG.get("expectBiMinBars", 5) or 5)
-    # 端点后的K线数（严格不含端点所在根；含当根未收盘K线，与闸① _barsSince 口径一致）
-    i0 = bisect.bisect_right(times, lastBi["endTime"])
-    i1 = bisect.bisect_right(times, tCut)
-    return (i1 - i0) >= minBars
+    return mergedSegmentCount(merged, lastBi["endTime"], barSec) >= int(CHAN_CFG.get("expectBiMinBars", 5) or 5)
 
 
 def _sinkChainRealtimeNodes(periodData, X, wantDir, tCut=None, periodTimes=None,
@@ -276,11 +279,17 @@ def _sinkChainRealtimeNodes(periodData, X, wantDir, tCut=None, periodTimes=None,
     bisX = (periodData.get(X) or {}).get("bis") or []
     if not bisX:
         return []
+    if bisX[-1].get("_forming"):
+        if expectBiEnabled is False or (expectBiEnabled is None and not CHAN_CFG.get("expectBiEnough")):
+            return []
+        if mergedSegmentCount(_mergedFor(periodData[X], X, tCut), bisX[-1]["startTime"], intervalSecOf(X)) < int(CHAN_CFG.get("expectBiMinBars", 5) or 5):
+            return []
     expectMode = bisX[-1]["type"] != wantType
     if expectMode:
         timesX = (periodTimes or {}).get(X)
         if (tCut is None or not timesX
-                or not counterMoveQualifies(timesX, bisX[-1], tCut, enabled=expectBiEnabled)):
+                or not counterMoveQualifies(timesX, bisX[-1], tCut, enabled=expectBiEnabled,
+                                            merged=_mergedFor(periodData[X], X, tCut), barSec=intervalSecOf(X))):
             return []  # 末笔反向且反向段未预期成笔 → 无链（保持旧口径的短路行为）
     nodes = [{"res": X, "F": bisX[-1], "parentBi": None}]
     C, B_C = X, bisX[-1]
@@ -395,7 +404,8 @@ def lastBiOk(bis, wantType):
     """够笔：最后一笔是否为预期方向（空头→up 反弹、多头→down 回调）。"""
     if not bis or len(bis) == 0:
         return False
-    return bis[-1]["type"] == wantType
+    return bis[-1]["type"] == wantType and (not bis[-1].get("_forming") or
+        (CHAN_CFG.get("expectBiEnough") and bis[-1].get("mergedCount", 0) >= int(CHAN_CFG.get("expectBiMinBars", 5) or 5)))
 
 
 def brokePrevLow(bis):
@@ -658,8 +668,7 @@ def evaluateEntry(ctx, strategy):
 # 当下背驰（实时判断）：形成中段创新低/新高 + MACD 当拍对比，无需反向笔确认
 # ============================================================
 
-# 形成中段最小K线数（够笔门槛）：isValid 要求合并K线 ≥5 根，这里用原始K线数 ≥5 作
-# 宽松代理——避免 1-2 根K线的微回调/微反弹触发，同时不引入合并结构重算
+# 形成中段够笔门槛：从起点所在合并块开始至少5块，包含起点块。
 REALTIME_MIN_BARS = 5
 
 
@@ -713,7 +722,7 @@ def _evalRealtimeNode(periodData, node, wantDir, tCut, periodTimes, minBars):
     times = (periodTimes or {}).get(res)
     if not times:
         times = [b["time"] for b in (pd.get("bars") or [])]
-    if _barsSince(times, F["startTime"], tCut) < minBars:
+    if mergedSegmentCount(_mergedFor(pd, res, tCut), F["startTime"], intervalSecOf(res)) < minBars:
         return None  # 段太短（微回调/微反弹），不算够笔
     # 参照笔：向前最近同向已完成笔（不含形成中段），跳过幅度不足的次级别回调；
     # 规则 2：参照须与 F 同处上级笔内部（更早的参照只会更靠外，直接无效）
@@ -827,7 +836,8 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
                             detectPeriods, near=NEAR, tCut=None, fired=None,
                             periodTimes=None, periodMacdTimes=None, divergeConfirm=None,
                             expectBiEnabled=None, realtimeMinBars=None,
-                            zsExitWeakRatio=None, trend_res=None, trend_state=None):
+                            zsExitWeakRatio=None, trend_res=None, trend_state=None,
+                            periodMerged=None, periodBars=None):
     """当下模式进场评估（每根 fine 收盘调用，信号无需等反向笔确认）。
 
     三条件与确认制同构，差异只在"何时评"与"②用什么评"：
@@ -874,7 +884,8 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
                            "macdArr": (periodMacd or {}).get(res) or [],
                            "macdTimes": (periodMacdTimes or {}).get(res),
                            "atr": (periodAtr or {}).get(res) or 0,
-                           "bars": []}
+                           "bars": (periodBars or {}).get(res) or [],
+                           "merged": (periodMerged or {}).get(res)}
     if not periodData:
         return []
 
@@ -920,14 +931,24 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
         #    尚未确认为笔）但末笔端点后已走出 ≥ expectBiMinBars 根本级K线 → 视为回调/反弹中，
         #    段起点改用末笔端点（分型确认固有 1 根K线滞后，不等右邻收盘）；
         #    False = 旧口径：末笔必须已是确认的反向笔。
-        expectBi = bis[-1]["type"] != wantType
-        if expectBi:
-            if not counterMoveQualifies(times, bis[-1], tCut, enabled=expectBiEnabled):
+        merged = _mergedFor(pd, X, tCut)
+        forming = bis[-1].get("_forming", False)
+        expectBi = forming or bis[-1]["type"] != wantType
+        if forming:
+            enabled = CHAN_CFG.get("expectBiEnough") if expectBiEnabled is None else expectBiEnabled
+            if not enabled or bis[-1]["type"] != wantType:
+                continue
+            segStart = bis[-1]["startTime"]
+            if mergedSegmentCount(merged, segStart, intervalSecOf(X)) < int(CHAN_CFG.get("expectBiMinBars", 5) or 5):
+                continue
+        elif expectBi:
+            if not counterMoveQualifies(times, bis[-1], tCut, enabled=expectBiEnabled,
+                                        merged=merged, barSec=intervalSecOf(X)):
                 continue
             segStart = bis[-1]["endTime"]
         else:
             segStart = bis[-1]["startTime"]
-        if _barsSince(times, segStart, tCut) < min_bars:
+        if mergedSegmentCount(merged, segStart, intervalSecOf(X)) < min_bars:
             continue
         # 该 (periodX, strategyKey, segStart) 已在任一 markRes 发过 → 跳过重算背驰链
         # （形成段延伸不重发；多 markRes 同段在既有口径下也只会命中一次有效进场路径）
@@ -970,7 +991,8 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
                 "nearEqual": bool(c.get("nearEqual", False)), # M2 近等候选（未严格创新极值）
                 "expectBi": expectBi,                         # M4 检测周期走了预期够笔口径
             }
-            if trend_dir:
+            # 观望态（dir=None 但 reason 非空）也要带注记；方向门控仍只看 dir
+            if trend_dir or trend_reason:
                 sig["trendDirection"] = trend_dir
                 sig["trendReason"] = trend_reason
             out.append(sig)
@@ -990,7 +1012,7 @@ ALL_RES_WITH_30S = ["D", "240", "60", "15", "3", "30S"]
 def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriods,
                     near=NEAR, periodMacd=None, periodAtr=None, with_30s=False,
                     zs_exit_weak_ratio=ZS_EXIT_WEAK_RATIO,
-                    trend_res=None, trend_state=None):
+                    trend_res=None, trend_state=None, trend_cfg=None):
     """逐周期判定进场状态（依赖交易计划 plan 结果）→ 生成进场信号。
 
     @param periodBis     各周期笔 { 周期: [bis] }
@@ -1008,9 +1030,13 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
                          trading_plan.trend_direction）。
     @param trend_state   调用方预计算的参考周期方向状态（trend_state_of 结果），
                          缺省时本函数内部计算（回测引擎在链路重算拍复用传入）。
+    @param trend_cfg     顺势相位判定参数（plan 模块 trendRebound/reboundNearPts/
+                         reboundAngleRef；缺省用 trading_plan 常量默认，仅自算
+                         trend_state 路径消费）。
     @returns { 标记级别: [信号...] }，信号含 { periodX, time, price, direction, strategyKey,
              nearSr, color, markRes, planDirection, trendDirection, trendReason }
     """
+    periodBis = structurePeriods(periodBis, barsByPeriod)
     periodMacd = periodMacd or {}
     periodAtr = periodAtr or {}
     all_res = ALL_RES_WITH_30S if with_30s else ALL_RES
@@ -1051,7 +1077,7 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
     trend_sec = (intervalSecOf(trend_res) or 0) if trend_res else 0
     if trend_state is None and trend_res:
         trend_state = trend_state_of(periodBis, barsByPeriod, trend_res,
-                                     periodMacd=periodMacd)
+                                     periodMacd=periodMacd, cfg=trend_cfg)
     trend_dir = (trend_state or {}).get("dir") if trend_res else None
     trend_reason = (trend_state or {}).get("reason", "") if trend_res else ""
 
@@ -1099,7 +1125,8 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
             "markRes": evalRes["markRes"],
             "planDirection": plan.get("direction"),
         }
-        if trend_dir:
+        # 观望态（dir=None 但 reason 非空）也要带注记；方向门控仍只看 dir
+        if trend_dir or trend_reason:
             sig["trendDirection"] = trend_dir
             sig["trendReason"] = trend_reason
         allEntries.setdefault(evalRes["markRes"], []).append(sig)

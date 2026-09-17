@@ -191,6 +191,7 @@ def _mergeStep(merged, direction, bar):
     if len(merged) == 0:
         m = dict(bar)
         m["_rawCount"] = 1
+        m["_firstTime"] = bar["time"]
         m["highTime"] = bar["time"]
         m["lowTime"] = bar["time"]
         m["rawHigh"] = bar["high"]
@@ -253,6 +254,7 @@ def _mergeStep(merged, direction, bar):
         direction = 1 if bar["high"] > last["high"] else -1
         m = dict(bar)
         m["_rawCount"] = 1
+        m["_firstTime"] = bar["time"]
         m["highTime"] = bar["time"]
         m["lowTime"] = bar["time"]
         m["rawHigh"] = bar["high"]
@@ -299,6 +301,130 @@ def fractalAt(merged, i):
     if cur["low"] < prev["low"] and cur["low"] < nxt["low"] and cur["high"] < prev["high"] and cur["high"] < nxt["high"]:
         return {"mergedIdx": i, "type": "bottom", "high": cur["high"], "low": cur["low"], "time": cur["lowTime"]}
     return None
+
+
+def mergedSegmentCount(merged, startTime, barSec=0):
+    """Count merged blocks from the block containing a calibrated endpoint (inclusive).
+
+    Input must be the closed prefix at the decision time, never a full-history merge.
+    A block covers [_firstTime, time + barSec); the containing block counts once.
+    """
+    if not merged:
+        return 0
+    lo, hi = 0, len(merged)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        before = merged[mid]["time"] + barSec <= startTime if barSec else merged[mid]["time"] < startTime
+        if before:
+            lo = mid + 1
+        else:
+            hi = mid
+    if lo == len(merged) or startTime < merged[lo].get("_firstTime", merged[lo]["time"]):
+        return 0
+    return len(merged) - lo
+
+
+def confirmedStructureBis(bis):
+    return [b for b in (bis or []) if not b.get("_forming")]
+
+
+def pointEligibleBis(bis):
+    # A prospective segment can contain child points immediately, but cannot itself
+    # create a second/third point until its own merged length is sufficient.
+    return [b for b in (bis or []) if not b.get("_forming") or b.get("enough")]
+
+
+def buildStructureContext(bis, bars, barSec, tCut=None, merged=None, fractals=None, lowerContext=None):
+    """Pure closed-prefix structure: confirmed strokes + at most one prospective leg.
+
+    Passing tCut also accepts full raw history: rebuild strokes if future bars were
+    removed. Callers with authoritative prefix strokes can pass their merged/fractal
+    state to avoid rebuilding it. The prospective endpoint is never a confirmed pivot.
+    """
+    raw = bars or []
+    known = confirmedStructureBis(bis)
+    if tCut is not None and raw and raw[-1]["time"] + barSec > tCut:
+        raw = [b for b in raw if b["time"] + barSec <= tCut]
+        merged = mergeBars(markWickBars(raw))
+        fractals = findFractals(merged)
+        known = buildBi(fractals, merged, calcATR(raw), calcMACD(raw), None, barSec >= 3600, lowerContext)
+        known = fixBiExtremes(known, merged) or known
+        known = extendLastBi(known, markWickBars(raw))
+    if merged is None:
+        merged = mergeBars(markWickBars(raw))
+    cutoff = tCut if tCut is not None else (raw[-1]["time"] + barSec if raw else 0)
+    result = {"confirmedBis": known, "bis": list(known), "current": None,
+              "merged": merged, "cutoff": cutoff}
+    if not known or not raw or not merged:
+        return result
+    last = known[-1]
+    current = dict(last, phase="confirmed", _contextReady=True, coverageEnd=cutoff,
+                   mergedCount=mergedSegmentCount(merged, last["startTime"], barSec), enough=True)
+    # Match the actual endpoint's merged block, not any earlier bottom/top.  Time
+    # containment handles lower-period endpoint calibration and recovered wick lows.
+    count = mergedSegmentCount(merged, last["endTime"], barSec)
+    idx = len(merged) - count if count else -1
+    fs = fractals if fractals is not None else findFractals(merged)
+    kind = "bottom" if last["type"] == "down" else "top"
+    endpoint = next((f for f in fs if f["mergedIdx"] == idx and f["type"] == kind), None)
+    after = [b for b in raw if b["time"] + barSec > last["endTime"]]
+    if endpoint is not None and after:
+        broken = any(b["low"] < last["endPrice"] - 1e-8 for b in after) if kind == "bottom" \
+            else any(b["high"] > last["endPrice"] + 1e-8 for b in after)
+        future = [b for b in raw if b["time"] > merged[idx]["time"]]
+        if not broken and future:
+            field = "high" if kind == "bottom" else "low"
+            extreme = (max if kind == "bottom" else min)(future, key=lambda b: b[field])
+            price = extreme[field]
+            if (price > last["endPrice"] if kind == "bottom" else price < last["endPrice"]):
+                current = {"type": "up" if kind == "bottom" else "down",
+                           "startTime": last["endTime"], "startPrice": last["endPrice"],
+                           "endTime": extreme["time"], "endPrice": price,
+                           "span": abs(price - last["endPrice"]), "_forming": True,
+                           "_contextReady": True, "mergedCount": count,
+                           "enough": count >= 5, "phase": "running" if count >= 5 else "expected",
+                           "coverageEnd": cutoff}
+                result["bis"].append(current)
+    if not current.get("_forming"):
+        result["bis"][-1] = current
+    result["current"] = current
+    return result
+
+
+def structurePeriods(periodBis, barsByPeriod, tCut=None, mergedByPeriod=None,
+                     fractalsByPeriod=None, work_cache=None):
+    """Prepare per-period structural views; cache only on closed-input changes.
+
+    Coverage advances every decision even when the upper period has not closed.
+    The caller invalidates work_cache on historical corrections/resynchronization.
+    """
+    if tCut is None:
+        tCut = max((v[-1]["time"] + intervalSecOf(r) for r, v in barsByPeriod.items() if v), default=0)
+    out = {}
+    for res, bis in periodBis.items():
+        if bis and bis[-1].get("_contextReady"):
+            out[res] = bis
+            continue
+        raw = barsByPeriod.get(res) or []
+        tail = raw[-1] if raw else {}
+        key = (len(raw), tuple(tail.get(k) for k in ("time", "open", "high", "low", "close")),
+               tuple((b["type"], b["startTime"], b["endTime"], b["startPrice"], b["endPrice"]) for b in bis),
+               min(tCut, tail.get("time", 0) + intervalSecOf(res)))
+        slot = ("structure", res)
+        ent = work_cache.get(slot) if work_cache is not None else None
+        if ent is not None and ent[0] == key:
+            ctx = ent[1]
+        else:
+            ctx = buildStructureContext(bis, raw, intervalSecOf(res), tCut,
+                                        (mergedByPeriod or {}).get(res), (fractalsByPeriod or {}).get(res),
+                                        makeBiLowerContext(res, barsByPeriod.get("15") or [], tCut) if str(res) == "60" else None)
+            if work_cache is not None:
+                work_cache[slot] = (key, ctx)
+        view = list(ctx["bis"])
+        if view and ctx["current"] is not None:
+            view[-1] = dict(view[-1], coverageEnd=tCut)
+        out[res] = view
+    return out
 
 
 def findFractals(merged):
@@ -1021,6 +1147,7 @@ def buildZSByUpper(lowerBis, upperBis, tolSec=0, open_last=True):
                   只能等上级 bar 收盘（曾致 8-21 15:48 信号延后 15 分钟才触发）。
     @returns 中枢列表，每项额外含 upperStart/upperEnd（所属上级笔时间范围）
     """
+    lowerBis = pointEligibleBis(lowerBis)
     if not lowerBis or len(lowerBis) < 3:
         return []
     tol = tolSec or 0
@@ -1041,7 +1168,8 @@ def buildZSByUpper(lowerBis, upperBis, tolSec=0, open_last=True):
     for b in lowerBis:
         ub = None
         for u in upperBis:
-            end_ok = b["endTime"] <= u["endTime"] + tol or (open_last and u is last_u)
+            boundary = u.get("coverageEnd", u["endTime"])
+            end_ok = b["endTime"] <= boundary + tol or (open_last and u is last_u and "coverageEnd" not in u)
             if b["startTime"] >= u["startTime"] - tol and end_ok:
                 ub = u
                 break
@@ -1497,6 +1625,7 @@ def _ubStartTimes(upperBis):
 
 def anchorFirstBuy(cand, upperBis):
     """一买锚定：取候选一买之前最近的上级底部端点。"""
+    upperBis = confirmedStructureBis(upperBis)
     if not upperBis or len(upperBis) == 0:
         return None
     best = None
@@ -1512,6 +1641,7 @@ def anchorFirstBuy(cand, upperBis):
 
 def anchorFirstSell(cand, upperBis):
     """一卖锚定：候选在上级上涨笔内则上移到其结束点，否则取最近上级顶部端点。"""
+    upperBis = confirmedStructureBis(upperBis)
     if not upperBis or len(upperBis) == 0:
         return None
     for b in upperBis:
@@ -1618,6 +1748,8 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
     3买/类3买：离 zg 后回踩 > zg-thirdZsTol；同段第1/第2个；无中枢不标。
     1买逻辑不变。
     """
+    bis = pointEligibleBis(bis)
+    knownUpper = confirmedStructureBis(upperBis)
     if len(bis) < 3:
         return []
     c2tol = float(class2ZsTol or 0)
@@ -1630,18 +1762,20 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
         if b["endTime"] not in idxByEndTime:
             idxByEndTime[b["endTime"]] = i
     upperByType = None
-    if upperBis:
-        upperByType = {"up": [u for u in upperBis if u["type"] == "up"],
-                       "down": [u for u in upperBis if u["type"] == "down"]}
+    if knownUpper:
+        upperByType = {"up": [u for u in knownUpper if u["type"] == "up"],
+                       "down": [u for u in knownUpper if u["type"] == "down"]}
 
     # 候选一买：创新低 + MACD 背驰；同笔例外
     firstBuys = []
     for k in range(1, len(downIdx)):
         cur = bis[downIdx[k]]
+        if cur.get("_forming"):
+            continue
         sameUpper = isSameAsUpperBi(cur, upperByType.get(cur["type"]) or [], barSec) \
             if upperByType is not None else None
         if sameUpper is not None:
-            if sameUpper is upperBis[-1]:
+            if sameUpper is knownUpper[-1]:
                 if CHAN_CFG["debug"]:
                     print(f"[一买跳过-上级末笔延伸中] {fmtT(cur['endTime'])}({cur['endPrice']}) "
                           f"与上级末笔重合，上级反向笔未确认")
@@ -1682,7 +1816,8 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
             if up["type"] != "up":
                 continue
             lo = bisect.bisect_left(downTimes, up["startTime"])
-            hi = bisect.bisect_right(downTimes, up["endTime"] + 1)
+            segEnd = up.get("coverageEnd", up["endTime"])
+            hi = bisect.bisect_right(downTimes, segEnd + 1)
             if lo >= hi:
                 continue
             lows = [{"biIdx": i, "time": t, "price": p} for i, t, p in downLows[lo:hi]]
@@ -1697,7 +1832,7 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
                 continue
             zd, zg = zs["zd"], zs["zg"]
             twoBuyMeta.append({"time": firstLow["time"], "price": firstLow["price"],
-                               "zg": zg, "segStart": up["startTime"], "segEnd": up["endTime"]})
+                               "zg": zg, "segStart": up["startTime"], "segEnd": segEnd})
             later = next((l for l in lows
                           if l["time"] > firstLow["time"] and l["price"] > firstLow["price"]
                           and (zd - c2tol) <= l["price"] <= zg), None)
@@ -1794,6 +1929,8 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
 
 def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.0):
     """卖点识别（与买点对称）：2卖不依赖中枢；类2/3/类3 依赖中枢。"""
+    bis = pointEligibleBis(bis)
+    knownUpper = confirmedStructureBis(upperBis)
     if len(bis) < 3:
         return []
     c2tol = float(class2ZsTol or 0)
@@ -1806,17 +1943,19 @@ def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0
         if b["endTime"] not in idxByEndTime:
             idxByEndTime[b["endTime"]] = i
     upperByType = None
-    if upperBis:
-        upperByType = {"up": [u for u in upperBis if u["type"] == "up"],
-                       "down": [u for u in upperBis if u["type"] == "down"]}
+    if knownUpper:
+        upperByType = {"up": [u for u in knownUpper if u["type"] == "up"],
+                       "down": [u for u in knownUpper if u["type"] == "down"]}
 
     firstSells = []
     for k in range(1, len(upIdx)):
         cur = bis[upIdx[k]]
+        if cur.get("_forming"):
+            continue
         sameUpper = isSameAsUpperBi(cur, upperByType.get(cur["type"]) or [], barSec) \
             if upperByType is not None else None
         if sameUpper is not None:
-            if sameUpper is upperBis[-1]:
+            if sameUpper is knownUpper[-1]:
                 if CHAN_CFG["debug"]:
                     print(f"[一卖跳过-上级末笔延伸中] {fmtT(cur['endTime'])}({cur['endPrice']}) "
                           f"与上级末笔重合，上级反向笔未确认")
@@ -1852,8 +1991,8 @@ def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0
     seenSellPos = set()
     for fs in firstSells:
         anchored = fs
-        if upperBis is not None and len(upperBis) > 0:
-            a = anchorFirstSell(fs, upperBis)
+        if knownUpper:
+            a = anchorFirstSell(fs, knownUpper)
             if a is not None:
                 bestBi = None
                 bestDist = float("inf")
@@ -1883,7 +2022,8 @@ def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0
             if dn["type"] != "down":
                 continue
             lo = bisect.bisect_left(upTimes, dn["startTime"])
-            hi = bisect.bisect_right(upTimes, dn["endTime"] + 1)
+            segEnd = dn.get("coverageEnd", dn["endTime"])
+            hi = bisect.bisect_right(upTimes, segEnd + 1)
             if lo >= hi:
                 continue
             highs = [{"biIdx": i, "time": t, "price": p} for i, t, p in upHighs[lo:hi]]
@@ -1898,7 +2038,7 @@ def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0
                 continue
             zd, zg = zs["zd"], zs["zg"]
             twoSellMeta.append({"time": firstHigh["time"], "price": firstHigh["price"],
-                                "zd": zd, "segStart": dn["startTime"], "segEnd": dn["endTime"]})
+                               "zd": zd, "segStart": dn["startTime"], "segEnd": segEnd})
             later = next((h for h in highs
                           if h["time"] > firstHigh["time"] and h["price"] < firstHigh["price"]
                           and zd <= h["price"] <= (zg + c2tol)), None)

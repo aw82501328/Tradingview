@@ -21,6 +21,8 @@
 // ============================================================
 
 const CHAN_CFG = {
+  expectBiEnough: true,
+  expectBiMinBars: 5,
   gapFilter: 1.0, // 跳空独立成笔阈值：相邻K线缺口 >= gapFilter*ATR 时强制独立成笔
   wickRatio: 0.70, // 长影剔除：影线占整根K线振幅的比例阈值（>= 时视为冲高/探底插针）
   wickAtrK: 0.5,   // 长影剔除：影线绝对长度下限 = wickAtrK * ATR（窄幅小K线免疫）
@@ -129,7 +131,7 @@ function markWickBars(rawBars) {
 function mergeStep(merged, direction, bar) {
   const pushBar = (b) => {
     merged.push({
-      ...b, _rawCount: 1,
+      ...b, _rawCount: 1, _firstTime: b.time,
       highTime: b.time, lowTime: b.time,
       rawHigh: b.high, rawLow: b.low, rawHighTime: b.time, rawLowTime: b.time,
     });
@@ -867,7 +869,8 @@ function buildZS(bis, barSec) {
  *                           （如 1小时周期 tolSec=3600 → 外扩 5 小时）
  * @returns {Array} 中枢列表，每项额外含 upperStart/upperEnd（所属上级笔时间范围）
  */
-function buildZSByUpper(lowerBis, upperBis, tolSec) {
+function buildZSByUpper(lowerBis, upperBis, tolSec, openLast = true) {
+  lowerBis = pointEligibleBis(lowerBis);
   if (!lowerBis || lowerBis.length < 3) return [];
   const tol = tolSec || 0;
   const out = [];
@@ -889,7 +892,7 @@ function buildZSByUpper(lowerBis, upperBis, tolSec) {
   for (const b of lowerBis) {
     let ub = null;
     for (const u of upperBis) {
-      if (b.startTime >= u.startTime - tol && b.endTime <= u.endTime + tol) { ub = u; break; }
+      if (b.startTime >= u.startTime - tol && (b.endTime <= (u.coverageEnd ?? u.endTime) + tol || (openLast && u === upperBis[upperBis.length-1] && u.coverageEnd == null))) { ub = u; break; }
     }
     if (!ub) continue; // 不完整归属任何上级笔的零散笔不参与中枢
     if (!cur || cur.upper !== ub) {
@@ -1197,6 +1200,7 @@ function isSameAsUpperBi(bi, upperBis, barSec) {
  * 找不到则返回 null（该周期不标记一买）。
  */
 function anchorFirstBuy(cand, upperBis) {
+  upperBis = confirmedStructureBis(upperBis);
   if (!upperBis || upperBis.length === 0) return null;
   let best = null;
   for (const b of upperBis) {
@@ -1215,6 +1219,7 @@ function anchorFirstBuy(cand, upperBis) {
  * 找不到则返回 null。
  */
 function anchorFirstSell(cand, upperBis) {
+  upperBis = confirmedStructureBis(upperBis);
   if (!upperBis || upperBis.length === 0) return null;
   for (const b of upperBis) {
     if (b.type !== "up") continue;
@@ -1303,6 +1308,8 @@ function appendThirdPoints(points, thirdList, mainType, classType, class2Type) {
  * 买点识别：2买抬高结构（不依赖中枢）；类2/3/类3 依赖中枢；1买不变。
  */
 function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) {
+  bis = pointEligibleBis(bis);
+  const knownUpper = confirmedStructureBis(upperBis);
   if (bis.length < 3) return [];
   const c2tol = +(class2ZsTol || 0);
   const t3tol = +(thirdZsTol || 0);
@@ -1312,21 +1319,22 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) 
   const idxByEndTime = {};
   bis.forEach((b, i) => { if (idxByEndTime[b.endTime] == null) idxByEndTime[b.endTime] = i; });
   let upperByType = null;
-  if (upperBis && upperBis.length > 0) {
+  if (knownUpper.length > 0) {
     upperByType = {
-      up: upperBis.filter(u => u.type === "up"),
-      down: upperBis.filter(u => u.type === "down"),
+      up: knownUpper.filter(u => u.type === "up"),
+      down: knownUpper.filter(u => u.type === "down"),
     };
   }
 
   const firstBuys = [];
   for (let k = 1; k < downIdx.length; k++) {
     const cur = bis[downIdx[k]];
+    if (cur._forming) continue;
     const sameUpper = upperByType != null
       ? isSameAsUpperBi(cur, upperByType[cur.type] || [], barSec)
       : null;
     if (sameUpper) {
-      if (upperBis && sameUpper === upperBis[upperBis.length - 1]) {
+      if (sameUpper === knownUpper[knownUpper.length - 1]) {
         if (CHAN_CFG.debug) console.log(`[一买跳过-上级末笔延伸中] ${fmtT(cur.endTime)}(${cur.endPrice}) 与上级末笔重合，上级反向笔未确认`);
         continue;
       }
@@ -1366,7 +1374,7 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) 
     for (const up of upperBis) {
       if (up.type !== "up") continue;
       const lows = downLows
-        .filter(l => l.time >= up.startTime && l.time <= up.endTime + 1)
+        .filter(l => l.time >= up.startTime && l.time <= (up.coverageEnd ?? up.endTime) + 1)
         .slice()
         .sort((a, b) => a.time - b.time);
       if (!lows.length) continue;
@@ -1378,7 +1386,7 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) 
       const zd = zs.zd, zg = zs.zg;
       twoBuyMeta.push({
         time: firstLow.time, price: firstLow.price,
-        zg, segStart: up.startTime, segEnd: up.endTime,
+        zg, segStart: up.startTime, segEnd: up.coverageEnd ?? up.endTime,
       });
       const later = lows.find(l =>
         l.time > firstLow.time && l.price > firstLow.price &&
@@ -1482,6 +1490,8 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) 
  * 卖点识别：2卖次高结构（不依赖中枢）；类2/3/类3 依赖中枢；与买点对称。
  */
 function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) {
+  bis = pointEligibleBis(bis);
+  const knownUpper = confirmedStructureBis(upperBis);
   if (bis.length < 3) return [];
   const c2tol = +(class2ZsTol || 0);
   const t3tol = +(thirdZsTol || 0);
@@ -1491,21 +1501,22 @@ function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol)
   const idxByEndTime = {};
   bis.forEach((b, i) => { if (idxByEndTime[b.endTime] == null) idxByEndTime[b.endTime] = i; });
   let upperByType = null;
-  if (upperBis && upperBis.length > 0) {
+  if (knownUpper.length > 0) {
     upperByType = {
-      up: upperBis.filter(u => u.type === "up"),
-      down: upperBis.filter(u => u.type === "down"),
+      up: knownUpper.filter(u => u.type === "up"),
+      down: knownUpper.filter(u => u.type === "down"),
     };
   }
 
   const firstSells = [];
   for (let k = 1; k < upIdx.length; k++) {
     const cur = bis[upIdx[k]];
+    if (cur._forming) continue;
     const sameUpper = upperByType != null
       ? isSameAsUpperBi(cur, upperByType[cur.type] || [], barSec)
       : null;
     if (sameUpper) {
-      if (upperBis && sameUpper === upperBis[upperBis.length - 1]) {
+      if (sameUpper === knownUpper[knownUpper.length - 1]) {
         if (CHAN_CFG.debug) console.log(`[一卖跳过-上级末笔延伸中] ${fmtT(cur.endTime)}(${cur.endPrice}) 与上级末笔重合，上级反向笔未确认`);
         continue;
       }
@@ -1571,7 +1582,7 @@ function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol)
     for (const dn of upperBis) {
       if (dn.type !== "down") continue;
       const highs = upHighs
-        .filter(h => h.time >= dn.startTime && h.time <= dn.endTime + 1)
+        .filter(h => h.time >= dn.startTime && h.time <= (dn.coverageEnd ?? dn.endTime) + 1)
         .slice()
         .sort((a, b) => a.time - b.time);
       if (!highs.length) continue;
@@ -1583,7 +1594,7 @@ function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol)
       const zd = zs.zd, zg = zs.zg;
       twoSellMeta.push({
         time: firstHigh.time, price: firstHigh.price,
-        zd, segStart: dn.startTime, segEnd: dn.endTime,
+        zd, segStart: dn.startTime, segEnd: dn.coverageEnd ?? dn.endTime,
       });
       const later = highs.find(h =>
         h.time > firstHigh.time && h.price < firstHigh.price &&
@@ -1847,7 +1858,74 @@ function alignBiToUpper(lowerBis, upperBis, upperIntervalSec, lowerBars) {
   return lowerBis;
 }
 
+// Structure context mirrors py_chain/chan_core.py. Inputs are closed prefixes;
+// prospective legs are separate from confirmed pivots and can contain child points.
+function mergedSegmentCount(merged, startTime, barSec = 0) {
+  if (!merged || !merged.length) return 0;
+  let lo = 0, hi = merged.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (barSec ? merged[mid].time + barSec <= startTime : merged[mid].time < startTime) lo = mid + 1;
+    else hi = mid;
+  }
+  if (lo === merged.length || startTime < (merged[lo]._firstTime ?? merged[lo].time)) return 0;
+  return merged.length - lo;
+}
+function confirmedStructureBis(bis) { return (bis || []).filter(b => !b._forming); }
+function pointEligibleBis(bis) { return (bis || []).filter(b => !b._forming || b.enough); }
+function buildStructureContext(bis, bars, barSec, tCut = null, merged = null, fractals = null, lowerContext = null) {
+  let raw = bars || [], known = confirmedStructureBis(bis);
+  if (tCut != null && raw.length && raw[raw.length - 1].time + barSec > tCut) {
+    raw = raw.filter(b => b.time + barSec <= tCut);
+    merged = mergeBars(markWickBars(raw));
+    fractals = findFractals(merged);
+    known = buildBi(fractals, merged, calcATR(raw), calcMACD(raw), null, barSec >= 3600, lowerContext);
+    known = fixBiExtremes(known, merged) || known;
+    known = extendLastBi(known, markWickBars(raw));
+  }
+  if (merged == null) merged = mergeBars(markWickBars(raw));
+  const cutoff = tCut ?? (raw.length ? raw[raw.length - 1].time + barSec : 0);
+  const result = {confirmedBis: known, bis: known.slice(), current: null, merged, cutoff};
+  if (!known.length || !raw.length || !merged.length) return result;
+  const last = known[known.length - 1];
+  let current = {...last, phase: "confirmed", _contextReady: true, coverageEnd: cutoff,
+    mergedCount: mergedSegmentCount(merged, last.startTime, barSec), enough: true};
+  const count = mergedSegmentCount(merged, last.endTime, barSec), idx = count ? merged.length - count : -1;
+  const fs = fractals ?? findFractals(merged), kind = last.type === "down" ? "bottom" : "top";
+  const endpoint = fs.find(f => f.mergedIdx === idx && f.type === kind);
+  const after = raw.filter(b => b.time + barSec > last.endTime);
+  if (endpoint && after.length) {
+    const broken = after.some(b => kind === "bottom" ? b.low < last.endPrice - 1e-8 : b.high > last.endPrice + 1e-8);
+    const future = raw.filter(b => b.time > merged[idx].time);
+    if (!broken && future.length) {
+      const field = kind === "bottom" ? "high" : "low";
+      const extreme = future.reduce((a,b) => (kind === "bottom" ? b[field] > a[field] : b[field] < a[field]) ? b : a);
+      const price = extreme[field];
+      if (kind === "bottom" ? price > last.endPrice : price < last.endPrice) {
+        current = {type: kind === "bottom" ? "up" : "down", startTime: last.endTime,
+          startPrice: last.endPrice, endTime: extreme.time, endPrice: price, span: Math.abs(price-last.endPrice),
+          _forming: true, _contextReady: true, mergedCount: count, enough: count >= 5,
+          phase: count >= 5 ? "running" : "expected", coverageEnd: cutoff};
+        result.bis.push(current);
+      }
+    }
+  }
+  if (!current._forming) result.bis[result.bis.length - 1] = current;
+  result.current = current;
+  return result;
+}
+function structurePeriods(periodBis, barsByPeriod, tCut = null) {
+  if (tCut == null) tCut = Math.max(0, ...Object.entries(barsByPeriod).filter(([,v])=>v.length).map(([r,v])=>v[v.length-1].time+intervalSecOf(r)));
+  const out = {};
+  for (const [r,bis] of Object.entries(periodBis)) {
+    if (bis.length && bis[bis.length-1]._contextReady) { out[r] = bis; continue; }
+    out[r] = buildStructureContext(bis, barsByPeriod[r] || [], intervalSecOf(r), tCut, null, null, r === "60" ? makeBiLowerContext(r,barsByPeriod["15"] || [],tCut) : null).bis;
+  }
+  return out;
+}
+
 module.exports = {
+  mergedSegmentCount, confirmedStructureBis, pointEligibleBis, buildStructureContext, structurePeriods,
   CHAN_CFG,
   // K线/分型/笔
   markWickBars,

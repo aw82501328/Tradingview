@@ -12,10 +12,12 @@
 """
 
 from .chan_core import (
-    calcATR, calcMACD, intervalSecOf, fmtT,
+    calcATR, calcMACD, intervalSecOf, fmtT, CHAN_CFG,
     findBuyPoints, findSellPoints, buildZS, buildZSByUpper, isBiDiverge,
     markWickBars, mergeBars, findFractals,
 )
+
+from .chan_core import structurePeriods, buildStructureContext, mergedSegmentCount
 
 # ============================================================
 # 纯函数：震荡判定（复制自 chan-status SKILL，保持原逻辑不变）
@@ -234,6 +236,11 @@ def _plan_gate_row(res, bis, bars, atr, upperBis, lastPrice, barSec, range_cfg):
              {"range": False, ...} /
              {"range": True, "insufficient": True, ...}——笔数 <2：更低周期直接观望（数据不足）。"""
     name = trend_res_name(res)
+    if bis and not bis[-1].get("_contextReady"):
+        ctx = buildStructureContext(bis, bars, intervalSecOf(res), tCut)
+        bis = ctx["bis"]
+        if tCut is not None:
+            bars = [b for b in (bars or []) if b["time"] + intervalSecOf(res) <= tCut]
     if not bis or len(bis) < 2:
         return {"range": True, "insufficient": True, "resName": name,
                 "reason": f"{name}笔数据不足（少于2笔），无法判定震荡/趋势，观望"}
@@ -365,6 +372,7 @@ def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=No
     from .sr_flip import _bis_fingerprint
     if range_res is None:
         range_res = RANGE_RES
+    periodBis = structurePeriods(periodBis, barsByPeriod, work_cache=work_cache)
     periodMacd = periodMacd or {}
     periodAtr = periodAtr or {}
     planRows = {}
@@ -472,6 +480,14 @@ TREND_RES = "240"
 # 参考周期笔不足 → 观望）；参考周期自身与更高周期固定观望只作锚。
 RANGE_RES = "240"
 
+# 方向相位判定（2026-09-17 与用户确认，图片决策树；参数中心 plan 模块可配）：
+# 锚点确立后、破坏闩锁未触发期间，按「形成段方向 → 够笔 → 位置 → 角度强弱」分相位，
+# 可返回观望（dir=None 带 reason，消费方双向放行）。总表 ①~⑤ 与闩锁优先级不变。
+TREND_REBOUND = True    # 相位判定开关（关闭 → 退回旧行为：确立方向锁到闩锁/新点）
+REBOUND_NEAR_PTS = 5.0  # 「附近」容差（绝对点数）：形成段极值距中枢上/下沿或前低/前高
+REBOUND_ANGLE_REF = 5.0 # 角度 45° 基准（点/根）：当前笔平均每根幅度 > 该值 = 角度>45°（强）
+                        # （XAUUSD 4h 量级默认；跨品种需调参）
+
 # 周期 → 中文名（方向成因展示用，如「4小时2买」「日线1卖」）
 RES_NAME_CN = {"D": "日线", "240": "4小时", "60": "1小时", "30": "30分钟",
                "15": "15分钟", "3": "3分钟", "30S": "30秒"}
@@ -502,10 +518,134 @@ def strong_fractal_after(merged, fractals, t, kind):
     return False
 
 
-def trend_direction(res, bis, bars, upperBis, macdArr, tCut=None):
+def _seg_bars_since(bars, t0, tCut=None):
+    """t0（不含）之后、tCut（含）之前的原始K根数（与 mark_entry._barsSince 同口径 (t0, tCut]）。"""
+    n = 0
+    for b in bars or []:
+        if b["time"] <= t0:
+            continue
+        if tCut is not None and b["time"] > tCut:
+            continue
+        n += 1
+    return n
+
+
+def _phase_direction(name, p, t_, bis, bars, upperBis, barSec, rb, tCut=None):
+    """方向相位树（2026-09-17 与用户确认，图片决策树；卖点侧 + 买点完全镜像）。
+
+    适用窗口：锚点确立后（1类点强分型已过 / 非1类点出现即确立）、破坏闩锁未触发
+    （trend_direction 里闩锁循环优先，走到这里即未触发）。
+
+    判据口径（用户确认）：
+      - 形成段 = 结构上下文末段，含底/顶分型确认后立即参与的预期段；
+      - 够笔 = 形成段起点所在合并块起（含）≥ rb["min_bars"] 块；
+      - 角度强/弱（下跌角度与反弹/回调力度同一口径）= 当前笔平均每根点数
+        span/根数 > rb["angle_ref"]（45° 基准，点/根）为强，否则弱；
+      - 近中枢边界 = 形成段极值（末笔端点价）距「锚点前最近已形成中枢」的 ZG/ZD
+        ≤ rb["near_pts"]（上/下沿附近结论相同，实现合并判）；无中枢 → 其他位置；
+      - 前低/前高（2/3 类锚点）= 锚点前最近 down/up 笔端点价，极值距其 ≤ near_pts 为附近；
+      - 观望 = (None, reason)：消费方双向放行，信号仍附 trendReason 注记。
+
+    @returns (dir, reason)，dir ∈ "long"/"short"/None。
+    """
+    seg = bis[-1]
+    seg_type = seg["type"]
+    seg_bars = _seg_bars_since(bars, seg["startTime"], tCut)
+    merged = mergeBars(markWickBars(bars or []))
+    enough = mergedSegmentCount(merged, seg["startTime"], barSec) >= int(rb.get("min_bars", 5) or 5)
+    angle_strong = seg["span"] / max(1, seg_bars) > float(rb.get("angle_ref", 5.0))
+    near_pts = float(rb.get("near_pts", 5.0))
+    extreme = seg["endPrice"]  # 形成段极值（延伸中末笔的端点价）
+    is_buy_anchor = t_.endswith("买")
+    is_first = t_ in ("1买", "1卖")
+
+    def _near_zs():
+        """形成段极值是否临近锚点前最近中枢的 ZG/ZD 任一边界。"""
+        zss = []
+        try:
+            if upperBis and len(upperBis) > 0:
+                zss = buildZSByUpper(bis, upperBis, barSec)
+            else:
+                zss = buildZS(bis, barSec)
+        except Exception:
+            return False
+        before = [z for z in zss if z.get("startTime") is not None
+                  and z["startTime"] <= p["time"]]
+        if not before:
+            return False
+        z = before[-1]
+        return min(abs(extreme - z["zg"]), abs(extreme - z["zd"])) <= near_pts
+
+    def _prev_extreme(want_type):
+        """锚点前最近一个 want_type 笔的端点价（前低=down 笔端点 / 前高=up 笔端点）。"""
+        cands = [b for b in bis[:-1] if b["type"] == want_type
+                 and b["endTime"] <= p["time"]]
+        return cands[-1]["endPrice"] if cands else None
+
+    if is_first:
+        # ===== 1类锚点 =====
+        if is_buy_anchor:
+            if seg_type == "up":
+                if not enough:
+                    return "long", f"{name}1买进行中"
+                if _near_zs():
+                    return (None, f"{name}1买近中枢观望") if angle_strong \
+                        else ("short", f"{name}1买转空预期")
+                if angle_strong:
+                    return "long", f"{name}1买进行中"
+                return None, f"{name}1买后方向不明"
+            # 形成段向下（回调）
+            if seg["startTime"] <= p["time"]:
+                return "long", f"{name}1买进行中"  # 上涨未开始（当前下跌笔起点不晚于买点）
+            if not enough:
+                return "short", f"{name}1买回调"
+            return ("short", f"{name}1买强回") if angle_strong \
+                else ("long", f"{name}2买预期")
+        # 1卖锚点
+        if seg_type == "down":
+            if not enough:
+                return "short", f"{name}1卖进行中"
+            if _near_zs():
+                return (None, f"{name}1卖近中枢观望") if angle_strong \
+                    else ("long", f"{name}1卖转多预期")
+            if angle_strong:
+                return "short", f"{name}1卖进行中"
+            return None, f"{name}1卖后方向不明"
+        # 形成段向上（反弹）
+        if seg["startTime"] <= p["time"]:
+            return "short", f"{name}1卖进行中"  # 下跌未开始（当前上涨笔起点不晚于卖点）
+        if not enough:
+            return "long", f"{name}1卖反弹"
+        return ("long", f"{name}1卖强反") if angle_strong \
+            else ("short", f"{name}2卖预期")
+
+    # ===== 2/3 类锚点（2买/类2买/3买/类3买、2卖/类2卖/3卖/类3卖）=====
+    if is_buy_anchor:
+        if seg_type == "down":
+            return None, f"{name}{t_}回调中"  # 图未覆盖，默认观望（2026-09-17 用户确认）
+        prev_high = _prev_extreme("up")
+        if prev_high is not None and abs(extreme - prev_high) <= near_pts:
+            return None, f"{name}{t_}前高附近"
+        if not enough:
+            return "long", f"{name}{t_}后上涨"
+        return ("long", f"{name}{t_}后上涨") if angle_strong \
+            else (None, f"{name}{t_}后方向不明")
+    # 卖类锚点
+    if seg_type == "up":
+        return None, f"{name}{t_}反弹中"  # 图未覆盖，默认观望（2026-09-17 用户确认）
+    prev_low = _prev_extreme("down")
+    if prev_low is not None and abs(extreme - prev_low) <= near_pts:
+        return None, f"{name}{t_}前低附近"
+    if not enough:
+        return "short", f"{name}{t_}后下跌"
+    return ("short", f"{name}{t_}后下跌") if angle_strong \
+        else (None, f"{name}{t_}后方向不明")
+
+
+def trend_direction(res, bis, bars, upperBis, macdArr, tCut=None, rebound=None):
     """参考周期方向判定（顺势过滤的唯一口径；mark_entry 进场方向过滤消费）。
 
-    规则（2026-09-15 与用户逐条确认）：
+    规则（2026-09-15 与用户逐条确认；7 为 2026-09-17 相位树更新）：
       1. 取参考周期最近一个买卖点（findBuyPoints/findSellPoints，最近 60 笔窗口
          与 compute_plan 同口径）；
       2. 1买/1卖：端点后出现强分型（strong_fractal_after）才确立方向，
@@ -516,13 +656,24 @@ def trend_direction(res, bis, bars, upperBis, macdArr, tCut=None):
          反向（下跌/上涨延续），闩锁到下一个买卖点事件（实现口径：从点时间起
          扫描全部收盘，命中即反向——价格收回也不翻回，直到更新的买卖点出现）；
       5. 无买卖点 / 1类点强分型未出现 → 回退最近一笔方向（末笔 up→多、down→空）；
-      6. 笔数据不足（<2 笔）→ (None, "")，消费方不过滤。
+      6. 笔数据不足（<2 笔）→ (None, "")，消费方不过滤；
+      7. 相位树（rebound 提供且 enabled；闩锁 4 优先——未触发才走到这里）：
+         锚点确立后按「形成段方向 → 够笔 → 位置（中枢上/下沿、前低/前高）→
+         角度强弱」分相位，可返回观望 (None, reason)（消费方双向放行、信号仍附
+         注记）；规则全文见 _phase_direction 与 spec/plans/SPEC_trend_rebound_phase.md。
+         rebound 未提供 / enabled=False → 退回旧行为（确立方向锁到闩锁/新点）。
 
     @returns (dir, reason)：dir ∈ "long"/"short"/None；reason 展示用，
-              如 "4小时2买"（点确立）、"4小时下跌延续"（破坏闩锁）、
-              "4小时末笔向上"（回退）；dir=None 时 reason=""。
+              如 "4小时2卖预期"（相位）、"4小时下跌延续"（破坏闩锁）、
+              "4小时末笔向上"（回退）；观望态 dir=None 但 reason 非空；
+              数据不足时 (None, "")。
     """
     name = trend_res_name(res)
+    if bis and not bis[-1].get("_contextReady"):
+        ctx = buildStructureContext(bis, bars, intervalSecOf(res), tCut)
+        bis = ctx["bis"]
+        if tCut is not None:
+            bars = [b for b in (bars or []) if b["time"] + intervalSecOf(res) <= tCut]
     if not bis or len(bis) < 2:
         return None, ""
     win = bis[-60:]  # 与 compute_plan 同窗口：计划只看最新结构
@@ -539,6 +690,10 @@ def trend_direction(res, bis, bars, upperBis, macdArr, tCut=None):
         fallback = ("long", f"{name}末笔向上")
     else:
         fallback = ("short", f"{name}末笔向下")
+    if bis[-1].get("_forming"):
+        fallback = ("long" if bis[-1]["type"] == "up" else "short",
+                    f"{name}{'预期' if bis[-1]['phase'] == 'expected' else '够笔'}"
+                    f"{'上涨' if bis[-1]['type'] == 'up' else '下跌'}")
     if not pts:
         return fallback
     p = pts[-1]
@@ -559,10 +714,18 @@ def trend_direction(res, bis, bars, upperBis, macdArr, tCut=None):
                 return ("short", f"{name}下跌延续")
         elif b["close"] > p["price"]:
             return ("long", f"{name}上涨延续")
+    # 相位树（2026-09-17 图片决策树；闩锁优先——上面循环未返回即未触发）：
+    # 1类与非1类锚点都走；关闭（rebound 未提供 / enabled=False）→ 旧行为确立返回
+    if rebound and rebound.get("enabled"):
+        direction, reason = _phase_direction(name, p, t_, bis, bars, upperBis, barSec, rebound, tCut)
+        if bis[-1].get("phase") == "expected":
+            reason += "（预期段）"
+        return direction, reason
     return ("long" if is_buy else "short"), f"{name}{t_}"
 
 
-def trend_state_of(periodBis, barsByPeriod, trend_res, periodMacd=None, work_cache=None):
+def trend_state_of(periodBis, barsByPeriod, trend_res, periodMacd=None, work_cache=None,
+                   cfg=None):
     """按配置计算参考周期方向状态（mark_entry 顺势过滤统一入口）。
 
     上级周期取法与 mark_entry.upperResOf 同口径：periodBis 中比参考周期大一级的
@@ -570,9 +733,11 @@ def trend_state_of(periodBis, barsByPeriod, trend_res, periodMacd=None, work_cac
 
     @param trend_res 参考周期（"240"/"D"；""/None = 关闭 → 返回 None）
     @param work_cache 可选：跨次调用复用的 dict（与 compute_plan 同一引擎级缓存；
-             参考周期/上级笔指纹、bars/MACD 长度未变时直接复用——参考周期输入只在
-             其收盘或笔结构变化时才变，两次收盘间（约 80 根 fine）全命中）。重同步
-             后由调用方清空（中段笔修正可能指纹漏判）。
+             参考周期/上级笔指纹、bars/MACD 长度、相位参数未变时直接复用——参考周期
+             输入只在其收盘或笔结构变化时才变，两次收盘间（约 80 根 fine）全命中）。
+             重同步后由调用方清空（中段笔修正可能指纹漏判）。
+    @param cfg 参数中心 plan 模块参数（trendRebound/reboundNearPts/reboundAngleRef；
+             None → 模块常量默认，相位判定默认开启）。
     @returns {"dir": "long"/"short"/None, "reason": str, "res": 参考周期}；
              参考周期无笔数据时 dir=None（不过滤，规则 6）。检测周期的结构性剔除
              由 mark_entry 按 trend_res 字符串独立执行，与本状态无关。
@@ -581,6 +746,7 @@ def trend_state_of(periodBis, barsByPeriod, trend_res, periodMacd=None, work_cac
         return None
     from .sr_flip import _bis_fingerprint
     tr = str(trend_res).upper()
+    periodBis = structurePeriods(periodBis or {}, barsByPeriod or {}, work_cache=work_cache)
     bis = (periodBis or {}).get(tr) or []
     bars = (barsByPeriod or {}).get(tr) or []
     if not bis:
@@ -595,15 +761,30 @@ def trend_state_of(periodBis, barsByPeriod, trend_res, periodMacd=None, work_cac
     if best is not None:
         upper = periodBis.get(best)
     macdArr = (periodMacd or {}).get(tr)
+    # 相位判定参数组装（cfg 缺省 → 模块常量默认；trendRebound=False → 关闭退旧行为）
+    rebound = None
+    if cfg is None or cfg.get("trendRebound", TREND_REBOUND):
+        rebound = {
+            "enabled": True,
+            "near_pts": float(cfg.get("reboundNearPts", REBOUND_NEAR_PTS)) if cfg
+                        else REBOUND_NEAR_PTS,
+            "angle_ref": float(cfg.get("reboundAngleRef", REBOUND_ANGLE_REF)) if cfg
+                         else REBOUND_ANGLE_REF,
+            "min_bars": int(CHAN_CFG.get("expectBiMinBars", 5) or 5),
+        }
+    rb_key = None
+    if rebound:
+        rb_key = (rebound["near_pts"], rebound["angle_ref"], rebound["min_bars"])
     if work_cache is not None:
         key = ("trend", tr, _bis_fingerprint(bis), _bis_fingerprint(upper),
-               len(bars), len(macdArr) if macdArr is not None else len(bars))
+               len(bars), len(macdArr) if macdArr is not None else len(bars), rb_key,
+               bis[-1].get("phase"), bis[-1].get("mergedCount"))
         ent = work_cache.get(("trend", tr))
         if ent is not None and ent[0] == key:
             return ent[1]
     if macdArr is None:
         macdArr = calcMACD(bars)
-    d, reason = trend_direction(tr, bis, bars, upper, macdArr)
+    d, reason = trend_direction(tr, bis, bars, upper, macdArr, rebound=rebound)
     row = {"dir": d, "reason": reason, "res": tr}
     if work_cache is not None:
         work_cache[("trend", tr)] = (key, row)

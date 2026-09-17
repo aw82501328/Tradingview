@@ -166,6 +166,8 @@ def compute_all_marks(bisByPeriod, barsByPeriod, periods, fromTs=None,
     @param periodAtr     可选：各周期预计算 ATR { 周期: atr }
     @returns { 周期: [marks] }，marks 含 { label, time, price, rawTime, rawPrice, color }
     """
+    from .chan_core import structurePeriods
+    bisByPeriod = structurePeriods(bisByPeriod, barsByPeriod)
     periodMacd = periodMacd or {}
     periodAtr = periodAtr or {}
     periodMarks = {}

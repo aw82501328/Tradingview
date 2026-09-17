@@ -376,6 +376,9 @@ class AnalysisManager:
             command.append("--zs-weak-ratio=" + str(pm["entry"]["zs_exit_weak_ratio"]))
             # 顺势参考周期（交易计划模块；"" = 关闭）——低周期只做参考周期方向的单边
             command.append("--trend-res=" + str(pm["plan"].get("trendRes", "")))
+            command.append("--trend-rebound=" + ("1" if pm["plan"].get("trendRebound", True) else "0"))
+            command.append("--rebound-near-pts=" + str(pm["plan"].get("reboundNearPts", 5)))
+            command.append("--rebound-angle-ref=" + str(pm["plan"].get("reboundAngleRef", 5)))
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         # Output is drained in a separate reader so a hung CDP cannot defeat timeout.
         with subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

@@ -915,7 +915,7 @@ async function main() {
       console.log("请先对当前品种运行「画笔」SKILL（chan-bi）生成笔数据，再运行本脚本。");
       process.exit(1);
     }
-    const periodBis = bisData.periods || {};
+    const periodBis = core.structurePeriods(bisData.periods || {}, bisData.bars || {}, Math.floor(Date.now()/1000));
     console.log(`已读取笔数据: ${bisFile}（${Object.keys(periodBis).length} 个周期）`);
 
     // 切换到指定周期并等待K线加载完成

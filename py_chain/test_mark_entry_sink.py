@@ -214,6 +214,7 @@ class TestRealtimeLowerDiverge(unittest.TestCase):
         data = {"60": pd([B60_DOWN_BEFORE, B60_UP]),
                 "15": pd(B15, macdArr),
                 "3": pd(B3)}
+        data["15"]["merged"] = [{"time":t,"_firstTime":t} for t in TIMES15 if t + 900 <= 82900]
         cands = realtimeLowerDiverge(data, "60", "short", 82900,
                                      periodTimes={"15": TIMES15, "3": list(range(78000, 83100, 180))})
         self.assertEqual(len(cands), 1)
@@ -247,6 +248,7 @@ class TestRealtimeLowerDiverge(unittest.TestCase):
                 "3": pd(B3)}
         stop, _ = sinkChainRealtime(data, "60", "short")
         self.assertEqual(stop, "15")  # 内部展开 ≥3 段，正常下沉
+        data["15"]["merged"] = [{"time":t,"_firstTime":t} for t in TIMES15 if t + 900 <= 82900]
         cands = realtimeLowerDiverge(data, "60", "short", 82900,
                                      periodTimes={"15": TIMES15})
         self.assertEqual(cands, [])   # 参照跨上级笔 → 候选无效
@@ -259,6 +261,7 @@ class TestRealtimeLowerDiverge(unittest.TestCase):
                 "3": pd(B3)}
         stop, _ = sinkChainRealtime(data, "60", "short")
         self.assertEqual(stop, "15")
+        data["15"]["merged"] = [{"time":t,"_firstTime":t} for t in TIMES15 if t + 900 <= 82900]
         cands = realtimeLowerDiverge(data, "60", "short", 82900,
                                      periodTimes={"15": TIMES15})
         self.assertEqual(cands, [])

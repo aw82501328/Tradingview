@@ -167,6 +167,7 @@ function onlyThisInterval(res) {
  * @returns {Array} [{ time, price, direction, referStart }] direction='long'（做多）|'short'（做空）
  */
 function findDivergePoints(bis, macdArr) {
+  bis = core.pointEligibleBis(bis);
   if (!bis || bis.length < 3) return [];
   const points = [];
 
@@ -404,7 +405,8 @@ function entryStrategyOf(planStrategy) {
  */
 function lastBiOk(bis, wantType) {
   if (!bis || bis.length === 0) return false;
-  return bis[bis.length - 1].type === wantType;
+  const last = bis[bis.length - 1];
+  return last.type === wantType && (!last._forming || (core.CHAN_CFG.expectBiEnough !== false && last.mergedCount >= (core.CHAN_CFG.expectBiMinBars || 5)));
 }
 
 /**
@@ -522,7 +524,7 @@ function lowerDiverge(periodData, X, wantDir) {
     const pd = periodData[res];
     if (!pd || !pd.bis || pd.bis.length < 3) continue;
     let pts = [];
-    try { pts = findDivergePoints(pd.bis, pd.macdArr); } catch (e) { continue; }
+    try { pts = findDivergePoints(core.pointEligibleBis(pd.bis), pd.macdArr); } catch (e) { continue; }
     for (const p of pts) {
       if (p.direction !== wantDir) continue;
       cands.push({ res, point: p });
@@ -1130,11 +1132,12 @@ async function main() {
         console.log(`\n[周期 ${res}] 读取K线失败，跳过该周期数据`);
         continue;
       }
+      const cutoff = Math.floor(Date.now()/1000);
+      const structure = core.buildStructureContext(periodBis[res], d.bars, intervalSecOf(res), cutoff, null, null, res === "60" ? core.makeBiLowerContext(res, (bisData.bars || {})["15"] || [], cutoff) : null);
+      const closedBars = d.bars.filter(b => b.time + intervalSecOf(res) <= cutoff);
       periodData[res] = {
-        bis: periodBis[res],
-        bars: d.bars,
-        atr: calcATR(d.bars, 14),
-        macdArr: calcMACD(d.bars),
+        bis: structure.bis, bars: closedBars, merged: structure.merged,
+        atr: calcATR(closedBars, 14), macdArr: calcMACD(closedBars),
       };
       if (DEBUG) console.log(`[数据] ${res}: K线 ${d.bars.length} 根 ATR=${periodData[res].atr.toFixed(2)} 笔 ${periodBis[res].length}`);
     }
@@ -1161,9 +1164,9 @@ async function main() {
     // allEntries 按「背驰级别（标记级别）」聚合：periods[markRes] = [信号...]
     // 顺势参考周期方向状态（trading-plan 模块 trendStateOf，一次性全量重放到最新）：
     // trendRes 关闭时为 null——参考周期照常检测、方向不过滤
-    const trendState = TREND_RES ? planCore.trendStateOf(periodBis,
+    const trendState = TREND_RES ? planCore.trendStateOf(Object.fromEntries(Object.entries(periodData).map(([r,p])=>[r,p.bis])),
       Object.fromEntries(Object.keys(periodData).map(r => [r, periodData[r].bars])),
-      TREND_RES) : null;
+      TREND_RES, null, {trendRebound: getStrArg("trend-rebound", "1") !== "0", reboundNearPts: getArg("rebound-near-pts",5), reboundAngleRef:getArg("rebound-angle-ref",5)}) : null;
     const trendDir = trendState ? trendState.dir : null;
     const trendReason = trendState ? trendState.reason : "";
     if (TREND_RES) {
@@ -1229,7 +1232,7 @@ async function main() {
         planDirection: plan.direction,
         color: strategy.direction === "long" ? BUY_COLOR : SELL_COLOR,
       };
-      if (trendDir) {
+      if (trendDir || trendReason) {
         sig.trendDirection = trendDir;
         sig.trendReason = trendReason;
       }

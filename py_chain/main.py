@@ -91,6 +91,9 @@ def build_full_chain(bars_by_period, periods, with_marks=True, sr_types=None, fi
     plan_mp = dict(mp.get("plan") or {})
     trend_res = plan_mp.pop("trendRes", None)
     range_res = plan_mp.pop("rangeRes", None)
+    # 方向相位判定参数（2026-09-17；缺省 → trading_plan 常量默认，相位判定默认开启）
+    trend_cfg = {k: plan_mp.pop(k) for k in
+                 ("trendRebound", "reboundNearPts", "reboundAngleRef") if k in plan_mp}
     plan = compute_plan(bis, bars_by_period, core, cfg=plan_mp or None,
                         range_res=range_res)
     srLevels = (sr or {}).get("merged") or []
@@ -100,7 +103,8 @@ def build_full_chain(bars_by_period, periods, with_marks=True, sr_types=None, fi
                               near=ep.get("near", NEAR),
                               with_30s=any(str(p).upper() == "30S" for p in periods),
                               zs_exit_weak_ratio=ep.get("zs_exit_weak_ratio", ZS_EXIT_WEAK_RATIO),
-                              trend_res=trend_res)
+                              trend_res=trend_res,
+                              trend_cfg=trend_cfg or None)
     return {"bis": bis, "marks": marks, "sr": sr, "plan": plan, "entries": entries}
 
 

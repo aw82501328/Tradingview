@@ -123,7 +123,7 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 
 映射函数 `entryStrategyOf`（`mark_entry.py` L290 / `mark_entry.js` L360）；计划策略本身由 `trading_plan.strategyOf` 产出。
 
-**顺势参考周期过滤**（2026-09-15 起，默认开启）：`compute_entries`/`evaluateRealtimeEntries` 形参 `trend_res`（None→`trading_plan.TREND_RES="240"`；`""`=关闭，参数中心 plan 模块 `trendRes` / JS CLI `--trend-res` 可配 `240`/`D`/关闭）。①参考周期及以上**结构性剔除**出检测周期（只作方向锚；`D` 锚时 240 恢复检测）；②方向状态（`trading_plan.trend_state_of`→`trend_direction`：最近买卖点定方向——1类点须强分型、非1类点出现即确立、收盘破锚定价反向闩锁、无点回退末笔方向，规则全文见 `.cursor/skills/trading-plan/SPEC.md` §5 与 WEB 参数页交易计划页签）非 None 且与策略方向相反时跳过该周期；③命中信号附 `trendDirection`/`trendReason`，回测信号列表方向列显示「多（4小时2买）」式注记（`web/index.html` `signalDirectionName`，方向过滤按基名 多/空 匹配）。当下制 `trend_state` 由回测引擎在链路重算拍（每根 fine）算好传入复用（`evaluateRealtimeEntries` 无 bars 入参不自算）。
+**顺势参考周期过滤**（2026-09-15 起，默认开启；**2026-09-17 方向判定改相位树**）：`compute_entries`/`evaluateRealtimeEntries` 形参 `trend_res`（None→`trading_plan.TREND_RES="240"`；`""`=关闭，参数中心 plan 模块 `trendRes` / JS CLI `--trend-res` 可配 `240`/`D`/关闭）。①参考周期及以上**结构性剔除**出检测周期（只作方向锚；`D` 锚时 240 恢复检测）；②方向状态（`trading_plan.trend_state_of`→`trend_direction`：最近买卖点定方向——1类点须强分型、收盘破锚定价反向闩锁（**优先于相位**）、无点回退末笔方向；**锚点确立后、闩锁未触发期间按相位树走**（2026-09-17，参数 `trendRebound` 默认开、`reboundNearPts`/`reboundAngleRef` 控制近位容差与 45° 角度基准，1类与非1类锚点都适用：形成段方向→够笔→位置（近中枢 ZG/ZD、前低/前高，绝对点数容差）→当前笔角度强弱（平均每根点数 vs 基准），可返回**观望态** dir=None 带 reason 双向放行带注记；规则全文见 `spec/plans/SPEC_trend_rebound_phase.md` v2 与 WEB 参数页交易计划页签表2/2a/2b）非 None 且与策略方向相反时跳过该周期；③命中信号附 `trendDirection`/`trendReason`（观望态 dir=None 也附注记），回测信号列表方向列显示「多（4小时1卖转多预期）」式注记（`web/index.html` `signalDirectionName`，方向过滤按基名 多/空 匹配）。当下制 `trend_state` 由回测引擎在链路重算拍（每根 fine）算好传入复用（`evaluateRealtimeEntries` 无 bars 入参不自算）。
 
 **震荡判定参考周期**（2026-09-16 起，默认 4 小时；当日二次收紧为最终口径，**必填**）：`compute_plan` 形参 `range_res`（None→`trading_plan.RANGE_RES="240"`；`""`=未配置（防御）→ **全部周期观望**；参数中心 plan 模块 `rangeRes` 枚举仅 4小时/日线，无关闭项）。**小周期只听门**：严格更低周期不再做自身 A/B 判定，只看参考周期 regime（`_plan_gate_row`，挂链路 work_cache）——regime 震荡 → 计划行「震荡整理（4小时），观望等待方向选择」（该周期不进场）；regime 非震荡 → 直接走趋势/买卖点分支（自身中枢不再封锁）；**参考周期笔数 <2（含无数据）→ 更低周期直接观望「笔数据不足」，不回退自身判定**。**参考周期及以上只作锚**：不低于 range_res 的行（参考周期自身与 D）计划行固定观望「参考周期，观望（只作锚不交易）」，不做自身 A/B 与买卖点判定（regime 供门、trend_direction 供顺势过滤照常在内部计算）。引擎内自身 A/B 判定只剩参考周期给自己判这一处（即门的依据）。动因：6-12 22:45 的 15m wait2Buy 信号曾被自身「中枢内观望」封锁 30 分钟（详见 §1 案例）。JS 技能仍为各周期自身判定（§2.1.5.2 差异 #2b）。
 
@@ -547,3 +547,8 @@ JS/Python的`buildBi`增加可选末参`lowerContext`；用`makeBiLowerContext(r
 画笔构建60分钟前需要完整15分钟历史（最近30天仅限显示）；回测、回放和监控仅使用当前决策时刻已收盘数据，先更新低周期。目标小时K线为8月7日08:00、4229.875，15分钟精确极值为08:45；固定样本仅目标相邻两笔变化，实际全量影响需回归检查。
 
 完整条件、接口、保护和测试见[现行补充规范](../spec/plans/SPEC_near_double_lower_confirmation.md)。早期章节中原阈值的说明描述基础分支，与本补充分支共同适用。
+
+
+## 预期笔统一口径（2026-09-17）
+
+普通底／顶分型确认后立即建立反向预期段并参与下级结构；够笔与进场门槛统一按包含处理后K线计数，包含起点块，默认5块。Python／JS相位同步，具体接口、缓存、截止时刻及固定样本见 [统一规范](../spec/plans/SPEC_structure_context.md)。

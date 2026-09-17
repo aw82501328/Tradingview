@@ -111,14 +111,14 @@ PARAM_MODULES = {
             "slip_fallback": ("兜底止损滑点", "无正确侧支阻位时 止损=进场价±该值", 0.1, 1000.0),
             "slip_be": ("保本滑点", "保本止损位 = 进场成交K线极值±该值", 0.1, 100.0),
             "exit_min_merged": ("出场成笔预期门槛", "形成段合并后 ≥ 该值根K视为成笔预期（TP2/逆势TP3b触发）", 2, 50),
-            "realtime_min_bars": ("当下制够笔K线数", "检测周期形成段 ≥ 该值根原始K才评估（仅回测/监控引擎，JS技能无此参数）", 1, 100),
+            "realtime_min_bars": ("当下制够笔K线数", "检测周期形成段从起点所在合并块起达到该块数才评估（含起点；默认5）", 1, 100),
             "zs_exit_weak_ratio": ("出中枢力度衰减比例", "离开笔幅度 < 进入笔幅度×该值 视为力度变弱（wait1买/卖条件）", 0.1, 5.0),
             "sinkFallback": ("M1下沉链回退", "下沉停止级无候选时沿链向上一级重评", None, None),
             "sinkFallbackRearm": ("M1终局后重置去重", "同向持仓终局后重置段去重（同段可再进一次）", None, None),
             "nearEqualAtrK": ("M2近等容差ATR", "创新低/新高近等容差（×ATR；0=关闭，实测负贡献）", 0.0, 5.0),
             "nearEqualPct": ("M2近等容差比例", "近等容差价格比例（0=关闭）", 0.0, 0.05),
-            "expectBiEnough": ("M4预期够笔", "末笔反向且端点后够K线即视为回调/反弹中", None, None),
-            "expectBiMinBars": ("M4够笔K线数", "预期够笔的本级K线数门槛", 1, 100),
+            "expectBiEnough": ("M4预期够笔", "允许预期段在合并K线够笔后进场；结构预期本身在普通分型确认后立即参与", None, None),
+            "expectBiMinBars": ("M4够笔K线数", "预期够笔的本级合并K线块数门槛（含起点所在块）", 1, 100),
             "divergeConfirm": ("M4背驰确认后成交", "开启=分型右邻K收盘后的下一根开盘成交（默认当下）", None, None),
             "macdZeroTol": ("2买卖0轴容差", "2买 DIF > -该值 / 2卖 DIF < +该值 视为动能还在（0=严格 0 轴）", 0.0, 100.0),
         },
@@ -137,6 +137,12 @@ PARAM_MODULES = {
                          ("", "240", "D"), None),
             "rangeRes": ("震荡判定参考周期", "更低周期只看该周期结构判震荡；参考周期及以上只作锚不交易（必填：4小时/日线）",
                          ("240", "D"), None),
+            "trendRebound": ("方向相位判定", "锚点（1卖/2\\3卖及买侧镜像）确立后按 够笔+中枢边界/前低前高+角度强弱 分相位定方向，含观望态（闩锁优先；仅回测/监控引擎，JS技能无此参数）",
+                         None, None),
+            "reboundNearPts": ("相位近位容差(点)", "形成段极值距中枢上/下沿或前低/前高 ≤ 该值（绝对点数）视为附近（调大等效常判附近）",
+                         0.0, 1000.0),
+            "reboundAngleRef": ("相位角度45°基准(点/根)", "当前笔平均每根幅度 > 该值 = 角度>45°（强），≤ 为弱；下跌角度与反弹/回调力度同口径",
+                         0.1, 100.0),
         },
     },
 }
@@ -176,7 +182,10 @@ def defaults_of(module):
         }
     if module == "plan":
         return {**trading_plan.RANGE_DEFAULTS, "trendRes": trading_plan.TREND_RES,
-                "rangeRes": trading_plan.RANGE_RES}
+                "rangeRes": trading_plan.RANGE_RES,
+                "trendRebound": trading_plan.TREND_REBOUND,
+                "reboundNearPts": trading_plan.REBOUND_NEAR_PTS,
+                "reboundAngleRef": trading_plan.REBOUND_ANGLE_REF}
     raise ValueError(f"未知参数模块：{module}")
 
 

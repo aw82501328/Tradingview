@@ -152,3 +152,8 @@ node .cursor/skills/trading-plan/scripts/trading_plan.js --periods=240,60
 - 本 SKILL **不画笔、不标记历史买卖点、不判断状态预判**（画笔用 `chan-bi`，历史买卖点用 `mark-buy-sell`，状态用 `chan-status`），只生成交易计划表 + 图上策略标记。
 - **运行依赖链**（依序执行）：**画笔（chan-bi）→ 标记买卖点（mark-buy-sell）→ 支阻互换位（mark-sr-flip）→ 交易计划（trading-plan）→ 进出场（mark-entry）**。本脚本的落盘结果（`plan_<品种>.json`）供下游「进出场」判定进场状态。
 - **笔结构为快照**：`bis` 来自 chan-bi 最近一次运行的缓存文件（同 chan-status）；在关键行情节点前建议先运行「画笔」刷新缓存。
+
+
+## 预期笔与够笔运行笔（2026-09-17 更新）
+
+下跌够笔且普通底分型右肩收盘后，预期上涨段立即参与下级买卖点、中枢归属和方向判断；卖侧镜像。合并后从起点块起满5块（含起点）才通过够笔门槛；进场预期够笔同样使用合并K线。活动端点不锚定已确认一类点，原始画笔缓存与结构视图分开。Python与JS共用同构 `buildStructureContext` / `mergedSegmentCount` 规则，详见 [统一规范](../../../../spec/plans/SPEC_structure_context.md)。

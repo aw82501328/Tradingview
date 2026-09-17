@@ -177,6 +177,7 @@ function checkThirdBuy(bis, last2Buy) {
  * @returns {{time:number, price:number}|null}
  */
 function findUpperPeak(upperBis) {
+  upperBis = core.confirmedStructureBis(upperBis);
   if (!upperBis || upperBis.length === 0) return null;
   for (let i = upperBis.length - 1; i >= 0; i--) {
     if (upperBis[i].type === "up") return { time: upperBis[i].endTime, price: upperBis[i].endPrice };
@@ -186,6 +187,7 @@ function findUpperPeak(upperBis) {
 
 /** 上级最近结构底：对称于 findUpperPeak */
 function findUpperTrough(upperBis) {
+  upperBis = core.confirmedStructureBis(upperBis);
   if (!upperBis || upperBis.length === 0) return null;
   for (let i = upperBis.length - 1; i >= 0; i--) {
     if (upperBis[i].type === "down") return { time: upperBis[i].endTime, price: upperBis[i].endPrice };
@@ -825,14 +827,14 @@ async function main() {
         continue;
       }
 
-      const rawBars = d.bars;
+      const rawBars = d.bars.filter(b => b.time + intervalSecOf(res) <= Math.floor(Date.now()/1000));
       const atr = calcATR(rawBars, 14);
       const macdArr = calcMACD(rawBars);
       const lastBar = rawBars[rawBars.length - 1];
       const lastPrice = lastBar ? lastBar.close : null;
       const lastBarTime = lastBar ? lastBar.time : null;
 
-      let curBis = bisCache.periods[res] || [];
+      let curBis = core.buildStructureContext(bisCache.periods[res] || [], d.bars, intervalSecOf(res), Math.floor(Date.now()/1000), null, null, res === "60" ? core.makeBiLowerContext(res, (bisCache.bars || {})["15"] || [], Math.floor(Date.now()/1000)) : null).bis;
       if (curBis.length === 0) {
         console.log(`\n[周期 ${res}] 笔数据为空（画笔未覆盖该周期），跳过`);
         continue;

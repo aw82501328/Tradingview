@@ -470,8 +470,44 @@ function strongFractalAfter(merged, fractals, t, kind) {
 //   6. 笔数据不足（<2 笔）→ [null, ""]，消费方不过滤。
 // @returns [dir, reason]：reason 如 "4小时2买"（点确立）、"4小时下跌延续"（破坏）、
 //          "4小时末笔向上"（回退）
-function trendDirection(res, bis, bars, upperBis, macdArr, tCut = null) {
+function phaseDirection(name, p, bis, bars, upperBis, barSec, rb, tCut = null) {
+  const seg = bis[bis.length - 1], t = p.type, isBuy = t.endsWith("买");
+  const rawCount = (bars || []).filter(b => b.time > seg.startTime && (tCut == null || b.time <= tCut)).length;
+  const merged = mergeBars(markWickBars(bars || []));
+  const enough = core.mergedSegmentCount(merged, seg.startTime, barSec) >= (rb.min_bars || 5);
+  const strong = seg.span / Math.max(1, rawCount) > (rb.angle_ref ?? 5);
+  const near = rb.near_pts ?? 5, extreme = seg.endPrice;
+  const nearZs = () => {
+    const zs = upperBis && upperBis.length ? buildZSByUpper(bis, upperBis, barSec) : buildZS(bis, barSec);
+    const before = zs.filter(z => z.startTime != null && z.startTime <= p.time);
+    if (!before.length) return false;
+    const z = before[before.length-1];
+    return Math.min(Math.abs(extreme-z.zg), Math.abs(extreme-z.zd)) <= near;
+  };
+  if (t === "1买" || t === "1卖") {
+    const same = seg.type === (isBuy ? "up" : "down"), dir = isBuy ? "long" : "short", other = isBuy ? "short" : "long";
+    if (same) {
+      if (!enough) return [dir, `${name}${t}进行中`];
+      if (nearZs()) return strong ? [null, `${name}${t}近中枢观望`] : [other, `${name}${t}转${isBuy ? "空" : "多"}预期`];
+      return strong ? [dir, `${name}${t}进行中`] : [null, `${name}${t}后方向不明`];
+    }
+    if (seg.startTime <= p.time) return [dir, `${name}${t}进行中`];
+    if (!enough) return [other, `${name}${t}${isBuy ? "回调" : "反弹"}`];
+    return strong ? [other, `${name}${t}${isBuy ? "强回" : "强反"}`] : [dir, `${name}${isBuy ? "2买" : "2卖"}预期`];
+  }
+  if (seg.type === (isBuy ? "down" : "up")) return [null, `${name}${t}${isBuy ? "回调中" : "反弹中"}`];
+  const prevs = bis.slice(0,-1).filter(b => b.type === (isBuy ? "up" : "down") && b.endTime <= p.time);
+  if (prevs.length && Math.abs(extreme-prevs[prevs.length-1].endPrice) <= near) return [null, `${name}${t}${isBuy ? "前高" : "前低"}附近`];
+  if (!enough || strong) return [isBuy ? "long" : "short", `${name}${t}后${isBuy ? "上涨" : "下跌"}`];
+  return [null, `${name}${t}后方向不明`];
+}
+
+function trendDirection(res, bis, bars, upperBis, macdArr, tCut = null, rebound = null) {
   const name = trendResName(res);
+  if (bis && bis.length && !bis[bis.length-1]._contextReady) {
+    bis = core.buildStructureContext(bis, bars, intervalSecOf(res), tCut).bis;
+    if (tCut != null) bars = (bars || []).filter(b => b.time + intervalSecOf(res) <= tCut);
+  }
   if (!bis || bis.length < 2) return [null, ""];
   const win = bis.slice(-60); // 与 compute_plan 同窗口：计划只看最新结构
   const barSec = intervalSecOf(res);
@@ -484,8 +520,10 @@ function trendDirection(res, bis, bars, upperBis, macdArr, tCut = null) {
   }
   if (tCut != null) pts = pts.filter(p => p.time <= tCut);
   pts.sort((a, b) => a.time - b.time);
-  const fallback = bis[bis.length - 1].type === "up"
+  let fallback = bis[bis.length - 1].type === "up"
     ? ["long", `${name}末笔向上`] : ["short", `${name}末笔向下`];
+  const current = bis[bis.length-1];
+  if (current._forming) fallback = [current.type === "up" ? "long" : "short", `${name}${current.phase === "expected" ? "预期" : "够笔"}${current.type === "up" ? "上涨" : "下跌"}`];
   if (!pts.length) return fallback;
   const p = pts[pts.length - 1];
   const t = p.type;
@@ -506,6 +544,11 @@ function trendDirection(res, bis, bars, upperBis, macdArr, tCut = null) {
       return ["long", `${name}上涨延续`];
     }
   }
+  if (rebound && rebound.enabled) {
+    const result = phaseDirection(name,p,bis,bars,upperBis,barSec,rebound,tCut);
+    if (current.phase === "expected") result[1] += "（预期段）";
+    return result;
+  }
   return [isBuy ? "long" : "short", `${name}${t}`];
 }
 
@@ -513,8 +556,9 @@ function trendDirection(res, bis, bars, upperBis, macdArr, tCut = null) {
 // 上级周期取法与 mark_entry.upperResOf 同口径：periodBis 中比参考周期大一级的最小周期
 // （240→D），供 findBuyPoints 区间套使用。
 // @returns { dir: "long"|"short"|null, reason: string, res } | null（trendRes 关闭）
-function trendStateOf(periodBis, barsByPeriod, trendRes, periodMacd = null) {
+function trendStateOf(periodBis, barsByPeriod, trendRes, periodMacd = null, cfg = null, tCut = null) {
   if (!trendRes) return null;
+  periodBis = core.structurePeriods(periodBis, barsByPeriod, tCut);
   const tr = String(trendRes).toUpperCase();
   const bis = (periodBis || {})[tr] || [];
   const bars = (barsByPeriod || {})[tr] || [];
@@ -528,7 +572,8 @@ function trendStateOf(periodBis, barsByPeriod, trendRes, periodMacd = null) {
   if (best !== null) upper = periodBis[best];
   let macdArr = (periodMacd || {})[tr];
   if (macdArr == null) macdArr = calcMACD(bars);
-  const [dir, reason] = trendDirection(tr, bis, bars, upper, macdArr);
+  const rebound = cfg && cfg.trendRebound === false ? null : {enabled:true, near_pts:cfg?.reboundNearPts ?? 5, angle_ref:cfg?.reboundAngleRef ?? 5, min_bars:core.CHAN_CFG.expectBiMinBars || 5};
+  const [dir, reason] = trendDirection(tr, bis, bars, upper, macdArr, tCut, rebound);
   return { dir, reason, res: tr };
 }
 
@@ -545,6 +590,7 @@ module.exports = {
   RES_NAME_CN,
   trendResName,
   strongFractalAfter,
+  phaseDirection,
   trendDirection,
   trendStateOf,
 };
@@ -815,14 +861,14 @@ async function main() {
         continue;
       }
 
-      const rawBars = d.bars;
+      const rawBars = d.bars.filter(b => b.time + intervalSecOf(res) <= Math.floor(Date.now()/1000));
       const atr = calcATR(rawBars, 14);
       const macdArr = calcMACD(rawBars);
       const lastBar = rawBars[rawBars.length - 1];
       const lastPrice = lastBar ? lastBar.close : null;
       const lastBarTime = lastBar ? lastBar.time : null;
 
-      let curBis = bisCache.periods[res] || [];
+      let curBis = core.buildStructureContext(bisCache.periods[res] || [], d.bars, intervalSecOf(res), Math.floor(Date.now()/1000), null, null, res === "60" ? core.makeBiLowerContext(res, (bisCache.bars || {})["15"] || [], Math.floor(Date.now()/1000)) : null).bis;
       if (curBis.length === 0) {
         console.log(`\n[周期 ${res}] 笔数据为空（画笔未覆盖该周期），跳过`);
         continue;

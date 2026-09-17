@@ -517,7 +517,8 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
       curBis = curBis.filter(b => b.endTime >= FROM_TS);
 
       // 仍需要本周期K线：用于 ATR 偏移量、买卖点吸附到本周期bar边界、MACD 背驰判定
-      const rawBars = d.bars;
+      const rawBars = d.bars.filter(b => b.time + intervalSecOf(res) <= Math.floor(Date.now()/1000));
+      curBis = core.buildStructureContext(curBis, d.bars, intervalSecOf(res), Math.floor(Date.now()/1000), null, null, res === "60" ? core.makeBiLowerContext(res, (bisCache.bars || {})["15"] || [], Math.floor(Date.now()/1000)) : null).bis;
       const atr = calcATR(rawBars, 14);
       const macdArr = calcMACD(rawBars);
 

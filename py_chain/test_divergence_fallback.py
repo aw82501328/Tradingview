@@ -32,20 +32,23 @@ def buildPeriodData(diverge15=True, f15End=90.0):
     diverge15 控制 15m 末段相对其参照是否背驰。"""
     return {
         "60": {"bis": [bi(0, 80, 600, 110, "up"), bi(600, 110, 1300, 90, "down")],
-               "macdArr": [], "atr": 20.0, "bars": []},
+               "macdArr": [], "atr": 20.0, "bars": [],
+               "merged": [{"time":t,"_firstTime":t} for t in range(600,1301,100)]},
         "15": {"bis": [bi(600, 110, 700, 100, "down"), bi(700, 100, 800, 105, "up"),
                        bi(800, 110, 900, 98, "down"), bi(900, 98, 1000, 110, "up"),
                        bi(1000, 110, 1300, f15End, "down")],
                "macdArr": [macd(810, -8, -8), macd(850, -8, -8),           # 15m 参照段（800→900）：深绿
                            macd(1050, -0.5 if diverge15 else -8, -0.5 if diverge15 else -8),
                            macd(1200, -0.5 if diverge15 else -8, -0.5 if diverge15 else -8)],
-               "atr": 10.0, "bars": []},
+               "atr": 10.0, "bars": [],
+               "merged": [{"time":t,"_firstTime":t} for t in range(1000,1301,50)]},
         "3": {"bis": [bi(1000, 110, 1100, 100, "up"), bi(1100, 100, 1150, 95, "down"),
                       bi(1150, 95, 1200, 102, "up"), bi(1200, 102, 1250, 94, "down"),
                       bi(1250, 94, 1260, 100, "up"), bi(1260, 100, 1300, 93, "down")],
               "macdArr": [macd(1210, -1, -1), macd(1240, -1, -1),          # 3m 参照段：浅绿
                           macd(1270, -5, -5), macd(1290, -5, -5)],         # 3m 末段：深绿（加速）
-              "atr": 5.0, "bars": []},
+              "atr": 5.0, "bars": [],
+              "merged": [{"time":t,"_firstTime":t} for t in range(1260,1301,10)]},
     }
 
 
@@ -133,8 +136,8 @@ class TestExpectBi(unittest.TestCase):
     def test_counter_move_threshold(self):
         times = [600, 700, 800, 900, 1000, 1100, 1200]
         last = bi(0, 80, 600, 110, "up")   # 末笔上涨，端点 600
-        self.assertFalse(counterMoveQualifies(times, last, 1000))  # (600,1000] = 4 根
-        self.assertTrue(counterMoveQualifies(times, last, 1100))   # 5 根
+        self.assertFalse(counterMoveQualifies(times, last, 900, merged=[{"time":t} for t in times[:4]]))  # (600,1000] = 4 根
+        self.assertTrue(counterMoveQualifies(times, last, 1000, merged=[{"time":t} for t in times[:5]]))   # 5 根
         CHAN_CFG["expectBiEnough"] = False
         self.assertFalse(counterMoveQualifies(times, last, 1200))  # 开关关
 
@@ -157,6 +160,7 @@ class TestExpectBi(unittest.TestCase):
         pd = buildPeriodData()
         pd["60"]["bis"] = [bi(0, 80, 600, 110, "up")]
         times = dict(PERIOD_TIMES)
+        pd["60"]["merged"] = [{"time":t,"_firstTime":t} for t in [600,700,800]]
         times["60"] = [0, 300, 600, 700, 800]  # 端点 600 后仅 2 根
         self.assertEqual(realtimeLowerDiverge(pd, "60", "long", 800, periodTimes=times), [])
 
@@ -194,7 +198,7 @@ class TestExpectBi(unittest.TestCase):
         t2 = [600, 700, 800, 900, 1000, 1100, 1200]
         last = bi(0, 80, 600, 110, "up")
         self.assertFalse(counterMoveQualifies(t2, last, 1200, enabled=False))
-        self.assertTrue(counterMoveQualifies(t2, last, 1200, enabled=True))
+        self.assertTrue(counterMoveQualifies(t2, last, 1200, enabled=True, merged=[{"time":t} for t in t2]))
         # 引擎 expect_bi 参数覆盖 CHAN_CFG
         bars = {"3": [{"time": i * 180, "open": 100, "high": 101, "low": 99, "close": 100}
                       for i in range(6)]}

@@ -124,7 +124,10 @@ class ParamCenterTests(unittest.TestCase):
         Path(param_center.PARAMS_FILE).write_text("{ not json", encoding="utf-8")
         self.assertEqual(param_center.effective("plan"),
                          {**trading_plan.RANGE_DEFAULTS, "trendRes": trading_plan.TREND_RES,
-                          "rangeRes": trading_plan.RANGE_RES})
+                          "rangeRes": trading_plan.RANGE_RES,
+                          "trendRebound": trading_plan.TREND_REBOUND,
+                          "reboundNearPts": trading_plan.REBOUND_NEAR_PTS,
+                          "reboundAngleRef": trading_plan.REBOUND_ANGLE_REF})
 
     def test_plan_cfg_changes_range_verdict(self):
         # 震荡阈值收得很紧（kMult=0.5 必不满足）→ 原本判震荡的窗口变趋势；

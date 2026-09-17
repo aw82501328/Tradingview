@@ -119,7 +119,8 @@ def _bis_fingerprint(bis):
         return (0, None, None, None, None)
     last = bis[-1]
     return (len(bis), last.get("startTime"), last.get("endTime"),
-            last.get("endPrice"), last.get("type"))
+            last.get("endPrice"), last.get("type"), last.get("phase"),
+            last.get("mergedCount"))
 
 # 级别大小顺序（从大到小），用于候选池排序与可见范围判断
 LEVEL_ORDER = ["1W", "W", "1D", "D", "240", "4H", "60", "1H", "15", "3"]
@@ -709,6 +710,8 @@ def compute_srflip(periodBis, barsByPeriod, periods,
     allManuals = {}
     periodAtrs = {}
     lastCloseByRes = {}
+    from .chan_core import structurePeriods
+    periodBis = structurePeriods(periodBis, barsByPeriod, work_cache=work_cache)
     for res in periods:
         manual = manualLevels.get(str(res).upper())
         bis = periodBis.get(res, []) or []
