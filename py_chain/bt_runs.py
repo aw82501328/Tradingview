@@ -18,6 +18,7 @@
     GET    /api/bt/runs/detail?id=      明细（含全部信号行）
     POST   /api/bt/runs/save            保存当前（最近一次完成的）回测
     POST   /api/bt/runs/rename          改名
+    POST   /api/bt/runs/analyze         亏损归因分析（body: id, lookahead）
     DELETE /api/bt/runs?id=             删除
 """
 
@@ -197,6 +198,111 @@ def default_name(cfg):
     return f"{symbol} {from_s}·{time.strftime('%m%d-%H%M')}".strip()
 
 
+# 亏损归因字段：分析写入；非亏损行或重算时清除，避免残留
+_LOSS_ATTR_KEYS = ("lossReason", "lossLookahead", "lossEndClose", "lossEndTime")
+_DEFAULT_LOOKAHEAD = 20
+
+
+def _clear_loss_attr(row):
+    """从信号行去掉上次分析写入的归因字段。"""
+    for k in _LOSS_ATTR_KEYS:
+        row.pop(k, None)
+
+
+def _bars_after_signal(bars, signal_ts, n):
+    """取信号时间之后（不含当根）的随后 n 根 K 线；不足则返回已有部分。"""
+    sig = int(signal_ts)
+    out = []
+    for b in bars:
+        if b["time"] > sig:
+            out.append(b)
+            if len(out) >= n:
+                break
+    return out
+
+
+def _judge_loss_reason(direction, signal_price, end_close):
+    """第 N 根收盘 vs 信号价：与进场方向不一致 → 方向问题，否则进出场问题（含平盘）。"""
+    if direction == "long":
+        return "方向问题" if end_close < signal_price else "进出场问题"
+    if direction == "short":
+        return "方向问题" if end_close > signal_price else "进出场问题"
+    return "进出场问题"
+
+
+def analyze_loss_attribution(rows, symbol, lookahead=_DEFAULT_LOOKAHEAD):
+    """对方案信号行做亏损归因：已平仓且 pnl<0 用检测周期后 N 根收盘对比信号价。
+
+    批量按 periodX 从本地 bars 库取 K 线；整品种缺失抛 ValueError。
+    返回 (更新后的 rows, loss_analysis 汇总 dict)。
+    """
+    lookahead = int(lookahead)
+    if lookahead < 1:
+        raise ValueError("lookahead 须为正整数")
+
+    # 先清掉所有行的旧归因，再只给亏损单重写
+    out = []
+    for r in rows:
+        row = dict(r)
+        _clear_loss_attr(row)
+        out.append(row)
+
+    lose_rows = [r for r in out
+                 if r.get("status") == "已平仓"
+                 and _num(r.get("pnl")) is not None
+                 and _num(r.get("pnl")) < 0]
+    if lose_rows and not symbol:
+        raise ValueError("方案缺少品种，无法加载 K 线做归因")
+
+    periods = sorted({str(r.get("periodX")) for r in lose_rows if r.get("periodX")})
+
+    bars_by_res = {}
+    if periods:
+        timed = [int(r["time"]) for r in lose_rows if r.get("time") is not None]
+        if timed:
+            # 从最早信号时间起加载，覆盖全部亏损单窗口
+            try:
+                loaded = data_store.load_store(symbol, periods=periods, from_ts=min(timed))
+            except ValueError as exc:
+                raise ValueError(str(exc)) from exc
+            bars_by_res = loaded
+
+    stats = {
+        "lookahead": lookahead,
+        "analyzed_at": int(time.time()),
+        "lose": len(lose_rows),
+        "direction": {"count": 0, "pnl": 0.0},
+        "entry_exit": {"count": 0, "pnl": 0.0},
+        "insufficient": {"count": 0},
+    }
+
+    for r in lose_rows:
+        period = str(r.get("periodX") or "")
+        sig_t = r.get("time")
+        sig_px = _num(r.get("price"))
+        direction = r.get("direction")
+        pnl = _num(r.get("pnl"))
+        bars = bars_by_res.get(period) or []
+        window = _bars_after_signal(bars, sig_t, lookahead) if sig_t is not None else []
+        if len(window) < lookahead or sig_px is None or direction not in ("long", "short"):
+            r["lossReason"] = "数据不足"
+            r["lossLookahead"] = lookahead
+            stats["insufficient"]["count"] += 1
+            continue
+        end = window[lookahead - 1]
+        end_close = float(end["close"])
+        reason = _judge_loss_reason(direction, sig_px, end_close)
+        r["lossReason"] = reason
+        r["lossLookahead"] = lookahead
+        r["lossEndClose"] = round(end_close, 4)
+        r["lossEndTime"] = end["time"]
+        bucket = "direction" if reason == "方向问题" else "entry_exit"
+        stats[bucket]["count"] += 1
+        stats[bucket]["pnl"] = round(stats[bucket]["pnl"] + (pnl or 0.0), 2)
+
+    return out, stats
+
+
 class BtRunStore:
     """bt_runs / bt_signals 读写（线程安全：实例锁串行 + 短连接用完即关，仿 data_store）。"""
 
@@ -352,6 +458,37 @@ class BtRunStore:
             finally:
                 conn.close()
 
+    def update_analysis(self, run_id, rows, loss_analysis):
+        """回写归因后的信号行与 summary.loss_analysis；未知 id 返回 None。
+
+        保留原有 summary 的盈亏/equity 等固化字段，只覆盖 loss_analysis。
+        """
+        with self.lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    f"SELECT {self._META_COLS} FROM bt_runs WHERE id=?",
+                    (run_id,)).fetchone()
+                if row is None:
+                    return None
+                meta = self._meta_from_row(row)
+                summary = dict(meta.get("summary") or {})
+                summary["loss_analysis"] = loss_analysis
+                with conn:
+                    conn.execute(
+                        "UPDATE bt_runs SET summary=? WHERE id=?",
+                        (_dumps(summary), run_id))
+                    conn.execute("DELETE FROM bt_signals WHERE run_id=?", (run_id,))
+                    conn.executemany(
+                        "INSERT INTO bt_signals(run_id, seq, row_json) VALUES(?,?,?)",
+                        [(run_id, i, _dumps(r)) for i, r in enumerate(rows)])
+                meta["summary"] = summary
+                meta["signals"] = rows
+                meta["signal_count"] = len(rows)
+                return meta
+            finally:
+                conn.close()
+
 
 # ============================================================
 # HTTP 适配（仿 analysis_api.handle：路径前缀命中即处理并返回 True）
@@ -395,6 +532,31 @@ def _rename(app, body):
     return {"run": meta}
 
 
+def _analyze(app, body):
+    """对已保存方案做亏损归因：检测周期信号后 N 根收盘 vs 信号价。"""
+    run_id = str(body.get("id") or "")
+    if not run_id:
+        raise ValueError("缺少方案 id")
+    lookahead = body.get("lookahead", _DEFAULT_LOOKAHEAD)
+    try:
+        lookahead = int(lookahead)
+    except (TypeError, ValueError):
+        raise ValueError("lookahead 须为正整数") from None
+    if lookahead < 1:
+        raise ValueError("lookahead 须为正整数")
+    run = app.bt_runs.get(run_id)
+    if run is None:
+        raise _HttpError("方案不存在", 404)
+    symbol = (run.get("cfg") or {}).get("symbol") or ""
+    rows, loss_analysis = analyze_loss_attribution(
+        run.get("signals") or [], symbol, lookahead=lookahead)
+    meta = app.bt_runs.update_analysis(run_id, rows, loss_analysis)
+    if meta is None:
+        raise _HttpError("方案不存在", 404)
+    # 列表缓存不含 signals，返回完整 run 供明细刷新
+    return {"run": meta}
+
+
 def handle(handler, app, method):
     """处理 /api/bt/runs 前缀的请求；命中返回 True（webapp 三个 do_* 顶部挂载）。"""
     parsed = urlparse(handler.path)
@@ -425,6 +587,8 @@ def handle(handler, app, method):
                 result = _save_current(app, body)
             elif action == "rename":
                 result = _rename(app, body)
+            elif action == "analyze":
+                result = _analyze(app, body)
             else:
                 raise _HttpError("未知回测方案接口", 404)
         elif method == "DELETE":

@@ -193,6 +193,8 @@ class SignalLocatorTests(unittest.TestCase):
         self.assertEqual(u, 500 + 180 * 60)
         u2 = locator._view_until(self.row, 100, '3')
         self.assertEqual(u2, 100 + 180 * 60)
+        self.assertEqual(locator._view_until(self.row, 100, '3', after_bars=10), 100 + 180 * 10)
+        self.assertEqual(locator._view_until(self.row, 100, '3', after_bars=0), 100)
 
     def test_draw_after_locate_uses_chart_bar_and_no_interval_visibility(self):
         client = Mock()
@@ -223,12 +225,15 @@ class SignalLocatorTests(unittest.TestCase):
             self.assertEqual(locate.call_args.args[0], self.row)
             # 使用服务端记录，忽略客户端多余字段；colors 缺省 → None
             self.assertIsNone(locate.call_args.kwargs['colors'])
+            self.assertEqual(locate.call_args.kwargs['after_bars'], 60)
             colors = {'buy': '#111111', 'sr': '#222222'}
-            self.assertEqual(request({'mode': 'backtest', 'id': 1, 'colors': colors})[1], 202)
+            self.assertEqual(request({'mode': 'backtest', 'id': 1, 'colors': colors, 'after_bars': 20})[1], 202)
             self.assertEqual(locate.call_args.kwargs['colors'], colors)
+            self.assertEqual(locate.call_args.kwargs['after_bars'], 20)
             # colors 非法类型 → 后端默认色兜底（None）
             self.assertEqual(request({'mode': 'backtest', 'id': 1, 'colors': 'bad'})[1], 202)
             self.assertIsNone(locate.call_args.kwargs['colors'])
+            self.assertEqual(request({'mode': 'backtest', 'id': 1, 'after_bars': -1})[1], 400)
 
 
 if __name__ == '__main__':

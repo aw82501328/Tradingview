@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, urlparse, quote
 from .data_loader import CDPConfig, DEFAULT_PERIODS, DEFAULT_CDP_PORT, load_bars
 from .backtest import BacktestEngine
 from .service_restart import RestartManager
-from .signal_locator import LocateManager
+from .signal_locator import LocateManager, parse_after_bars
 from .main import parse_from
 from .chan_core import fmtT
 from .monitor import LiveMonitor, ReplayMonitor, clear_rt_markers
@@ -1188,6 +1188,12 @@ def make_handler(app):
                 colors = body.get('colors') if isinstance(body, dict) else None
                 if not isinstance(colors, dict):
                     colors = None
+                try:
+                    after_bars = parse_after_bars(
+                        body.get('after_bars') if isinstance(body, dict) else None)
+                except ValueError as exc:
+                    self._send_json({'ok': False, 'error': str(exc)}, 400)
+                    return
                 # 历史方案明细：带 row 快照，直接定位/标记，不依赖内存 SignalLog
                 row_snap = body.get('row') if isinstance(body, dict) else None
                 if isinstance(row_snap, dict):
@@ -1199,7 +1205,8 @@ def make_handler(app):
                         self._send_json({'ok': False, 'error': '无效的模式或记录ID'}, 400)
                         return
                     try:
-                        job = app.locator.start(mode, rid, colors=colors, row=row_snap)
+                        job = app.locator.start(mode, rid, colors=colors, row=row_snap,
+                                                after_bars=after_bars)
                     except ValueError as exc:
                         self._send_json({'ok': False, 'error': str(exc)}, 400)
                     except LookupError as exc:
@@ -1216,7 +1223,8 @@ def make_handler(app):
                     self._send_json({'ok': False, 'error': '无效的模式或记录ID'}, 400)
                     return
                 try:
-                    job = app.locator.start(body['mode'], body['id'], colors=colors)
+                    job = app.locator.start(body['mode'], body['id'], colors=colors,
+                                            after_bars=after_bars)
                 except ValueError as exc:
                     self._send_json({'ok': False, 'error': str(exc)}, 400)
                 except LookupError as exc:

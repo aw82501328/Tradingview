@@ -240,6 +240,18 @@
   .bt-summary b { color: var(--text); font-weight: 600; }
   .bt-summary .pnl-pos { color: var(--buy); }
   .bt-summary .pnl-neg { color: var(--sell); }
+  .bt-loss-summary { display: flex; gap: 14px; flex-wrap: wrap; padding: 8px 16px;
+    border-bottom: 1px solid var(--border); background: var(--card-2);
+    font-size: 12px; color: var(--muted); }
+  .bt-loss-summary b { color: var(--text); font-weight: 600; }
+  .bt-loss-summary .pnl-pos { color: var(--buy); }
+  .bt-loss-summary .pnl-neg { color: var(--sell); }
+  .bt-analyze-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    font-size: 12px; color: var(--muted); }
+  .bt-analyze-bar input[type="number"] {
+    width: 52px; padding: 4px 6px; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+  }
   #bt-detail-body .scroll { max-height: 44vh; }
   #bt-detail-body .equity-chart { border-top: 0; }
   #bt-compare-view .equity-chart {
@@ -279,7 +291,9 @@
         <thead>
           <tr>
             <th>对比</th><th>名称</th><th>保存时间</th><th>品种</th><th>周期</th><th>起始</th>
-            <th>已平仓</th><th>胜率</th><th>盈亏比</th><th>合计</th><th>信号数</th><th>运行</th><th>操作</th>
+            <th>已平仓</th><th>胜率</th><th>盈亏比</th>
+            <th id="bt-runs-pnl-header" aria-sort="none"><button type="button" id="sort-bt-runs-pnl" class="sort-button" title="点击按合计盈亏从高到低排序">合计 ↕</button></th>
+            <th>信号数</th><th>运行</th><th>操作</th>
           </tr>
         </thead>
         <tbody id="bt-runs-body"></tbody>
@@ -365,6 +379,12 @@
     <div class="bt-modal-head">
       <strong id="bt-detail-title"></strong>
       <div class="bt-modal-actions">
+        <div class="bt-analyze-bar" title="用检测周期信号后 N 根收盘对比信号价，判定亏损是方向问题还是进出场问题">
+          <span>信号后</span>
+          <input id="bt-detail-lookahead" type="number" min="1" step="1" value="20" aria-label="归因回看K线根数">
+          <span>根</span>
+          <button id="bt-detail-analyze" type="button">分析方案</button>
+        </div>
         <button id="bt-detail-max" type="button" title="全屏最大化明细窗口">最大化</button>
         <button id="bt-detail-close" type="button">关闭</button>
       </div>
@@ -462,6 +482,9 @@ function buildCard(m) {
     backtest: [
       { k: 'lead_days', label: '预热提前（天）·0=从起始日交易', type: 'text', def: '60' },
       { k: 'warmup', label: '预热根数（提前=0 时生效）', type: 'text', def: '60' },
+      { k: 'locate-after-bars', label: '定位后保留K线', type: 'number', def: '60',
+        cfg: false, min: 0, step: 1,
+        title: '点击信号行在图上定位时，出场（无出场则进场）之后再显示的K线根数' },
       { k: 'sr_preset', label: '支阻预设', type: 'select', def: '', options: [
         ['', '默认（引擎参数：密集区+BOLL）'],
       ] },
@@ -492,11 +515,13 @@ function buildCard(m) {
     ${m.id === 'backtest' ? '<div class="field"><label>结束日期（空=到最新）</label><input type="date" data-cfg="to"></div>' : ''}
   </div>`);
   const extraHtml = (extras[m.id] || []).map(f => {
+    const attr = f.cfg === false ? `id="${f.k}"` : `data-cfg="${f.k}"`;
+    const extra = `${f.min != null ? ` min="${f.min}"` : ''}${f.step != null ? ` step="${f.step}"` : ''}${f.title ? ` title="${f.title}"` : ''}`;
     const ctrl = (f.type === 'select')
-      ? `<select data-cfg="${f.k}">${(f.options || []).map(([v, t]) =>
+      ? `<select ${attr}>${(f.options || []).map(([v, t]) =>
           `<option value="${v}"${v === f.def ? ' selected' : ''}>${t}</option>`).join('')}</select>`
-      : `<input type="${f.type || 'text'}" data-cfg="${f.k}" value="${f.def}">`;
-    return `<div class="field"><label>${f.label}</label>${ctrl}</div>`;
+      : `<input type="${f.type || 'text'}" ${attr} value="${f.def}"${extra}>`;
+    return `<div class="field"><label${f.title ? ` title="${f.title}"` : ''}>${f.label}</label>${ctrl}</div>`;
   }).join('');
   // 回测卡片：数据源三选，默认 store=本地SQLite存储（无需 TradingView）；回放/实时沿用缓存开关
   const sourceField = m.id === 'backtest'
@@ -896,9 +921,11 @@ function locateLabel(mode, id) {
 }
 // 行 → <tr> HTML：实时表格与历史方案明细弹窗共用。
 // opts.selectedId：明细弹窗用独立选中态；opts.labelById：明细用方案内序号。
+// opts.showLossReason：明细表在盈亏后显示亏损原因列（rowspan 与交易级字段一致）。
 function signalRowsHtml(rows, opts = {}) {
   const interactive = opts.interactive !== false;
   const selectedId = 'selectedId' in opts ? opts.selectedId : selectedSignal[selectedMode];
+  const showLoss = !!opts.showLossReason;
   return rows.map(r => {
     const exits = exitDisplayRows(r);
     const no = opts.labelById ? (opts.labelById[r.id] ?? r.id)
@@ -916,6 +943,14 @@ function signalRowsHtml(rows, opts = {}) {
       <td>${fmtTime(r.entryTime)}</td>
       <td>${r.entryPrice != null ? Number(r.entryPrice).toFixed(2) : '-'}</td>
     `.replace(/<td(?=[ >])/g, `<td rowspan="${exits.length}"`);
+    const lossTitle = r.lossReason
+      ? (r.lossEndClose != null
+        ? `第 ${r.lossLookahead || '?'} 根收盘 ${Number(r.lossEndClose).toFixed(2)} @ ${fmtTime(r.lossEndTime)}`
+        : `回看 ${r.lossLookahead || '?'} 根，数据不足`)
+      : '仅已平仓亏损单参与归因';
+    const lossCell = showLoss
+      ? `<td rowspan="${exits.length}" title="${esc(lossTitle)}">${r.lossReason || '-'}</td>`
+      : '';
     return exits.map((exit, i) => {
       const pnl = exit.pnl;
       const pnlCls = pnl == null || pnl === 0 ? '' : (pnl > 0 ? 'pnl-pos' : 'pnl-neg');
@@ -933,6 +968,7 @@ function signalRowsHtml(rows, opts = {}) {
         <td title="${exitEventsDesc(r)}">${exit.label}</td>
         <td>${exit.lots != null ? exit.lots : '-'}</td>
         <td class="${pnlCls}" title="${exits.length > 1 ? (exit.type ? '本次出场盈亏' : '剩余持仓浮盈') + '；整笔交易合计：' + totalTxt : '整笔交易盈亏'}">${pnlTxt}</td>
+        ${i === 0 ? lossCell : ''}
       </tr>`;
     }).join('');
   }).join('');
@@ -960,6 +996,8 @@ function signalCopyText(r, no) {
     parts.push(`出场时间：${fmtTime(exit.time)}`, `出场价：${px(exit.price)}`,
       `出场类型：${exit.label}`, `手数：${exit.lots != null ? exit.lots : '-'}`, `盈亏：${pnlTxt(exit.pnl)}`);
   }
+  // 明细归因后带亏损原因（主表行无此字段则跳过）
+  if (r.lossReason) parts.push(`亏损原因：${r.lossReason}`);
   return parts.join('；');
 }
 
@@ -1082,6 +1120,11 @@ async function pollLocate() {
   if (locatePending === pending) locatePoll = setTimeout(pollLocate, 2000);
 }
 
+function locateAfterBars() {
+  const n = parseInt(el('locate-after-bars')?.value, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 60;
+}
+
 async function locateRow(id) {
   if (locatePending) return;
   const mode = selectedMode;
@@ -1100,7 +1143,7 @@ async function locateRow(id) {
   try {
     // 单行标记颜色随工具条取色器（与「标记进出场」按钮同源）
     const response = await fetch('/api/signals/locate', {
-      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode,id,colors:{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode,id,after_bars:locateAfterBars(),colors:{
         buy:el('mark-color-buy').value, sell:el('mark-color-sell').value,
         exit:el('mark-color-exit').value, sr:el('mark-color-sr').value
       }})
@@ -1305,6 +1348,7 @@ function connectSSE() {
 // ---------- 历史回测方案（仅全量回测：保存/列表/明细/对比/载参数） ----------
 let btRuns = [];                 // 列表缓存（/api/bt/runs，不含信号行）
 const btCompareSel = new Set();  // 对比勾选的方案 id
+let btRunsPnlSort = 'none';      // 方案列表合计盈亏：none / descending / ascending
 
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const pnlClass = v => (v > 0 ? 'pnl-pos' : v < 0 ? 'pnl-neg' : '');
@@ -1386,11 +1430,26 @@ function renderBtRuns() {
   el('bt-runs-status').textContent = btRuns.length
     ? `${btRuns.length} 个方案 · 保存于本地数据库（data/bars.db），不受清空表格与服务重启影响`
     : '暂无保存的方案';
+  const sort = btRunsPnlSort;
+  el('bt-runs-pnl-header').ariaSort = sort;
+  el('sort-bt-runs-pnl').textContent = '合计 ' + ({none:'↕',descending:'↓',ascending:'↑'}[sort]);
+  el('sort-bt-runs-pnl').title = {none:'点击按合计盈亏从高到低排序',descending:'点击按合计盈亏从低到高排序',ascending:'点击恢复默认顺序'}[sort];
   const body = el('bt-runs-body');
   if (!btRuns.length) {
     body.innerHTML = `<tr><td colspan="13" style="color:var(--muted);white-space:normal;">回测完成后点卡片上的「保存方案」；已保存方案与当前信号表格互不影响</td></tr>`;
   } else {
-    body.innerHTML = btRuns.map(r => {
+    // 仅排列展示副本；无合计盈亏的方案置后，相同盈亏保持保存时间顺序
+    const runs = btRuns.slice();
+    if (sort !== 'none') {
+      runs.sort((a, b) => {
+        const aValue = a.summary?.total == null ? NaN : Number(a.summary.total);
+        const bValue = b.summary?.total == null ? NaN : Number(b.summary.total);
+        const aValid = Number.isFinite(aValue), bValid = Number.isFinite(bValue);
+        if (!aValid || !bValid) return aValid ? -1 : bValid ? 1 : 0;
+        return sort === 'ascending' ? aValue - bValue : bValue - aValue;
+      });
+    }
+    body.innerHTML = runs.map(r => {
       const s = r.summary || {};
       return `<tr data-id="${r.id}">
         <td><input type="checkbox" data-bt-check="${r.id}"${btCompareSel.has(r.id) ? ' checked' : ''} aria-label="对比勾选 ${esc(r.name)}"></td>
@@ -1407,6 +1466,7 @@ function renderBtRuns() {
         <td title="${esc(btRunStateLabel(r))}">${btRunStateLabel(r)}</td>
         <td class="bt-actions">
           <button data-bt-act="detail">明细</button>
+          <button data-bt-act="analyze" title="打开明细并对亏损单做方向/进出场归因">分析方案</button>
           <button data-bt-act="load" title="把该方案的参数回填到表单（不自动启动）">载参数</button>
           <button data-bt-act="rename">重命名</button>
           <button data-bt-act="delete" class="danger">删除</button>
@@ -1418,6 +1478,11 @@ function renderBtRuns() {
   if (!el('bt-compare-view').hidden) renderBtCompare();
 }
 
+function toggleBtRunsPnlSort() {
+  btRunsPnlSort = {none:'descending',descending:'ascending',ascending:'none'}[btRunsPnlSort];
+  renderBtRuns();
+}
+
 function onBtRunsClick(e) {
   const btn = e.target.closest('button[data-bt-act]');
   if (!btn) return;
@@ -1426,6 +1491,7 @@ function onBtRunsClick(e) {
   if (!run) return;
   const act = btn.dataset.btAct;
   if (act === 'detail') openBtDetail(run.id);
+  else if (act === 'analyze') openBtDetail(run.id, { analyze: true });
   else if (act === 'load') loadBtCfg(run);
   else if (act === 'rename') renameBtRun(run);
   else if (act === 'delete') deleteBtRun(run);
@@ -1554,20 +1620,50 @@ async function fillCompareEquity(runs, host) {
 }
 
 // ---------- 明细弹窗 ----------
-// 信号表列与主表 thead 保持一致（此处为纯文本表头，盈亏列无排序按钮）
+// 信号表列：主表无亏损原因；明细在盈亏后追加该列
 const SIG_TABLE_HEADERS = `<th>#</th><th>信号时间</th><th>方向</th><th>检测周期</th>
   <th>策略</th><th>背驰级别</th><th>价格</th><th>近支阻</th><th>状态</th><th>成交时间</th><th>成交价</th>
-  <th>出场时间</th><th>出场价</th><th>出场类型</th><th title="分批出场时分别显示本次出场或剩余持仓手数">手数</th><th>盈亏</th>`;
+  <th>出场时间</th><th>出场价</th><th>出场类型</th><th title="分批出场时分别显示本次出场或剩余持仓手数">手数</th>
+  <th id="bt-detail-pnl-header" aria-sort="none"><button type="button" id="sort-bt-detail-pnl" class="sort-button" title="点击按整笔交易盈亏从高到低排序">盈亏 ↕</button></th>
+  <th title="已平仓亏损单：信号后 N 根检测周期收盘 vs 信号价">亏损原因</th>`;
 
-async function openBtDetail(id) {
-  let run;
-  try {
-    const resp = await fetch(`/api/bt/runs/detail?id=${encodeURIComponent(id)}`);
-    const d = await resp.json();
-    if (!resp.ok || !d.ok) throw Error(d.error || `请求失败 ${resp.status}`);
-    run = d.run;
-  } catch (e) { alert('明细加载失败：' + e.message); return; }
+// 历史方案明细：行点击定位（带 row 快照，不依赖内存信号表）
+let btDetailSignals = [];
+let btDetailSelectedId = null;
+let btDetailLocateMsg = '';
+let btDetailRunId = null;
+let btDetailSummary = null;
+let btDetailName = '';
+let btAnalyzeBusy = false;
+let btDetailPnlSort = 'none';    // 明细信号表盈亏：none / descending / ascending
+
+function lossAnalysisHtml(la) {
+  if (!la) {
+    return `<div class="bt-loss-summary" id="bt-detail-loss-summary">
+      <span style="color:var(--muted)">尚未分析亏损原因；可在上方设置回看根数后点「分析方案」</span>
+    </div>`;
+  }
+  const lose = la.lose ?? 0;
+  const d = la.direction || { count: 0, pnl: 0 };
+  const e = la.entry_exit || { count: 0, pnl: 0 };
+  const ins = la.insufficient || { count: 0 };
+  const pct = (n) => lose ? Math.round(100 * n / lose) : 0;
+  const fmtV = v => (v > 0 ? '+' : '') + Number(v || 0).toFixed(2);
+  const parts = [
+    `亏损归因（信号后 <b>${la.lookahead ?? '?'}</b> 根）`,
+    `亏损 <b>${lose}</b> 笔`,
+    `方向问题 <b>${d.count ?? 0}</b>${lose ? `（${pct(d.count || 0)}%` : ''}${lose ? `，合计 <span class="pnl-neg">${fmtV(d.pnl)}</span>）` : ''}`,
+    `进出场问题 <b>${e.count ?? 0}</b>${lose ? `（${pct(e.count || 0)}%` : ''}${lose ? `，合计 <span class="pnl-neg">${fmtV(e.pnl)}</span>）` : ''}`,
+  ];
+  if (ins.count) parts.push(`数据不足 <b>${ins.count}</b>`);
+  return `<div class="bt-loss-summary" id="bt-detail-loss-summary">${parts.map(p => `<span>${p}</span>`).join('')}</div>`;
+}
+
+function fillBtDetail(run) {
   const cfg = run.cfg || {};
+  btDetailRunId = run.id;
+  btDetailName = run.name || '';
+  btDetailSummary = run.summary || {};
   // 快照行缺 symbol 时用方案 cfg 补全，定位需要品种
   btDetailSignals = (run.signals || []).map(r => ({
     ...r,
@@ -1582,9 +1678,13 @@ async function openBtDetail(id) {
   const durBit = fmtDuration(run.summary?.duration_sec);
   el('bt-detail-title').textContent =
     `${run.name}（保存于 ${fmtTime(run.saved_at)} · ${stateBit}${durBit === '—' ? '' : ' · ' + durBit}）`;
+  // 若 summary 已有归因结果，回填 N 输入框
+  const la = run.summary?.loss_analysis;
+  if (la?.lookahead != null) el('bt-detail-lookahead').value = la.lookahead;
   el('bt-detail-body').innerHTML = `
     <div class="bt-params">${paramsHtml}</div>
     <div class="bt-summary">${summaryHtml(run.summary || {})}</div>
+    ${lossAnalysisHtml(la)}
     <div class="equity-chart" id="bt-detail-equity"></div>
     <div id="bt-detail-locate" class="bt-detail-locate" role="status">${esc(btDetailLocateMsg)}</div>
     <div class="scroll"><table>
@@ -1592,19 +1692,54 @@ async function openBtDetail(id) {
       <tbody id="bt-detail-sig-body">${btDetailRowsHtml()}</tbody>
     </table></div>`;
   el('bt-detail-modal').hidden = false;
-  // 明细大图：优先固化 equity，否则用信号行现场算
   const eq = (Array.isArray(run.summary?.equity) && run.summary.equity.length)
     ? run.summary.equity
     : equityPoints(btDetailSignals);
   drawEquityChart(el('bt-detail-equity'), eq.length ? [{ name: run.name, points: eq }] : [], {
     height: 280, title: '资金曲线', note: '本方案出场盈亏累加（含半平）',
   });
+  syncBtDetailPnlSortButton();
 }
 
-// 历史方案明细：行点击定位（带 row 快照，不依赖内存信号表）
-let btDetailSignals = [];
-let btDetailSelectedId = null;
-let btDetailLocateMsg = '';
+async function openBtDetail(id, opts = {}) {
+  let run;
+  try {
+    const resp = await fetch(`/api/bt/runs/detail?id=${encodeURIComponent(id)}`);
+    const d = await resp.json();
+    if (!resp.ok || !d.ok) throw Error(d.error || `请求失败 ${resp.status}`);
+    run = d.run;
+  } catch (e) { alert('明细加载失败：' + e.message); return; }
+  btDetailPnlSort = 'none';
+  fillBtDetail(run);
+  if (opts.analyze) await analyzeBtDetail();
+}
+
+async function analyzeBtDetail() {
+  if (!btDetailRunId || btAnalyzeBusy) return;
+  const raw = el('bt-detail-lookahead').value;
+  const lookahead = parseInt(raw, 10);
+  if (!Number.isFinite(lookahead) || lookahead < 1) {
+    alert('回看根数须为正整数');
+    return;
+  }
+  btAnalyzeBusy = true;
+  const btn = el('bt-detail-analyze');
+  if (btn) { btn.disabled = true; btn.textContent = '分析中…'; }
+  try {
+    const r = await api('/api/bt/runs/analyze', { id: btDetailRunId, lookahead });
+    if (!r || !r.run) return;
+    // 同步列表缓存里的 summary.loss_analysis
+    const cached = btRuns.find(x => x.id === btDetailRunId);
+    if (cached) {
+      if (!cached.summary) cached.summary = {};
+      cached.summary.loss_analysis = r.run.summary?.loss_analysis;
+    }
+    fillBtDetail(r.run);
+  } finally {
+    btAnalyzeBusy = false;
+    if (btn) { btn.disabled = false; btn.textContent = '分析方案'; }
+  }
+}
 
 function btDetailLabelOf(id) {
   const i = btDetailSignals.findIndex(r => r.id === id);
@@ -1617,11 +1752,40 @@ function btDetailLabelById() {
   return m;
 }
 
+function syncBtDetailPnlSortButton() {
+  const header = el('bt-detail-pnl-header');
+  const btn = el('sort-bt-detail-pnl');
+  if (!header || !btn) return;
+  const sort = btDetailPnlSort;
+  header.ariaSort = sort;
+  btn.textContent = '盈亏 ' + ({none:'↕',descending:'↓',ascending:'↑'}[sort]);
+  btn.title = {none:'点击按整笔交易盈亏从高到低排序',descending:'点击按整笔交易盈亏从低到高排序',ascending:'点击恢复默认顺序'}[sort];
+}
+
+function toggleBtDetailPnlSort() {
+  btDetailPnlSort = {none:'descending',descending:'ascending',ascending:'none'}[btDetailPnlSort];
+  syncBtDetailPnlSortButton();
+  renderBtDetailRows();
+}
+
 function btDetailRowsHtml() {
-  return signalRowsHtml(btDetailSignals, {
+  // 仅排列展示副本；序号仍按方案原始顺序；无盈亏的记录始终置后
+  const rows = btDetailSignals.slice();
+  const sort = btDetailPnlSort;
+  if (sort !== 'none') {
+    rows.sort((a, b) => {
+      const aValue = a.pnl == null ? NaN : Number(a.pnl);
+      const bValue = b.pnl == null ? NaN : Number(b.pnl);
+      const aValid = Number.isFinite(aValue), bValid = Number.isFinite(bValue);
+      if (!aValid || !bValid) return aValid ? -1 : bValid ? 1 : 0;
+      return sort === 'ascending' ? aValue - bValue : bValue - aValue;
+    });
+  }
+  return signalRowsHtml(rows, {
     interactive: true,
     selectedId: btDetailSelectedId,
     labelById: btDetailLabelById(),
+    showLossReason: true,
   });
 }
 
@@ -1658,7 +1822,7 @@ async function locateDetailRow(id) {
     const response = await fetch('/api/signals/locate', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        mode, id, row,
+        mode, id, row, after_bars: locateAfterBars(),
         colors: {
           buy: el('mark-color-buy').value, sell: el('mark-color-sell').value,
           exit: el('mark-color-exit').value, sr: el('mark-color-sr').value,
@@ -1759,6 +1923,9 @@ function closeBtDetail() {
   syncBtDetailMaxButton();
   btDetailSignals = [];
   btDetailSelectedId = null;
+  btDetailRunId = null;
+  btDetailSummary = null;
+  btDetailPnlSort = 'none';
 }
 
 // ---------- 载参数：collectCfg 的逆映射（只回填表单，不自动启动） ----------
@@ -1804,11 +1971,16 @@ function bindBtRuns() {
     v.hidden = !v.hidden;
     if (!v.hidden) renderBtCompare();
   };
+  el('sort-bt-runs-pnl').onclick = toggleBtRunsPnlSort;
   el('bt-runs-body').onclick = onBtRunsClick;
   el('bt-runs-body').onchange = onBtRunsCheck;
   el('bt-detail-close').onclick = closeBtDetail;
   el('bt-detail-max').onclick = toggleBtDetailMax;
-  el('bt-detail-body').onclick = onBtDetailSigActivate;
+  el('bt-detail-analyze').onclick = () => analyzeBtDetail();
+  el('bt-detail-body').onclick = e => {
+    if (e.target.closest('#sort-bt-detail-pnl')) { toggleBtDetailPnlSort(); return; }
+    onBtDetailSigActivate(e);
+  };
   el('bt-detail-body').onkeydown = onBtDetailSigActivate;
   el('bt-detail-body').oncontextmenu = onBtDetailSigCopy;
   el('bt-detail-modal').onclick = e => { if (e.target === el('bt-detail-modal')) closeBtDetail(); };

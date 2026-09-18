@@ -22,6 +22,22 @@ from .marks import (
     _clear_single_marks, _colors,
 )
 
+# 定位视口：最后出场（无出场则进场）之后再留的 K 线根数
+DEFAULT_AFTER_BARS = 60
+
+
+def parse_after_bars(v, default=DEFAULT_AFTER_BARS):
+    """解析定位后保留 K 线根数；缺省 60，须为非负整数。"""
+    if v is None or v == '':
+        return default
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        raise ValueError('定位后保留K线须为非负整数') from None
+    if n < 0:
+        raise ValueError('定位后保留K线须为非负整数')
+    return n
+
 
 def validate_signal(row):
     if not isinstance(row.get('symbol'), str) or not row['symbol'].strip():
@@ -35,11 +51,11 @@ def validate_signal(row):
     return row['symbol'].strip(), res, stamp
 
 
-def _view_until(row, stamp, res):
+def _view_until(row, stamp, res, after_bars=DEFAULT_AFTER_BARS):
     """回放光标与视口右端：覆盖进场到最后出场，并再留一段K线。
 
     回放只加载 ≤光标 的K线。光标停在进场根则进场之后全无数据，离场也无法标记。
-    有出场时拉到最后离场后再留 60 根；无出场时从进场再往后 60 根。
+    有出场时拉到最后离场后再留 after_bars 根；无出场时从进场再往后 after_bars 根。
     """
     from .chan_core import intervalSecOf
     times = [int(stamp)]
@@ -53,8 +69,8 @@ def _view_until(row, stamp, res):
             times.append(int(t))
     last = max(times)
     sec = intervalSecOf(res) or 60
-    # 离场（或尚无出场的进场）后再留 60 根，方便看后续走势
-    return last + sec * 60
+    # 离场（或尚无出场的进场）后再留 after_bars 根，方便看后续走势
+    return last + sec * after_bars
 
 
 def _replay_to_signal(c, stamp, deadline, res=None, until=None):
@@ -211,9 +227,10 @@ def _draw_after_locate(c, row, bar_time, colors=None, last_time=None):
     return r
 
 
-def locate_signal(row, cfg=None, timeout=360, colors=None):
+def locate_signal(row, cfg=None, timeout=360, colors=None, after_bars=DEFAULT_AFTER_BARS):
     symbol, res, stamp = validate_signal(row)
-    view_until = _view_until(row, stamp, res)
+    after_bars = parse_after_bars(after_bars)
+    view_until = _view_until(row, stamp, res, after_bars)
     with CDPClient(cfg, log=lambda *_: None) as c:
         _set_symbol(c, symbol)
         _set_resolution(c, res)
@@ -341,12 +358,14 @@ class LocateManager:
         with self.lock:
             return dict(self.job) if self.job else None
 
-    def start(self, mode, row_id, colors=None, row=None):
+    def start(self, mode, row_id, colors=None, row=None, after_bars=None):
         """启动定位任务。
 
         row 非空时直接用该快照（历史方案明细），不再查内存 SignalLog；
         否则按 mode+row_id 取服务端当前记录。
+        after_bars：出场（无出场则进场）之后再留的 K 线根数，缺省 60。
         """
+        after_bars = parse_after_bars(after_bars)
         if row is not None:
             if not isinstance(row, dict):
                 raise ValueError('无效的记录快照')
@@ -379,7 +398,7 @@ class LocateManager:
                 # 内存表定位：任务期间若被清空则中止；快照定位不依赖内存表
                 if from_log and self.signals.get(row_id, mode) is None:
                     raise LookupError('记录已清空，请刷新列表')
-                result = locate_signal(row, colors=colors)
+                result = locate_signal(row, colors=colors, after_bars=after_bars)
             except Exception as exc:
                 error = str(exc)
             finally:
