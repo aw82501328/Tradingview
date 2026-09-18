@@ -323,3 +323,54 @@ adopt 在输出碰巧相同时跳过归零，漂移跨重同步点存活导致�
    可二分；`_findIndex` 类2买/类2卖去重（11.8s·profiled）可换 (type,time) 集合；
 4. 结构性：fib 对 fine 周期每拍全量重算（末笔延伸即指纹变）——如需再量级提速，
    须做 find* 的笔前缀冻结/尾部增量（一致性风险最高，须单独 SPEC）。
+
+## 12. 第七批：结构层回归修复 + find* 冻结前缀缓存（2026-09-18）
+
+### 12.1 定位：结构视图层引入 ~4.8× 回归
+
+用户月级回测（from=2026-06-02 + lead60、52,697 根）报 20+ 分钟。对照实测（第六批
+场景 33,430 根、13,892 步、同机安静环境）：dce5f89 768-810s → **HEAD(23af6e2)
+3859.75s（64 分钟）**——「相位树/结构上下文」等提交引入的 structurePeriods 层
+放大了既有热点：`_macdTimesOf` 是**全局单槽**缓存，结构层使多周期 MACD 数组交错
+调用更密 → 单槽每拍互踢 → 每次 biMacdMetrics 都 O(n) 重建时间表（fine 周期 ~5 万
+元素）→ 平方级放大。52,697 根场景的 HEAD 基线运行 110+ 分钟 CPU 未能完成（已弃）。
+
+### 12.2 已实施（全部输出逐位不变）
+
+1. **P1-1 biMacdMetrics 记忆化 + _macdTimesOf 多槽**（chan_core.py）：时间表按对象
+   LRU 多槽（>16 淘汰）+ append-only 增量 extend；窗口结果按 (macdArr 对象,
+   (t0,t1)) 记忆化，命中守卫 `t1 <= frozenTime`（计算时末条时间，O(1)）；None 结果
+   同守卫可缓存；返回共享 dict（调用方已核实只读）。
+2. **P1-2 锚定最近 up 笔二分**：`_nearestUpBiIdx`（严格 < 先见者胜、等距取先者）。
+3. **P1-3 anchorFirstSell 预计算 + 二分**：每调用一次 `_anchorSellPre`（顺带消除
+   逐候选重复的 confirmedStructureBis 过滤）；单调性守卫失败回退线性。
+4. **P1-4 类2/3 去重 O(1)**：`_append_third_points` 增量索引（del 后重建，摊销）。
+5. **P1-6 fired O(1)**：`evaluateRealtimeEntries(firedIndex=)` 只在 `fired.add`
+   处同步维护；`_rt_fired` 改 property（替换即失效，惰性重建，rearm 同步）。
+6. **S1 一买/一卖候选循环冻结前缀记录**：`_firstPointsLoop` 记录序列按元素 dict
+   身份锚定（引擎 bis 只发生「后缀拼接换新/整表换新/末笔延伸」，冻结前缀按引用
+   共享）；kind=samebi/append/none 永久稳定、skiplast 每拍重做 `same_ref is
+   knownUpper[-1]` 身份比较（上级末笔确认后单调迁移）；复用守卫 = 上级安全界
+   （cur.endTime < 倒数第 26 个已确认上级笔 startTime）+ 对齐截断。
+7. **S2 buildZSByUpper 内层二分**：归属判定 bisect + 前 3 个前驱候选窗（tol 双向
+   容差 + 相邻上级笔共享端点），「首个包含」语义与线性全扫一致。
+8. **S3 2买/2卖窗口结果记忆化**：冻结上级笔（i < len-26）且窗口下级笔全冻结
+   （segEnd+1 < 本级倒数第 26 笔 endTime）→ 该窗口的 points/meta 直接复用。
+   P1-5（预计算数组缓存）评估后跳过：预计算仅占 find* 函数内成本 ~2%，被 S1/S3
+   完全覆盖；三类段（3买/3卖）键控缓存未实施（占比 ~1%）。
+
+### 12.3 验证与收益
+
+- 第一道关（TEMP 新旧对照，git show HEAD 同进程）：anchorFirstSell 2 万组三路
+  一致、_nearestUpBiIdx 2 万组暴力对照、_append_third_points 8000 组、
+  biMacdMetrics/_macdTimesOf 6201 组（append-only 增长/重复/切片/多数组交替）。
+- 白盒（py_chain/test_find_perf_cache.py，新增）：**长序列逐步一致**——引擎逐根
+  推进每拍「带 cache vs cache=None」findBuy/findSellPoints 逐位相同（adopt 教训
+  的直接检验），含中途 resync、手工替换中段笔 dict 对抗；记录槽跨拍增长确认。
+- 全量 A/B（第六批场景 33,430 根、ZZ+HJ、store、realtime）：
+  **stats/signals/trades/lastTime/最终笔数逐位一致；3859.75s → 636.25s（6.07×）**，
+  且快于结构层之前的 dce5f89（768-810s）。留档 `.cache/backtest-perf/batch7-ab/`。
+- 单测 12 个模块全部通过（含新增 test_find_perf_cache）。
+- 注：快赢与结构性合并为一笔提交（原计划两笔）——A/B 关卡全有或全无，拆分提交
+  不改变验证强度；52,697 根场景未复测（HEAD 基线 110+ 分钟已弃），提速比率按
+  第六批场景推证，建议 Web 控制台重启后用用户方案实测。

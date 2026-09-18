@@ -484,6 +484,12 @@ find* 同笔判定 `isSameAsUpperBi` 线性全扫引发 9 亿次 abs；改 start
 （输出逐位不变）+ trend_state_of 挂 work_cache + BOLL/人工位尾切片；全量 A/B 逐位
 一致、810→768s。resync×BiInc「相等即换绑」试作因内部栈状态漂移跨重同步点存活而
 回退（详见 `SPEC_backtest_perf.md` §11）。
+第七批（2026-09-18）：结构视图层（structurePeriods）使 `_macdTimesOf` 全局单槽
+每拍互踢 → 4.8× 回归（第六批场景 810→3860s）。修复 + 提速：biMacdMetrics 按对象
+LRU 记忆化（frozenTime 前缀界守卫）、_macdTimesOf 多槽增量、锚定/去重二分化与
+集合化、fired O(1)、find* 一买/一卖候选循环冻结前缀记录（元素身份锚定 + 上级安全
+界）、2买/2卖窗口记忆化、buildZSByUpper 二分。全量 A/B 逐位一致：
+**3859.75s → 636.25s（6.07×）**（`SPEC_backtest_perf.md` §12）。
 
 2026-09-09第二批：`run()` 的 realtime 模式跳过未消费的确认式进场计算，
 按运行复用各周期价格数组并以 `[:cut]` 限制可见数据，突破扫描按时间索引定位。

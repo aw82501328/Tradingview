@@ -1088,6 +1088,20 @@ class BacktestEngine:
                 newSigs.append(s)
         return newSigs
 
+    @property
+    def _rt_fired(self):
+        """当下背驰去重集合：(periodX, strategyKey, markRes, 形成段起点时间)。
+
+        O(1) 预检索引 _rt_fired_idx = {(X, key, segStart)} 与集合同步维护：
+        真正发出信号处两边同 add；整体替换（rearm/测试直接赋值）经 setter 失效，
+        下拍惰性重建。"""
+        return self._rt_fired_store
+
+    @_rt_fired.setter
+    def _rt_fired(self, value):
+        self._rt_fired_store = value
+        self._rt_fired_idx = None
+
     def _rearm_fired(self, tr):
         """M1 配套（CHAN_CFG.sinkFallbackRearm）：同向持仓终局后，重置该
         (periodX, strategyKey, markRes) 组合的当下背驰去重——同一形成段允许在
@@ -1106,12 +1120,14 @@ class BacktestEngine:
         from .mark_entry import evaluateRealtimeEntries
         srLevels = (self._sr or {}).get("merged") or []
         detectPeriods = filterDetectPeriods(self.periods)  # 与确认制一致：须有已加载更低级别
+        if self._rt_fired_idx is None:
+            self._rt_fired_idx = {(f[0], f[1], f[3]) for f in self._rt_fired}
         sigs = evaluateRealtimeEntries(
             getattr(self, "_structure_bis", self._bis),
             {res: self._macd[res].entries for res in self.periods},
             {res: self._atr[res].value for res in self.periods},
             self._plan, srLevels, detectPeriods,
-            near=self.near, tCut=t, fired=self._rt_fired,
+            near=self.near, tCut=t, fired=self._rt_fired, firedIndex=self._rt_fired_idx,
             periodTimes=self._times, periodMacdTimes=self._macd_times,
             periodMerged=self._merged,
             divergeConfirm=self.diverge_confirm,

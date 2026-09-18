@@ -767,8 +767,8 @@ def compute_srflip(periodBis, barsByPeriod, periods,
         # 黄金分割叠加层：独立于支阻位来源，人工周期照常生成（需笔：bis≥3）
         if "fib" in srTypes and bis and len(bis) >= 3:
             macd = periodMacdIn.get(res) or calcMACD(bars)
-            buyPts = findBuyPoints(bis, upperBis, macd, intervalSecOf(res))
-            sellPts = findSellPoints(bis, upperBis, macd, intervalSecOf(res))
+            buyPts = findBuyPoints(bis, upperBis, macd, intervalSecOf(res), cache=work_cache)
+            sellPts = findSellPoints(bis, upperBis, macd, intervalSecOf(res), cache=work_cache)
             fibs = buildFibCandidates(bis, buyPts, sellPts, fibLevels, bars, clusterAtr * atr,
                                       periodBarArraysIn.get(res))
             allFibs[res] = fibs

@@ -837,7 +837,7 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
                             periodTimes=None, periodMacdTimes=None, divergeConfirm=None,
                             expectBiEnabled=None, realtimeMinBars=None,
                             zsExitWeakRatio=None, trend_res=None, trend_state=None,
-                            periodMerged=None, periodBars=None):
+                            periodMerged=None, periodBars=None, firedIndex=None):
     """当下模式进场评估（每根 fine 收盘调用，信号无需等反向笔确认）。
 
     三条件与确认制同构，差异只在"何时评"与"②用什么评"：
@@ -854,6 +854,8 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
 
     @param tCut              当前时刻（fine 收盘时间）；None 时取各周期数据末尾
     @param fired             去重集合（调用方跨拍持有，原地更新）
+    @param firedIndex        可选：{(periodX, strategyKey, segStart)} 索引（fired 的 O(1)
+                             预检视图，由调用方与 fired 同步维护；None 时回退 any() 线性扫描）
     @param periodTimes       各周期K线时间数组 { res: [times] }（二分用，可选）
     @param periodMacdTimes   各周期MACD时间数组 { res: [times] }（切片用，可选；
                              缺省时 realtimeLowerDiverge 内部现建）
@@ -952,7 +954,10 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
             continue
         # 该 (periodX, strategyKey, segStart) 已在任一 markRes 发过 → 跳过重算背驰链
         # （形成段延伸不重发；多 markRes 同段在既有口径下也只会命中一次有效进场路径）
-        if any(f[0] == X and f[1] == key and f[3] == segStart for f in fired):
+        if firedIndex is not None:
+            if (X, key, segStart) in firedIndex:
+                continue
+        elif any(f[0] == X and f[1] == key and f[3] == segStart for f in fired):
             continue
         # 策略专属条件（与确认制共用）
         upRes = upperResOf(X)
@@ -976,6 +981,9 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
             if hit is None:
                 continue
             fired.add(fkey)
+            # 索引与 fired 只在真正发出处同步维护（预检处绝不加——会把未发段误标已发）
+            if firedIndex is not None:
+                firedIndex.add((fkey[0], fkey[1], fkey[3]))
             sig = {
                 "periodX": X,
                 "markRes": c["res"],

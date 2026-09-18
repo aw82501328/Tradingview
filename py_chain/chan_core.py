@@ -31,6 +31,8 @@ import math
 import re
 import threading
 
+from collections import OrderedDict
+
 from datetime import datetime
 
 # ============================================================
@@ -1162,12 +1164,21 @@ def buildZSByUpper(lowerBis, upperBis, tolSec=0, open_last=True):
     # 按时间完整归属到上级笔区间：笔必须 startTime 与 endTime 都落在同一上级笔内
     # （含 tol 容差）。不完整落在任何上级笔内的笔不参与中枢。
     # 最后一段开放段：最后一个上级笔的 endTime 边界视为 +∞（见 open_last 说明）。
+    # 归属判定二分：满足 u.start - tol ≤ b.start 的 u 中取最后一个（bisect），
+    # 再向下多查 3 个前驱（相邻上级笔共享端点 + tol 双向容差下，跨界笔可能命中
+    # 更早的 u；按原列表顺序首个命中即归属，与原全量线性扫语义一致）。
     last_u = upperBis[len(upperBis) - 1]
+    uStarts = [u["startTime"] for u in upperBis]
+    nU = len(upperBis)
     segments = []
     cur = None  # { upper, bis }
     for b in lowerBis:
+        j = bisect.bisect_right(uStarts, b["startTime"] + tol) - 1
         ub = None
-        for u in upperBis:
+        for jj in range(max(0, j - 3), j + 1):
+            if jj >= nU:
+                break
+            u = upperBis[jj]
             boundary = u.get("coverageEnd", u["endTime"])
             end_ok = b["endTime"] <= boundary + tol or (open_last and u is last_u and "coverageEnd" not in u)
             if b["startTime"] >= u["startTime"] - tol and end_ok:
@@ -1324,18 +1335,42 @@ def _macdTime(m):
 
 # macdArr → 平行时间列表缓存：同一 macdArr（回测引擎中为累加器内部列表，append-only）
 # 反复进入 biMacdMetrics/hasMacdCrossBetween，缓存其时间列表可避免 bisect 的 key 回调
-# （百万级调用下 key 回调本身即成热点）。缓存持强引用并以长度校验失效（追加会使长度变化）。
-_macdTimesCache = (None, 0, None)
+# （百万级调用下 key 回调本身即成热点）。按对象 LRU 多槽（持强引用防 id 复用）：
+# 五周期交替调用下单槽会每拍互踢重建；长度只增时增量 extend（append-only 不变式），
+# 实时切片（mark_entry macdArr[lo:hi]）为一次性对象，自然 miss 且被 LRU 淘汰，
+# 不会挤掉持久周期槽。
+_macdTimesSlots = OrderedDict()
 
 
 def _macdTimesOf(macdArr):
-    global _macdTimesCache
-    ref, n, times = _macdTimesCache
-    if ref is macdArr and n == len(macdArr):
-        return times
+    n = len(macdArr)
+    key = id(macdArr)
+    ent = _macdTimesSlots.get(key)
+    if ent is not None and ent[0] is macdArr:
+        times = ent[1]
+        if len(times) == n:
+            _macdTimesSlots.move_to_end(key)
+            return times
+        if len(times) < n:
+            # append-only：只补新增段（引擎累加器不回退；回退路径换新对象 → 身份失配）
+            times.extend(m["time"] for m in macdArr[len(times):n])
+            _macdTimesSlots.move_to_end(key)
+            return times
+        # 长度回退（同对象截断，理论不可达）：丢弃重建
     times = [m["time"] for m in macdArr]
-    _macdTimesCache = (macdArr, len(macdArr), times)
+    _macdTimesSlots[key] = (macdArr, times)
+    if len(_macdTimesSlots) > 16:
+        _macdTimesSlots.popitem(last=False)
     return times
+
+
+# biMacdMetrics 窗口结果缓存（按 macdArr 对象 LRU 多槽 + frozenTime 前缀界守卫）：
+# 回测链路同一 (macdArr, [t0,t1] 窗口) 跨重算高频复发（find* 候选背驰、实时下沉链、
+# 近等端点确认、zsExitWeak）。macdArr append-only 且条目时间严格递增 → 计算时
+# t1 <= frozen（末条时间）的窗口此后不会再有条目落入，结果可共享；t1 > frozen 的
+# 未定型窗口不入缓存。None 结果同守卫可缓存（窗口真空则永远空）。
+# 返回值为缓存共享对象，调用方须只读（2026-09-18 核实全部调用方只读）。
+_macdMetricsSlots = OrderedDict()
 
 
 def biMacdMetrics(bi, macdArr):
@@ -1343,13 +1378,37 @@ def biMacdMetrics(bi, macdArr):
     { redArea, greenArea, difHigh, difLow, redMax, greenMax }。
     与 JS 版一致：redMax=单根红柱最大高度、greenMax=单根绿柱最大绝对值。
     性能：macdArr 按时间升序，用 bisect 定位 [t0,t1] 窗口（闭区间）后再累加，
-    替代从头线性扫描——回测链路每次重算会调用本函数上万次，长窗口下线性扫是主要热点。"""
-    metrics = {"redArea": 0.0, "greenArea": 0.0, "difHigh": float("-inf"),
-               "difLow": float("inf"), "redMax": 0.0, "greenMax": 0.0}
+    替代从头线性扫描——回测链路每次重算会调用本函数上万次，长窗口下线性扫是主要热点。
+    窗口结果按 (macdArr 对象, (t0,t1)) 记忆化（见 _macdMetricsSlots）；返回值只读。"""
     if not macdArr or len(macdArr) == 0:
         return None
     t0 = bi["startTime"]
     t1 = bi["endTime"]
+    key = id(macdArr)
+    slot = _macdMetricsSlots.get(key)
+    if slot is not None and slot[0] is macdArr:
+        ent = slot[1].get((t0, t1))
+        if ent is not None and t1 <= ent[1]:
+            _macdMetricsSlots.move_to_end(key)
+            return ent[0]
+    metrics = _biMacdMetricsCompute(bi, macdArr, t0, t1)
+    frozen = macdArr[-1]["time"]
+    if slot is None or slot[0] is not macdArr:
+        slot = [macdArr, {}]
+        _macdMetricsSlots[key] = slot
+        if len(_macdMetricsSlots) > 64:
+            _macdMetricsSlots.popitem(last=False)
+    elif len(slot[1]) >= 262144:
+        slot[1].clear()
+    if t1 <= frozen:
+        slot[1][(t0, t1)] = (metrics, frozen)
+    return metrics
+
+
+def _biMacdMetricsCompute(bi, macdArr, t0, t1):
+    """biMacdMetrics 的原始计算体（无缓存路径，bisect 窗口 + 累加）。"""
+    metrics = {"redArea": 0.0, "greenArea": 0.0, "difHigh": float("-inf"),
+               "difLow": float("inf"), "redMax": 0.0, "greenMax": 0.0}
     times = _macdTimesOf(macdArr)
     lo = bisect.bisect_left(times, t0)
     hi = bisect.bisect_right(times, t1)
@@ -1639,25 +1698,82 @@ def anchorFirstBuy(cand, upperBis):
     return best
 
 
-def anchorFirstSell(cand, upperBis):
-    """一卖锚定：候选在上级上涨笔内则上移到其结束点，否则取最近上级顶部端点。"""
-    upperBis = confirmedStructureBis(upperBis)
+def _anchorSellPre(upperBis):
+    """anchorFirstSell 的每调用预计算（吃**已确认**上级笔列表）。返回
+    (upStarts, upEnds, upEndPrices, anchorT, anchorP) 或 None（单调性守卫失败
+    → 调用方回退线性原路径）。"""
+    upStarts, upEnds, upEndPrices = [], [], []
+    anchorT, anchorP = [], []
+    for b in upperBis:
+        if b["type"] == "up":
+            upStarts.append(b["startTime"])
+            upEnds.append(b["endTime"])
+            upEndPrices.append(b["endPrice"])
+            t, p = b["endTime"], b["endPrice"]
+        else:
+            t, p = b["startTime"], b["startPrice"]
+        anchorT.append(t)
+        anchorP.append(p)
+    for arr in (upStarts, anchorT):
+        for i in range(1, len(arr)):
+            if arr[i] < arr[i - 1]:
+                return None
+    return (upStarts, upEnds, upEndPrices, anchorT, anchorP)
+
+
+def anchorFirstSell(cand, upperBis, _pre=None):
+    """一卖锚定：候选在上级上涨笔内则上移到其结束点，否则取最近上级顶部端点。
+
+    _pre 为 _anchorSellPre 对**已确认**上级笔（confirmedStructureBis 结果）的
+    预计算（可选）：第一趟包含判定 bisect 后只查前驱与命中两个 up 笔（链序 up 笔
+    不重叠，共享端点时先见者=前笔）；第二趟取 ≤ t 的最大右锚点（up→end /
+    down→start，沿笔列表单调；相邻笔共享端点的重复时刻值等价）。缺省走线性
+    原路径（内部自行 confirmedStructureBis，外部调用方不变）。"""
+    if _pre is None:
+        upperBis = confirmedStructureBis(upperBis)
     if not upperBis or len(upperBis) == 0:
+        return None
+    t = cand["time"]
+    if _pre is not None:
+        upStarts, upEnds, upEndPrices, anchorT, anchorP = _pre
+        j = bisect.bisect_right(upStarts, t) - 1
+        for jj in (j - 1, j):
+            if 0 <= jj < len(upStarts) and upStarts[jj] <= t <= upEnds[jj]:
+                return {"time": upEnds[jj], "price": upEndPrices[jj]}
+        k = bisect.bisect_right(anchorT, t) - 1
+        if k >= 0:
+            return {"time": anchorT[k], "price": anchorP[k]}
         return None
     for b in upperBis:
         if b["type"] != "up":
             continue
-        if b["startTime"] <= cand["time"] and b["endTime"] >= cand["time"]:
+        if b["startTime"] <= t and b["endTime"] >= t:
             return {"time": b["endTime"], "price": b["endPrice"]}
     best = None
     for b in upperBis:
-        t = b["endTime"] if b["type"] == "up" else b["startTime"]
+        bt = b["endTime"] if b["type"] == "up" else b["startTime"]
         p = b["endPrice"] if b["type"] == "up" else b["startPrice"]
-        if t > cand["time"]:
+        if bt > t:
             continue
-        if best is None or cand["time"] - t < cand["time"] - best["time"]:
-            best = {"time": t, "price": p}
+        if best is None or t - bt < t - best["time"]:
+            best = {"time": bt, "price": p}
     return best
+
+
+def _nearestUpBiIdx(upIdx, upTimes, t):
+    """时间 t 最近的 up 笔在 bis 中的下标（与全量扫描同语义：严格 < 先见者胜，
+    等距取先见者）。upTimes 与 upIdx 平行（up 笔 endTime 升序）；无 up 笔返回 None。"""
+    if not upTimes:
+        return None
+    hi = bisect.bisect_left(upTimes, t)
+    left = hi - 1
+    while left > 0 and upTimes[left - 1] == upTimes[left]:
+        left -= 1  # 重复段首下标（先见者）
+    if left < 0:
+        return upIdx[hi]  # t 早于全部 up 笔 endTime → 首个
+    if hi >= len(upTimes):
+        return upIdx[left]  # t 晚于全部 → 末个
+    return upIdx[left] if (t - upTimes[left]) <= (upTimes[hi] - t) else upIdx[hi]
 
 
 def snapToOwnBar(price, refTime, bars):
@@ -1731,17 +1847,155 @@ def _pick_zs_for_two(zss, seg_start, seg_end, two_time):
 
 
 def _append_third_points(points, third_list, main_type, class_type, class2_type):
-    """写入 3/类3；与类2同点时删类2保留 3/类3。"""
+    """写入 3/类3；与类2同点时删类2保留 3/类3。
+
+    去重/定位用增量索引（3/类3 时间集合 + 类2同刻首现下标表；删除后下标表整体
+    重建——删除罕见，摊销 O(1)），与 any/_findIndex 全量扫描语义逐位一致。"""
+    mc_types = (main_type, class_type)
+    mc_times = {p["time"] for p in points if p["type"] in mc_types}
+    c2_first = {}
+    for i, p in enumerate(points):
+        if p["type"] == class2_type and p["time"] not in c2_first:
+            c2_first[p["time"]] = i
     for t in third_list:
-        if any(p["type"] in (main_type, class_type) and p["time"] == t["time"] for p in points):
+        if t["time"] in mc_times:
             continue
-        dup = _findIndex(points, lambda p: p["type"] == class2_type and p["time"] == t["time"])
+        dup = c2_first.get(t["time"], -1)
         if dup >= 0:
             del points[dup]
+            c2_first = {}
+            for i, p in enumerate(points):
+                if p["type"] == class2_type and p["time"] not in c2_first:
+                    c2_first[p["time"]] = i
         points.append({"type": t["type"], "time": t["time"], "price": t["price"]})
+        if t["type"] in mc_types:
+            mc_times.add(t["time"])
 
 
-def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.0):
+# ---- find* 一买/一卖候选循环的冻结前缀记录缓存（第七批 S1）----
+# 引擎 bis 只发生「后缀拼接换新 dict（seam ≥ len-24）/ resync 整表换新 / 末笔原地
+# 延伸」三类变化，冻结前缀按引用共享且不再修改；structurePeriods 视图每拍新建但
+# 元素为共享引用 → 记录序列按元素身份锚定，延伸/新笔只重算受影响尾部。
+_FIND1_MARGIN = 26     # 冻结裕量：prospective/延伸中末笔 + BiInc _TAIL=24 splice 区
+_FIND1_MIN_BIS = 64    # 过短列表不启用
+
+
+def _upperSafeTime(knownUpper, upperByType):
+    """上级安全界：endTime 早于该值的下级笔，其同笔判定（±1 本级 bar 时间带）不可能
+    再被未来确认的上级笔覆盖——none/append 记录可安全复用。取倒数第 _FIND1_MARGIN
+    个已确认上级笔的 startTime；无上级（判定恒 None）或上级过短（无裕量）→ ±inf。"""
+    if upperByType is None:
+        return float("inf")     # 恒无同笔命中，CAND 结果不依赖上级演化
+    j = len(knownUpper) - _FIND1_MARGIN
+    return knownUpper[j]["startTime"] if j >= 0 else float("-inf")
+
+
+def _firstPointsLoop(bis, idxArr, upperByType, knownUpper, macdArr, barSec, records, is_sell):
+    """一买/一卖候选循环（记录化执行，findBuy/findSellPoints 共用）。
+
+    记录项 (idx_k, cur_ref, sameUpper_ref|None, kind, payload) 与 k=1..len(records)
+    一一对应（每 k 恒产记录保证连续性）：
+      0=无产出；1=无条件产出（同笔标记/背驰 append，对冻结前缀永久稳定）；
+      2=当时命中上级末笔（延伸中）→ 重放时重做 `same_ref is knownUpper[-1]` 身份
+        比较：仍是末笔→跳过；已非末笔（上级反向笔确认，单调迁移）→产出。
+    复用守卫（pop 不可复用尾，后缀拼接不变量下 O(1) 摊销）：cur.endTime <
+    上级安全界；idxArr[k] 对齐且 bis[idx_k] is cur_ref。尾部走原始逻辑并记录到
+    冻结边界。debug 打印仅在尾部原始路径产生（重放不重放打印）。"""
+    ust = _upperSafeTime(knownUpper, upperByType)
+    while records:
+        idx_k, cur_ref = records[-1][0], records[-1][1]
+        k = len(records)
+        if (cur_ref["endTime"] >= ust or k >= len(idxArr)
+                or idxArr[k] != idx_k or bis[idx_k] is not cur_ref):
+            records.pop()
+        else:
+            break
+    out = []
+    for (_idx_k, _cur, same_ref, kind, payload) in records:
+        if kind == 1:
+            out.append(payload)
+        elif kind == 2 and not (knownUpper and same_ref is knownUpper[-1]):
+            out.append(payload)
+    freezeIdx = len(bis) - 1 - _FIND1_MARGIN
+    for k in range(len(records) + 1, len(idxArr)):
+        cur = bis[idxArr[k]]
+        sameUpper = None
+        kind = 0
+        payload = None
+        if not cur.get("_forming"):
+            sameUpper = isSameAsUpperBi(cur, upperByType.get(cur["type"]) or [], barSec) \
+                if upperByType is not None else None
+            if sameUpper is not None:
+                payload = {"biIdx": idxArr[k], "time": cur["endTime"], "price": cur["endPrice"]}
+                if sameUpper is knownUpper[-1]:
+                    if CHAN_CFG["debug"]:
+                        print(f"[一{'卖' if is_sell else '买'}跳过-上级末笔延伸中] "
+                              f"{fmtT(cur['endTime'])}({cur['endPrice']}) 与上级末笔重合，"
+                              f"上级反向笔未确认")
+                    kind = 2
+                else:
+                    if CHAN_CFG["debug"]:
+                        print(f"[一{'卖' if is_sell else '买'}同笔] {fmtT(cur['endTime'])}"
+                              f"({cur['endPrice']}) 与上级已结束{'上涨' if is_sell else '下跌'}笔重合，"
+                              f"结构同笔标记1{'卖' if is_sell else '买'}")
+                    out.append(payload)
+                    kind = 1
+            else:
+                refer = None
+                for j in range(k - 1, -1, -1):
+                    cand = bis[idxArr[j]]
+                    if cand["span"] < cur["span"] * 0.5:
+                        continue
+                    refer = cand
+                    break
+                if refer is not None and ((cur["endPrice"] > refer["endPrice"]) if is_sell
+                                          else (cur["endPrice"] < refer["endPrice"])):
+                    diverge = isBiDiverge(cur, refer, macdArr)
+                    if CHAN_CFG["debug"]:
+                        cm = biMacdMetrics(cur, macdArr)
+                        rm = biMacdMetrics(refer, macdArr)
+                        if is_sell:
+                            print(f"[一卖候选] {fmtT(cur['endTime'])}({cur['endPrice']}) vs 参照 "
+                                  f"{fmtT(refer['endTime'])}({refer['endPrice']}) "
+                                  f"| 创新高={cur['endPrice'] > refer['endPrice']} "
+                                  f"| 红柱面积 {cm['redArea']:.2f} vs {rm['redArea']:.2f} "
+                                  f"| DIF高点 {cm['difHigh']:.3f} vs {rm['difHigh']:.3f} | 背驰={diverge}")
+                        else:
+                            print(f"[一买候选] {fmtT(cur['endTime'])}({cur['endPrice']}) vs 参照 "
+                                  f"{fmtT(refer['endTime'])}({refer['endPrice']}) "
+                                  f"| 创新低={cur['endPrice'] < refer['endPrice']} "
+                                  f"| 绿柱面积 {cm['greenArea']:.2f} vs {rm['greenArea']:.2f} "
+                                  f"| DIF低点 {cm['difLow']:.3f} vs {rm['difLow']:.3f} | 背驰={diverge}")
+                    if diverge:
+                        payload = {"biIdx": idxArr[k], "time": cur["endTime"],
+                                   "price": cur["endPrice"]}
+                        out.append(payload)
+                        kind = 1
+        if idxArr[k] <= freezeIdx:
+            records.append((idxArr[k], cur, sameUpper, kind, payload))
+    return out
+
+
+def _find1RecordsSlot(cache, macdArr, kind):
+    """候选循环记录槽（按 macdArr 对象身份分槽，持强引用）。"""
+    slot = cache.get((kind, id(macdArr)))
+    if slot is None or slot[0] is not macdArr:
+        slot = [macdArr, []]
+        cache[(kind, id(macdArr))] = slot
+    return slot[1]
+
+
+def _find2WinSlot(cache, macdArr, kind):
+    """2买/2卖窗口结果槽（按 macdArr 对象身份分槽；值 {id(上级笔): (dn_ref,
+    win_points, meta_entry|None)}，持强引用防 id 复用）。"""
+    slot = cache.get((kind, id(macdArr)))
+    if slot is None or slot[0] is not macdArr:
+        slot = [macdArr, {}]
+        cache[(kind, id(macdArr))] = slot
+    return slot[1]
+
+
+def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.0, cache=None):
     """买点识别（MACD 背驰 + 抬高结构 + 中枢类2/3）。
     2买：上级上涨笔内首个 price > up.startPrice（无上级：结构底抬高），不读 zd/zg。
     类2买：2买后更高抬高且落在中枢 [zd-class2ZsTol, zg]；无中枢不标。
@@ -1766,55 +2020,38 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
         upperByType = {"up": [u for u in knownUpper if u["type"] == "up"],
                        "down": [u for u in knownUpper if u["type"] == "down"]}
 
-    # 候选一买：创新低 + MACD 背驰；同笔例外
-    firstBuys = []
-    for k in range(1, len(downIdx)):
-        cur = bis[downIdx[k]]
-        if cur.get("_forming"):
-            continue
-        sameUpper = isSameAsUpperBi(cur, upperByType.get(cur["type"]) or [], barSec) \
-            if upperByType is not None else None
-        if sameUpper is not None:
-            if sameUpper is knownUpper[-1]:
-                if CHAN_CFG["debug"]:
-                    print(f"[一买跳过-上级末笔延伸中] {fmtT(cur['endTime'])}({cur['endPrice']}) "
-                          f"与上级末笔重合，上级反向笔未确认")
-                continue
-            if CHAN_CFG["debug"]:
-                print(f"[一买同笔] {fmtT(cur['endTime'])}({cur['endPrice']}) "
-                      f"与上级已结束下跌笔重合，结构同笔标记1买")
-            firstBuys.append({"biIdx": downIdx[k], "time": cur["endTime"], "price": cur["endPrice"]})
-            continue
-        refer = None
-        for j in range(k - 1, -1, -1):
-            cand = bis[downIdx[j]]
-            if cand["span"] < cur["span"] * 0.5:
-                continue
-            refer = cand
-            break
-        if refer is not None and cur["endPrice"] < refer["endPrice"]:
-            diverge = isBiDiverge(cur, refer, macdArr)
-            if CHAN_CFG["debug"]:
-                cm = biMacdMetrics(cur, macdArr)
-                rm = biMacdMetrics(refer, macdArr)
-                print(
-                    f"[一买候选] {fmtT(cur['endTime'])}({cur['endPrice']}) vs 参照 {fmtT(refer['endTime'])}({refer['endPrice']}) "
-                    f"| 创新低={cur['endPrice'] < refer['endPrice']} "
-                    f"| 绿柱面积 {cm['greenArea']:.2f} vs {rm['greenArea']:.2f} "
-                    f"| DIF低点 {cm['difLow']:.3f} vs {rm['difLow']:.3f} | 背驰={diverge}"
-                )
-            if diverge:
-                firstBuys.append({"biIdx": downIdx[k], "time": cur["endTime"], "price": cur["endPrice"]})
+    # 候选一买：创新低 + MACD 背驰；同笔例外（S1 记录化：冻结前缀重放 + 尾部续算）
+    recs = _find1RecordsSlot(cache, macdArr, "find1buy") \
+        if (cache is not None and len(bis) >= _FIND1_MIN_BIS) else []
+    firstBuys = _firstPointsLoop(bis, downIdx, upperByType, knownUpper, macdArr,
+                                 barSec, recs, is_sell=False)
     firstBuy = firstBuys[-1] if firstBuys else None
 
     points = []
     twoBuyMeta = []  # 有中枢的 2买，供类2/3/类3
 
     if upperBis is not None and len(upperBis) > 0:
-        zss = buildZSByUpper(bis, upperBis, barSec)
-        for up in upperBis:
+        # S3：冻结上级笔的窗口结果记忆化（窗口内下级笔与 dn 均已冻结 → 结果稳定）
+        wincache = _find2WinSlot(cache, macdArr, "find2buy") if cache is not None else None
+        lowerSafeEnd = bis[len(bis) - _FIND1_MARGIN]["endTime"] \
+            if len(bis) > _FIND1_MARGIN else None
+        nUpperStable = len(upperBis) - _FIND1_MARGIN
+        zss = None
+        for i_up, up in enumerate(upperBis):
             if up["type"] != "up":
                 continue
+            stable = (wincache is not None and i_up < nUpperStable
+                      and lowerSafeEnd is not None
+                      and up.get("coverageEnd", up["endTime"]) + 1 < lowerSafeEnd)
+            ent = wincache.get(id(up)) if stable else None
+            if ent is not None and ent[0] is up:
+                if ent[1]:
+                    points.extend(ent[1])
+                if ent[2] is not None:
+                    twoBuyMeta.append(ent[2])
+                continue
+            if zss is None:
+                zss = buildZSByUpper(bis, upperBis, barSec)
             lo = bisect.bisect_left(downTimes, up["startTime"])
             segEnd = up.get("coverageEnd", up["endTime"])
             hi = bisect.bisect_right(downTimes, segEnd + 1)
@@ -1826,18 +2063,23 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
             firstLow = next((l for l in lows if l["price"] > up["startPrice"]), None)
             if firstLow is None:
                 continue
-            points.append({"type": "2买", "time": firstLow["time"], "price": firstLow["price"]})
+            win_points = [{"type": "2买", "time": firstLow["time"], "price": firstLow["price"]}]
             zs = _pick_zs_for_two(zss, up["startTime"], up["endTime"], firstLow["time"])
-            if zs is None:
-                continue
-            zd, zg = zs["zd"], zs["zg"]
-            twoBuyMeta.append({"time": firstLow["time"], "price": firstLow["price"],
-                               "zg": zg, "segStart": up["startTime"], "segEnd": segEnd})
-            later = next((l for l in lows
-                          if l["time"] > firstLow["time"] and l["price"] > firstLow["price"]
-                          and (zd - c2tol) <= l["price"] <= zg), None)
-            if later is not None:
-                points.append({"type": "类2买", "time": later["time"], "price": later["price"]})
+            meta_entry = None
+            if zs is not None:
+                zd, zg = zs["zd"], zs["zg"]
+                meta_entry = {"time": firstLow["time"], "price": firstLow["price"],
+                              "zg": zg, "segStart": up["startTime"], "segEnd": segEnd}
+                later = next((l for l in lows
+                              if l["time"] > firstLow["time"] and l["price"] > firstLow["price"]
+                              and (zd - c2tol) <= l["price"] <= zg), None)
+                if later is not None:
+                    win_points.append({"type": "类2买", "time": later["time"], "price": later["price"]})
+            if stable:
+                wincache[id(up)] = (up, win_points, meta_entry)
+            points.extend(win_points)
+            if meta_entry is not None:
+                twoBuyMeta.append(meta_entry)
     else:
         # 结构底 → 2买（不依赖中枢）
         structBottomIdx = None
@@ -1927,7 +2169,7 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
     return points
 
 
-def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.0):
+def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.0, cache=None):
     """卖点识别（与买点对称）：2卖不依赖中枢；类2/3/类3 依赖中枢。"""
     bis = pointEligibleBis(bis)
     knownUpper = confirmedStructureBis(upperBis)
@@ -1947,64 +2189,27 @@ def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0
         upperByType = {"up": [u for u in knownUpper if u["type"] == "up"],
                        "down": [u for u in knownUpper if u["type"] == "down"]}
 
-    firstSells = []
-    for k in range(1, len(upIdx)):
-        cur = bis[upIdx[k]]
-        if cur.get("_forming"):
-            continue
-        sameUpper = isSameAsUpperBi(cur, upperByType.get(cur["type"]) or [], barSec) \
-            if upperByType is not None else None
-        if sameUpper is not None:
-            if sameUpper is knownUpper[-1]:
-                if CHAN_CFG["debug"]:
-                    print(f"[一卖跳过-上级末笔延伸中] {fmtT(cur['endTime'])}({cur['endPrice']}) "
-                          f"与上级末笔重合，上级反向笔未确认")
-                continue
-            if CHAN_CFG["debug"]:
-                print(f"[一卖同笔] {fmtT(cur['endTime'])}({cur['endPrice']}) "
-                      f"与上级已结束上涨笔重合，结构同笔标记1卖")
-            firstSells.append({"biIdx": upIdx[k], "time": cur["endTime"], "price": cur["endPrice"]})
-            continue
-        refer = None
-        for j in range(k - 1, -1, -1):
-            cand = bis[upIdx[j]]
-            if cand["span"] < cur["span"] * 0.5:
-                continue
-            refer = cand
-            break
-        if refer is not None and cur["endPrice"] > refer["endPrice"]:
-            diverge = isBiDiverge(cur, refer, macdArr)
-            if CHAN_CFG["debug"]:
-                cm = biMacdMetrics(cur, macdArr)
-                rm = biMacdMetrics(refer, macdArr)
-                print(
-                    f"[一卖候选] {fmtT(cur['endTime'])}({cur['endPrice']}) vs 参照 {fmtT(refer['endTime'])}({refer['endPrice']}) "
-                    f"| 创新高={cur['endPrice'] > refer['endPrice']} "
-                    f"| 红柱面积 {cm['redArea']:.2f} vs {rm['redArea']:.2f} "
-                    f"| DIF高点 {cm['difHigh']:.3f} vs {rm['difHigh']:.3f} | 背驰={diverge}"
-                )
-            if diverge:
-                firstSells.append({"biIdx": upIdx[k], "time": cur["endTime"], "price": cur["endPrice"]})
+    # 候选一卖：创新高 + MACD 背驰；同笔例外（S1 记录化：冻结前缀重放 + 尾部续算）
+    recs = _find1RecordsSlot(cache, macdArr, "find1sell") \
+        if (cache is not None and len(bis) >= _FIND1_MIN_BIS) else []
+    firstSells = _firstPointsLoop(bis, upIdx, upperByType, knownUpper, macdArr,
+                                  barSec, recs, is_sell=True)
     firstSell = firstSells[-1] if firstSells else None
 
     anchoredSells = []
     seenSellPos = set()
+    # 锚定链路预计算（每调用一次；O(U)）——单调性守卫失败回退线性原路径
+    anchorPre = _anchorSellPre(knownUpper) if knownUpper else None
     for fs in firstSells:
         anchored = fs
         if knownUpper:
-            a = anchorFirstSell(fs, knownUpper)
+            a = anchorFirstSell(fs, knownUpper, _pre=anchorPre)
             if a is not None:
-                bestBi = None
-                bestDist = float("inf")
-                for i, b in enumerate(bis):
-                    if b["type"] != "up":
-                        continue
-                    d = abs(b["endTime"] - a["time"])
-                    if d < bestDist:
-                        bestDist = d
-                        bestBi = i
+                # 最近 up 笔：upTimes 升序 → bisect（严格 < 先见者胜、等距取先者，
+                # 与原全量扫描逐位一致）
+                bi_i = _nearestUpBiIdx(upIdx, upTimes, a["time"])
                 anchored = {
-                    "biIdx": bestBi if bestBi is not None else fs["biIdx"],
+                    "biIdx": bi_i if bi_i is not None else fs["biIdx"],
                     "time": a["time"],
                     "price": a["price"],
                 }
@@ -2017,10 +2222,27 @@ def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0
     twoSellMeta = []
 
     if upperBis is not None and len(upperBis) > 0:
-        zss = buildZSByUpper(bis, upperBis, barSec)
-        for dn in upperBis:
+        # S3：冻结上级笔的窗口结果记忆化（窗口内下级笔与 dn 均已冻结 → 结果稳定）
+        wincache = _find2WinSlot(cache, macdArr, "find2sell") if cache is not None else None
+        lowerSafeEnd = bis[len(bis) - _FIND1_MARGIN]["endTime"] \
+            if len(bis) > _FIND1_MARGIN else None
+        nUpperStable = len(upperBis) - _FIND1_MARGIN
+        zss = None
+        for i_dn, dn in enumerate(upperBis):
             if dn["type"] != "down":
                 continue
+            stable = (wincache is not None and i_dn < nUpperStable
+                      and lowerSafeEnd is not None
+                      and dn.get("coverageEnd", dn["endTime"]) + 1 < lowerSafeEnd)
+            ent = wincache.get(id(dn)) if stable else None
+            if ent is not None and ent[0] is dn:
+                if ent[1]:
+                    points.extend(ent[1])
+                if ent[2] is not None:
+                    twoSellMeta.append(ent[2])
+                continue
+            if zss is None:
+                zss = buildZSByUpper(bis, upperBis, barSec)
             lo = bisect.bisect_left(upTimes, dn["startTime"])
             segEnd = dn.get("coverageEnd", dn["endTime"])
             hi = bisect.bisect_right(upTimes, segEnd + 1)
@@ -2032,18 +2254,23 @@ def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0
             firstHigh = next((h for h in highs if h["price"] < dn["startPrice"]), None)
             if firstHigh is None:
                 continue
-            points.append({"type": "2卖", "time": firstHigh["time"], "price": firstHigh["price"]})
+            win_points = [{"type": "2卖", "time": firstHigh["time"], "price": firstHigh["price"]}]
             zs = _pick_zs_for_two(zss, dn["startTime"], dn["endTime"], firstHigh["time"])
-            if zs is None:
-                continue
-            zd, zg = zs["zd"], zs["zg"]
-            twoSellMeta.append({"time": firstHigh["time"], "price": firstHigh["price"],
-                               "zd": zd, "segStart": dn["startTime"], "segEnd": segEnd})
-            later = next((h for h in highs
-                          if h["time"] > firstHigh["time"] and h["price"] < firstHigh["price"]
-                          and zd <= h["price"] <= (zg + c2tol)), None)
-            if later is not None:
-                points.append({"type": "类2卖", "time": later["time"], "price": later["price"]})
+            meta_entry = None
+            if zs is not None:
+                zd, zg = zs["zd"], zs["zg"]
+                meta_entry = {"time": firstHigh["time"], "price": firstHigh["price"],
+                              "zd": zd, "segStart": dn["startTime"], "segEnd": segEnd}
+                later = next((h for h in highs
+                              if h["time"] > firstHigh["time"] and h["price"] < firstHigh["price"]
+                              and zd <= h["price"] <= (zg + c2tol)), None)
+                if later is not None:
+                    win_points.append({"type": "类2卖", "time": later["time"], "price": later["price"]})
+            if stable:
+                wincache[id(dn)] = (dn, win_points, meta_entry)
+            points.extend(win_points)
+            if meta_entry is not None:
+                twoSellMeta.append(meta_entry)
     else:
         # 结构顶 → 2卖
         structTopIdx = None
