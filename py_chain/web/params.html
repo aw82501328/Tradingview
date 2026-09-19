@@ -19,6 +19,7 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 .pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:8px 16px;max-width:1180px}
 .prow{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--border);
   border-radius:6px;padding:7px 10px;cursor:default}
+.prow.break-before{grid-column:1}  /* 从第1列起排=在此参数前换行（行内其余卡片宽度不变；trendRes 前断行→参考周期行） */
 .prow .pname{flex:1;min-width:0}
 .prow .plabel{color:var(--text);font-size:12.5px;display:block}
 .prow .pdef{color:var(--muted);font-size:11px}
@@ -37,6 +38,9 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 .prow .zs-side .zs-keep{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px;white-space:nowrap}
 .prow .zs-side .zs-keep.dim{opacity:.45}
 .prow .zs-side .zs-keep.dim input{pointer-events:none}
+/* 滑点行内嵌 ATR 系数小输入框（无独立参数行） */
+.prow .slip-k{display:flex;align-items:center;gap:4px;color:var(--muted);font-size:11.5px;white-space:nowrap;flex-shrink:0}
+.prow .slip-k input{width:64px;text-align:right}
 .pfoot{display:flex;gap:10px;align-items:center;margin:14px 0 0;flex-wrap:wrap}
 .pfoot .state{color:var(--muted);font-size:11px}
 .pnote{color:var(--muted);font-size:12px;margin-top:10px;max-width:1180px}
@@ -359,7 +363,13 @@ const CHOICE_LABELS = { trendRes: { '': '关闭', '240': '4小时', 'D': '日线
                         rangeRes: { '240': '4小时', 'D': '日线' } };
 const choiceLabel = (key, v) => (CHOICE_LABELS[key] && CHOICE_LABELS[key][v]) || v;
 
-function rowHtml(key, spec, value, isMod) {
+// 三滑点的 ATR 系数键（entry 模块）：系数不独立成行，内嵌进各自滑点行（2026-09-19）
+const SLIP_ATR_K = { slip_stop: 'slip_stop_atr_k', slip_fallback: 'slip_fallback_atr_k', slip_be: 'slip_be_atr_k' };
+
+// 换行断点（该参数从第1列起排，卡片本身不占整行）：顺势参考周期前断行 → 紧跟②中枢内判定下一行
+const BREAK_BEFORE_KEYS = new Set(['trendRes']);
+
+function rowHtml(key, spec, value, isMod, embed) {
   const defText = spec.type === 'bool' ? (spec.default ? '默认开' : '默认关')
     : spec.type === 'str' ? `默认 ${choiceLabel(key, spec.default)}`
     : `默认 ${spec.default}`;
@@ -375,9 +385,13 @@ function rowHtml(key, spec, value, isMod) {
     const max = spec.max != null ? ` max="${spec.max}"` : '';
     control = `<input type="number" step="${step}"${min}${max} data-k="${key}" value="${value}">`;
   }
-  return `<div class="prow ${isMod ? 'mod' : ''}" title="${spec.desc}">
+  // 内嵌小输入框（滑点行 + ATR 系数）：collect 按 data-k 自动收集，无独立参数行
+  const embedHtml = embed
+    ? `<span class="slip-k" title="${embed.title}">+ ATR×<input type="number" step="any" min="${embed.min}" max="${embed.max}" data-k="${embed.key}" value="${embed.value}" aria-label="${embed.title}"></span>`
+    : '';
+  return `<div class="prow ${isMod ? 'mod' : ''} ${BREAK_BEFORE_KEYS.has(key) ? 'break-before' : ''}" title="${spec.desc}">
     <span class="pname"><span class="plabel">${spec.label}<span class="badge">已修改</span></span>
-    <span class="pdef">${defText} · ${spec.desc}</span></span>${control}</div>`;
+    <span class="pdef">${defText} · ${spec.desc}</span></span>${control}${embedHtml}</div>`;
 }
 
 // 画中枢：同周期「是否画 + 最近个数」同一行
@@ -412,7 +426,18 @@ function renderModule(name) {
   $('pgrid').innerHTML = name === 'zs'
     ? zsRowsHtml(m)
     : Object.entries(m.schema)
-      .map(([key, spec]) => rowHtml(key, spec, m.effective[key], m.overrides[key] !== undefined))
+      // 滑点 ATR 系数不独立成行：内嵌进各自滑点行（badge 在固定值或系数任一被改时亮）
+      .filter(([key]) => !Object.values(SLIP_ATR_K).includes(key))
+      .map(([key, spec]) => {
+        const embKey = SLIP_ATR_K[key];
+        const embed = embKey ? {
+          key: embKey, min: m.schema[embKey].min, max: m.schema[embKey].max,
+          value: m.effective[embKey], title: m.schema[embKey].desc,
+        } : null;
+        const isMod = m.overrides[key] !== undefined
+          || (embKey && m.overrides[embKey] !== undefined);
+        return rowHtml(key, spec, m.effective[key], isMod, embed);
+      })
       .join('');
   const n = Object.keys(m.overrides).length;
   $('stateLine').textContent = `已修改 ${n} 项 · 最近保存 ${timeText(m.savedAt)}`;
@@ -420,7 +445,7 @@ function renderModule(name) {
     chan: '画笔参数保存后立即全局生效（成笔阈值，画笔/回测/监控共用）。有任务运行中时会拒绝保存。',
     points: '标记买卖点参数：邻近合并/保留数/中枢容差在工作台与回测读取；背驰时长可比上限写入 CHAN_CFG，保存后立即全局生效。有任务运行中时会拒绝保存。',
     zs: '画中枢参数在工作台「画中枢 / 更新全部」时读取：控制各周期是否绘制、以及每周期只保留最近几个中枢。',
-    entry: '标记进出场参数在工作台分析与回测读取生效；进场扩展（M1/M2/M4、0轴容差）写入 CHAN_CFG，保存后立即全局生效。「当下制够笔K线数」仅回测/监控引擎使用。有任务运行中时会拒绝保存。',
+    entry: '标记进出场参数在工作台分析与回测读取生效；进场扩展（M1/M2/M4、0轴容差）写入 CHAN_CFG，保存后立即全局生效。「当下制够笔K线数」仅回测/监控引擎使用。三个滑点支持 ATR 动态分量：有效滑点 = 固定值 + ATR系数×背驰周期ATR(14)，系数内嵌在各滑点行（0=关闭）。有任务运行中时会拒绝保存。',
     plan: '交易计划参数在工作台分析与回测运行时读取生效；「顺势参考周期」额外过滤进出场信号方向，锚点后的「方向相位判定/相位近位容差(点)/相位角度45°基准(点/根)」按相位表定方向含观望态（规则见图解表2/2a/2b；仅回测/监控引擎，JS技能无此参数）。下方可展开「交易计划逻辑图解」。',
   }[name] || '';
   const rules = MODULE_RULES[name];

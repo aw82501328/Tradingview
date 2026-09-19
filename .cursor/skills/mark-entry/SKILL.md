@@ -62,6 +62,9 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 | `--slip-stop=K` | 止损位滑点（绝对价格：正确侧支阻位外侧偏移，short +/long −） | `3` |
 | `--slip-fallback=K` | 兜底止损滑点（无正确侧支阻位 → 止损 = 进场价±该值；止损位永不为 null） | `10` |
 | `--slip-be=K` | 保本滑点（beStop = 进场K线极值±该值，short: high+/long: low−） | `3` |
+| `--slip-stop-atr-k=K` | 止损滑点ATR系数：有效滑点 = 固定值 + K×ATR(14,背驰周期 markRes)；0=关闭。WEB 参数中心透传 | `0` |
+| `--slip-fallback-atr-k=K` | 兜底止损滑点ATR系数（同上口径） | `0` |
+| `--slip-be-atr-k=K` | 保本滑点ATR系数（同上口径） | `0` |
 | `--exit-min-merged=N` | 出场成笔预期门槛（形成段合并后 ≥N 根K；WEB 参数中心「进出场」模块同名透传） | `5` |
 | `--zs-weak-ratio=K` | 出中枢力度衰减比例（离开笔幅度 < 进入笔×K 视为变弱；WEB 参数中心同名透传） | `1.0` |
 | `--chan-cfg=<json>` | 缠论核心 CHAN_CFG 整体覆盖（WEB 参数中心透传，未知键闲置无害） | 不覆盖 |
@@ -146,8 +149,8 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 | — | **保本止损 stopBe** | 保本触发后盘中破坏 **beStop**（跳空按开盘价成交） | 全平终局，黄 `↓/↑` |
 
 - **顺势 / 逆势**：**顺势** = 计划方向 ∈ {多头多, 空头空}；**逆势** = {多头空, 空头多}。顺势阶梯完整（保本 → 半平 → 破前高/前低全平）；**逆势没有半平**——「形成段 ≥5 根K」一到就全平快速离场。
-- **止损位**（`stopRefOf`，方向感知）：short 取进场价**上方**最近支阻位 + 止损滑点、long 取**下方**最近 − 止损滑点；信号自带 `nearSr` 已在正确侧则直接沿用（± 滑点）。**无正确侧位 → 兜底 = 进场价 ± 兜底滑点**（止损位永不为 null，不再有「不设止损」仓位）。
-- **保本止损位 beStop** = 进场K线极值 ± 保本滑点（short: high+ / long: low−）。
+- **止损位**（`stopRefOf`，方向感知）：short 取进场价**上方**最近支阻位 + 有效止损滑点、long 取**下方**最近 − 有效止损滑点；信号自带 `nearSr` 已在正确侧则直接沿用（± 有效滑点）。**无正确侧位 → 兜底 = 进场价 ± 有效兜底滑点**（止损位永不为 null，不再有「不设止损」仓位）。**有效滑点 = 固定值 + ATR系数 × ATR(14, 背驰周期 markRes)**（系数默认 0=关闭，WEB 参数中心各滑点行内配置）。
+- **保本止损位 beStop** = 进场K线极值 ± 有效保本滑点（short: high+ / long: low−；ATR 分量同上）。
 - **合并后 ≥5 根K成笔预期**：检测周期形成段自段起点合并块起 ≥5 块（chan_core `isValid` gap≥4 同口径），触发 bar = 计数首次达 5 的已收盘K线、成交 = 下一开盘。已知近似差异：形成段达 5 后被最终笔结构吸收时，py 引擎当下已触发、JS hindsight 不触发。
 - **同拍顺序**：保本 → 平一半 → 全平 → 止损（同拍只挂一个成交型事件）。
 - **结算**：手数 `--lots` 默认 4（JS 端仅落盘，不算盈亏）；盈亏 =（0.5 × 半平价 + 0.5 × 终局价 − 进场价）× 方向 × 手数，未触发半平则 =（终局价 − 进场价）× 方向 × 手数。
@@ -167,7 +170,7 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 ## 落盘
 
 每次标记（含 `--dry`）都会把各周期信号写入 **`.cursor/cache/entry_<品种>.json`**：
-顶层含 `nearAtr`、`lots`（手数）、`slipStop`/`slipFallback`/`slipBe`（三个滑点参数，供复现）；
+顶层含 `nearAtr`、`lots`（手数）、`slipStop`/`slipFallback`/`slipBe`（三个滑点参数，供复现）及 `slipStopAtrK`/`slipFallbackAtrK`/`slipBeAtrK`（滑点 ATR 系数）；
 `periods` 按**背驰级别**聚合，字段：`periodX` 状态所在周期、`time` 背驰时间、`price` 背驰点价格、`direction`（`long` 做多 / `short` 做空）、`strategyKey`（策略标识）、`nearSr` 靠近的支阻位价格、`planDirection`（该周期计划方向，顺势/逆势判定用）、`color` 箭头颜色；
 出场相关新增字段：`stopRef` 止损位（支阻位±滑点或兜底，永不为 null）、`beStop` 保本止损位（进场K线极值±保本滑点）、`state`（`closed` 已终局 / `open` 仍持仓）、`exits` 出场事件列表 `[{type, time, price}]`（type：`breakeven` 保本 / `half` 平一半 / `close` 全平 / `stopSr` 支阻位止损 / `stopBe` 保本止损 / `stillOpen` 仍持仓）、互斥过滤的信号带 `suppressed: true` + `suppressedBy`（占用仓位的信号时间）。
 

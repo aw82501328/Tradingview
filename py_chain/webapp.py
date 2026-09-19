@@ -582,7 +582,8 @@ class BacktestWorker(ModeWorker):
         pm = param_center.effective_all()
         chan_core.apply_cfg(param_center.chan_cfg_effective())  # 幂等重放（启动已应用；防参数文件被手改）
         ep = pm["entry"]
-        for k in ("lots", "slip_stop", "slip_fallback", "slip_be", "near"):
+        for k in ("lots", "slip_stop", "slip_fallback", "slip_be", "near",
+                  "slip_stop_atr_k", "slip_fallback_atr_k", "slip_be_atr_k"):
             if cfg.get(k) is None:
                 cfg[k] = ep[k]
         engine = BacktestEngine(bars, periods=periods,
@@ -594,6 +595,9 @@ class BacktestWorker(ModeWorker):
                                 slip_stop=cfg["slip_stop"],
                                 slip_fallback=cfg["slip_fallback"],
                                 slip_be=cfg["slip_be"],
+                                slip_stop_atr_k=cfg["slip_stop_atr_k"],
+                                slip_fallback_atr_k=cfg["slip_fallback_atr_k"],
+                                slip_be_atr_k=cfg["slip_be_atr_k"],
                                 near=cfg["near"],
                                 sr_kwargs=self._sr_preset_kwargs(cfg, periods),
                                 diverge_confirm=cfg.get("diverge_confirm"),
@@ -917,7 +921,8 @@ class ControlApp:
                     out[k] = int(out[k])
                 except (TypeError, ValueError):
                     pass
-        for k in ("interval", "hold", "slip_stop", "slip_fallback", "slip_be", "near"):
+        for k in ("interval", "hold", "slip_stop", "slip_fallback", "slip_be", "near",
+                  "slip_stop_atr_k", "slip_fallback_atr_k", "slip_be_atr_k"):
             if k in out and out[k] not in (None, ""):
                 try:
                     out[k] = float(out[k])

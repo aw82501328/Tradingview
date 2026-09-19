@@ -202,6 +202,23 @@ class ParamCenterTests(unittest.TestCase):
         self.assertEqual(schema["type"], "str")
         self.assertEqual(schema["choices"], ["240", "D"])
 
+    def test_slip_atr_k_keys(self):
+        # 滑点 ATR 系数（2026-09-19）：默认 0（关闭）、允许 0、范围 [0, 10]、override 往返
+        defaults = param_center.defaults_of("entry")
+        for k in ("slip_stop_atr_k", "slip_fallback_atr_k", "slip_be_atr_k"):
+            self.assertEqual(defaults[k], 0.0)
+        self.assertEqual(param_center.normalize("entry", {"slip_stop_atr_k": 0}),
+                         {"slip_stop_atr_k": 0.0})
+        self.assertEqual(param_center.normalize("entry", {"slip_fallback_atr_k": "0.5"}),
+                         {"slip_fallback_atr_k": 0.5})
+        for bad in (-0.1, 10.1, "abc"):
+            with self.assertRaises(ValueError):
+                param_center.normalize("entry", {"slip_be_atr_k": bad})
+        param_center.update("entry", {"slip_be_atr_k": 0.3})
+        self.assertEqual(param_center.effective("entry")["slip_be_atr_k"], 0.3)
+        param_center.reset("entry")
+        self.assertEqual(param_center.effective("entry")["slip_be_atr_k"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

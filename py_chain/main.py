@@ -190,6 +190,12 @@ def main(argv=None):
                     help="兜底止损滑点（无正确侧支阻位时 止损 = 进场价 ± 该值）；缺省用参数中心值（默认 10）")
     ap.add_argument("--slip-be", type=float, default=None,
                     help="保本滑点（beStop = 进场成交K线极值 ± 该值）；缺省用参数中心值（默认 3）")
+    ap.add_argument("--slip-stop-atr-k", type=float, default=None,
+                    help="止损滑点ATR系数（有效滑点=固定值+系数×ATR(14,背驰周期)，0=关闭）；缺省用参数中心值（默认 0）")
+    ap.add_argument("--slip-fallback-atr-k", type=float, default=None,
+                    help="兜底止损滑点ATR系数（同上口径）；缺省用参数中心值（默认 0）")
+    ap.add_argument("--slip-be-atr-k", type=float, default=None,
+                    help="保本滑点ATR系数（同上口径）；缺省用参数中心值（默认 0）")
     ap.add_argument("--near", type=float, default=None,
                     help="近支阻阈值（绝对价差，不乘 ATR）；缺省用参数中心值（默认 10）")
     ap.add_argument("--sr-preset", default=None,
@@ -232,6 +238,9 @@ def main(argv=None):
     slip_stop = args.slip_stop if args.slip_stop is not None else ep["slip_stop"]
     slip_fallback = args.slip_fallback if args.slip_fallback is not None else ep["slip_fallback"]
     slip_be = args.slip_be if args.slip_be is not None else ep["slip_be"]
+    slip_stop_atr_k = args.slip_stop_atr_k if args.slip_stop_atr_k is not None else ep["slip_stop_atr_k"]
+    slip_fallback_atr_k = args.slip_fallback_atr_k if args.slip_fallback_atr_k is not None else ep["slip_fallback_atr_k"]
+    slip_be_atr_k = args.slip_be_atr_k if args.slip_be_atr_k is not None else ep["slip_be_atr_k"]
     near = args.near if args.near is not None else ep["near"]
     module_params = {"plan": pm["plan"], "marks": pm["points"],
                      "exit_min_merged": ep["exit_min_merged"],
@@ -267,6 +276,9 @@ def main(argv=None):
                           boll_length=args.boll_length, boll_mult=args.boll_mult,
                           lots=lots, slip_stop=slip_stop,
                           slip_fallback=slip_fallback, slip_be=slip_be,
+                          slip_stop_atr_k=slip_stop_atr_k,
+                          slip_fallback_atr_k=slip_fallback_atr_k,
+                          slip_be_atr_k=slip_be_atr_k,
                           near=near, sr_kwargs=sr_kwargs, module_params=module_params,
                           log=lambda *a: print(*a) if a and a[0].startswith("回测") else None)
 

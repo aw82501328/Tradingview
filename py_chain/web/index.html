@@ -1530,11 +1530,13 @@ const BT_METRICS = [
 ];
 // 参数对比展示顺序与汉化（键为保存的规范化 cfg 字段名）
 const BT_CFG_KEYS = ['symbol', 'from', 'to', 'periods', 'data_source', 'lead_days', 'warmup', 'lots',
-                     'slip_stop', 'slip_fallback', 'slip_be', 'near', 'sr_preset',
-                     'diverge_confirm', 'expect_bi', 'with_30s'];
+                     'slip_stop', 'slip_stop_atr_k', 'slip_fallback', 'slip_fallback_atr_k', 'slip_be', 'slip_be_atr_k',
+                     'near', 'sr_preset', 'diverge_confirm', 'expect_bi', 'with_30s'];
 const BT_CFG_LABELS = { symbol: '品种', from: '起始日期', to: '结束日期', periods: '周期', data_source: '数据源',
-                        lead_days: '预热提前(天)', warmup: '预热根数', lots: '手数', slip_stop: '止损滑点', slip_fallback: '兜底止损滑点',
-                        slip_be: '保本滑点', near: '近支阻阈值', sr_preset: '支阻预设', diverge_confirm: '背驰进场', expect_bi: '检测周期够笔', with_30s: '30秒级别' };
+                        lead_days: '预热提前(天)', warmup: '预热根数', lots: '手数', slip_stop: '止损滑点', slip_stop_atr_k: '止损滑点ATR系数',
+                        slip_fallback: '兜底止损滑点', slip_fallback_atr_k: '兜底滑点ATR系数',
+                        slip_be: '保本滑点', slip_be_atr_k: '保本滑点ATR系数',
+                        near: '近支阻阈值', sr_preset: '支阻预设', diverge_confirm: '背驰进场', expect_bi: '检测周期够笔', with_30s: '30秒级别' };
 function btCfgVal(k, v) {
   if (k === 'periods') return Array.isArray(v) ? v.join('+') : (v ?? '—');
   if (k === 'data_source') return { store: '本地数据存储', live: '实时拉取', cache: '本地缓存' }[v] || v || '—';

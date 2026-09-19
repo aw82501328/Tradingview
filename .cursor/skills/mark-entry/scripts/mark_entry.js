@@ -34,6 +34,9 @@
  *   --slip-stop=K       止损位滑点（绝对价格，默认 3）
  *   --slip-fallback=K   兜底止损滑点（无正确侧支阻位 → 进场价±该值，默认 10）
  *   --slip-be=K         保本滑点（beStop = 进场K线极值±该值，默认 3）
+ *   --slip-stop-atr-k=K    止损滑点ATR系数（有效滑点=固定值+系数×ATR(14,背驰周期)，默认 0=关闭）
+ *   --slip-fallback-atr-k=K 兜底止损滑点ATR系数（同上口径，默认 0）
+ *   --slip-be-atr-k=K      保本滑点ATR系数（同上口径，默认 0）
  *   --dry               只计算不绘图
  *   --debug             打印调试信息
  *
@@ -75,6 +78,11 @@ const SLIP_STOP = getArg("slip-stop", 3);
 const SLIP_FALLBACK = getArg("slip-fallback", 10);
 // 保本滑点：beStop = 进场K线极值 ± 该值（short: high+ / long: low−）
 const SLIP_BE = getArg("slip-be", 3);
+// 滑点 ATR 系数（2026-09-19）：有效滑点 = 固定滑点 + 系数 × ATR(14, 背驰周期 markRes)；0=关闭
+// --slip-*-atr-k 来自 WEB 参数中心（analysis_service entry 阶段透传，与 py_chain 同名同默认）
+const SLIP_STOP_ATR_K = getArg("slip-stop-atr-k", 0);
+const SLIP_FALLBACK_ATR_K = getArg("slip-fallback-atr-k", 0);
+const SLIP_BE_ATR_K = getArg("slip-be-atr-k", 0);
 // 形成段「成笔预期」门槛：合并后 ≥5 根K（chan_core isValid gap>=4 同口径）；
 // --exit-min-merged 来自 WEB 参数中心（进出场模块，py_chain EXIT_MIN_MERGED 同名）
 const EXIT_MIN_MERGED = Math.max(2, Math.round(getArg("exit-min-merged", 5) || 5));
@@ -632,12 +640,19 @@ function evaluateEntry(ctx, strategy) {
  * @param {Array} srLevels 支阻位列表（每项含 price）
  * @param {number} [slipStop=SLIP_STOP] 止损位滑点（short + / long −）
  * @param {number} [slipFallback=SLIP_FALLBACK] 兜底止损滑点（short + / long −）
+ * @param {number} [atr=0] 背驰周期 ATR(14)（2026-09-19 ATR 分量，缺省 0 = 纯固定滑点）
+ * @param {number} [kStop=SLIP_STOP_ATR_K] 止损滑点 ATR 系数：有效滑点 = slipStop + kStop×atr（0=关闭）
+ * @param {number} [kFallback=SLIP_FALLBACK_ATR_K] 兜底滑点 ATR 系数：有效滑点 = slipFallback + kFallback×atr
  * @returns {number} 止损参考位价格（永不为 null）
  */
-function stopRefOf(sig, srLevels, slipStop = SLIP_STOP, slipFallback = SLIP_FALLBACK) {
+function stopRefOf(sig, srLevels, slipStop = SLIP_STOP, slipFallback = SLIP_FALLBACK,
+                   atr = 0, kStop = SLIP_STOP_ATR_K, kFallback = SLIP_FALLBACK_ATR_K) {
   const isShort = sig.direction === "short";
   const entryP = sig.price;
-  const slip = isShort ? slipStop : -slipStop;
+  const a = atr || 0;
+  const sEff = slipStop + kStop * a;
+  const fEff = slipFallback + kFallback * a;
+  const slip = isShort ? sEff : -sEff;
   if (sig.nearSr != null && (isShort ? sig.nearSr > entryP : sig.nearSr < entryP)) {
     return sig.nearSr + slip;
   }
@@ -649,7 +664,7 @@ function stopRefOf(sig, srLevels, slipStop = SLIP_STOP, slipFallback = SLIP_FALL
       if (!best || d < best.d) best = { p, d };
     }
   }
-  if (!best) return entryP + (isShort ? slipFallback : -slipFallback);
+  if (!best) return entryP + (isShort ? fEff : -fEff);
   return best.p + slip;
 }
 
@@ -762,7 +777,7 @@ function favSeg5Time(pd, isShort, entryT) {
  * @param {number} stopRef stopRefOf 的输出（永不为 null）
  * @param {object} markResData 背驰级别周期数据 {bis, bars}
  * @param {object} periodXData 检测周期数据 {bis, bars}
- * @param {object} [opts] {slipBe}（默认 SLIP_BE）
+ * @param {object} [opts] {slipBe, kBe}（默认 SLIP_BE / SLIP_BE_ATR_K；有效保本滑点 = slipBe + kBe×markRes ATR）
  * @returns {{events:Array<{type:string,time:number,price:number|null}>, closed:boolean, beStop:number}}
  *   type: breakeven | half | close | stopSr（支阻位止损）| stopBe（保本止损）| stillOpen
  */
@@ -771,14 +786,17 @@ function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
   const entryT = sig.time;
   const entryP = sig.price;
   const slipBe = opts && opts.slipBe != null ? opts.slipBe : SLIP_BE;
+  const kBe = opts && opts.kBe != null ? opts.kBe : SLIP_BE_ATR_K;
+  // 有效保本滑点 = 固定值 + ATR系数 × 背驰周期 ATR(14)（markResData.atr，0=关闭）
+  const slipBeEff = slipBe + kBe * ((markResData && markResData.atr) || 0);
   const fav = isShort ? "down" : "up"; // 有利方向笔（short 持仓盼下跌笔）
   const trend = trendFollowingOf(sig.planDirection, sig.strategyKey);
-  // 保本止损位：进场K线极值 ± slipBe（sig.time 对应 markRes bar；取不到取 ≤ entryT 最近一根）
-  let beStop = entryP + (isShort ? slipBe : -slipBe);
+  // 保本止损位：进场K线极值 ± 有效保本滑点（sig.time 对应 markRes bar；取不到取 ≤ entryT 最近一根）
+  let beStop = entryP + (isShort ? slipBeEff : -slipBeEff);
   const mbars = (markResData && markResData.bars) || [];
   for (let i = mbars.length - 1; i >= 0; i--) {
     if (mbars[i].time <= entryT) {
-      beStop = isShort ? mbars[i].high + slipBe : mbars[i].low - slipBe;
+      beStop = isShort ? mbars[i].high + slipBeEff : mbars[i].low - slipBeEff;
       break;
     }
   }
@@ -1267,7 +1285,9 @@ async function main() {
         console.log(`[互斥] ${toT(s.time)} ${s.direction === "long" ? "做多" : "做空"}（检测周期 ${s.periodX}）被过滤：同向仓 ${toT(held.sig.time)}（${held.sig.periodX}）持仓中`);
         continue;
       }
-      s.stopRef = stopRefOf(s, srLevels);
+      // 止损参考位带 ATR 分量（2026-09-19）：ATR 取背驰周期 markRes 的 ATR(14)
+      const mrAtr = (periodData[s.markRes] && periodData[s.markRes].atr) || 0;
+      s.stopRef = stopRefOf(s, srLevels, SLIP_STOP, SLIP_FALLBACK, mrAtr);
       const sim = simulatePosition(
         s, s.stopRef,
         periodData[s.markRes] || null,
@@ -1312,8 +1332,11 @@ async function main() {
         near: NEAR,
         lots: LOTS,
         slipStop: SLIP_STOP,
+        slipStopAtrK: SLIP_STOP_ATR_K,
         slipFallback: SLIP_FALLBACK,
+        slipFallbackAtrK: SLIP_FALLBACK_ATR_K,
         slipBe: SLIP_BE,
+        slipBeAtrK: SLIP_BE_ATR_K,
         periods: allEntries,
       };
       fs.writeFileSync(entryFile, JSON.stringify(payload, null, 2), "utf8");

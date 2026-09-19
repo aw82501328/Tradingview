@@ -70,6 +70,31 @@ class TestStopRefOf(unittest.TestCase):
                                      slip_stop=5.0, slip_fallback=20.0), 4465.0)
         self.assertEqual(stop_ref_of("short", 4450.0, None, [], slip_stop=5.0, slip_fallback=20.0), 4470.0)
 
+    def test_atr_component(self):
+        # ATR 分量（2026-09-19）：有效滑点 = 固定值 + 系数×ATR，三条路径全覆盖
+        # 支阻位路径：4460 + (3 + 0.5×2) = 4464
+        self.assertEqual(stop_ref_of("short", 4450.0, None, [{"price": 4460.0}],
+                                     slip_stop=3.0, slip_fallback=10.0,
+                                     atr=2.0, k_stop=0.5, k_fallback=1.0), 4464.0)
+        # 兜底路径：4450 + (10 + 1×2) = 4462
+        self.assertEqual(stop_ref_of("short", 4450.0, None, [],
+                                     slip_stop=3.0, slip_fallback=10.0,
+                                     atr=2.0, k_stop=0.5, k_fallback=1.0), 4462.0)
+        # nearSr 正确侧路径：4465 + (3 + 1×2) = 4470
+        self.assertEqual(stop_ref_of("short", 4450.0, 4465.0, [{"price": 4460.0}],
+                                     slip_stop=3.0, slip_fallback=10.0,
+                                     atr=2.0, k_stop=1.0, k_fallback=0.0), 4470.0)
+        # long 镜像：4430 − (3 + 0.5×2) = 4426
+        self.assertEqual(stop_ref_of("long", 4450.0, None, [{"price": 4430.0}],
+                                     atr=2.0, k_stop=0.5), 4426.0)
+
+    def test_atr_zero_regression(self):
+        # 系数默认 0 / atr=0 → 与无 ATR 分量完全一致（回归锚点）
+        self.assertEqual(stop_ref_of("short", 4450.0, None, [{"price": 4460.0}],
+                                     atr=0.0, k_stop=0.7, k_fallback=0.9), 4463.0)
+        self.assertEqual(stop_ref_of("short", 4450.0, None, [],
+                                     atr=2.0, k_stop=0.0, k_fallback=0.0), 4460.0)
+
 
 class TestFormingSegReady(unittest.TestCase):
     def setUp(self):

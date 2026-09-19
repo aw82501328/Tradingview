@@ -157,6 +157,18 @@ describe("出场规则：stopRefOf（支阻位±滑点/兜底）", () => {
     assert.equal(stopRefOf(sig, [{ price: 4460 }], 5, 20), 4465);
     assert.equal(stopRefOf(sig, [], 5, 20), 4470);
   });
+
+  test("ATR 分量：有效滑点 = 固定值 + 系数×ATR；k=0 回归（成对 py test_atr_component）", () => {
+    const sig = { direction: "short", price: 4450 };
+    // 支阻位路径：4460 + (3 + 0.5×2) = 4464；兜底路径：4450 + (10 + 1×2) = 4462
+    assert.equal(stopRefOf(sig, [{ price: 4460 }], 3, 10, 2, 0.5, 1), 4464);
+    assert.equal(stopRefOf(sig, [], 3, 10, 2, 0.5, 1), 4462);
+    // nearSr 正确侧路径：4465 + (3 + 1×2) = 4470
+    assert.equal(stopRefOf({ ...sig, nearSr: 4465 }, [{ price: 4460 }], 3, 10, 2, 1, 0), 4470);
+    // k=0（或 atr=0）→ 与无 ATR 分量一致
+    assert.equal(stopRefOf(sig, [{ price: 4460 }], 3, 10, 2, 0, 0), 4463);
+    assert.equal(stopRefOf(sig, [{ price: 4460 }], 3, 10, 0, 0.7, 0.9), 4463);
+  });
 });
 
 describe("出场规则：trendFollowingOf / favSeg5Time", () => {
@@ -210,6 +222,19 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
     assert.equal(sim.events[1].time, 400);
     assert.equal(sim.events[1].price, 4455); // max(beStop, open 4450)
     assert.equal(sim.closed, true);
+  });
+
+  test("ATR 分量：有效保本滑点 = slipBe + kBe×markRes ATR（2026-09-19，成对 py 开仓点 slip_be_eff）", () => {
+    const mr = { bis: [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)],
+                 bars: MR_BARS, atr: 2 };
+    // 进场K线 high 4452：beStop = 4452 + (3 + 1×2) = 4457
+    const sim = simulatePosition(SIG(), 4463, mr, { bars: altBars([0, 100, 200, 300, 400]) },
+                                 { slipBe: 3, kBe: 1 });
+    assert.equal(sim.beStop, 4457);
+    // kBe=0 → 纯固定滑点（回归）
+    const sim0 = simulatePosition(SIG(), 4463, mr, { bars: altBars([0, 100, 200, 300, 400]) },
+                                  { slipBe: 3, kBe: 0 });
+    assert.equal(sim0.beStop, 4455);
   });
 
   test("TP2 顺势：形成段≥5块 → 平一半（下一开盘成交），剩余半仓打 beStop 终局", () => {

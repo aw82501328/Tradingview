@@ -64,6 +64,7 @@ from .mark_entry import (
     compute_entries, stop_ref_of, find_bi_event, filterDetectPeriods,
     trend_following_of, forming_seg_ready,
     DEFAULT_LOTS, DEFAULT_SLIP_STOP, DEFAULT_SLIP_FALLBACK, DEFAULT_SLIP_BE,
+    DEFAULT_SLIP_STOP_ATR_K, DEFAULT_SLIP_FALLBACK_ATR_K, DEFAULT_SLIP_BE_ATR_K,
     NEAR as DEFAULT_NEAR, EXIT_MIN_MERGED, REALTIME_MIN_BARS, ZS_EXIT_WEAK_RATIO,
 )
 
@@ -190,6 +191,9 @@ class BacktestEngine:
                  sr_types=None, fib_levels=None, boll_length=None, boll_mult=None,
                  lots=DEFAULT_LOTS, slip_stop=DEFAULT_SLIP_STOP,
                  slip_fallback=DEFAULT_SLIP_FALLBACK, slip_be=DEFAULT_SLIP_BE,
+                 slip_stop_atr_k=DEFAULT_SLIP_STOP_ATR_K,
+                 slip_fallback_atr_k=DEFAULT_SLIP_FALLBACK_ATR_K,
+                 slip_be_atr_k=DEFAULT_SLIP_BE_ATR_K,
                  near=DEFAULT_NEAR, sr_kwargs=None,
                  diverge_confirm=None, expect_bi=None, module_params=None):
         self.periods = list(periods or DEFAULT_PERIODS)
@@ -264,11 +268,16 @@ class BacktestEngine:
         # 出场参数（2026-09-09 出场阶梯重构）：
         #   lots 手数（盈亏 × lots）；slip_stop 止损位滑点（支阻位外侧）；
         #   slip_fallback 兜底止损滑点（无正确侧支阻位 → 进场价±该值）；
-        #   slip_be 保本滑点（beStop = 进场成交K线极值 ± 该值）
+        #   slip_be 保本滑点（beStop = 进场成交K线极值 ± 该值）；
+        #   slip_*_atr_k 三滑点 ATR 系数（2026-09-19）：有效滑点 = 固定值 + 系数 ×
+        #   ATR(14, 背驰周期 markRes)；0=关闭（默认，结果与无 ATR 分量一致）
         self.lots = lots
         self.slip_stop = slip_stop
         self.slip_fallback = slip_fallback
         self.slip_be = slip_be
+        self.slip_stop_atr_k = slip_stop_atr_k
+        self.slip_fallback_atr_k = slip_fallback_atr_k
+        self.slip_be_atr_k = slip_be_atr_k
         self.near = near  # 近支阻阈值（绝对价差，mark_entry near 同口径）
         # 支阻位预设 kwargs（Web 回测「支阻预设」下拉 / CLI --sr-preset 载入后经
         # normalize_sr_cfg + engine_kwargs_of 映射；优先于 sr_types 等独立形参）
@@ -1195,17 +1204,24 @@ class BacktestEngine:
                         entryPrice = fine[idx]["open"]
                         fillMode = "anchor"
                     # idx 越界（锚点之后已无 fine bar）→ 维持 confirm 口径
+            # 滑点 ATR 分量（2026-09-19）：有效滑点 = 固定值 + 系数 × ATR(14, 背驰周期)；
+            # markRes 不在周期表内（异常兜底）→ atr=0 = 纯固定滑点
+            atr_acc = self._atr.get(s.get("markRes"))
+            mrAtr = atr_acc.value if atr_acc is not None else 0.0
             stopRef = stop_ref_of(d, entryPrice, s.get("nearSr"), srLevels,
-                                  slip_stop=self.slip_stop, slip_fallback=self.slip_fallback)
-            # 保本止损位 beStop = 进场成交K线极值 ± slip_be（short: high+ / long: low−）；
-            # 成交 bar 按 entryTime 定位于 fine 时间轴，取不到时兜底 进场价 ± slip_be。
+                                  slip_stop=self.slip_stop, slip_fallback=self.slip_fallback,
+                                  atr=mrAtr, k_stop=self.slip_stop_atr_k,
+                                  k_fallback=self.slip_fallback_atr_k)
+            # 保本止损位 beStop = 进场成交K线极值 ± 有效保本滑点（short: high+ / long: low−）；
+            # 成交 bar 按 entryTime 定位于 fine 时间轴，取不到时兜底 进场价 ± 有效保本滑点。
             # 注意：run() 批量路径成交 bar 当拍未收盘（微前视 ≤1 根 fine bar），
             # step_to 实时路径成交 bar 已收盘、无前视（研究口径可接受，见模块 docstring）。
-            beStop = entryPrice + (self.slip_be if d == "short" else -self.slip_be)
+            slip_be_eff = self.slip_be + self.slip_be_atr_k * mrAtr
+            beStop = entryPrice + (slip_be_eff if d == "short" else -slip_be_eff)
             bi = bisect.bisect_left(fineTimes, entryTime)
             if bi < len(fine) and fine[bi]["time"] == entryTime:
-                beStop = (fine[bi]["high"] + self.slip_be) if d == "short" \
-                    else (fine[bi]["low"] - self.slip_be)
+                beStop = (fine[bi]["high"] + slip_be_eff) if d == "short" \
+                    else (fine[bi]["low"] - slip_be_eff)
             trades.append({
                 "tradeNo": len(trades) + 1,
                 "periodX": s["periodX"],
@@ -1282,6 +1298,9 @@ def run_backtest(bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
                  boll_length=None, boll_mult=None,
                  lots=DEFAULT_LOTS, slip_stop=DEFAULT_SLIP_STOP,
                  slip_fallback=DEFAULT_SLIP_FALLBACK, slip_be=DEFAULT_SLIP_BE,
+                 slip_stop_atr_k=DEFAULT_SLIP_STOP_ATR_K,
+                 slip_fallback_atr_k=DEFAULT_SLIP_FALLBACK_ATR_K,
+                 slip_be_atr_k=DEFAULT_SLIP_BE_ATR_K,
                  near=DEFAULT_NEAR, sr_kwargs=None,
                  diverge_confirm=None, expect_bi=None, module_params=None):
     """便捷入口：构建引擎并运行。start_ts=交易开始时刻（None=预热 warmup_bars 根后开始，
@@ -1290,7 +1309,9 @@ def run_backtest(bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
     sr_types/fib_levels 透传支阻位类型开关与黄金分割比率（None → compute_srflip 默认）；
     boll_length/boll_mult 透传 BOLL 布林带周期与标准差倍数（None → compute_srflip 默认 26/2）；
     lots/slip_stop/slip_fallback/slip_be 透传出场参数（手数/止损滑点/兜底止损滑点/保本滑点，
-    默认 4 / 3 / 10 / 3，绝对价格单位）；near 近支阻阈值（绝对价差，默认 10）；
+    默认 4 / 3 / 10 / 3，绝对价格单位）；slip_stop_atr_k/slip_fallback_atr_k/slip_be_atr_k
+    三滑点 ATR 系数（有效滑点 = 固定值 + 系数 × ATR(14,背驰周期)，默认 0=关闭）；
+    near 近支阻阈值（绝对价差，默认 10）；
     sr_kwargs 支阻位预设 kwargs（Web 回测预设下拉/CLI --sr-preset 载入，含 manualLevels，
     优先于 sr_types 等独立形参）。"""
     engine = BacktestEngine(bars_by_period, periods=periods, warmup_bars=warmup_bars,
@@ -1300,6 +1321,9 @@ def run_backtest(bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
                             boll_length=boll_length, boll_mult=boll_mult,
                             lots=lots, slip_stop=slip_stop,
                             slip_fallback=slip_fallback, slip_be=slip_be,
+                            slip_stop_atr_k=slip_stop_atr_k,
+                            slip_fallback_atr_k=slip_fallback_atr_k,
+                            slip_be_atr_k=slip_be_atr_k,
                             near=near, sr_kwargs=sr_kwargs,
                             diverge_confirm=diverge_confirm, expect_bi=expect_bi,
                             module_params=module_params)

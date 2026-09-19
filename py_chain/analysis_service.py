@@ -91,7 +91,8 @@ class AnalysisManager:
         self.next_at = None
         self.cfg = {"from": "2026-06-30", "intervalMinutes": 5, "port": 9222,
                     "with30s": False, "keep": 10,
-                    "near": 10.0, "slip_stop": 3.0, "slip_fallback": 10.0, "slip_be": 3.0}
+                    "near": 10.0, "slip_stop": 3.0, "slip_fallback": 10.0, "slip_be": 3.0,
+                    "slip_stop_atr_k": 0.0, "slip_fallback_atr_k": 0.0, "slip_be_atr_k": 0.0}
         self.job = None
         self.last_success = None
         self.waiting = None
@@ -154,6 +155,11 @@ class AnalysisManager:
             candidate[k] = float(pm["entry"][k])
             if not math.isfinite(candidate[k]) or candidate[k] <= 0:
                 raise ValueError("滑点参数须大于0")
+        # 滑点 ATR 系数（2026-09-19）：有效滑点 = 固定值 + 系数×ATR(14,背驰周期)；允许 0（=关闭）
+        for k in ("slip_stop_atr_k", "slip_fallback_atr_k", "slip_be_atr_k"):
+            candidate[k] = float(pm["entry"][k])
+            if not math.isfinite(candidate[k]) or candidate[k] < 0:
+                raise ValueError("滑点ATR系数须不小于0")
         candidate["with30s"] = candidate.get("with30s") is True
         sr = copy.deepcopy(candidate.get("sr") or {"srTypes": ["cluster", "boll"]})
         sr.update(symbol=candidate["symbol"], **{"from": candidate["from"]})
@@ -372,6 +378,10 @@ class AnalysisManager:
             command.append("--slip-stop=" + str(cfg.get("slip_stop", 3.0)))
             command.append("--slip-fallback=" + str(cfg.get("slip_fallback", 10.0)))
             command.append("--slip-be=" + str(cfg.get("slip_be", 3.0)))
+            # 滑点 ATR 系数（有效滑点 = 固定值 + 系数×ATR(14,背驰周期)；0=关闭）
+            command.append("--slip-stop-atr-k=" + str(cfg.get("slip_stop_atr_k", 0.0)))
+            command.append("--slip-fallback-atr-k=" + str(cfg.get("slip_fallback_atr_k", 0.0)))
+            command.append("--slip-be-atr-k=" + str(cfg.get("slip_be_atr_k", 0.0)))
             command.append("--exit-min-merged=" + str(pm["entry"]["exit_min_merged"]))
             command.append("--zs-weak-ratio=" + str(pm["entry"]["zs_exit_weak_ratio"]))
             # 顺势参考周期（交易计划模块；"" = 关闭）——低周期只做参考周期方向的单边

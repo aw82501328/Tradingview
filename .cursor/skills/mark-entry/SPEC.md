@@ -26,6 +26,9 @@
 | `--slip-stop=K` | 3 | 止损位滑点（绝对价格：正确侧支阻位外侧偏移，short +/long −） |
 | `--slip-fallback=K` | 10 | 兜底止损滑点（无正确侧支阻位 → 止损 = 进场价±该值；止损位永不为 null） |
 | `--slip-be=K` | 3 | 保本滑点（beStop = 进场K线极值±该值，short: high+/long: low−） |
+| `--slip-stop-atr-k=K` | 0 | 止损滑点ATR系数：有效滑点 = 固定值 + K×ATR(14,背驰周期 markRes)；0=关闭 |
+| `--slip-fallback-atr-k=K` | 0 | 兜底止损滑点ATR系数（同上口径） |
+| `--slip-be-atr-k=K` | 0 | 保本滑点ATR系数（同上口径） |
 | `--dry` | 关闭 | 只计算不绘图 |
 | `--debug` | 关闭 | 打印调试信息 |
 
@@ -96,9 +99,9 @@
 | 保本止损 `stopBe` | 保本触发后盘中破坏 **beStop**（short `high > beStop` / long `low < beStop`） | 全平终局（跳空按开盘价成交） | 黄 `↓/↑` |
 | 仍持仓 `stillOpen` | 数据末尾未终局 | `state:'open'` | 无 |
 
-**止损位**（`stopRefOf`，方向感知，**永不为 null**）：short 取进场价**上方**最近支阻位（阻力）+ 止损滑点、long 取**下方**最近（支撑）− 止损滑点；信号自带 `nearSr`（进场校验按绝对价差最近命中，不分上下方）已在正确侧则直接沿用（± 滑点），否则从 `srLevels` 重选正确侧最近位（**进场判定逻辑不变**）。**无正确侧位 → 兜底止损 = 进场价 ± 兜底滑点**（不再有「不设止损」仓位）。
+**止损位**（`stopRefOf`，方向感知，**永不为 null**）：short 取进场价**上方**最近支阻位（阻力）+ 有效止损滑点、long 取**下方**最近（支撑）− 有效止损滑点；信号自带 `nearSr`（进场校验按绝对价差最近命中，不分上下方）已在正确侧则直接沿用（± 有效滑点），否则从 `srLevels` 重选正确侧最近位（**进场判定逻辑不变**）。**无正确侧位 → 兜底止损 = 进场价 ± 有效兜底滑点**（不再有「不设止损」仓位）。**有效滑点 = 固定值 + ATR系数 × ATR(14, 背驰周期 markRes)**（2026-09-19；系数默认 0=关闭，窗口固定 14 内部实现，WEB 参数中心各滑点行内配置）。
 
-**保本止损位 beStop** = 进场K线极值 ± 保本滑点（short: high+ / long: low−）。JS 取 `sig.time` 对应 markRes bar 的极值；py 引擎取成交那根 fine bar 的极值（run() 批量路径该 bar 当拍未收盘，存在 ≤1 根 fine bar 的微前视；step_to 实时路径无前视——研究口径可接受）。
+**保本止损位 beStop** = 进场K线极值 ± 有效保本滑点（short: high+ / long: low−；ATR 分量同上）。JS 取 `sig.time` 对应 markRes bar 的极值；py 引擎取成交那根 fine bar 的极值（run() 批量路径该 bar 当拍未收盘，存在 ≤1 根 fine bar 的微前视；step_to 实时路径无前视——研究口径可接受）。
 
 **合并后 ≥5 根K且有成笔预期**（TP2 / 逆势 TP3 条件）：检测周期形成段自段起点合并块起 **≥5 块**（chan_core `isValid` 的 gap≥4 成笔门槛同口径）。JS 用 `favSeg5Time`（`mergeStep` 回放记录每块诞生时间，触发 = 段内第 5 块诞生 bar，成交 = 其后第一根 markRes bar 开盘）；py 引擎用 `forming_seg_ready`（增量 `_merged_times` 按末笔延伸终点二分计数）。**已知近似差异**：形成段达 5 后若被最终笔结构吸收（未成笔），py 引擎当下已触发、JS hindsight 不触发。
 
@@ -157,8 +160,11 @@
   "nearAtr": 1.0,
   "lots": 4,
   "slipStop": 3,
+  "slipStopAtrK": 0,
   "slipFallback": 10,
+  "slipFallbackAtrK": 0,
   "slipBe": 3,
+  "slipBeAtrK": 0,
   "periods": { "15": [{ "periodX": "60", "time": 1724908800, "price": 4631.98, "direction": "short", "strategyKey": "wait2Sell", "nearSr": 4640.1, "planDirection": "空头空", "color": "#089981",
                          "stopRef": 4643.1, "beStop": 4636.5, "state": "closed",
                          "exits": [{ "type": "breakeven", "time": 1724913000, "price": 4620.5 },

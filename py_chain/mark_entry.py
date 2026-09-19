@@ -43,6 +43,10 @@ DEFAULT_SLIP_STOP = 3.0
 DEFAULT_SLIP_FALLBACK = 10.0
 # 保本滑点：保本止损位 beStop = 进场成交K线极值 ± slip_be（short: high+ / long: low−）
 DEFAULT_SLIP_BE = 3.0
+# 滑点 ATR 系数（2026-09-19）：有效滑点 = 固定滑点 + 系数 × ATR(14, 背驰周期 markRes)；0=关闭
+DEFAULT_SLIP_STOP_ATR_K = 0.0
+DEFAULT_SLIP_FALLBACK_ATR_K = 0.0
+DEFAULT_SLIP_BE_ATR_K = 0.0
 # 形成段「成笔预期」门槛：合并后 ≥5 根K（chan_core.isValid gap>=4 同口径）
 EXIT_MIN_MERGED = 5
 # 出中枢力度衰减比例：离开笔 span < 进入笔 span × ratio 即力度变弱（参数中心可调）
@@ -1147,7 +1151,8 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
 
 
 def stop_ref_of(direction, entry_price, near_sr, sr_levels,
-                slip_stop=DEFAULT_SLIP_STOP, slip_fallback=DEFAULT_SLIP_FALLBACK):
+                slip_stop=DEFAULT_SLIP_STOP, slip_fallback=DEFAULT_SLIP_FALLBACK,
+                atr=0.0, k_stop=0.0, k_fallback=0.0):
     """方向感知的止损参考位（含滑点偏移与兜底，返回值永不为 None）：
     short 取进场价上方最近支阻位（阻力）+ slip_stop、long 取下方最近（支撑）− slip_stop。
 
@@ -1160,7 +1165,13 @@ def stop_ref_of(direction, entry_price, near_sr, sr_levels,
     @param sr_levels     支阻位列表（dict 含 "price"，或直接为价格数值）
     @param slip_stop     支阻位滑点（绝对价格，short + / long −）
     @param slip_fallback 兜底止损滑点（绝对价格，short + / long −）
+    @param atr           背驰周期 ATR(14)（2026-09-19 ATR 分量，缺省 0 = 纯固定滑点）
+    @param k_stop        止损滑点 ATR 系数：有效滑点 = slip_stop + k_stop×atr（0=关闭）
+    @param k_fallback    兜底滑点 ATR 系数：有效滑点 = slip_fallback + k_fallback×atr
     """
+    atr = atr or 0.0
+    slip_stop = slip_stop + k_stop * atr
+    slip_fallback = slip_fallback + k_fallback * atr
     is_short = direction == "short"
     slip = slip_stop if is_short else -slip_stop
     if near_sr is not None and (near_sr > entry_price if is_short else near_sr < entry_price):
