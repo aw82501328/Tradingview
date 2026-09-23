@@ -53,7 +53,7 @@ ENTRY_CHAN_KEYS = (
     "sinkFallback", "sinkFallbackRearm",
     "nearEqualAtrK", "nearEqualPct",
     "expectBiEnough", "expectBiMinBars", "divergeConfirm", "macdZeroTol",
-    "entryMacdShrink",
+    "entryMacdShrink", "stopEntryBarFloor",
 )
 # 旧 module_params.json 把上述键都写在 modules.chan 下；读入时迁到 points/entry
 _LEGACY_CHAN_TO_POINTS = set(POINTS_CHAN_KEYS)
@@ -125,6 +125,7 @@ PARAM_MODULES = {
             "expectBiMinBars": ("M4够笔K线数", "预期够笔的本级合并K线块数门槛（含起点所在块）", 1, 100),
             "divergeConfirm": ("M4背驰确认后成交", "开启=分型右邻K收盘后的下一根开盘成交（默认当下）", None, None),
             "entryMacdShrink": ("进场MACD柱缩闸", "开启=背驰级别上一根已收K线柱状体(|MACD|)较前一根缩小才出信号（确认背驰且柱缩，下一根开盘进场）", None, None),
+            "stopEntryBarFloor": ("进场K线止损下限", "开启=止损至少在进场背驰周期K线极值外侧加滑点处（运行中外推、收盘冻结，与支阻位止损取更宽者）", None, None),
             "macdZeroTol": ("2买卖0轴容差", "2买 DIF > -该值 / 2卖 DIF < +该值 视为动能还在（0=严格 0 轴）", 0.0, 100.0),
         },
     },

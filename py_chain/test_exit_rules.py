@@ -15,7 +15,8 @@
 import unittest
 
 from py_chain.mark_entry import stop_ref_of, forming_seg_ready, trend_following_of
-from py_chain.backtest import advance_exit_decision, execute_pending_exit, close_trade
+from py_chain.backtest import (advance_exit_decision, execute_pending_exit,
+                               close_trade, BacktestEngine)
 
 
 def bi(type_, startTime, endTime, startPrice, endPrice):
@@ -241,6 +242,111 @@ class TestCloseTradeLots(unittest.TestCase):
         tr = close_trade(pos, "close", 1000, 4440.0)
         # (0.5*(4460-4450) + 0.5*(4440-4450)) * 1 * 4 = 0
         self.assertEqual(tr["pnl"], 0.0)
+
+
+class TestEntryBarFloor(unittest.TestCase):
+    """进场K线止损下限（stopEntryBarFloor）：至少在进场背驰周期K线极值外侧加滑点。
+
+    进场K线窗口内运行极值外推（只放松、当根恒不触发），越出窗口自然冻结；
+    与支阻位止损取更宽者；beDone 后止损=beStop 不再外推。"""
+
+    def _floor_pos(self):
+        # long：窗口 [900,1800)（markRes=15m），fill 时种子 ext=90、支阻位止损 93
+        pos = make_pos(direction="long", entryPrice=95.0, stopRef=93.0, beStop=94.5,
+                       planDirection="多头多")
+        pos.update({"entryBarStart": 900, "entryBarEnd": 1800,
+                    "entryBarExt": 90.0, "slipStopEff": 3.0})
+        return pos
+
+    def test_no_stop_inside_entry_bar(self):
+        # 进场K线内逐根新低：止损同步外推，当根恒在其自身极值−滑点内侧 → 不触发
+        pos = self._floor_pos()
+        r = advance_exit_decision(pos, 930, bar(900, 95, 96, 88, 89), [], [])
+        self.assertIsNone(r)                       # 旧口径此处 88<93 会被扫掉
+        self.assertEqual(pos["entryBarExt"], 88.0)
+        self.assertEqual(pos["stopRef"], 85.0)     # min(93, 88−3)
+        r = advance_exit_decision(pos, 1110, bar(1080, 89, 90, 84, 85), [], [])
+        self.assertIsNone(r)
+        self.assertEqual(pos["stopRef"], 81.0)     # min(85, 84−3)
+
+    def test_frozen_after_entry_bar(self):
+        pos = self._floor_pos()
+        advance_exit_decision(pos, 930, bar(900, 95, 96, 88, 89), [], [])
+        advance_exit_decision(pos, 1110, bar(1080, 89, 90, 84, 85), [], [])
+        # 窗口外：冻结在 81，跌破才触发
+        r = advance_exit_decision(pos, 2010, bar(1800, 85, 86, 80, 81), [], [])
+        self.assertEqual(r, "stopSr")
+        self.assertEqual(pos["stopRef"], 81.0)
+
+    def test_sr_stop_wider_kept(self):
+        # 支阻位止损已比K线低点下限更宽 → 维持（"至少"=取更宽者）
+        pos = self._floor_pos()
+        pos["stopRef"] = 80.0
+        advance_exit_decision(pos, 930, bar(900, 95, 96, 88, 89), [], [])
+        self.assertEqual(pos["stopRef"], 80.0)
+
+    def test_short_symmetric(self):
+        pos = make_pos(direction="short", entryPrice=4450.0, stopRef=4463.0, beStop=4445.0)
+        pos.update({"entryBarStart": 900, "entryBarEnd": 1800,
+                    "entryBarExt": None, "slipStopEff": 3.0})
+        r = advance_exit_decision(pos, 930, bar(900, 4450, 4468, 4449, 4466), [], [])
+        self.assertIsNone(r)                       # high 4468 < 新止损 4471
+        self.assertEqual(pos["entryBarExt"], 4468.0)
+        self.assertEqual(pos["stopRef"], 4471.0)   # max(4463, 4468+3)
+        r = advance_exit_decision(pos, 2010, bar(1800, 4470, 4475, 4465, 4472), [], [])
+        self.assertEqual(r, "stopSr")
+
+    def test_bestop_precedence_after_breakeven(self):
+        # beDone 后止损=beStop，下限不再外推（stopRef 保持原值）
+        pos = self._floor_pos()
+        pos["beDone"] = True
+        r = advance_exit_decision(pos, 930, bar(900, 95, 96, 88, 89), [], [])
+        self.assertEqual(r, "stopBe")              # low 88 < beStop 94.5 → 走保本位
+        self.assertEqual(pos["stopRef"], 93.0)     # 下限未外推
+
+    def test_no_window_legacy_pos_unchanged(self):
+        # 旧口径持仓（无 entryBar 字段）行为不变
+        pos = make_pos(direction="long", entryPrice=95.0, stopRef=93.0)
+        r = advance_exit_decision(pos, 930, bar(900, 95, 96, 88, 89), [], [])
+        self.assertEqual(r, "stopSr")
+
+
+class TestFillEntryBarSeed(unittest.TestCase):
+    """_fill_pending 的下限种子：窗口内已收 fine bar 极值 + 与支阻位止损取更宽者。"""
+
+    def _fill(self, **kw):
+        lows = kw.pop("lows", [100, 98, 97, 96, 90, 88])     # 0,180,...,900（900 低点 88）
+        bars = {"3": [bar(i * 180, 100, 101, lo, 100)
+                      for i, lo in enumerate(lows)]}
+        eng = BacktestEngine(bars, periods=["3"], slip_stop=3.0, slip_fallback=10.0,
+                             stop_entry_bar_floor=kw.pop("floor", True))
+        sig = {"direction": "long", "periodX": "60", "markRes": "15",
+               "time": 880, "price": 94.0, "nearSr": 94.0, "realtime": True,
+               "strategyKey": "wait2Buy"}
+        trades, stats = [], {"suppressed": 0, "executed": 0}
+        eng._fill_pending(trades, [sig], 95.0, kw.pop("nextTime", 1080), stats, collectT=880,
+                          open_pos={})
+        return trades[0]
+
+    def test_seed_extends_stop(self):
+        # 进场 1080（15m 窗口 [900,1800)）：已收 bar 900 low=88 → 下限 88−3=85 < 支阻位 91
+        tr = self._fill()
+        self.assertEqual(tr["entryBarStart"], 900)
+        self.assertEqual(tr["entryBarEnd"], 1800)
+        self.assertEqual(tr["entryBarExt"], 88.0)
+        self.assertEqual(tr["slipStopEff"], 3.0)
+        self.assertEqual(tr["stopRef"], 85.0)     # min(94−3, 88−3)
+
+    def test_boundary_entry_no_seed(self):
+        # 进场恰在 15m 边界 900：窗口 [900,900) 空 → 无种子，下限暂不生效
+        tr = self._fill(nextTime=900, lows=[100, 98, 97, 96, 88, 90])
+        self.assertIsNone(tr["entryBarExt"])
+        self.assertEqual(tr["stopRef"], 91.0)     # 纯支阻位 94−3
+
+    def test_floor_off_legacy(self):
+        tr = self._fill(floor=False)
+        self.assertIsNone(tr["entryBarStart"])
+        self.assertEqual(tr["stopRef"], 91.0)
 
 
 if __name__ == "__main__":

@@ -127,6 +127,20 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
         # TP3 全平：顺势=有利方向笔破前高/前低；逆势=形成段成笔预期快速离场
         pos["pendingExit"] = "close"
         return "close"
+    # 进场K线止损下限（stopEntryBarFloor）：进场背驰周期K线仍在走（bar 落在其窗口内）
+    # 且未保本 → 用当根极值更新运行极值并把止损外推到 运行极值±有效止损滑点（只放松，
+    # 与支阻位止损取更宽者）；bar 越出窗口即自然冻结。状态全在 pos 上，三模式共用本函数。
+    bs, be = pos.get("entryBarStart"), pos.get("entryBarEnd")
+    if (bs is not None and not pos.get("beDone")
+            and bs <= bar["time"] < be):
+        e = bar["high"] if is_short else bar["low"]
+        cur = pos.get("entryBarExt")
+        pos["entryBarExt"] = e if cur is None else \
+            (max(cur, e) if is_short else min(cur, e))
+        floor = (pos["entryBarExt"] + pos["slipStopEff"] if is_short
+                 else pos["entryBarExt"] - pos["slipStopEff"])
+        pos["stopRef"] = max(pos["stopRef"], floor) if is_short \
+            else min(pos["stopRef"], floor)
     stop = pos.get("beStop") if pos.get("beDone") else pos.get("stopRef")
     if stop is not None:  # 止损位永不为 None（兜底进场价±slip_fallback），此保护仅防御旧持仓数据
         hit = bar["high"] > stop if is_short else bar["low"] < stop
@@ -196,7 +210,7 @@ class BacktestEngine:
                  slip_be_atr_k=DEFAULT_SLIP_BE_ATR_K,
                  near=DEFAULT_NEAR, sr_kwargs=None,
                  diverge_confirm=None, expect_bi=None, module_params=None,
-                 entry_macd_shrink=None):
+                 entry_macd_shrink=None, stop_entry_bar_floor=None):
         self.periods = list(periods or DEFAULT_PERIODS)
         # 各周期按时间升序整理 + 缓存时间数组
         self.bars = {}
@@ -292,6 +306,11 @@ class BacktestEngine:
         # 确认背驰且柱缩，下一根开盘进场；闸未过不消耗段去重键，下一拍自动重评。
         self.entry_macd_shrink = (bool(CHAN_CFG.get("entryMacdShrink"))
                                   if entry_macd_shrink is None else bool(entry_macd_shrink))
+        # 进场K线止损下限（参数中心可调）：None → 读 CHAN_CFG 一次固化为本轮值。
+        # True = 止损至少在进场背驰周期K线极值外侧加滑点处（运行中外推、收盘冻结）。
+        self.stop_entry_bar_floor = (bool(CHAN_CFG.get("stopEntryBarFloor"))
+                                     if stop_entry_bar_floor is None
+                                     else bool(stop_entry_bar_floor))
         # M4 检测周期够笔口径（回测页面可选）：True（默认）= 预期够笔（末笔反向 + 端点后
         # ≥expectBiMinBars 根K线即视为回调/反弹中）；False = 旧口径（末笔须已是确认的反向笔）。
         self.expect_bi = (bool(CHAN_CFG.get("expectBiEnough"))
@@ -1229,6 +1248,28 @@ class BacktestEngine:
             if bi < len(fine) and fine[bi]["time"] == entryTime:
                 beStop = (fine[bi]["high"] + slip_be_eff) if d == "short" \
                     else (fine[bi]["low"] - slip_be_eff)
+            # 进场K线止损下限（stopEntryBarFloor，2026-09-23）：止损通常按支阻位逻辑，但
+            # 至少在进场时所在背驰周期K线（markRes）极值外侧加滑点处——该K线运行中每创新
+            # 低/高，advance_exit_decision 用运行极值同步外推（只放松），收盘后自然冻结；
+            # 进场K线内部由构造保证不触发止损（当根 low/high 恒在运行极值−+滑点内侧）。
+            # 窗口内已收 fine bar 的极值作种子（成交发生在 entryTime 开盘，此前均已收）；
+            # 时间戳均为周期整数倍（DB 已验证），barStart 直接模周期对齐。
+            barStart = barEnd = extSeed = None
+            slipStopEff = self.slip_stop + self.slip_stop_atr_k * mrAtr
+            if self.stop_entry_bar_floor:
+                sec = intervalSecOf(s.get("markRes")) or 0
+                if sec:
+                    barStart = entryTime - (entryTime % sec)
+                    barEnd = barStart + sec
+                    for b in fine[bisect.bisect_left(fineTimes, barStart):
+                                  bisect.bisect_left(fineTimes, entryTime)]:
+                        e = b["low"] if d == "long" else b["high"]
+                        extSeed = e if extSeed is None else \
+                            (min(extSeed, e) if d == "long" else max(extSeed, e))
+                    if extSeed is not None:
+                        floor = (extSeed - slipStopEff) if d == "long" \
+                            else (extSeed + slipStopEff)
+                        stopRef = min(stopRef, floor) if d == "long" else max(stopRef, floor)
             trades.append({
                 "tradeNo": len(trades) + 1,
                 "periodX": s["periodX"],
@@ -1251,6 +1292,12 @@ class BacktestEngine:
                 # 出场状态机字段（advance_exit_decision/execute_pending_exit 增量维护）
                 "stopRef": stopRef,
                 "beStop": beStop,
+                # 进场K线止损下限状态（advance_exit_decision 运行极值外推用；
+                # ext=None=窗口内尚无已收 bar，下限暂不生效）
+                "entryBarStart": barStart,
+                "entryBarEnd": barEnd,
+                "entryBarExt": extSeed,
+                "slipStopEff": slipStopEff,
                 "state": "open",
                 "beDone": False,
                 "halfDone": False,
@@ -1310,7 +1357,7 @@ def run_backtest(bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
                  slip_be_atr_k=DEFAULT_SLIP_BE_ATR_K,
                  near=DEFAULT_NEAR, sr_kwargs=None,
                  diverge_confirm=None, expect_bi=None, module_params=None,
-                 entry_macd_shrink=None):
+                 entry_macd_shrink=None, stop_entry_bar_floor=None):
     """便捷入口：构建引擎并运行。start_ts=交易开始时刻（None=预热 warmup_bars 根后开始，
     见 BacktestEngine.run）；fill_mode 见 BacktestEngine（anchor=锚点当拍成交，confirm=确认成交）；
     signal_mode：realtime=当下背驰（每拍评估形成中段，默认），confirm=确认制（结构变化时收集）；
@@ -1335,7 +1382,8 @@ def run_backtest(bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
                             near=near, sr_kwargs=sr_kwargs,
                             diverge_confirm=diverge_confirm, expect_bi=expect_bi,
                             module_params=module_params,
-                            entry_macd_shrink=entry_macd_shrink)
+                            entry_macd_shrink=entry_macd_shrink,
+                            stop_entry_bar_floor=stop_entry_bar_floor)
     return engine.run(to_ts=to_ts, start_ts=start_ts, log=log)
 
 
