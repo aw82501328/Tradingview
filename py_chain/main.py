@@ -23,6 +23,7 @@ from .sr_flip import compute_srflip
 from .trading_plan import compute_plan
 from .mark_entry import (compute_entries, filterDetectPeriods,
                          NEAR, ZS_EXIT_WEAK_RATIO)
+from . import mark_entry
 from .tv_draw import draw_trades
 from .chan_core import intervalSecOf, fmtT
 
@@ -183,7 +184,8 @@ def main(argv=None):
     ap.add_argument("--boll-mult", type=float, default=None,
                     help="BOLL 标准差倍数（默认 2）")
     ap.add_argument("--lots", type=int, default=None,
-                    help="每笔进场手数（盈亏 = 价格差 × 方向 × 手数）；缺省用参数中心值（默认 4）")
+                    help="每笔进场手数（盈亏 = 价差 × 方向 × 手数 × 合约乘数，1手=0.01标准手）；"
+                         "缺省按品种取参数中心值（品种行/默认行）")
     ap.add_argument("--slip-stop", type=float, default=None,
                     help="止损位滑点（绝对价格：正确侧支阻位外侧偏移）；缺省用参数中心值（默认 3）")
     ap.add_argument("--slip-fallback", type=float, default=None,
@@ -234,7 +236,7 @@ def main(argv=None):
     pm = param_center.effective_all()
     apply_cfg(param_center.chan_cfg_effective())
     ep = pm["entry"]
-    lots = args.lots if args.lots is not None else ep["lots"]
+    lots = args.lots if args.lots is not None else param_center.lots_of(ep, args.symbol)
     slip_stop = args.slip_stop if args.slip_stop is not None else ep["slip_stop"]
     slip_fallback = args.slip_fallback if args.slip_fallback is not None else ep["slip_fallback"]
     slip_be = args.slip_be if args.slip_be is not None else ep["slip_be"]
@@ -274,7 +276,9 @@ def main(argv=None):
                           start_ts=start_ts,
                           sr_types=sr_types, fib_levels=fib_levels,
                           boll_length=args.boll_length, boll_mult=args.boll_mult,
-                          lots=lots, slip_stop=slip_stop,
+                          lots=lots,
+                          contract_mult=mark_entry.contract_mult_of(args.symbol),
+                          slip_stop=slip_stop,
                           slip_fallback=slip_fallback, slip_be=slip_be,
                           slip_stop_atr_k=slip_stop_atr_k,
                           slip_fallback_atr_k=slip_fallback_atr_k,

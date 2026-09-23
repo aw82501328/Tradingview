@@ -80,6 +80,24 @@
   .progress { height: 6px; background: var(--card-2); border-radius: 3px; overflow: hidden; }
   .progress > div { height: 100%; width: 0%; background: var(--accent); transition: width .3s; }
   .progress-label { font-size: 11px; color: var(--muted); }
+  /* 多品种批量并行进度表（回测卡，2026-09-23）：每品种一行 状态徽标+进度条+计数/错误 */
+  .bt-batch { margin-top: 6px; border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; }
+  .bt-batch-row { display: flex; align-items: center; gap: 10px; padding: 3px 0; font-size: 12px; }
+  .bt-batch-sym { min-width: 128px; font-family: Consolas, monospace; }
+  .bt-batch-state { min-width: 52px; text-align: center; border-radius: 4px; padding: 1px 6px; font-size: 11px; }
+  .bt-batch-state.running { background: #0e1a2e; color: #7cb0ff; }
+  .bt-batch-state.paused { background: #2b2410; color: #ffd66b; }
+  .bt-batch-state.done { background: #0f2415; color: #7fe0b0; }
+  .bt-batch-state.stopped, .bt-batch-state.skipped { background: var(--card-2); color: var(--muted); }
+  .bt-batch-state.error { background: #2a1014; color: #ff8fa3; }
+  .bt-batch-bar { flex: 1; height: 6px; background: var(--card-2); border-radius: 3px; overflow: hidden; }
+  .bt-batch-bar i { display: block; height: 100%; background: var(--accent); }
+  .bt-batch-pct { min-width: 130px; text-align: right; color: var(--muted); font-family: Consolas, monospace; }
+  .bt-batch-err { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ff8fa3; }
+  /* 品种页签（多品种批量回测后按品种查看/保存）：默认选中第一个品种，末位「全部」 */
+  .sym-tabs { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .sym-tab { padding: 2px 12px; font-size: 12px; border-radius: 999px; color: var(--muted); }
+  .sym-tab.active { color: var(--text); border-color: var(--accent); background: #16202f; }
   .log-box {
     background: #0b0d11; border: 1px solid var(--border); border-radius: 6px;
     padding: 8px; font-family: Consolas, monospace; font-size: 11px;
@@ -471,6 +489,7 @@
           <label class="ms-opt"><input type="checkbox" data-sig-opt value="空头多">空头多</label>
         </div>
       </div>
+      <div id="sym-tabs" class="sym-tabs" hidden title="按品种查看结果（多品种批量回测）：表格/汇总/资金曲线随页签切换；「保存方案」存当前品种"></div>
       <select id="filter-status" style="width:auto;" title="按状态过滤信号列表">
         <option value="">全部</option>
         <option value="信号">信号</option>
@@ -504,7 +523,7 @@
         <tr>
           <th>#</th><th>信号时间</th><th>方向</th><th>检测周期</th>
           <th>策略</th><th>背驰级别</th><th>价格</th><th>近支阻</th><th>状态</th><th>成交时间</th><th>成交价</th>
-          <th>出场时间</th><th>出场价</th><th>出场类型</th><th title="分批出场时分别显示本次出场或剩余持仓手数">手数</th><th id="pnl-header" aria-sort="none"><button type="button" id="sort-pnl" class="sort-button" title="点击按整笔交易盈亏从高到低排序">盈亏 ↕</button></th>
+          <th>出场时间</th><th>出场价</th><th>出场类型</th><th title="分批出场时分别显示本次出场或剩余持仓手数；1手=0.01标准手（盈亏=价差×方向×手数×合约乘数）">手数</th><th id="pnl-header" aria-sort="none"><button type="button" id="sort-pnl" class="sort-button" title="点击按整笔交易盈亏从高到低排序">盈亏 ↕</button></th>
         </tr>
       </thead>
       <tbody id="sig-body"></tbody>
@@ -539,6 +558,9 @@ const MODES = [
 ];
 // 周期多选下拉的可选项；30S 不在此列，仍由「30秒级别」开关单独追加
 const PERIOD_OPTIONS = ['D', '240', '60', '15', '3'];
+// 品种清单（三模式共用）：回测卡 = .ms 多选（勾多个 → 批量并行，仅本地数据存储）；
+// 回放/实时沿用单选下拉（选项同源，去硬编码）
+const SYMBOL_OPTIONS = ['OANDA:XAUUSD', 'OANDA:XAGUSD', 'FX:NAS100', 'TVC:USOIL', 'BITSTAMP:BTCUSD'];
 
 const state = { active: null, modes: {} };
 let sigRows = [];
@@ -631,7 +653,7 @@ function buildCard(m) {
     ],
   };
   const rows = [];
-  const periodsHtml = `<div class="field"><label>周期</label><div class="ms">
+  const periodsHtml = `<div class="field"><label>周期</label><div class="ms" data-ms="periods">
     <button type="button" class="ms-toggle" data-ms-toggle aria-expanded="false" title="勾选一个或多个周期">
       <span class="ms-value">${PERIOD_OPTIONS.join(',')}</span><span class="ms-caret">▾</span>
     </button>
@@ -640,8 +662,22 @@ function buildCard(m) {
     </div>
     <input type="hidden" data-cfg="periods" value="${PERIOD_OPTIONS.join(',')}">
   </div></div>`;
+  // 回测卡品种多选（2026-09-23 批量并行）：勾 1 个 = 原单品种行为（后端折叠回 symbol）；
+  // 勾多个 = 批量并行（每品种一个子进程，仅本地数据存储）。回放/实时沿用单选。
+  const symbolsHtml = m.id === 'backtest'
+    ? `<div class="field"><label>品种</label><div class="ms" data-ms="symbols">
+      <button type="button" class="ms-toggle" data-ms-toggle aria-expanded="false" title="勾选一个或多个品种；多个=批量并行回测（仅本地数据存储）">
+        <span class="ms-value">${SYMBOL_OPTIONS[0]}</span><span class="ms-caret">▾</span>
+      </button>
+      <div class="ms-panel" hidden>${SYMBOL_OPTIONS.map((s, i) =>
+        `<label class="ms-opt"><input type="checkbox" data-ms-opt value="${s}"${i === 0 ? ' checked' : ''}>${s}</label>`).join('')}
+      </div>
+      <input type="hidden" data-cfg="symbols" value="${SYMBOL_OPTIONS[0]}">
+    </div></div>`
+    : `<div class="field"><label>品种</label><select data-cfg="symbol">${SYMBOL_OPTIONS.map(s =>
+        `<option>${s}</option>`).join('')}</select></div>`;
   rows.push(`<div class="row">
-    <div class="field"><label>品种</label><select data-cfg="symbol"><option>OANDA:XAUUSD</option><option>OANDA:XAGUSD</option><option>FX:NAS100</option><option>TVC:USOIL</option><option>BITSTAMP:BTCUSD</option></select></div>
+    ${symbolsHtml}
     ${periodsHtml}
     <div class="field"><label>${m.id === 'backtest' ? '起始日期（开始交易）' : '起始日期'}</label><input type="date" data-cfg="from" value="2026-07-02"></div>
     ${m.id === 'backtest' ? '<div class="field"><label>结束日期（空=到最新）</label><input type="date" data-cfg="to"></div>' : ''}
@@ -667,10 +703,6 @@ function buildCard(m) {
     ${sourceField}
     <div class="field"><label>30秒级别</label><select data-cfg="with_30s"><option value="false">关闭</option><option value="true">开启（仅作背驰级别，时间轴仍为3m；30S数据量大，回测明显慢于关闭时）</option></select></div>
   </div>`);
-  // 手数/滑点/近支阻/背驰进场/够笔等算法参数已移至「参数配置」页分模块统一管理（2026-09-15 去重）
-  if (m.id === 'backtest') {
-    rows.push(`<div class="row" style="font-size:11px;color:var(--muted);">手数、止损/保本滑点、近支阻阈值、画笔/买卖点/进出场算法阈值（含背驰进场/检测周期够笔）等在「参数配置」页统一设置，启动时读取生效；历史方案对比表仍显示各方案保存时的取值。</div>`);
-  }
   return `
   <div class="card" id="card-${m.id}">
     <h2><span>${m.name}</span><span class="badge" id="badge-${m.id}">idle</span></h2>
@@ -678,6 +710,7 @@ function buildCard(m) {
     <div class="mode-fields">${rows.join('')}</div>
     <div class="progress"><div id="bar-${m.id}"></div></div>
     <div class="progress-label" id="plabel-${m.id}"></div>
+    ${m.id === 'backtest' ? '<div id="bt-batch" class="bt-batch" hidden></div>' : ''}
     <div class="log-box" id="log-${m.id}"></div>
     <div class="btn-row">
       <button class="start" id="btn-start-${m.id}">启动</button>
@@ -685,7 +718,8 @@ function buildCard(m) {
       <button id="btn-resume-${m.id}" disabled>继续</button>
       <button class="danger" id="btn-stop-${m.id}" disabled>停止</button>
       ${m.id === 'backtest' ? `
-      <button id="btn-bt-save" disabled title="把最近一次完成的全量回测（参数+本轮信号+固化汇总）保存为历史方案">保存方案</button>` : ''}
+      <button id="btn-bt-save" disabled title="把最近一次完成的全量回测（参数+本轮信号+固化汇总）保存为历史方案；多品种批量=保存当前页签品种">保存方案</button>
+      <button id="btn-bt-save-all" hidden title="多品种批量一键保存：每个完成品种自动各存一条方案（名称自动带品种）">全部保存</button>` : ''}
     </div>
   </div>`;
 }
@@ -738,6 +772,7 @@ function exitEventsDesc(r) {
 function exitDisplayRows(r) {
   const numeric = value => value != null && Number.isFinite(Number(value)) ? Number(value) : null;
   const totalPnl = numeric(r.pnl), lots = numeric(r.lots);
+  const mult = numeric(r.mult) ?? 1;   // 合约乘数快照（2026-09-23：1手=0.01标准手；旧行无此键 → 1）
   const final = {time:r.exitTime,price:r.exitPrice,type:r.exitType,
     label:r.exitType ? exitTypeName(r.exitType) : (r.state === 'open' ? '持仓中' : '-'),lots,pnl:totalPnl};
   // 现有结算按首次 half 平掉原持仓一半；breakeven 仅移动止损，不是出场。
@@ -747,7 +782,7 @@ function exitDisplayRows(r) {
   const entry = numeric(r.entryPrice), price = numeric(half.price);
   const direction = r.direction === 'long' ? 1 : r.direction === 'short' ? -1 : null;
   const halfPnl = entry == null || price == null || halfLots == null || direction == null
-    ? null : (price - entry) * direction * halfLots;
+    ? null : (price - entry) * direction * halfLots * mult;
   final.lots = halfLots;
   final.pnl = totalPnl == null || halfPnl == null ? null : totalPnl - halfPnl;
   if (!r.exitType) final.label = '剩余持仓';
@@ -950,10 +985,12 @@ function renderLiveEquity() {
   if (selectedMode !== 'backtest') {
     host.hidden = true; host.innerHTML = ''; return;
   }
-  const pts = equityPoints(sigRows.filter(r => r.mode === 'backtest'));
+  // 多品种批量：跟随品种页签（多品种混合资金曲线口径混乱）；单品种时页签隐藏=全部
+  const fs = currentSymFilter();
+  const pts = equityPoints(sigRows.filter(r => r.mode === 'backtest' && (!fs || r.symbol === fs)));
   if (!pts.length) { host.hidden = true; host.innerHTML = ''; return; }
   drawEquityChart(host, [{ name: '本轮回测', points: pts }], {
-    height: 280, title: '资金曲线', note: '出场盈亏累加（含半平）；不受上方筛选影响',
+    height: 280, title: '资金曲线', note: '出场盈亏累加（含半平）；品种页签生效，状态/策略/方向筛选不影响',
   });
 }
 function statusClass(s) {
@@ -985,10 +1022,13 @@ function filteredRows() {
   const f = el('filter-status').value;
   const st = sigFilterValues('strategy');
   const dir = sigFilterValues('direction');
+  // 品种页签仅对回测行生效（多品种批量跑完后切换查看；回放/实时不受影响）
+  const fs = selectedMode === 'backtest' ? currentSymFilter() : '';
   return sigRows.filter(r=>r.mode===selectedMode
     &&(!f||r.status===f)
     &&(!st.length||st.includes(r.strategyKey))
-    &&(!dir.length||dir.includes(signalDirectionKey(r))));
+    &&(!dir.length||dir.includes(signalDirectionKey(r)))
+    &&(!fs||r.symbol===fs));
 }
 // 盈亏汇总：统计（summaryStats，对过滤后的行实时聚合）与展示（summaryHtml）分离，
 // 展示函数同时吃后端保存时固化的 summary（bt_runs.compute_summary 同口径），
@@ -1135,16 +1175,22 @@ function signalRowsHtml(rows, opts = {}) {
   const interactive = opts.interactive !== false;
   const selectedId = 'selectedId' in opts ? opts.selectedId : selectedSignal[selectedMode];
   const showLoss = !!opts.showLossReason;
+  // 品种角标：回测行出现 >1 个品种且当前是「全部」混合视图时在策略列标注行所属品种
+  // （已按页签切到具体品种时每行品种相同，角标冗余不显示）
+  const showSym = interactive && !currentSymFilter() && new Set(
+    sigRows.filter(r => r.mode === 'backtest').map(r => r.symbol)).size > 1;
   return rows.map(r => {
     const exits = exitDisplayRows(r);
     const no = opts.labelById ? (opts.labelById[r.id] ?? r.id)
       : (interactive ? displayNo(r) : r.id);
+    const symBadge = showSym && r.mode === 'backtest' && r.symbol
+      ? `<span class="mini-badge" title="${escAttr(r.symbol)}">${esc(String(r.symbol).split(':').pop())}</span>` : '';
     const shared = `
       <td title="内部记录 id：${r.id}">${no}</td>
       <td>${fmtTime(r.time)}</td>
       <td class="${r.direction === 'long' ? 'long' : 'short'}">${signalDirectionName(r)}</td>
       <td>${r.periodX || '-'}</td>
-      <td>${r.strategyKey || '-'}${candidateBadges(r)}</td>
+      <td>${r.strategyKey || '-'}${candidateBadges(r)}${symBadge}</td>
       <td>${r.markRes || '-'}</td>
       <td>${r.price != null ? Number(r.price).toFixed(2) : '-'}</td>
       <td>${r.nearSr != null ? Number(r.nearSr).toFixed(2) : '-'}</td>
@@ -1252,6 +1298,7 @@ function showCopyTip(msg) {
 }
 
 function renderTable() {
+  refreshSymTabs();        // 品种页签先于过滤刷新：首个多品种行到达即回落默认选中品种
   const rows = filteredRows();
   if (!sigRows.some(r=>r.mode===selectedMode&&r.id===selectedSignal[selectedMode])) {
     selectedSignal[selectedMode] = null;
@@ -1436,8 +1483,55 @@ function applyStatus(status) {
     const p = w.progress || {};
     if (p.pct != null) { bar.style.width = p.pct + '%'; el(`plabel-${m}`).textContent = `${p.current}/${p.total} (${p.pct}%)`; }
     else { bar.style.width = w.state === 'running' ? '100%' : '0%'; el(`plabel-${m}`).textContent = ''; }
+    if (m === 'backtest') renderBtBatch();   // 批量并行进度表（init/刷新恢复；单品种 batch=null → 隐藏）
   }
   updateMarkButtons();
+}
+
+// ---------- 多品种批量并行（回测）：每品种进度表 + 品种筛选 ----------
+function renderBtBatch() {
+  const host = el('bt-batch');
+  if (!host) return;
+  const batch = state.modes.backtest?.batch;
+  if (!batch || !Object.keys(batch).length) { host.hidden = true; host.innerHTML = ''; return; }
+  host.hidden = false;
+  host.innerHTML = Object.entries(batch).map(([sym, st]) => {
+    const pct = st.pct != null ? st.pct : (st.state === 'done' ? 100 : 0);
+    const cnt = st.state === 'skipped' ? '—' : `${st.current ?? 0}/${st.total ?? 0} (${pct}%)`;
+    const err = st.error ? `<span class="bt-batch-err" title="${escAttr(st.error)}">${esc(st.error)}</span>` : '';
+    return `<div class="bt-batch-row" data-sym="${escAttr(sym)}" style="cursor:pointer" title="点击在下方记录区按该品种查看信号">
+      <span class="bt-batch-sym">${esc(sym)}</span>
+      <span class="bt-batch-state ${esc(st.state || 'running')}">${esc(st.state || 'running')}</span>
+      <span class="bt-batch-bar"><i style="width:${Math.max(0, Math.min(100, pct))}%"></i></span>
+      <span class="bt-batch-pct">${cnt}</span>${err}
+    </div>`;
+  }).join('');
+}
+
+// 品种页签（记录区顶部，多品种批量回测）：>1 个品种时显示，**默认选中第一个品种**
+// （不默认混合「全部」）；表格/汇总/资金曲线随页签切换，「保存方案」存当前品种。
+// symTabSel：null=未选（刷新/新一轮批量后回落到第一个品种）；''=「全部」；其余=品种。
+// 顺序优先取批量勾选顺序（batch 键序），否则按行首次出现顺序。
+let symTabSel = null;
+let _symTabsSig = '';
+function currentSymFilter() { return symTabSel || ''; }
+function refreshSymTabs() {
+  const host = el('sym-tabs');
+  if (!host) return;
+  const batchSyms = Object.keys(state.modes.backtest?.batch || []);
+  const rowSyms = [...new Set(sigRows.filter(r => r.mode === 'backtest' && r.symbol).map(r => r.symbol))];
+  const syms = batchSyms.length > 1 ? batchSyms : rowSyms;
+  if (syms.length <= 1) {           // 单品种/无行：隐藏页签、清选择（=不过滤）
+    host.hidden = true; symTabSel = null; _symTabsSig = ''; return;
+  }
+  if (symTabSel === null || (symTabSel !== '' && !syms.includes(symTabSel))) symTabSel = syms[0];
+  host.hidden = false;
+  const sig = syms.join('') + '|' + symTabSel;
+  if (sig === _symTabsSig) return;  // 运行中逐行新增时避免无谓 DOM 重建
+  _symTabsSig = sig;
+  host.innerHTML = syms.map(s =>
+    `<button type="button" class="sym-tab${s === symTabSel ? ' active' : ''}" data-sym="${escAttr(s)}" title="${escAttr(s)}">${esc(s.split(':').pop())}</button>`).join('')
+    + `<button type="button" class="sym-tab${symTabSel === '' ? ' active' : ''}" data-sym="" title="全部品种混合视图">全部</button>`;
 }
 
 function addLog(m, msg) {
@@ -1481,14 +1575,18 @@ function collectCfg(m) {
   return cfg;
 }
 
-// ---------- 周期多选下拉 ----------
-// 勾选变化 → 按 PERIOD_OPTIONS 固定顺序同步隐藏 input（data-cfg="periods"）与按钮文案
+// ---------- 周期/品种多选下拉 ----------
+// 勾选变化 → 按面板内选项顺序（= 常量清单顺序）同步隐藏 input（data-cfg）与按钮文案。
+// 面板带 data-ms="periods"|"symbols" 区分用途（2026-09-23 品种多选加入后泛化）
 function syncMs(ms) {
-  const checked = [...ms.querySelectorAll('[data-ms-opt]')]
-    .filter(c => c.checked).map(c => c.value);
-  const values = PERIOD_OPTIONS.filter(p => checked.includes(p));
-  ms.querySelector('.ms-value').textContent = values.length ? values.join(',') : '请选择周期';
-  ms.querySelector('input[data-cfg="periods"]').value = values.join(',');
+  if (!ms) return;
+  const boxes = [...ms.querySelectorAll('[data-ms-opt]')];
+  const values = boxes.filter(c => c.checked).map(c => c.value);
+  const input = ms.querySelector('input[data-cfg]');
+  ms.querySelector('.ms-value').textContent = values.length
+    ? values.join(',')
+    : (input?.dataset.cfg === 'symbols' ? '请选择品种' : '请选择周期');
+  if (input) input.value = values.join(',');
 }
 function closeAllMsPanels(except) {
   document.querySelectorAll('.ms-panel').forEach(p => {
@@ -1497,6 +1595,18 @@ function closeAllMsPanels(except) {
     p.hidden = true;
     ms.querySelector('[data-ms-toggle]').setAttribute('aria-expanded', 'false');
   });
+}
+
+// 回测卡：勾选 >1 个品种时禁用不可并行的数据源（live/cache）并回落 store。
+// 提示性联动；服务端 normalize_cfg 硬校验兜底
+function toggleBtSourceOptions() {
+  const card = el('card-backtest');
+  const sel = card?.querySelector('[data-cfg="data_source"]');
+  if (!sel) return;
+  const n = String(card.querySelector('[data-cfg="symbols"]')?.value || '')
+    .split(',').map(s => s.trim()).filter(Boolean).length;
+  [...sel.options].forEach(o => { if (o.value !== 'store') o.disabled = n > 1; });
+  if (n > 1 && sel.value !== 'store') sel.value = 'store';
 }
 
 // ---------- 绑定 ----------
@@ -1510,8 +1620,17 @@ function bindCard(m) {
   el(`btn-start-${m}`).onclick = async () => {
     const cfg = collectCfg(m);
     if (!cfg.periods.length) { alert('请至少选择一个周期'); return; }
-    // 全量回测启动前自动清空本轮信号表格，避免新旧行混在一起
-    if (m === 'backtest') await clearModeRows('backtest');
+    if (m === 'backtest') {
+      // 品种多选：空 → 拒绝；>1 个 → 仅本地数据存储（cache 单品种文件/live 共享图表不可并行）
+      cfg.symbols = String(cfg.symbols || '').split(',').map(s => s.trim()).filter(Boolean);
+      if (!cfg.symbols.length) { alert('请至少选择一个品种'); return; }
+      if (cfg.symbols.length > 1 && cfg.data_source !== 'store') {
+        alert('多品种批量回测仅支持数据源=本地数据存储（store）');
+        return;
+      }
+      // 全量回测启动前自动清空本轮信号表格，避免新旧行混在一起
+      await clearModeRows('backtest');
+    }
     const r = await api(`/api/${m}/start`, { cfg });
     if (r) { addLog(m, '启动请求已发送'); }
   };
@@ -1569,6 +1688,16 @@ function connectSSE() {
     const bar = el(`bar-${d.mode}`);
     if (d.pct != null) { bar.style.width = d.pct + '%'; el(`plabel-${d.mode}`).textContent = `${d.current}/${d.total} (${d.pct}%)`; }
   });
+  // 多品种批量并行：单品种进度/状态行（仅回测页监听；总进度条仍走 progress 事件）
+  es.addEventListener('bt_symbol', e => {
+    const d = JSON.parse(e.data);
+    if (d.mode !== 'backtest' || !d.symbol) return;
+    if (!state.modes.backtest) state.modes.backtest = {};
+    const batch = state.modes.backtest.batch = state.modes.backtest.batch || {};
+    batch[d.symbol] = { state: d.state, current: d.current, total: d.total,
+                        pct: d.pct, error: d.error, stats: d.stats, duration: d.duration };
+    renderBtBatch();
+  });
   es.addEventListener('signals_cleared', e => { const d=JSON.parse(e.data);sigRows=d.mode?sigRows.filter(r=>r.mode!==d.mode):[];renderTable(); });
 }
 
@@ -1601,13 +1730,25 @@ function updateBtSaveButton() {
   const btn = el('btn-bt-save');
   if (!btn) return;
   const st = state.modes.backtest?.state;
-  btn.disabled = !['done', 'stopped'].includes(st) || !sigRows.some(r => r.mode === 'backtest');
+  const ready = ['done', 'stopped'].includes(st) && sigRows.some(r => r.mode === 'backtest');
+  btn.disabled = !ready;
+  // 「全部保存」：仅多品种批量跑完出现（一键每品种各存一条）
+  const all = el('btn-bt-save-all');
+  if (all) {
+    const show = Object.keys(state.modes.backtest?.batch || {}).length > 1 && ready;
+    all.hidden = !show;
+    all.disabled = !show;
+  }
 }
 
-// 表单默认名与服务端 default_name 同式：品种 + 起始日期（→结束日期，有则） + 保存时刻
+// 表单默认名与服务端 default_name 同式：品种 + 起始日期（→结束日期，有则） + 保存时刻。
+// 品种来源：批量 → 当前页签品种（默认已选中第一个品种）；单品种 → 表单唯一勾选值
 function btDefaultName() {
   const card = el('card-backtest');
-  const sym = card.querySelector('[data-cfg="symbol"]')?.value || '';
+  const batch = state.modes.backtest?.batch || {};
+  const sym = currentSymFilter() || Object.keys(batch)[0]
+    || String(card.querySelector('[data-cfg="symbols"]')?.value || '')
+      .split(',').map(s => s.trim()).filter(Boolean)[0] || '';
   const from = card.querySelector('[data-cfg="from"]')?.value || '';
   const to = card.querySelector('[data-cfg="to"]')?.value || '';
   const p = n => String(n).padStart(2, '0');
@@ -1618,12 +1759,35 @@ function btDefaultName() {
 
 async function saveBtRun() {
   if (el('btn-bt-save').disabled) return;
+  // 多品种批量：保存当前页签品种（「全部」时提示先选品种）；单品种：不传 symbol 走原路径
+  const batchKeys = Object.keys(state.modes.backtest?.batch || {});
+  const fs = currentSymFilter();
+  if (batchKeys.length > 1 && !fs) {
+    alert('多品种批量回测：请先在记录区顶部点选要保存的品种页签（当前为「全部」）');
+    return;
+  }
   const name = prompt('方案名称（参数 + 本轮信号记录 + 汇总将一起保存）：', btDefaultName());
   if (name === null) return;
-  const r = await api('/api/bt/runs/save', { name: name.trim() });
+  const r = await api('/api/bt/runs/save', { name: name.trim(), symbol: fs || undefined });
   if (r) {
     showRecordTab('bt');            // 保存成功后切到历史方案 TAB 直见结果（内部已刷新列表）
   }
+}
+
+// 一键全存（多品种批量）：每个完成品种自动各存一条方案（名称自动带品种）
+async function saveAllBtRuns() {
+  if (el('btn-bt-save-all')?.disabled) return;
+  const batch = state.modes.backtest?.batch || {};
+  const n = Object.keys(batch).filter(s => ['done', 'stopped'].includes(batch[s]?.state)).length;
+  if (!n) { alert('没有可保存的品种结果'); return; }
+  if (!confirm(`将按品种保存 ${n} 条方案（名称自动带品种），继续？`)) return;
+  const r = await api('/api/bt/runs/save_all', {});
+  if (!r) return;
+  const parts = [`已保存 ${r.saved.length} 条`];
+  if (r.skipped?.length) parts.push(`跳过 ${r.skipped.length} 个：` + r.skipped.map(s => `${s.symbol}（${s.reason}）`).join('；'));
+  if (r.failed?.length) parts.push(`失败 ${r.failed.length} 个：` + r.failed.map(s => `${s.symbol}（${s.error}）`).join('；'));
+  alert(parts.join('\n'));
+  if (r.saved?.length) showRecordTab('bt');
 }
 
 // ---------- 记录区 TAB 切换（进场信号记录 / 历史回测方案） ----------
@@ -1754,11 +1918,11 @@ const BT_METRICS = [
   ['同向过滤', s => s.cnt_filtered ?? '-'],
 ];
 // 参数对比展示顺序与汉化（键为保存的规范化 cfg 字段名）
-const BT_CFG_KEYS = ['symbol', 'from', 'to', 'periods', 'data_source', 'lead_days', 'warmup', 'lots',
+const BT_CFG_KEYS = ['symbol', 'from', 'to', 'periods', 'data_source', 'lead_days', 'warmup', 'lots', 'contract_mult',
                      'slip_stop', 'slip_stop_atr_k', 'slip_fallback', 'slip_fallback_atr_k', 'slip_be', 'slip_be_atr_k',
                      'near', 'sr_preset', 'diverge_confirm', 'expect_bi', 'entry_macd_shrink', 'stop_entry_bar_floor', 'with_30s'];
 const BT_CFG_LABELS = { symbol: '品种', from: '起始日期', to: '结束日期', periods: '周期', data_source: '数据源',
-                        lead_days: '预热提前(天)', warmup: '预热根数', lots: '手数', slip_stop: '止损滑点', slip_stop_atr_k: '止损滑点ATR系数',
+                        lead_days: '预热提前(天)', warmup: '预热根数', lots: '手数', contract_mult: '合约乘数', slip_stop: '止损滑点', slip_stop_atr_k: '止损滑点ATR系数',
                         slip_fallback: '兜底止损滑点', slip_fallback_atr_k: '兜底滑点ATR系数',
                         slip_be: '保本滑点', slip_be_atr_k: '保本滑点ATR系数',
                         near: '近支阻阈值', sr_preset: '支阻预设', diverge_confirm: '背驰进场', expect_bi: '检测周期够笔',
@@ -1851,7 +2015,7 @@ async function fillCompareEquity(runs, host) {
 // 信号表列：主表无亏损原因；明细在盈亏后追加该列
 const SIG_TABLE_HEADERS = `<th>#</th><th>信号时间</th><th>方向</th><th>检测周期</th>
   <th>策略</th><th>背驰级别</th><th>价格</th><th>近支阻</th><th>状态</th><th>成交时间</th><th>成交价</th>
-  <th>出场时间</th><th>出场价</th><th>出场类型</th><th title="分批出场时分别显示本次出场或剩余持仓手数">手数</th>
+  <th>出场时间</th><th>出场价</th><th>出场类型</th><th title="分批出场时分别显示本次出场或剩余持仓手数；1手=0.01标准手（盈亏=价差×方向×手数×合约乘数）">手数</th>
   <th id="bt-detail-pnl-header" aria-sort="none"><button type="button" id="sort-bt-detail-pnl" class="sort-button" title="点击按整笔交易盈亏从高到低排序">盈亏 ↕</button></th>
   <th title="已平仓亏损单：信号后 N 根检测周期收盘 vs 信号价">亏损原因</th>`;
 
@@ -2012,6 +2176,7 @@ function fillBtDetail(run, preserve = false) {
   el('bt-detail-body').innerHTML = `
     <section id="bt-detail-overview" role="tabpanel" aria-labelledby="bt-detail-tab-overview" tabindex="0">
       <div class="bt-kpis">${btDetailMetricsHtml(btDetailSummary)}</div>
+      <p class="bt-note">手数口径（2026-09-23）：1 手 = 0.01 标准手（MT4/MT5 经纪商口径）；盈亏 = 价差 × 方向 × 手数 × 合约乘数（黄金 ×1.0、原油 ×10、白银 ×50、BTC/纳指 ×0.01、其他品种 ×1.0）。</p>
       <section class="bt-panel bt-chart-panel"><div class="equity-chart" id="bt-detail-equity"></div>
         <div id="bt-detail-equity-empty" class="bt-empty" hidden>暂无已实现盈亏记录，产生出场记录后可展示资金曲线。</div></section>
       <div class="bt-insights">
@@ -2350,7 +2515,8 @@ function loadBtCfg(run) {
   const card = el('card-backtest');
   card.querySelectorAll('[data-cfg]').forEach(inp => {
     const k = inp.dataset.cfg;
-    if (k === 'periods' || k === 'with_30s' || !(k in cfg)) return;  // 这两项由 periods 推导
+    // periods/with_30s 由 periods 推导；symbols 由 symbol/symbols 专门回填（多选面板）
+    if (k === 'periods' || k === 'symbols' || k === 'with_30s' || !(k in cfg)) return;
     const v = typeof cfg[k] === 'boolean' ? String(cfg[k]) : cfg[k];
     // select 遇到不在选项里的值会静默重置为首项（如品种已删库、预设已删）：先补临时选项再赋值
     if (inp.tagName === 'SELECT' && typeof v === 'string' && v && ![...inp.options].some(o => o.value === v)) {
@@ -2359,8 +2525,16 @@ function loadBtCfg(run) {
     inp.value = v;
   });
   const periods = Array.isArray(cfg.periods) ? cfg.periods : [];
-  card.querySelectorAll('[data-ms-opt]').forEach(c => { c.checked = periods.includes(c.value); });
-  syncMs(card.querySelector('.ms'));
+  // 周期/品种两个多选面板分别回填（历史方案：单品种 symbol 或批量 symbols 列表）
+  const periodsMs = card.querySelector('.ms[data-ms="periods"]');
+  periodsMs?.querySelectorAll('[data-ms-opt]').forEach(c => { c.checked = periods.includes(c.value); });
+  syncMs(periodsMs);
+  const syms = Array.isArray(cfg.symbols) && cfg.symbols.length ? cfg.symbols
+    : (cfg.symbol ? [cfg.symbol] : []);
+  const symbolsMs = card.querySelector('.ms[data-ms="symbols"]');
+  symbolsMs?.querySelectorAll('[data-ms-opt]').forEach(c => { c.checked = syms.includes(c.value); });
+  syncMs(symbolsMs);
+  toggleBtSourceOptions();
   card.querySelector('[data-cfg="with_30s"]').value = String(periods.includes('30S'));
   // 结束日期显式清空/回填：旧方案 cfg 无 to 键，通用循环会跳过——不清空则上次手填值残留、悄悄截断复现回测
   card.querySelector('[data-cfg="to"]').value = cfg.to || '';
@@ -2386,6 +2560,7 @@ async function deleteBtRun(run) {
 
 function bindBtRuns() {
   el('btn-bt-save').onclick = saveBtRun;
+  el('btn-bt-save-all').onclick = saveAllBtRuns;
   el('btn-bt-refresh').onclick = refreshBtRuns;
   el('btn-bt-compare').onclick = () => {
     const v = el('bt-compare-view');
@@ -2507,7 +2682,11 @@ async function init() {
     if (!e.target.closest('.ms')) closeAllMsPanels(null);
   });
   document.addEventListener('change', e => {
-    if (e.target.matches?.('[data-ms-opt]')) syncMs(e.target.closest('.ms'));
+    if (e.target.matches?.('[data-ms-opt]')) {
+      const ms = e.target.closest('.ms');
+      syncMs(ms);
+      if (ms?.dataset.ms === 'symbols') toggleBtSourceOptions();  // >1 品种 → 数据源限 store
+    }
   });
   selectMode(selectedMode);
   loadSrPresetOptions();
@@ -2516,6 +2695,25 @@ async function init() {
   if(parent!==window)parent.postMessage({type:'modes-ready'},location.origin);
   el('btn-clear').onclick = () => clearModeRows(selectedMode);
   el('filter-status').onchange = () => renderTable();
+  // 品种页签（多品种批量回测）：点击切换 → 表格/汇总/资金曲线/保存品种随之切换
+  el('sym-tabs').addEventListener('click', e => {
+    const b = e.target.closest('.sym-tab');
+    if (!b) return;
+    symTabSel = b.dataset.sym;
+    renderTable();
+  });
+  // 批量进度表行点击 → 切到该品种页签并滚动到记录区（页签可见时生效）
+  el('bt-batch')?.addEventListener('click', e => {
+    const row = e.target.closest('.bt-batch-row[data-sym]');
+    if (!row) return;
+    const host = el('sym-tabs');
+    if (!host || host.hidden) return;
+    symTabSel = row.dataset.sym;
+    showRecordTab('signals');
+    renderTable();
+    document.getElementById('record-signals')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  toggleBtSourceOptions();
   // 策略/方向多选过滤：勾选变化 → 更新按钮文案与当前模式的筛选记忆 → 重渲染
   document.querySelectorAll('[data-sig-opt]').forEach(c => c.onchange = () => {
     syncSigFilter(c.closest('.ms').id.replace('filter-', ''));

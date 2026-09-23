@@ -41,6 +41,7 @@ from .data_loader import (
 from .backtest import BacktestEngine
 from .chan_core import fmtT, intervalSecOf
 from .main import parse_from
+from .mark_entry import DEFAULT_LOTS, contract_mult_of
 
 # 箭头颜色与文本前缀：与回测回画(tv_draw)约定一致
 BUY_COLOR = "#F23645"      # 红（做多）
@@ -328,12 +329,15 @@ class LiveMonitor:
     """实时监控：轮询 CDP 最新K线，增量推进链路，检测新进场信号并提醒/画标记。"""
 
     def __init__(self, symbol=None, periods=None, from_ts=0, port=DEFAULT_CDP_PORT,
-                 interval=15.0, tail=100, use_cache=False, log=None, module_params=None):
+                 interval=15.0, tail=100, use_cache=False, log=None, module_params=None,
+                 lots=DEFAULT_LOTS):
         self.periods = list(periods or DEFAULT_PERIODS)
         self.cfg = CDPConfig(port=port, periods=self.periods)
         self.interval = float(interval)
         self.tail = int(tail)
         self.log = log or (lambda *a, **k: print(*a))
+        self.symbol = symbol
+        self.lots = lots
 
         # 0. 记录图表初始周期；监控期间图表固定在最细周期（默认 3m，含 30S 时为 30 秒），
         #    作为收盘 bar 触发与快速轮询周期，退出时恢复原周期
@@ -358,6 +362,8 @@ class LiveMonitor:
                 last = bars_by_period[res][-1]["time"]
                 self.log(f"  {res:>4}: {n} 根（{fmtT(last)} 止）")
         self.engine = BacktestEngine(bars_by_period, periods=self.periods, warmup_bars=0,
+                                     lots=self.lots,
+                                     contract_mult=contract_mult_of(symbol),
                                      module_params=module_params)
 
         # 2. 预热到最新，初始信号忽略（历史信号不提醒不画）
@@ -530,12 +536,15 @@ class ReplayMonitor(LiveMonitor):
 
     def __init__(self, symbol=None, periods=None, from_ts=0, port=DEFAULT_CDP_PORT,
                  start_ts=None, speed_ms=1000, hold_sec=2.0, interval=0.5,
-                 tail=100, use_cache=False, log=None, module_params=None):
+                 tail=100, use_cache=False, log=None, module_params=None,
+                 lots=DEFAULT_LOTS):
         self.periods = list(periods or DEFAULT_PERIODS)
         self.cfg = CDPConfig(port=port, periods=self.periods)
         self.interval = float(interval)
         self.tail = int(tail)
         self.log = log or (lambda *a, **k: print(*a))
+        self.symbol = symbol
+        self.lots = lots
         self.start_ts = start_ts
         self.speed_ms = speed_ms
         self.hold_sec = hold_sec
@@ -568,6 +577,8 @@ class ReplayMonitor(LiveMonitor):
                 last = bars_by_period[res][-1]["time"]
                 self.log(f"  {res:>4}: {n} 根（{fmtT(last)} 止）")
         self.engine = BacktestEngine(bars_by_period, periods=self.periods, warmup_bars=0,
+                                     lots=self.lots,
+                                     contract_mult=contract_mult_of(symbol),
                                      module_params=module_params)
         self._drawn = set()       # 已画过的 (time, direction)
         self.log(f"回放回测就绪：起点 {fmtT(start_ts) if start_ts else '（使用回放工具栏当前选择）'} "
@@ -794,18 +805,21 @@ def main(argv=None):
 
     periods = [p.strip() for p in args.periods.split(",") if p.strip()]
     from_ts = parse_from(args.from_date)
+    # 手数按品种取参数中心（2026-09-23 与 main.py 回测 CLI 对齐）
+    from . import param_center
+    lots = param_center.lots_of(param_center.effective_all()["entry"], args.symbol)
     if args.mode == "replay":
         start_ts = parse_from(args.start_date) if args.start_date else from_ts
         monitor = ReplayMonitor(symbol=args.symbol, periods=periods,
                                 from_ts=from_ts, port=args.port,
                                 start_ts=start_ts, speed_ms=args.speed,
                                 hold_sec=args.hold, interval=args.interval,
-                                tail=args.tail, use_cache=args.use_cache)
+                                tail=args.tail, use_cache=args.use_cache, lots=lots)
     else:
         monitor = LiveMonitor(symbol=args.symbol, periods=periods,
                               from_ts=from_ts, port=args.port,
                               interval=args.interval, tail=args.tail,
-                              use_cache=args.use_cache)
+                              use_cache=args.use_cache, lots=lots)
     monitor.run_loop()
     return 0
 

@@ -34,7 +34,9 @@
   - stopSr/stopBe：盘中破坏止损位 / 保本位 beStop；
   - 同向持仓互斥：同方向持仓未终局时新信号不成交（on_suppressed 回调）；多空互不影响；
   - 已平仓盈亏 =（TP2 半仓价 + 终局价各 0.5，未到 TP2 全量终局价，减进场价）× 方向 × lots
-    （手数默认 4，参数化），未平仓仍按最新收盘价 mark-to-market × lots。
+    × 合约乘数（手数默认 4，参数化；2026-09-23 起 1 手 = 0.01 标准手，乘数 =
+    每标准手规模 × 0.01，mark_entry.contract_mult_of），未平仓仍按最新收盘价
+    mark-to-market × lots × 乘数。
   - run() 与 step_to(execute=True) 同一套逐根逻辑（实时监控/回放从此也有成交与出场；
     step_to(execute=False) 仅预热推进）。
   - run(start_ts)：交易开始时刻口径——start_ts 前只推进状态不交易（忽略 warmup_bars），
@@ -171,7 +173,7 @@ def execute_pending_exit(pos, exec_bar):
 
 
 def close_trade(pos, exit_type, exit_time, exit_price):
-    """标记持仓终局并结算盈亏（半仓按 half 事件价加权，整体 × lots 手数）。"""
+    """标记持仓终局并结算盈亏（半仓按 half 事件价加权，整体 × lots 手数 × 合约乘数）。"""
     pos["state"] = "closed"
     pos["exitType"] = exit_type
     pos["exitTime"] = exit_time
@@ -179,11 +181,12 @@ def close_trade(pos, exit_type, exit_time, exit_price):
     d = 1 if pos["direction"] == "long" else -1
     entry = pos["entryPrice"]
     lots = pos.get("lots", 1)
+    mult = pos.get("mult", 1.0)  # 合约乘数快照（2026-09-23：1手=0.01标准手；旧行缺省1）
     half_ev = next((e for e in pos.get("exits", []) if e["type"] == "half"), None)
     if half_ev:
-        pos["pnl"] = (0.5 * (half_ev["price"] - entry) + 0.5 * (exit_price - entry)) * d * lots
+        pos["pnl"] = (0.5 * (half_ev["price"] - entry) + 0.5 * (exit_price - entry)) * d * lots * mult
     else:
-        pos["pnl"] = (exit_price - entry) * d * lots
+        pos["pnl"] = (exit_price - entry) * d * lots * mult
     return pos
 
 
@@ -203,7 +206,8 @@ class BacktestEngine:
     def __init__(self, bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
                  with_marks=False, cfg=None, fill_mode="anchor", signal_mode="realtime",
                  sr_types=None, fib_levels=None, boll_length=None, boll_mult=None,
-                 lots=DEFAULT_LOTS, slip_stop=DEFAULT_SLIP_STOP,
+                 fill_at_open_bar=False,
+                 lots=DEFAULT_LOTS, contract_mult=1.0, slip_stop=DEFAULT_SLIP_STOP,
                  slip_fallback=DEFAULT_SLIP_FALLBACK, slip_be=DEFAULT_SLIP_BE,
                  slip_stop_atr_k=DEFAULT_SLIP_STOP_ATR_K,
                  slip_fallback_atr_k=DEFAULT_SLIP_FALLBACK_ATR_K,
@@ -280,13 +284,25 @@ class BacktestEngine:
         #     （intervalSecOf(periodX)，锚点明显过时——如「校验失败回退次新」选中的旧点）
         #     时，该笔回落 confirm 口径，fillMode 记 "confirm-stale-anchor"。
         self.fill_mode = fill_mode
+        # 实盘逐拍成交开关（2026-09-23，live_trader 专用；默认关闭，run()/LiveMonitor
+        # 与全部回测锚点位级不变）：成交槽原条件 i+1 < end_cut 要求成交 bar 已收盘——
+        # 批量 run() 单次调用跨全部 bar 无碍；但实时每拍仅推进 1 根新收盘 bar，
+        # pending 永远差一根无法冲销（信号拍→成交拍需要单次调用跨 ≥2 根）。开启后，
+        # 下一根 bar 只要以「进行中」形态存在（开盘价已知，判定时刻恰为其开盘瞬间，
+        # 无未来函数）即允许按其开盘价成交——与 run() 的「信号拍下一根开盘成交」语义一致。
+        # 注意：进行中 bar 的极值未定 → beStop 暂按开盘价±保本滑点冻结，bar 收盘后
+        # 由调用方（live_trader._diff_states）按真实极值校正为批量等价值。
+        self.fill_at_open_bar = fill_at_open_bar
         # 出场参数（2026-09-09 出场阶梯重构）：
-        #   lots 手数（盈亏 × lots）；slip_stop 止损位滑点（支阻位外侧）；
+        #   lots 手数（盈亏 × lots）；contract_mult 合约乘数（2026-09-23 统一 MT4/MT5
+        #   口径 1 手 = 0.01 标准手，乘数 = 每标准手规模 × 0.01，成交时快照进 trade 行；
+        #   未知品种缺省 1.0 与旧口径一致）；slip_stop 止损位滑点（支阻位外侧）；
         #   slip_fallback 兜底止损滑点（无正确侧支阻位 → 进场价±该值）；
         #   slip_be 保本滑点（beStop = 进场成交K线极值 ± 该值）；
         #   slip_*_atr_k 三滑点 ATR 系数（2026-09-19）：有效滑点 = 固定值 + 系数 ×
         #   ATR(14, 背驰周期 markRes)；0=关闭（默认，结果与无 ATR 分量一致）
         self.lots = lots
+        self.contract_mult = contract_mult
         self.slip_stop = slip_stop
         self.slip_fallback = slip_fallback
         self.slip_be = slip_be
@@ -766,8 +782,12 @@ class BacktestEngine:
                     pend = []
             st["pending"] += pend
             out["signals"] += list(pend)
-            # ③ 成交槽（有下一根才成交）：出场先执行（解锁同向互斥）→ 进场再成交
-            if i + 1 < end_cut:
+            # ③ 成交槽（有下一根才成交）：出场先执行（解锁同向互斥）→ 进场再成交。
+            # fill_at_open_bar（实盘逐拍）：下一根 bar 以进行中形态存在（len>end_cut，
+            # 开盘价已知）即成交——否则逐拍推进时 pending 永远差一根无法冲销。
+            next_ok = (i + 1 < end_cut
+                       or (self.fill_at_open_bar and i + 1 == end_cut and i + 1 < len(fine)))
+            if next_ok:
                 for d in ("long", "short"):
                     pos = st["open_pos"][d]
                     if pos is None:
@@ -1198,7 +1218,7 @@ class BacktestEngine:
           - 旧锚点保护：anchor 模式下锚点距收集时刻 > 检测周期 1 根 bar 长度（回退选中的
             过时旧点）→ 该笔回落 confirm 口径，fillMode = "confirm-stale-anchor"。
         简化的成交模型：单笔 lots 手（默认 4，平一半后 0.5 + 0.5 加权），
-        盈亏 = 价格差 × 方向 × lots。
+        盈亏 = 价格差 × 方向 × lots × 合约乘数（1手=0.01标准手，2026-09-23）。
         """
         fine = self.bars[self.fine_res]["_list"]
         fineTimes = self._times[self.fine_res]
@@ -1289,6 +1309,7 @@ class BacktestEngine:
                 "nearEqual": s.get("nearEqual", False), # M2 近等候选标记
                 "expectBi": s.get("expectBi", False),   # M4 检测周期预期够笔口径标记
                 "lots": self.lots,
+                "mult": self.contract_mult,  # 合约乘数快照（2026-09-23）
                 # 出场状态机字段（advance_exit_decision/execute_pending_exit 增量维护）
                 "stopRef": stopRef,
                 "beStop": beStop,
@@ -1312,7 +1333,7 @@ class BacktestEngine:
 
         已平仓（state=closed）的盈亏在 close_trade 终局时已结算（on_exit 回调携带），
         此处保留；未平仓按最新收盘价 mark-to-market（已平一半的按 0.5 half 价
-        + 0.5 最新收盘加权），整体 × lots 手数。
+        + 0.5 最新收盘加权），整体 × lots 手数 × 合约乘数。
         """
         lastPrice = None
         lastTime = None
@@ -1328,13 +1349,14 @@ class BacktestEngine:
                 continue
             d = 1 if tr["direction"] == "long" else -1
             lots = tr.get("lots", 1)
+            mult = tr.get("mult", 1.0)  # 合约乘数快照（旧行缺省 1，与旧口径一致）
             half_ev = next((e for e in tr.get("exits", []) if e["type"] == "half"), None)
             if half_ev:
                 # 已平一半：半仓按 half 价已实现 + 半仓按最新收盘 mark-to-market
                 tr["pnl"] = (0.5 * (half_ev["price"] - tr["entryPrice"])
-                             + 0.5 * (lastPrice - tr["entryPrice"])) * d * lots
+                             + 0.5 * (lastPrice - tr["entryPrice"])) * d * lots * mult
             else:
-                tr["pnl"] = (lastPrice - tr["entryPrice"]) * d * lots
+                tr["pnl"] = (lastPrice - tr["entryPrice"]) * d * lots * mult
         return {
             "signals": allSignals,        # { markRes: [signals] }
             "trades": trades,             # [ { tradeNo, periodX, direction, ... } ]
@@ -1350,7 +1372,7 @@ def run_backtest(bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
                  with_marks=False, to_ts=None, start_ts=None, log=None, fill_mode="anchor",
                  signal_mode="realtime", sr_types=None, fib_levels=None,
                  boll_length=None, boll_mult=None,
-                 lots=DEFAULT_LOTS, slip_stop=DEFAULT_SLIP_STOP,
+                 lots=DEFAULT_LOTS, contract_mult=1.0, slip_stop=DEFAULT_SLIP_STOP,
                  slip_fallback=DEFAULT_SLIP_FALLBACK, slip_be=DEFAULT_SLIP_BE,
                  slip_stop_atr_k=DEFAULT_SLIP_STOP_ATR_K,
                  slip_fallback_atr_k=DEFAULT_SLIP_FALLBACK_ATR_K,
@@ -1364,7 +1386,9 @@ def run_backtest(bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
     sr_types/fib_levels 透传支阻位类型开关与黄金分割比率（None → compute_srflip 默认）；
     boll_length/boll_mult 透传 BOLL 布林带周期与标准差倍数（None → compute_srflip 默认 26/2）；
     lots/slip_stop/slip_fallback/slip_be 透传出场参数（手数/止损滑点/兜底止损滑点/保本滑点，
-    默认 4 / 3 / 10 / 3，绝对价格单位）；slip_stop_atr_k/slip_fallback_atr_k/slip_be_atr_k
+    默认 4 / 3 / 10 / 3，绝对价格单位）；contract_mult 合约乘数（2026-09-23 统一 MT4/MT5
+    口径 1 手 = 0.01 标准手，缺省 1.0 与旧口径一致）；
+    slip_stop_atr_k/slip_fallback_atr_k/slip_be_atr_k
     三滑点 ATR 系数（有效滑点 = 固定值 + 系数 × ATR(14,背驰周期)，默认 0=关闭）；
     near 近支阻阈值（绝对价差，默认 10）；
     sr_kwargs 支阻位预设 kwargs（Web 回测预设下拉/CLI --sr-preset 载入，含 manualLevels，
@@ -1374,7 +1398,7 @@ def run_backtest(bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
                             signal_mode=signal_mode,
                             sr_types=sr_types, fib_levels=fib_levels,
                             boll_length=boll_length, boll_mult=boll_mult,
-                            lots=lots, slip_stop=slip_stop,
+                            lots=lots, contract_mult=contract_mult, slip_stop=slip_stop,
                             slip_fallback=slip_fallback, slip_be=slip_be,
                             slip_stop_atr_k=slip_stop_atr_k,
                             slip_fallback_atr_k=slip_fallback_atr_k,

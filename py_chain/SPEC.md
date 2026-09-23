@@ -577,3 +577,16 @@ JS/Python的`buildBi`增加可选末参`lowerContext`；用`makeBiLowerContext(r
 ## 预期笔统一口径（2026-09-17）
 
 普通底／顶分型确认后立即建立反向预期段并参与下级结构；够笔与进场门槛统一按包含处理后K线计数，包含起点块，默认5块。Python／JS相位同步，具体接口、缓存、截止时刻及固定样本见 [统一规范](../spec/plans/SPEC_structure_context.md)。
+
+
+## 实盘接入 EXNESS MT5（2026-09-23 规划批准，M0–M4 代码完成）
+
+缠论算法全自动交易 EXNESS MT5 的 XAUUSD，先模拟盘后实盘，未来部署 Windows 服务器。核心机制：**Python 进程本身就是交易者**——`live_trader.py` 常驻进程经 MetaTrader5 官方库（本机 IPC）驱动 MT5 终端拉行情、发市价单、改 SL、平仓；信号不出本机，毫秒级执行。不是 EA/MQL、不是桥接推送、不是 REST API。
+
+总原则：**引擎=决策真相（backtest.py 零改动，只信 bar），券商 SL=生存保底（每笔仓单必带硬止损），镜像执行层=尽力执行+对账收敛**。`step_to(execute=True)` 返回的事件（进场/终局）+ 持仓 dict 原地状态 diff（TP1 保本/TP2 半仓/止损外推）驱动订单镜像；风控门只挡镜像侧（跳过则 trade 标记 shadow，引擎照常推进），永不挡引擎推进。
+
+关键实测依据：bars.db 240/D 时间戳为纽约 17:00 锚定（非 UTC 对齐），EXNESS 行情须拉 M1 自行重采样（240/D 按 America/New_York 17:00 日界分箱，禁用 MT5 自带 H4/D1）；OANDA 有日维护窗与周末断档，feed 会话过滤对齐口径。重启恢复=确定性重放（execute=False 预热→execute=True 重放到当前→按 live_orders 挂接 MT5 ticket→对账），不序列化引擎内部状态。
+
+新增模块：`mt5_feed.py`（行情+时区+重采样）、`mt5_broker.py`（可 mock 下单层）、`live_store.py`（bars.db 新表 live_state/live_events/live_orders/live_trades）、`live_trader.py`（编排主进程）、`mt5_align.py`（对拍锚点）。配置 `web/live_config.json`；实盘开闸双条件（require_mode=real + data/LIVE_ARMED）；密码只存终端凭据。
+
+分阶段 M0–M7（SPEC→环境 probe→数据对拍→执行层→编排+shadow→模拟盘实单→只读页签→VPS），各阶段验收锚点、风控默认值、多策略扩展（多进程+按实例 magic）与稳定/可靠/安全设计详见 [实盘接入规范](../spec/plans/SPEC_live_exness_mt5.md)。实施后本节随实际实现同步修订。

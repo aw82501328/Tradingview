@@ -20,6 +20,10 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 .prow{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--border);
   border-radius:6px;padding:7px 10px;cursor:default}
 .prow.break-before{grid-column:1}  /* 从第1列起排=在此参数前换行（行内其余卡片宽度不变；trendRes 前断行→参考周期行） */
+/* 「标记进出场」组标题行：占满整行把下一组卡片挤到新视觉行，右侧细线延伸填充 */
+.pgroup{grid-column:1/-1;color:var(--muted);font-size:11.5px;display:flex;align-items:center;gap:8px;margin-top:4px}
+.pgroup::after{content:'';flex:1;border-top:1px solid var(--border)}
+.pgroup:first-child{margin-top:0}
 .prow .pname{flex:1;min-width:0}
 .prow .plabel{color:var(--text);font-size:12.5px;display:block}
 .prow .pdef{color:var(--muted);font-size:11px}
@@ -369,6 +373,18 @@ const SLIP_ATR_K = { slip_stop: 'slip_stop_atr_k', slip_fallback: 'slip_fallback
 // 换行断点（该参数从第1列起排，卡片本身不占整行）：顺势参考周期前断行 → 紧跟②中枢内判定下一行
 const BREAK_BEFORE_KEYS = new Set(['trendRes']);
 
+// 「标记进出场」分类分组：组标题行 + 组内键序（macdZeroTol 在 schema 里排末尾但语义属进场扩展组；
+// 键集与 param_center entry 模块对应，未列键自动排尾部兜底渲染）
+const ENTRY_GROUPS = [
+  ['支阻', ['near']],
+  ['手数', ['lots', 'lots_xauusd', 'lots_xagusd', 'lots_usoil', 'lots_btcusd', 'lots_nas100']],
+  ['滑点（ATR系数内嵌各行）', ['slip_stop', 'slip_fallback', 'slip_be']],
+  ['出场判定', ['exit_min_merged', 'realtime_min_bars', 'zs_exit_weak_ratio']],
+  ['进场扩展（M1/M2/M4、0轴容差）', ['sinkFallback', 'sinkFallbackRearm', 'nearEqualAtrK', 'nearEqualPct',
+                                     'expectBiEnough', 'expectBiMinBars', 'divergeConfirm', 'macdZeroTol']],
+  ['进场闸门', ['entryMacdShrink', 'stopEntryBarFloor']],
+];
+
 function rowHtml(key, spec, value, isMod, embed) {
   const defText = spec.type === 'bool' ? (spec.default ? '默认开' : '默认关')
     : spec.type === 'str' ? `默认 ${choiceLabel(key, spec.default)}`
@@ -392,6 +408,28 @@ function rowHtml(key, spec, value, isMod, embed) {
   return `<div class="prow ${isMod ? 'mod' : ''} ${BREAK_BEFORE_KEYS.has(key) ? 'break-before' : ''}" title="${spec.desc}">
     <span class="pname"><span class="plabel">${spec.label}<span class="badge">已修改</span></span>
     <span class="pdef">${defText} · ${spec.desc}</span></span>${control}${embedHtml}</div>`;
+}
+
+// 单个参数卡（含滑点行内嵌 ATR 系数；badge 在固定值或系数任一被改时亮）
+function paramRow(m, key) {
+  const embKey = SLIP_ATR_K[key];
+  const embed = embKey ? {
+    key: embKey, min: m.schema[embKey].min, max: m.schema[embKey].max,
+    value: m.effective[embKey], title: m.schema[embKey].desc,
+  } : null;
+  const isMod = m.overrides[key] !== undefined
+    || (embKey && m.overrides[embKey] !== undefined);
+  return rowHtml(key, m.schema[key], m.effective[key], isMod, embed);
+}
+
+// 标记进出场：按分类分组换行（组标题占满整行 → 下一组自动起新视觉行，卡片普通宽度不变）
+function entryRowsHtml(m) {
+  const grouped = new Set(ENTRY_GROUPS.flatMap(([, keys]) => keys));
+  return ENTRY_GROUPS.map(([title, keys]) =>
+    `<div class="pgroup">${title}</div>` + keys.filter(k => m.schema[k]).map(k => paramRow(m, k)).join('')
+  ).join('') + Object.keys(m.schema)
+    .filter(k => !grouped.has(k) && !Object.values(SLIP_ATR_K).includes(k))
+    .map(k => paramRow(m, k)).join('');  // 未分组键（未来新增）尾部兜底，不丢渲染
 }
 
 // 画中枢：同周期「是否画 + 最近个数」同一行
@@ -425,19 +463,12 @@ function renderModule(name) {
   if (!m) return;
   $('pgrid').innerHTML = name === 'zs'
     ? zsRowsHtml(m)
+    : name === 'entry'
+    ? entryRowsHtml(m)
     : Object.entries(m.schema)
       // 滑点 ATR 系数不独立成行：内嵌进各自滑点行（badge 在固定值或系数任一被改时亮）
       .filter(([key]) => !Object.values(SLIP_ATR_K).includes(key))
-      .map(([key, spec]) => {
-        const embKey = SLIP_ATR_K[key];
-        const embed = embKey ? {
-          key: embKey, min: m.schema[embKey].min, max: m.schema[embKey].max,
-          value: m.effective[embKey], title: m.schema[embKey].desc,
-        } : null;
-        const isMod = m.overrides[key] !== undefined
-          || (embKey && m.overrides[embKey] !== undefined);
-        return rowHtml(key, spec, m.effective[key], isMod, embed);
-      })
+      .map(([key]) => paramRow(m, key))
       .join('');
   const n = Object.keys(m.overrides).length;
   $('stateLine').textContent = `已修改 ${n} 项 · 最近保存 ${timeText(m.savedAt)}`;
@@ -445,7 +476,7 @@ function renderModule(name) {
     chan: '画笔参数保存后立即全局生效（成笔阈值，画笔/回测/监控共用）。有任务运行中时会拒绝保存。',
     points: '标记买卖点参数：邻近合并/保留数/中枢容差在工作台与回测读取；背驰时长可比上限写入 CHAN_CFG，保存后立即全局生效。有任务运行中时会拒绝保存。',
     zs: '画中枢参数在工作台「画中枢 / 更新全部」时读取：控制各周期是否绘制、以及每周期只保留最近几个中枢。',
-    entry: '标记进出场参数在工作台分析与回测读取生效；进场扩展（M1/M2/M4、0轴容差）写入 CHAN_CFG，保存后立即全局生效。「当下制够笔K线数」仅回测/监控引擎使用。三个滑点支持 ATR 动态分量：有效滑点 = 固定值 + ATR系数×背驰周期ATR(14)，系数内嵌在各滑点行（0=关闭）。有任务运行中时会拒绝保存。',
+    entry: '标记进出场参数在工作台分析与回测读取生效；进场扩展（M1/M2/M4、0轴容差）写入 CHAN_CFG，保存后立即全局生效。「当下制够笔K线数」仅回测/监控引擎使用。三个滑点支持 ATR 动态分量：有效滑点 = 固定值 + ATR系数×背驰周期ATR(14)，系数内嵌在各滑点行（0=关闭）。手数口径（2026-09-23）：1 手 = 0.01 标准手（MT4/MT5 经纪商口径），盈亏 = 价差 × 方向 × 手数 × 合约乘数（黄金 ×1、原油 ×10、白银 ×50、BTC/纳指 ×0.01、未列品种 ×1）；黄金/白银/原油/BTC/纳指五个手数行各自独立，其余品种用「默认手数」。有任务运行中时会拒绝保存。',
     plan: '交易计划参数在工作台分析与回测运行时读取生效；「顺势参考周期」额外过滤进出场信号方向，锚点后的「方向相位判定/相位近位容差(点)/相位角度45°基准(点/根)」按相位表定方向含观望态（规则见图解表2/2a/2b；仅回测/监控引擎，JS技能无此参数）。下方可展开「交易计划逻辑图解」。',
   }[name] || '';
   const rules = MODULE_RULES[name];

@@ -236,6 +236,18 @@ class TestCloseTradeLots(unittest.TestCase):
         tr = close_trade(pos, "close", 1000, 4430.0)
         self.assertEqual(tr["pnl"], (4430 - 4450) * (-1) * 10)
 
+    def test_contract_mult_multiplier(self):
+        # 合约乘数快照（2026-09-23：1手=0.01标准手）：pos 带 mult → 盈亏再 × mult
+        pos = make_pos()
+        pos["mult"] = 10.0
+        tr = close_trade(pos, "close", 1000, 4430.0)
+        self.assertEqual(tr["pnl"], (4430 - 4450) * (-1) * 4 * 10.0)
+        pos2 = make_pos()
+        pos2["mult"] = 0.01   # BTC/纳指口径
+        pos2["exits"].append({"type": "half", "time": 800, "price": 4440.0})
+        tr2 = close_trade(pos2, "close", 1000, 4454.0)
+        self.assertAlmostEqual(tr2["pnl"], 12.0 * 0.01)
+
     def test_long_direction(self):
         pos = make_pos(direction="long", entryPrice=4450.0, lots=4)
         pos["exits"].append({"type": "half", "time": 800, "price": 4460.0})

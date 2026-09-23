@@ -15,13 +15,15 @@ from py_chain.bt_runs import (
 )
 
 
-def row(status, pnl=None, exitType=None, exits=None, exitTime=1100, entryPrice=4201.0, lots=4):
+def row(status, pnl=None, exitType=None, exits=None, exitTime=1100, entryPrice=4201.0, lots=4,
+        mult=None):
     return {"id": 1, "mode": "backtest", "symbol": "OANDA:XAUUSD", "time": 1000,
             "direction": "long", "periodX": "15", "strategyKey": "waitBuy",
             "markRes": "15", "price": 4200.0, "nearSr": 4210.0,
             "fallback": False, "nearEqual": False, "expectBi": False,
             "status": status, "entryTime": 1010, "entryPrice": entryPrice,
-            "lots": lots, "stopRef": 4190.0, "state": "closed" if status == "已平仓" else None,
+            "lots": lots, "mult": mult, "stopRef": 4190.0,
+            "state": "closed" if status == "已平仓" else None,
             "exitTime": exitTime, "exitPrice": 4230.0, "exitType": exitType,
             "exits": exits or [], "pnl": pnl}
 
@@ -124,6 +126,15 @@ class TestComputeEquity(unittest.TestCase):
         self.assertEqual(eq[0]["v"], 0.0)
         self.assertEqual(eq[1], {"t": 1050, "v": 38.0})
         self.assertEqual(eq[-1]["v"], -2.5)   # 终点 = 整笔浮盈合计
+
+    def test_half_with_contract_mult(self):
+        # 合约乘数（2026-09-23）：白银口径 mult=50 → 半平 (4220-4201)*2*50 = 1900 @1050；
+        # 整笔 pnl 已含乘数（引擎结算），终局余下 = total - half = -2.5 - 1900
+        rows = [row("持仓中", pnl=-2.5, exitTime=None, lots=4, entryPrice=4201.0, mult=50.0,
+                    exits=[{"type": "half", "time": 1050, "price": 4220.0}])]
+        eq = compute_equity(rows)
+        self.assertEqual(eq[1], {"t": 1050, "v": 1900.0})
+        self.assertEqual(eq[-1]["v"], -2.5)   # 终点 = 整笔浮盈合计（含乘数）
 
 
 class TestBtRunStore(unittest.TestCase):

@@ -35,8 +35,33 @@ SELL_COLOR = "#089981"
 NEAR = 10.0
 
 # ---- 出场参数（2026-09-09 出场阶梯重构；与 mark_entry.js / CLI / Web 回测界面同名） ----
-# 进场手数（盈亏 = 价格差 × 方向 × lots）
+# 进场手数（盈亏 = 价格差 × 方向 × lots × 合约乘数；2026-09-23 起统一 MT4/MT5 口径：
+# 1 手 = 0.01 标准手，合约乘数见 SYMBOL_CONTRACTS）
 DEFAULT_LOTS = 4
+# 品种合约规模（每标准手；2026-09-23 统一 MT4/MT5 经纪商 Exness 型口径：1 回测手 = 0.01 标准手，
+# 盈亏 = 价差 × 方向 × lots × 乘数，乘数 = 每标准手规模 × 0.01；未知品种缺省乘数 1.0 保持旧行为）
+SYMBOL_CONTRACTS = {
+    "XAUUSD": 100.0,   # OANDA:XAUUSD 100盎司/标准手 → 乘数 1.0（数字不变）
+    "XAGUSD": 5000.0,  # OANDA:XAGUSD 5000盎司/标准手 → 乘数 50.0
+    "USOIL": 1000.0,   # TVC:USOIL 1000桶/标准手（NYMEX CL 期货型） → 乘数 10.0
+                       # （2026-09-23 修正：原按 100 桶设乘数 1.0，实单核对应为 1000 桶）
+    "BTCUSD": 1.0,     # BITSTAMP:BTCUSD 1 BTC/标准手 → 乘数 0.01
+    "NAS100": 1.0,     # FX:NAS100 1合约($1/点)/标准手 → 乘数 0.01
+}
+
+
+def symbol_suffix(symbol):
+    """品种后缀："OANDA:XAUUSD"→"XAUUSD"（无冒号原样返回，统一大写；None→None）。"""
+    if not symbol:
+        return symbol
+    return (symbol.split(":", 1)[-1] if ":" in symbol else symbol).upper()
+
+
+def contract_mult_of(symbol):
+    """合约乘数 = 每标准手规模 × 0.01（1 回测手 = 0.01 标准手）；未知/None → 1.0。
+    纯函数不读任何配置，bt_batch 子进程可安全调用。"""
+    size = SYMBOL_CONTRACTS.get(symbol_suffix(symbol))
+    return 1.0 if size is None else size * 0.01
 # 止损位滑点（绝对价格）：正确侧支阻位外侧偏移（short 上方+ / long 下方−）
 DEFAULT_SLIP_STOP = 3.0
 # 兜底止损滑点：无正确侧支阻位时 止损 = 进场价 ± slip_fallback（止损位永不为 None）

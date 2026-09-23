@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>实盘监控（只读） · EXNESS MT5</title>
+<link rel="stylesheet" href="/theme.css">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    padding: 20px; font-size: 14px;
+  }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 20px; }
+  .sub a { color: var(--muted); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+          gap: 10px; margin-bottom: 20px; }
+  .stat { background: var(--card); border: 1px solid var(--border);
+          border-radius: 10px; padding: 12px; }
+  .stat label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .stat b { font-size: 15px; font-weight: 600; }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 10px;
+           background: #2a2f3a; color: var(--muted); }
+  .badge.on  { background: #0d3b31; color: #7fe0b0; }
+  .badge.off { background: #3b2226; color: #e0938f; }
+  .card { background: var(--card); border: 1px solid var(--border);
+          border-radius: 10px; padding: 14px; margin-bottom: 20px; overflow-x: auto; }
+  .card h2 { font-size: 15px; margin-bottom: 10px; display: flex;
+             align-items: center; justify-content: space-between; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border);
+           white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 11.5px; }
+  .long { color: #7fe0b0; } .short { color: #e0938f; }
+  .muted { color: var(--muted); }
+  .mono { font-family: Consolas, monospace; }
+  .empty { color: var(--muted); padding: 8px; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>实盘监控（只读）</h1>
+<div class="sub">数据源 bars.db live_* 表 · 每 5s 刷新 · 本页零写操作（重启 webapp 不影响 live_trader 进程）·
+运行手册见 <a href="/live" onclick="return false">py_chain/LIVE_GUIDE.md</a></div>
+
+<div class="grid" id="stats"></div>
+
+<div class="card">
+  <h2>当前持仓 <span class="badge" id="open-count">0</span></h2>
+  <table id="open-table"><thead><tr>
+    <th>#</th><th>方向</th><th>进场时间</th><th>引擎价</th><th>剩余手数</th>
+    <th>引擎止损</th><th>券商SL</th><th>保本/半平</th><th>shadow</th><th>ticket</th>
+  </tr></thead><tbody></tbody></table>
+  <div class="empty" id="open-empty">无持仓</div>
+</div>
+
+<div class="card">
+  <h2>已平仓 <span class="badge" id="closed-count">0</span></h2>
+  <table id="closed-table"><thead><tr>
+    <th>#</th><th>方向</th><th>进场</th><th>出场</th><th>类型</th>
+    <th>引擎盈亏</th><th>券商盈亏</th><th>偏差</th><th>状态</th>
+  </tr></thead><tbody></tbody></table>
+  <div class="empty" id="closed-empty">暂无平仓</div>
+</div>
+
+<div class="card">
+  <h2>订单动作日志 <span class="badge" id="order-count">0</span></h2>
+  <table id="order-table"><thead><tr>
+    <th>时间</th><th>动作</th><th>trade#</th><th>方向</th><th>手数</th>
+    <th>SL</th><th>成交价</th><th>结果</th><th>shadow</th>
+  </tr></thead><tbody></tbody></table>
+  <div class="empty" id="order-empty">暂无订单</div>
+</div>
+
+<div class="card">
+  <h2>事件流（最近 80 条） <span class="badge">live_events</span></h2>
+  <table id="event-table"><thead><tr>
+    <th>时间</th><th>类型</th><th>内容</th>
+  </tr></thead><tbody></tbody></table>
+  <div class="empty" id="event-empty">暂无事件</div>
+</div>
+
+<script>
+const fmtT = ts => ts ? new Date(ts * 1000).toLocaleString('zh-CN',
+  { timeZone: 'UTC', hour12: false }) + ' UTC' : '—';
+const esc = s => String(s ?? '—').replace(/[&<>"]/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const dirCls = d => d === 'long' ? 'long' : 'short';
+const dirTxt = d => d === 'long' ? '多' : '空';
+
+function fillTable(tid, rows, emptyId, rowHtml) {
+  const tb = document.querySelector(tid + ' tbody');
+  tb.innerHTML = rows.map(rowHtml).join('');
+  document.getElementById(emptyId).style.display = rows.length ? 'none' : 'block';
+}
+
+async function refresh() {
+  let d;
+  try { d = await (await fetch('/api/live/overview')).json(); }
+  catch (e) { return; }
+  const s = d.session || {};
+  const hbAge = d.heartbeat && d.heartbeat.ts ? Math.round(Date.now()/1000 - d.heartbeat.ts) : null;
+  document.getElementById('stats').innerHTML = `
+    <div class="stat"><label>进程状态</label>
+      <b><span class="badge ${d.online ? 'on' : 'off'}">${d.online ? '在线' : '离线'}</span></b></div>
+    <div class="stat"><label>会话</label><b class="mono">${esc(s.id || '—')}</b></div>
+    <div class="stat"><label>模式</label><b>${s.shadow ? 'shadow（不下单）' : '实单'}</b></div>
+    <div class="stat"><label>品种/手数</label><b>${esc(s.symbol || '—')} · ${esc(s.lots ?? '—')}回测手</b></div>
+    <div class="stat"><label>心跳</label><b>${hbAge === null ? '—' : hbAge + 's 前'}</b></div>
+    <div class="stat"><label>引擎推进至</label><b>${d.engine_cursor && d.engine_cursor.fine_last ? fmtT(d.engine_cursor.fine_last) : '—'}</b></div>`;
+
+  document.getElementById('open-count').textContent = d.open_trades.length;
+  fillTable('#open-table', d.open_trades, 'open-empty', t => `<tr>
+    <td>${t.engine_trade_no}</td>
+    <td class="${dirCls(t.direction)}">${dirTxt(t.direction)}</td>
+    <td class="mono">${fmtT(t.entry_time)}</td>
+    <td class="mono">${esc(t.entry_price?.toFixed(2))}</td>
+    <td class="mono">${esc(t.volume_left)}</td>
+    <td class="mono">${esc(t.engine_stop?.toFixed(2))}</td>
+    <td class="mono">${esc(t.broker_sl?.toFixed(2))}</td>
+    <td>${t.be_done ? '✓保本 ' : ''}${t.half_done ? '✓半平' : ''}</td>
+    <td>${t.shadow ? 'shadow' : ''}</td>
+    <td class="mono muted">${esc(t.position_ticket || '—')}</td></tr>`);
+
+  document.getElementById('closed-count').textContent = d.closed_trades.length;
+  fillTable('#closed-table', d.closed_trades, 'closed-empty', t => `<tr>
+    <td>${t.engine_trade_no}</td>
+    <td class="${dirCls(t.direction)}">${dirTxt(t.direction)}</td>
+    <td class="mono">${fmtT(t.entry_time)}</td>
+    <td class="mono">${fmtT(t.exit_time)}</td>
+    <td>${esc(t.exit_type)}</td>
+    <td class="mono">${esc(t.engine_pnl?.toFixed(2))}</td>
+    <td class="mono">${esc(t.broker_pnl?.toFixed(2))}</td>
+    <td class="mono">${esc(t.deviation)}</td>
+    <td class="muted">${esc(t.state)}</td></tr>`);
+
+  document.getElementById('order-count').textContent = d.orders.length;
+  fillTable('#order-table', d.orders, 'order-empty', o => `<tr>
+    <td class="mono">${fmtT(o.ts_utc)}</td>
+    <td>${esc(o.action)}</td>
+    <td>${o.engine_trade_no ?? '—'}</td>
+    <td class="${dirCls(o.direction)}">${o.direction ? dirTxt(o.direction) : '—'}</td>
+    <td class="mono">${esc(o.volume)}</td>
+    <td class="mono">${esc(o.sl?.toFixed ? o.sl.toFixed(2) : o.sl)}</td>
+    <td class="mono">${esc(o.deal_price?.toFixed ? o.deal_price.toFixed(2) : o.deal_price)}</td>
+    <td class="${o.ok ? '' : 'short'}">${o.ok ? '成功' : '失败 ' + esc(o.retcode)}${o.retcomment ? ' ' + esc(o.retcomment).slice(0, 40) : ''}</td>
+    <td>${o.shadow ? 'shadow' : ''}</td></tr>`);
+
+  fillTable('#event-table', d.events, 'event-empty', e => `<tr>
+    <td class="mono">${fmtT(e.ts_utc)}</td>
+    <td>${esc(e.kind)}</td>
+    <td class="mono muted">${esc(JSON.stringify(e.payload)).slice(0, 160)}</td></tr>`);
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

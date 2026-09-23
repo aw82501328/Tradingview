@@ -74,6 +74,14 @@ const settle = () => new Promise(resolve=>setImmediate(resolve));
   const rendered=node('bt-detail-sig-body').innerHTML;
   assert.ok(rendered.indexOf('data-signal-id="21"')<rendered.indexOf('data-signal-id="22"'));
   assert.match(rendered,/data-signal-id="22"[^>]*class="selected"/);
+  // exitDisplayRows 合约乘数（2026-09-23）：行带 mult → 半平重算同乘；旧行无 mult 缺省 1
+  const scaled=run(`exitDisplayRows({direction:'long',entryPrice:100,lots:2,mult:50,pnl:900,
+    exits:[{type:'half',time:1050,price:130}],exitTime:1100,exitPrice:110,exitType:'close',state:'closed'})`);
+  assert.equal(scaled[0].pnl,(130-100)*1*50);            // 半平 (130-100)×halfLots(1)×mult(50)
+  assert.equal(scaled[1].pnl,900-(130-100)*1*50);        // 终局 = 整笔 − 半平
+  const legacy=run(`exitDisplayRows({direction:'long',entryPrice:100,lots:2,pnl:900,
+    exits:[{type:'half',time:1050,price:130}],exitTime:1100,exitPrice:110,exitType:'close',state:'closed'})`);
+  assert.equal(legacy[0].pnl,(130-100)*1);               // 旧存档行：mult 缺省 1，数字不变
   // Close while analysis is pending; its completion must not reopen the dialog.
   const old=run('analyzeBtDetail()');const oldReq=requests.at(-1);
   run('closeBtDetail()');

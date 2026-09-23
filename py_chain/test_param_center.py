@@ -120,6 +120,19 @@ class ParamCenterTests(unittest.TestCase):
         self.assertEqual(eff["lots"], 4)                    # 其余保持默认
         self.assertIn("plan", param_center.effective_all()) # 全模块快照可用
 
+    def test_per_symbol_lots_keys_and_lots_of(self):
+        # 按品种手数（2026-09-23）：五品种键默认全 4；lots_of 品种键优先 → 全局 → DEFAULT
+        eff = param_center.effective("entry")
+        for key in ("lots_xauusd", "lots_xagusd", "lots_usoil", "lots_btcusd", "lots_nas100"):
+            self.assertIn(key, eff)
+            self.assertEqual(eff[key], param_center.mark_entry.DEFAULT_LOTS)
+        self.assertEqual(param_center.lots_of(eff, "OANDA:XAUUSD"), eff["lots_xauusd"])
+        # 未列品种 → 全局 lots
+        self.assertEqual(param_center.lots_of(eff, "FOO:BAR"), eff["lots"])
+        # 覆盖品种键后按品种生效
+        param_center.update("entry", {"lots_xagusd": 2})
+        self.assertEqual(param_center.lots_of(param_center.effective("entry"), "OANDA:XAGUSD"), 2)
+
     def test_corrupt_file_degrades_to_defaults(self):
         Path(param_center.PARAMS_FILE).write_text("{ not json", encoding="utf-8")
         self.assertEqual(param_center.effective("plan"),

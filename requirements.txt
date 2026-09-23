@@ -1,0 +1,9 @@
+# py_chain 运行依赖（Python 3.12，Windows）
+# 说明：py_chain 其余部分为纯标准库；此处仅列第三方依赖
+# 安装：py -3.12 -m pip install -r requirements.txt
+
+# EXNESS MT5 实盘（mt5_feed.py / mt5_broker.py；仅 Windows，需本机 MT5 终端）
+MetaTrader5>=5.0.6180 ; sys_platform == "win32"
+
+# TradingView Desktop CDP 连接（data_loader.py，回测/监控/数据拉取用）
+websocket-client>=1.6

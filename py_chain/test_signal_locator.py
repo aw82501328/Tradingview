@@ -23,7 +23,8 @@ class SignalLocatorTests(unittest.TestCase):
         self.manager = locator.LocateManager(self.signals, self.lock, self.emit)
 
     def test_original_symbol_survives_fill_and_configuration_change(self):
-        filled = self.signals.fill_trade('backtest', {**self.sample, 'signalTime': 100}, symbol='OTHER')
+        # symbol 入键（2026-09-23 多品种并行）：同品种回填命中原行且不覆盖其 symbol
+        filled = self.signals.fill_trade('backtest', {**self.sample, 'signalTime': 100}, symbol='OANDA:XAUUSD')
         self.assertEqual(filled['symbol'], 'OANDA:XAUUSD')
         worker = webapp.ModeWorker(self.signals, SimpleNamespace(emit=Mock()))
         worker.cfg = {'symbol': 'FIRST'}
@@ -32,6 +33,10 @@ class SignalLocatorTests(unittest.TestCase):
         self.assertEqual(self.signals.list()[-1]['symbol'], 'FIRST')
         created = self.signals.fill_trade('replay', self.sample, symbol='THIRD')
         self.assertEqual(created['symbol'], 'THIRD')
+        # 同键不同品种的成交：批量并行下各成一行，绝不串写原品种行
+        other = self.signals.fill_trade('backtest', {**self.sample, 'signalTime': 100}, symbol='OTHER')
+        self.assertEqual(other['symbol'], 'OTHER')
+        self.assertNotEqual(other['id'], filled['id'])
 
     def test_bad_metadata_and_mode_never_touch_chart(self):
         with self.assertRaises(LookupError):

@@ -107,7 +107,12 @@ PARAM_MODULES = {
         "title": "标记进出场",
         "params": {
             "near": ("近支阻阈值", "背驰点价与支阻位价差 ≤ 该值视为接近（绝对价差，不乘ATR）", 0.1, 1000.0),
-            "lots": ("进场手数", "盈亏 = 价格差 × 方向 × 手数", 1, 100),
+            "lots": ("默认手数(其他品种)", "未单列品种的进场手数;盈亏 = 价差 × 方向 × 手数 × 合约乘数(1手=0.01标准手)", 1, 100),
+            "lots_xauusd": ("黄金手数", "OANDA:XAUUSD;1手=0.01标准手=1盎司,$1波动=$1", 1, 100),
+            "lots_xagusd": ("白银手数", "OANDA:XAGUSD;1手=0.01标准手=50盎司,$1波动=$50", 1, 100),
+            "lots_usoil": ("原油手数", "TVC:USOIL;1手=0.01标准手=10桶,$1波动=$10", 1, 100),
+            "lots_btcusd": ("BTC手数", "BITSTAMP:BTCUSD;1手=0.01标准手=0.01 BTC,$1波动=$0.01", 1, 100),
+            "lots_nas100": ("纳指手数", "FX:NAS100;1手=0.01标准手=0.01合约,1点=$0.01", 1, 100),
             "slip_stop": ("止损滑点", "正确侧支阻位外侧偏移（绝对价格）；有效值 = 该值 + ATR系数×ATR(14,背驰周期)", 0.1, 100.0),
             "slip_stop_atr_k": ("止损滑点ATR系数", "有效止损滑点 = 止损滑点 + 该值×ATR(14,背驰周期)；0=关闭", 0.0, 10.0),
             "slip_fallback": ("兜底止损滑点", "无正确侧支阻位时 止损=进场价±该值；有效值 = 该值 + ATR系数×ATR(14,背驰周期)", 0.1, 1000.0),
@@ -178,6 +183,12 @@ def defaults_of(module):
         return {
             "near": mark_entry.NEAR,
             "lots": mark_entry.DEFAULT_LOTS,
+            # 按品种手数（2026-09-23）：五品种各自独立，默认同 DEFAULT_LOTS（活取常量防漂移）
+            "lots_xauusd": mark_entry.DEFAULT_LOTS,
+            "lots_xagusd": mark_entry.DEFAULT_LOTS,
+            "lots_usoil": mark_entry.DEFAULT_LOTS,
+            "lots_btcusd": mark_entry.DEFAULT_LOTS,
+            "lots_nas100": mark_entry.DEFAULT_LOTS,
             "slip_stop": mark_entry.DEFAULT_SLIP_STOP,
             "slip_stop_atr_k": mark_entry.DEFAULT_SLIP_STOP_ATR_K,
             "slip_fallback": mark_entry.DEFAULT_SLIP_FALLBACK,
@@ -196,6 +207,36 @@ def defaults_of(module):
                 "reboundNearPts": trading_plan.REBOUND_NEAR_PTS,
                 "reboundAngleRef": trading_plan.REBOUND_ANGLE_REF}
     raise ValueError(f"未知参数模块：{module}")
+
+
+# 按品种手数键映射（2026-09-23）：symbol 后缀 → entry 模块参数键；未列品种走全局 lots
+SYMBOL_LOT_KEYS = {
+    "XAUUSD": "lots_xauusd",
+    "XAGUSD": "lots_xagusd",
+    "USOIL": "lots_usoil",
+    "BTCUSD": "lots_btcusd",
+    "NAS100": "lots_nas100",
+}
+
+
+def lots_of(ep, symbol):
+    """按品种解析进场手数（2026-09-23）：品种键优先 → 全局 lots → DEFAULT_LOTS。
+    ep 为 effective_all()["entry"] 字典；symbol 形如 "OANDA:XAUUSD"。"""
+    key = SYMBOL_LOT_KEYS.get(mark_entry.symbol_suffix(symbol))
+    if key is not None and key in ep:
+        return ep[key]
+    return ep.get("lots", mark_entry.DEFAULT_LOTS)
+
+
+def engine_module_params(pm):
+    """effective_all → BacktestEngine.module_params 映射（webapp 三模式 Worker 与
+    实盘 live_trader 共用；2026-09-23 自 webapp._engine_module_params 上移，避免复制漂移）。"""
+    ep = pm["entry"]
+    return {"plan": pm["plan"], "marks": pm["points"],
+            "trendRes": pm["plan"]["trendRes"],
+            "exit_min_merged": ep["exit_min_merged"],
+            "realtime_min_bars": ep["realtime_min_bars"],
+            "zs_exit_weak_ratio": ep["zs_exit_weak_ratio"]}
 
 
 def zs_draw_spec(zs_cfg=None):

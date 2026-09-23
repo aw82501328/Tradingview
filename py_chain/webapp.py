@@ -40,7 +40,8 @@ from .chan_core import fmtT
 from .monitor import LiveMonitor, ReplayMonitor, clear_rt_markers
 from .marks import draw_signal_marks, draw_sr_marks, clear_signal_marks, clear_all_marks
 from . import chan_core
-from . import data_store, td_launcher, sr_service, sr_draw, sr_tune, sr_tune_api, sr_preset_excel, analysis_service, analysis_api, bt_runs, param_center, params_api
+from . import data_store, td_launcher, sr_service, sr_draw, sr_tune, sr_tune_api, sr_preset_excel, analysis_service, analysis_api, bt_runs, param_center, params_api, live_api
+from . import mark_entry
 
 # ============================================================
 # 全局互斥：三种模式同一时间最多运行一种
@@ -178,15 +179,20 @@ class SignalLog:
         self.lock = threading.Lock()
         self.rows = []
         self._id = 0
-        # 成交回填匹配键：(mode, signalTime, periodX, direction, strategyKey)
+        # 成交回填匹配键：(mode, symbol, signalTime, periodX, direction, strategyKey)
+        # symbol 入键（2026-09-23 多品种并行回测）：不同品种同时刻同方向同策略的
+        # 信号行必须各自独立回填，否则批量并行时成交/出场会串写到别的品种行上
         self._key_to_idx = {}
 
     def _row_key(self, mode, s):
-        return (mode, s.get("time") or s.get("signalTime"), s.get("periodX"),
+        return (mode, s.get("symbol"), s.get("time") or s.get("signalTime"), s.get("periodX"),
                 s.get("direction"), s.get("strategyKey"))
 
     def append_signal(self, mode, s, symbol=None):
         """记录一条新进场信号，返回该行。"""
+        if symbol:
+            s = dict(s)
+            s["symbol"] = symbol    # 入键与入行同源（调用方显式 symbol 优先）
         with self.lock:
             self._id += 1
             row = {
@@ -215,6 +221,7 @@ class SignalLog:
                 "entryTime": None,
                 "entryPrice": None,
                 "lots": None,
+                "mult": None,       # 合约乘数快照（2026-09-23：1手=0.01标准手）
                 # 出场相关（成交/出场时回填）
                 "stopRef": None,
                 "state": None,
@@ -230,7 +237,7 @@ class SignalLog:
 
     def fill_trade(self, mode, tr, symbol=None):
         """回测成交时回填对应信号行的成交状态（持仓中）；找不到则追加一行记录。"""
-        key = (mode, tr.get("signalTime"), tr.get("periodX"),
+        key = (mode, symbol or tr.get("symbol"), tr.get("signalTime"), tr.get("periodX"),
                tr.get("direction"), tr.get("strategyKey"))
         with self.lock:
             idx = self._key_to_idx.get(key)
@@ -258,6 +265,7 @@ class SignalLog:
                     "entryPrice": tr.get("entryPrice"),
                     "fillMode": tr.get("fillMode"),
                     "lots": tr.get("lots"),
+                    "mult": tr.get("mult"),
                     "stopRef": tr.get("stopRef"),
                     "state": tr.get("state", "open"),
                     "exitTime": None,
@@ -274,15 +282,16 @@ class SignalLog:
             row["entryPrice"] = tr.get("entryPrice")
             row["fillMode"] = tr.get("fillMode")
             row["lots"] = tr.get("lots")
+            row["mult"] = tr.get("mult")
             row["stopRef"] = tr.get("stopRef")
             row["state"] = tr.get("state", "open")
             row["exits"] = list(tr.get("exits") or [])
             row["pnl"] = tr.get("pnl")
             return row
 
-    def fill_exit(self, mode, tr):
+    def fill_exit(self, mode, tr, symbol=None):
         """持仓终局（止损/保本止损/全平）时回填出场信息（状态→已平仓）。"""
-        key = (mode, tr.get("signalTime"), tr.get("periodX"),
+        key = (mode, symbol or tr.get("symbol"), tr.get("signalTime"), tr.get("periodX"),
                tr.get("direction"), tr.get("strategyKey"))
         with self.lock:
             idx = self._key_to_idx.get(key)
@@ -298,8 +307,11 @@ class SignalLog:
             row["pnl"] = tr.get("pnl")
             return row
 
-    def fill_suppressed(self, mode, s):
+    def fill_suppressed(self, mode, s, symbol=None):
         """同向持仓互斥过滤的信号：状态→同向过滤（保留行，不画箭头）。"""
+        if symbol:
+            s = dict(s)
+            s["symbol"] = symbol
         key = self._row_key(mode, s)
         with self.lock:
             idx = self._key_to_idx.get(key)
@@ -394,6 +406,8 @@ class ModeWorker:
         # 保存回测方案时按 id>_row_base 过滤出"本次运行新增行"，保证 cfg 与行配对
         self._row_base = 0
         self.error = None
+        # 多品种批量并行（仅 backtest）：{symbol: {state/current/total/pct/error/stats/duration}}
+        self.batch = None
         self.progress = {"current": 0, "total": 0, "pct": 0}
         self._pause_evt = threading.Event()
         self._stop_evt = threading.Event()
@@ -421,30 +435,38 @@ class ModeWorker:
         self.broadcaster.emit("progress", {"mode": self.MODE, **self.progress})
 
     # ---- 信号记录 ----
-    def _on_signal(self, s):
-        row = self.signals.append_signal(self.MODE, s, symbol=self.cfg.get('symbol'))
+    # symbol 形参：单品种路径不传 → 用 cfg['symbol']（行为与旧键口径等价）；
+    # 多品种批量并行时按消息携带的品种传入（2026-09-23）
+    def _on_signal(self, s, symbol=None):
+        row = self.signals.append_signal(self.MODE, s,
+                                         symbol=symbol or self.cfg.get('symbol'))
         self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
         d = "做多" if s.get("direction") == "long" else "做空"
-        self.log(f"新进场信号：{d} 策略 {s.get('strategyKey')} "
+        tag = f"[{symbol}] " if symbol and (self.cfg or {}).get("symbols") else ""
+        self.log(f"{tag}新进场信号：{d} 策略 {s.get('strategyKey')} "
                  f"周期 {s.get('periodX')} @ {fmtT(s.get('time'))} {s.get('price')}")
 
-    def _on_trade(self, tr):
-        row = self.signals.fill_trade(self.MODE, tr, symbol=self.cfg.get('symbol'))
+    def _on_trade(self, tr, symbol=None):
+        row = self.signals.fill_trade(self.MODE, tr,
+                                      symbol=symbol or self.cfg.get('symbol'))
         self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
 
-    def _on_exit(self, tr):
+    def _on_exit(self, tr, symbol=None):
         """持仓终局（止损/保本止损/全平）：行状态→已平仓并推送。"""
-        row = self.signals.fill_exit(self.MODE, tr)
+        row = self.signals.fill_exit(self.MODE, tr,
+                                     symbol=symbol or self.cfg.get('symbol'))
         if row is not None:
             self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
             name = {"stopSr": "支阻位止损", "stopBe": "保本止损", "close": "全平"}.get(
                 tr.get("exitType"), tr.get("exitType"))
-            self.log(f"出场：{name} {fmtT(tr.get('exitTime'))} "
+            tag = f"[{symbol}] " if symbol and (self.cfg or {}).get("symbols") else ""
+            self.log(f"{tag}出场：{name} {fmtT(tr.get('exitTime'))} "
                      f"@ {tr.get('exitPrice')}（盈亏 {tr.get('pnl', 0):.2f}）")
 
-    def _on_suppressed(self, s):
+    def _on_suppressed(self, s, symbol=None):
         """同向持仓互斥过滤的信号：行状态→同向过滤。"""
-        row = self.signals.fill_suppressed(self.MODE, s)
+        row = self.signals.fill_suppressed(self.MODE, s,
+                                           symbol=symbol or self.cfg.get('symbol'))
         if row is not None:
             self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
 
@@ -458,6 +480,7 @@ class ModeWorker:
         self.cfg = dict(cfg)
         self._row_base = self.signals.max_id()
         self.error = None
+        self.batch = None
         self.started_at = time.time()
         self.ended_at = None
         self.duration_sec = None
@@ -509,7 +532,8 @@ class ModeWorker:
 
     def status(self):
         return {"mode": self.MODE, "state": self.state,
-                "error": self.error, "progress": self.progress}
+                "error": self.error, "progress": self.progress,
+                "batch": self.batch}
 
 
 class BacktestWorker(ModeWorker):
@@ -541,8 +565,54 @@ class BacktestWorker(ModeWorker):
         pcfg = ControlApp.normalize_sr_cfg(pcfg)   # 校验 + manualLevels 按支阻周期过滤
         return engine_kwargs_of(pcfg)
 
+    @staticmethod
+    def _engine_kwargs_of(cfg, periods):
+        """参数中心取参 + cfg 缺省回填 + BacktestEngine 构造 kwargs（单品种 _run 与
+        多品种 _run_batch 共用，逐参等价）。会回写 cfg（lots/滑点等缺省值），保持
+        bt_runs 历史方案快照/对比表显示实际生效参数的既有口径。
+        diverge_confirm/expect_bi 页面不再传入（None → 引擎读 CHAN_CFG）。"""
+        pm = param_center.effective_all()
+        chan_core.apply_cfg(param_center.chan_cfg_effective())  # 幂等重放（启动已应用；防参数文件被手改）
+        ep = pm["entry"]
+        for k in ("slip_stop", "slip_fallback", "slip_be", "near",
+                  "slip_stop_atr_k", "slip_fallback_atr_k", "slip_be_atr_k"):
+            if cfg.get(k) is None:
+                cfg[k] = ep[k]
+        # 手数按品种解析（2026-09-23）：显式 cfg["lots"]（API/历史方案复现）优先
+        # → 参数中心品种键 → 全局 lots；合约乘数按品种（1 手 = 0.01 标准手）。
+        # 回写 cfg 保持快照/对比表显示实际生效值的既有口径；批量模式无 symbol，
+        # 在 _run_batch 循环内按品种覆盖并在 _save_one 回写各自值。
+        if cfg.get("lots") is None:
+            cfg["lots"] = param_center.lots_of(ep, cfg.get("symbol"))
+        cfg["contract_mult"] = mark_entry.contract_mult_of(cfg.get("symbol"))
+        return dict(
+            periods=periods,
+            warmup_bars=cfg.get("warmup", 60),
+            with_marks=cfg.get("with_marks", False),
+            fill_mode=cfg.get("fill_mode", "anchor"),
+            signal_mode=cfg.get("signal_mode", "realtime"),
+            lots=cfg["lots"],
+            contract_mult=cfg["contract_mult"],
+            slip_stop=cfg["slip_stop"],
+            slip_fallback=cfg["slip_fallback"],
+            slip_be=cfg["slip_be"],
+            slip_stop_atr_k=cfg["slip_stop_atr_k"],
+            slip_fallback_atr_k=cfg["slip_fallback_atr_k"],
+            slip_be_atr_k=cfg["slip_be_atr_k"],
+            near=cfg["near"],
+            sr_kwargs=BacktestWorker._sr_preset_kwargs(cfg, periods),
+            diverge_confirm=cfg.get("diverge_confirm"),
+            expect_bi=cfg.get("expect_bi"),
+            module_params=param_center.engine_module_params(pm),
+            entry_macd_shrink=cfg.get("entry_macd_shrink"),
+            stop_entry_bar_floor=cfg.get("stop_entry_bar_floor"))
+
     def _run(self):
         cfg = self.cfg
+        # 多品种批量并行（>1 个品种）：转 _run_batch（每品种一个子进程）；
+        # 恰 1 个品种时 normalize_cfg 已折叠回 cfg["symbol"]，走下方原单品种路径
+        if len([s for s in (cfg.get("symbols") or []) if s]) > 1:
+            return self._run_batch()
         periods = cfg.get("periods") or DEFAULT_PERIODS
         # 预热提前（lead_days > 0）：「起始日期=交易开始日」口径——取数自动前移 lead 天
         # 建状态（笔/支阻位/MACD 就绪），引擎 start_ts 前只推进状态不交易、从空仓起步；
@@ -578,33 +648,8 @@ class BacktestWorker(ModeWorker):
                 self.log(f"  {res:>4}: {n} 根（{fmtT(bars[res][-1]['time'])} 止）")
         # 参数中心（参数配置页统一管理）：API 显式值优先（历史方案复现/后端覆盖能力），
         # 缺省用参数中心当前值；回写 cfg 保证 bt_runs 历史方案快照/对比表显示实际生效参数。
-        # diverge_confirm/expect_bi 页面不再传入（None → 引擎读 CHAN_CFG，由画笔/买卖点/进出场拼合）。
-        pm = param_center.effective_all()
-        chan_core.apply_cfg(param_center.chan_cfg_effective())  # 幂等重放（启动已应用；防参数文件被手改）
-        ep = pm["entry"]
-        for k in ("lots", "slip_stop", "slip_fallback", "slip_be", "near",
-                  "slip_stop_atr_k", "slip_fallback_atr_k", "slip_be_atr_k"):
-            if cfg.get(k) is None:
-                cfg[k] = ep[k]
-        engine = BacktestEngine(bars, periods=periods,
-                                warmup_bars=cfg.get("warmup", 60),
-                                with_marks=cfg.get("with_marks", False),
-                                fill_mode=cfg.get("fill_mode", "anchor"),
-                                signal_mode=cfg.get("signal_mode", "realtime"),
-                                lots=cfg["lots"],
-                                slip_stop=cfg["slip_stop"],
-                                slip_fallback=cfg["slip_fallback"],
-                                slip_be=cfg["slip_be"],
-                                slip_stop_atr_k=cfg["slip_stop_atr_k"],
-                                slip_fallback_atr_k=cfg["slip_fallback_atr_k"],
-                                slip_be_atr_k=cfg["slip_be_atr_k"],
-                                near=cfg["near"],
-                                sr_kwargs=self._sr_preset_kwargs(cfg, periods),
-                                diverge_confirm=cfg.get("diverge_confirm"),
-                                expect_bi=cfg.get("expect_bi"),
-                                module_params=_engine_module_params(pm),
-                                entry_macd_shrink=cfg.get("entry_macd_shrink"),
-                                stop_entry_bar_floor=cfg.get("stop_entry_bar_floor"))
+        # 构造参数抽取为 _engine_kwargs_of（与多品种批量共用，逐参等价）
+        engine = BacktestEngine(bars, **self._engine_kwargs_of(cfg, periods))
         self.log(f"回测开始（最小周期 {engine.fine_res}，成交口径 {engine.fill_mode}，"
                  f"信号模式 {'当下背驰' if engine.signal_mode == 'realtime' else '确认制'}，"
                  f"背驰进场 {'分型确认后下一根开盘' if engine.diverge_confirm else '当下'}，"
@@ -637,6 +682,206 @@ class BacktestWorker(ModeWorker):
         self.log(f"回测完成：{st['steps']} 步，信号 {st['signals']}，成交 {st['executed']}，"
                  f"同向过滤 {st.get('suppressed', 0)}，已平仓 {st.get('closed', 0)}")
 
+    # ---- 多品种批量并行（2026-09-23）----
+    def _run_batch(self):
+        """多品种并行全量回测：统一参数、仅 symbol 不同，每品种一个 spawn 子进程
+        （回测是纯 CPU 计算，GIL 下线程并行无收益 → 多进程）；消息经共享 mp.Queue
+        回传，本线程中继转发到 SignalLog/SSE。各品种结果与逐个串行跑完全一致。"""
+        import multiprocessing as mp
+        from . import bt_batch
+        cfg = self.cfg
+        symbols = [s for s in (cfg.get("symbols") or []) if s]
+        periods = cfg.get("periods") or DEFAULT_PERIODS
+        lead_days = int(cfg.get("lead_days") or 0)
+        from_ts = int(cfg.get("from_ts", 0))
+        data_from_ts = max(0, from_ts - lead_days * 86400)
+        start_ts = from_ts if lead_days > 0 else None
+        to_ts = int(cfg.get("to_ts") or 0) or None
+        if lead_days > 0:
+            self.log(f"预热提前 {lead_days} 天：数据起点 {fmtT(data_from_ts)}，交易起点 {fmtT(from_ts)}")
+        self.log(f"批量并行回测：{len(symbols)} 个品种 {symbols}（数据源=本地存储，参数统一）")
+        # 父进程预计算一切配置（子进程不读参数文件/不解析日期）；
+        # chan_cfg 由子进程各自 apply_cfg 重放 → CHAN_CFG 进程级隔离天然成立
+        base_kwargs = self._engine_kwargs_of(cfg, periods)
+        pm_entry = param_center.effective_all()["entry"]
+        chan_cfg = param_center.chan_cfg_effective()
+        # 无数据品种预检：标 skipped 不 spawn（预检失败不拦截，交给子进程报具体错误）
+        try:
+            have = {s.get("symbol") for s in data_store.list_stores()}
+        except Exception:
+            have = None
+        self.batch = {s: {"state": "running", "current": 0, "total": 0, "pct": 0,
+                          "error": None, "stats": None, "duration": None}
+                      for s in symbols}
+        todo = []
+        for sym in symbols:
+            if have is not None and sym not in have:
+                self.batch[sym].update(state="skipped",
+                                       error="本地数据存储没有该品种，请先在基础数据页拉取")
+                self.log(f"[{sym}] 跳过：{self.batch[sym]['error']}")
+            else:
+                todo.append(sym)
+        ctx = mp.get_context("spawn")
+        msg_q = ctx.Queue()
+        pause_e = ctx.Event()
+        stop_e = ctx.Event()
+        procs = {}
+        try:
+            for sym in todo:
+                scfg = dict(cfg)
+                scfg["symbol"] = sym
+                kw = dict(base_kwargs)
+                kw["sr_kwargs"] = self._sr_preset_kwargs(scfg, periods)  # 支阻预设按品种重算
+                # 手数/合约乘数按品种解析（2026-09-23，父进程解析 → 纯数字 pickle 安全）；
+                # 记入 self.batch[sym] 供 _save_one 回写各自 cfg 快照
+                kw["lots"] = param_center.lots_of(pm_entry, sym)
+                kw["contract_mult"] = mark_entry.contract_mult_of(sym)
+                self.batch[sym]["lots"] = kw["lots"]
+                self.batch[sym]["contract_mult"] = kw["contract_mult"]
+                child_cfg = {"chan_cfg": chan_cfg, "engine_kwargs": kw, "periods": periods,
+                             "data_from_ts": data_from_ts, "to_ts": to_ts, "start_ts": start_ts}
+                p = ctx.Process(target=bt_batch.run_symbol,
+                                args=(child_cfg, sym, msg_q, pause_e, stop_e),
+                                name=f"bt-batch-{sym}", daemon=True)
+                p.start()
+                procs[sym] = p
+                self.log(f"[{sym}] 子进程已启动（PID {p.pid}）")
+            self._relay_batch(msg_q, procs, pause_e, stop_e)
+        finally:
+            stop_e.set()
+            for p in procs.values():
+                if p.is_alive():
+                    p.join(5)
+                    if p.is_alive():
+                        p.terminate()
+                p.join(2)
+            try:
+                msg_q.close()
+                msg_q.join_thread()
+            except Exception:
+                pass
+        if self._stop_evt.is_set():
+            self.set_state("stopped")
+        else:
+            self.set_state("done")
+
+    def _emit_batch_row(self, sym):
+        st = dict(self.batch[sym])
+        st["symbol"] = sym
+        self.broadcaster.emit("bt_symbol", {"mode": self.MODE, **st})
+
+    def _dispatch_batch_msg(self, msg):
+        """处理一条子进程消息；品种终结（done/error）时返回 symbol，否则 None。"""
+        kind = msg.get("kind")
+        sym = msg.get("symbol")
+        row = self.batch.get(sym)
+        if row is None:
+            return None            # 迟到消息（品种已终结）：丢弃
+        if kind == "log":
+            self.log(f"[{sym}] {msg.get('msg', '')}")
+        elif kind == "progress":
+            row["current"] = msg.get("current", 0)
+            row["total"] = msg.get("total", 0)
+            row["pct"] = msg.get("pct") or 0
+        elif kind == "signal":
+            self._on_signal(msg.get("signal") or {}, symbol=sym)
+        elif kind == "trade":
+            self._on_trade(msg.get("trade") or {}, symbol=sym)
+        elif kind == "exit":
+            self._on_exit(msg.get("trade") or {}, symbol=sym)
+        elif kind == "suppressed":
+            self._on_suppressed(msg.get("signal") or {}, symbol=sym)
+        elif kind == "done":
+            row["state"] = "stopped" if msg.get("stopped") else "done"
+            row["stats"] = msg.get("stats") or {}
+            row["duration"] = msg.get("duration")
+            # 回测结束后回推「持仓中」行（对齐单品种 _run 收尾口径）
+            for tr in msg.get("open") or []:
+                r2 = self.signals.fill_trade(self.MODE, tr, symbol=sym)
+                self.broadcaster.emit("signal", {"mode": self.MODE, "row": r2})
+            st = row["stats"]
+            self.log(f"[{sym}] 回测完成：{st.get('steps', 0)} 步，信号 {st.get('signals', 0)}，"
+                     f"成交 {st.get('executed', 0)}，同向过滤 {st.get('suppressed', 0)}，"
+                     f"已平仓 {st.get('closed', 0)}")
+            return sym
+        elif kind == "error":
+            row["state"] = "error"
+            row["error"] = str(msg.get("error") or "未知错误")
+            self.log(f"[{sym}] 运行失败：{row['error']}")
+            return sym
+        return None
+
+    def _relay_batch(self, msg_q, procs, pause_e, stop_e):
+        """中继循环：控制镜像（暂停/停止 → mp.Event）、消息分发、崩溃检测、terminate 兜底。"""
+        terminal = ("done", "stopped", "error", "skipped")
+        finished = {s for s, st in self.batch.items() if st["state"] in terminal}
+        dying = {}        # symbol → 首次检测到进程已退出的时刻（留 2s 等队列 flush 终结消息）
+        stop_at = {}      # symbol → stop 置位后进程仍未退出的时刻（5s 后 terminate 兜底）
+        last_emit = {s: (self.batch[s]["pct"], self.batch[s]["state"]) for s in self.batch}
+        last_fin = -1
+        for sym in self.batch:      # 初始全量推一次（含 skipped，刷新页面也经 status.batch 恢复）
+            self._emit_batch_row(sym)
+        while len(finished) < len(self.batch):
+            # ---- 控制下发：worker 线程事件镜像到子进程 ----
+            if self._pause_evt.is_set():
+                pause_e.set()
+            else:
+                pause_e.clear()
+            if self._stop_evt.is_set():
+                stop_e.set()
+            # ---- 消息分发：先阻塞取一条（0.2s 心跳），再抽干 ----
+            got = None
+            try:
+                got = msg_q.get(timeout=0.2)
+            except queue.Empty:
+                pass
+            while got is not None:
+                sym = self._dispatch_batch_msg(got)
+                if sym is not None:
+                    finished.add(sym)
+                    last_emit[sym] = (self.batch[sym]["pct"], self.batch[sym]["state"])
+                    self._emit_batch_row(sym)
+                try:
+                    got = msg_q.get_nowait()
+                except queue.Empty:
+                    got = None
+            # ---- 崩溃 / 停止兜底：单品种异常不影响其他品种 ----
+            now = time.time()
+            for sym, p in procs.items():
+                if sym in finished:
+                    continue
+                if p.is_alive():
+                    dying.pop(sym, None)
+                    if stop_e.is_set():
+                        stop_at.setdefault(sym, now)
+                        if now - stop_at[sym] > 5:
+                            p.terminate()
+                    continue
+                dying.setdefault(sym, now)
+                if now - dying[sym] > 2.0:
+                    self.batch[sym].update(
+                        state="error", error=f"子进程异常退出（exitcode={p.exitcode}）")
+                    self.log(f"[{sym}] {self.batch[sym]['error']}")
+                    finished.add(sym)
+                    self._emit_batch_row(sym)
+            # ---- 总进度 = 已终结品种数 / 总品种数（驱动现有单值进度条）----
+            n_fin = sum(1 for st in self.batch.values() if st["state"] in terminal)
+            if n_fin != last_fin:
+                self.set_progress(n_fin, len(self.batch))
+                last_fin = n_fin
+            # ---- 每品种行：暂停态同步 + SSE 节流（pct 变化 ≥1 或状态变化）----
+            for sym in procs:
+                if sym in finished:
+                    continue
+                st = self.batch[sym]
+                if st["state"] == "running" and pause_e.is_set():
+                    st["state"] = "paused"
+                elif st["state"] == "paused" and not pause_e.is_set():
+                    st["state"] = "running"
+                if (st["pct"] or 0) - (last_emit[sym][0] or 0) >= 1 or st["state"] != last_emit[sym][1]:
+                    self._emit_batch_row(sym)
+                    last_emit[sym] = (st["pct"], st["state"])
+
     def _on_progress(self, i, total):
         if i % max(1, total // 100) == 0 or i == total:
             self.set_progress(i, total)
@@ -656,7 +901,8 @@ class LiveWorker(ModeWorker):
                         from_ts=cfg.get("from_ts", 0), port=cfg.get("port", DEFAULT_CDP_PORT),
                         interval=cfg.get("interval", 15.0), tail=cfg.get("tail", 100),
                         use_cache=cfg.get("use_cache", False), log=self.log,
-                        module_params=_engine_module_params(pm))
+                        lots=param_center.lots_of(pm["entry"], cfg.get("symbol")),
+                        module_params=param_center.engine_module_params(pm))
         self.monitor = m
         self.log("实时监控就绪（Ctrl+C 无效，用停止按钮）")
         while not self._stop_evt.is_set():
@@ -703,7 +949,8 @@ class ReplayWorker(ModeWorker):
                           speed_ms=cfg.get("speed", 1000), hold_sec=cfg.get("hold", 2.0),
                           interval=cfg.get("interval", 0.5), tail=cfg.get("tail", 100),
                           use_cache=cfg.get("use_cache", False), log=self.log,
-                          module_params=_engine_module_params(pm))
+                          lots=param_center.lots_of(pm["entry"], cfg.get("symbol")),
+                          module_params=param_center.engine_module_params(pm))
         self.monitor = m
         m.enter_replay()
         self.log(f"回放自动播放已启动：速度 {m.speed_ms}ms/根，默认驻留 3m")
@@ -940,6 +1187,24 @@ class ControlApp:
             out["use_cache"] = v in (True, "true", "True", "1", 1)
         if out.get("data_source") not in ("live", "cache", "store"):
             out["data_source"] = "live"
+        # 品种多选（回测批量并行，2026-09-23）：列表或逗号串 → 去重保序；
+        # 恰 1 个 → 折叠回单品种 symbol 走原路径（行为不变）；>1 个仅支持本地数据存储
+        # （cache 是单品种 JSON、live 共享 CDP 图表均不可并行）。replay/live 不发此键。
+        if "symbols" in out:
+            raw = out.get("symbols")
+            if isinstance(raw, str):
+                raw = raw.split(",")
+            syms = [s for s in dict.fromkeys(
+                str(x).strip() for x in (raw or []) if str(x).strip())]
+            if not syms:
+                raise ValueError("请至少选择一个品种")
+            if len(syms) > 1:
+                if out.get("data_source") != "store":
+                    raise ValueError("多品种批量回测仅支持数据源=本地数据存储（store）")
+                out["symbols"] = syms
+            else:
+                out["symbol"] = syms[0]
+                del out["symbols"]
         if "periods" in out and isinstance(out["periods"], str):
             out["periods"] = [p.strip() for p in out["periods"].split(",") if p.strip()]
         if "from" in out and out.get("from"):
@@ -1015,14 +1280,7 @@ def _params_busy(app):
     return job.get("state") in ("pending", "running", "stopping")
 
 
-def _engine_module_params(pm):
-    """参数中心 effective_all → BacktestEngine.module_params 映射（三模式 Worker 共用）。"""
-    ep = pm["entry"]
-    return {"plan": pm["plan"], "marks": pm["points"],
-            "trendRes": pm["plan"]["trendRes"],
-            "exit_min_merged": ep["exit_min_merged"],
-            "realtime_min_bars": ep["realtime_min_bars"],
-            "zs_exit_weak_ratio": ep["zs_exit_weak_ratio"]}
+# _engine_module_params 已上移 param_center.engine_module_params（实盘 live_trader 共用，2026-09-23）
 
 
 def make_handler(app):
@@ -1068,6 +1326,8 @@ def make_handler(app):
                 self._send_json({'ok': True, 'job': app.locator.snapshot()})
                 return
             if analysis_api.handle(self, app, "GET"):
+                return
+            if live_api.handle(self, app, "GET"):
                 return
             if params_api.handle(self, app, "GET"):
                 return

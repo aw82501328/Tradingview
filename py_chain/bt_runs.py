@@ -69,6 +69,8 @@ def _exit_pnl_events(row):
     """
     total = _num(row.get("pnl"))
     lots = _num(row.get("lots"))
+    mult = _num(row.get("mult"))   # 合约乘数快照（2026-09-23；旧存档行无此键 → 1）
+    mult = 1.0 if mult is None else mult
     final_t = row.get("exitTime")
     final_pnl = total
     events = []
@@ -80,7 +82,7 @@ def _exit_pnl_events(row):
         d = 1 if row.get("direction") == "long" else -1 if row.get("direction") == "short" else None
         half_pnl = None
         if entry is not None and price is not None and half_lots is not None and d is not None:
-            half_pnl = (price - entry) * d * half_lots
+            half_pnl = (price - entry) * d * half_lots * mult
         if half_pnl is not None and half.get("time") is not None:
             events.append({"t": half["time"], "pnl": half_pnl})
         if total is not None and half_pnl is not None:
@@ -493,27 +495,94 @@ class BtRunStore:
 # ============================================================
 # HTTP 适配（仿 analysis_api.handle：路径前缀命中即处理并返回 True）
 # ============================================================
+def _save_one(app, worker, sym, name=None):
+    """保存一个品种的当前回测结果（_save_current 单存与 _save_all 全存共用）。
+    sym=None → 单品种整存（旧行为）；否则行按 symbol 过滤、cfg 注入该品种
+    （default_name/汇总/亏损归因均读 cfg["symbol"]）、耗时用该品种自身墙钟。
+    无行抛 ValueError；重名抛 _HttpError(409)。"""
+    cfg = worker.cfg
+    rows = app.signals.snapshot("backtest", worker._row_base)
+    if sym:
+        rows = [r for r in rows if r.get("symbol") == sym]
+    if not rows:
+        raise ValueError("当前没有可保存的本轮回测信号记录（表格已清空或未产生信号）")
+    if sym:
+        cfg = dict(cfg)
+        cfg["symbol"] = sym
+        # 批量：注入该品种实际生效的手数/合约乘数（父进程 _run_batch 循环记录，
+        # 2026-09-23）——保存"本次实际生效参数"，快照/对比表显示真实值
+        per = worker.batch.get(sym) if isinstance(worker.batch, dict) else None
+        per = per or {}
+        if per.get("lots") is not None:
+            cfg["lots"] = per["lots"]
+        if per.get("contract_mult") is not None:
+            cfg["contract_mult"] = per["contract_mult"]
+    duration = worker.duration_sec
+    if sym and isinstance(worker.batch, dict):
+        per = (worker.batch.get(sym) or {}).get("duration")
+        if per is not None:
+            duration = per          # 批量：用该品种自身墙钟耗时，而非整批耗时
+    name = (str(name or "").strip() or default_name(cfg))[:100]
+    try:
+        meta = app.bt_runs.save(
+            name, cfg, rows, worker_state=worker.state,
+            duration_sec=duration)
+    except sqlite3.IntegrityError:
+        raise _HttpError(f"方案名已存在：{name}", 409)
+    app.broadcaster.emit("log", {"mode": "backtest",
+                                 "msg": f"已保存回测方案：{name}（{len(rows)} 条信号）"})
+    return {"run": meta, "name": name, "rows": len(rows)}
+
+
 def _save_current(app, body):
-    """保存最近一次完成的全量回测：worker.cfg + 本次运行新增的信号行快照。"""
+    """保存最近一次完成的全量回测：worker.cfg + 本次运行新增的信号行快照。
+    多品种批量（cfg.symbols，2026-09-23）：body.symbol 指定品种——信号行按 symbol
+    过滤、cfg 注入该品种。"""
     worker = app.workers["backtest"]
     if worker.state in ("running", "paused"):
         raise _HttpError("回测进行中，请等其完成或停止后再保存", 409)
     if not worker.cfg:
         raise ValueError("服务启动后尚未运行过回测，没有可保存的参数")
-    rows = app.signals.snapshot("backtest", worker._row_base)
-    if not rows:
-        raise ValueError("当前没有可保存的本轮回测信号记录（表格已清空或未产生信号）")
-    name = str(body.get("name") or "").strip() or default_name(worker.cfg)
-    name = name[:100]
-    try:
-        meta = app.bt_runs.save(
-            name, worker.cfg, rows, worker_state=worker.state,
-            duration_sec=worker.duration_sec)
-    except sqlite3.IntegrityError:
-        raise _HttpError(f"方案名已存在：{name}", 409)
-    app.broadcaster.emit("log", {"mode": "backtest",
-                                 "msg": f"已保存回测方案：{name}（{len(rows)} 条信号）"})
-    return {"run": meta}
+    cfg = worker.cfg
+    symbols = [s for s in (cfg.get("symbols") or []) if s]
+    sym = str(body.get("symbol") or "").strip()
+    if symbols:
+        if sym not in symbols:
+            raise _HttpError(
+                f"多品种批量回测须指定要保存的品种（可选：{', '.join(symbols)}）", 400)
+    elif sym and sym != cfg.get("symbol"):
+        raise _HttpError(f"品种与本次回测不符（本次为 {cfg.get('symbol')}）", 400)
+    r = _save_one(app, worker, sym or None, body.get("name"))
+    return {"run": r["run"]}
+
+
+def _save_all(app, body):
+    """多品种批量回测一键全存（2026-09-23）：每个已完成品种自动各存一条方案，
+    名称自动带品种（default_name 含品种+窗口+时刻，互不重名）。
+    skipped/error/无行品种跳过；重名品种失败不影响其余。单品种运行 → 400。"""
+    worker = app.workers["backtest"]
+    if worker.state in ("running", "paused"):
+        raise _HttpError("回测进行中，请等其完成或停止后再保存", 409)
+    if not worker.cfg:
+        raise ValueError("服务启动后尚未运行过回测，没有可保存的参数")
+    symbols = [s for s in (worker.cfg.get("symbols") or []) if s]
+    if not symbols:
+        raise _HttpError("当前不是多品种批量回测，请用「保存方案」按当前品种单存", 400)
+    batch = worker.batch if isinstance(worker.batch, dict) else {}
+    saved, failed, skipped = [], [], []
+    for sym in symbols:
+        st = (batch.get(sym) or {}).get("state")
+        if st not in ("done", "stopped"):
+            skipped.append({"symbol": sym, "reason": f"品种状态 {st or '未知'}，无可存结果"})
+            continue
+        try:
+            r = _save_one(app, worker, sym)
+            saved.append({"symbol": sym, "name": r["name"], "run": r["run"]})
+        except _HttpError as e:     # 重名等：该品种失败，继续其余
+            failed.append({"symbol": sym, "error": str(e)})
+        except ValueError as e:     # 无信号行：跳过
+            skipped.append({"symbol": sym, "reason": str(e)})
+    return {"ok": True, "saved": saved, "failed": failed, "skipped": skipped}
 
 
 def _rename(app, body):
@@ -585,6 +654,8 @@ def handle(handler, app, method):
                 raise ValueError("请求体须为对象")
             if action == "save":
                 result = _save_current(app, body)
+            elif action == "save_all":
+                result = _save_all(app, body)
             elif action == "rename":
                 result = _rename(app, body)
             elif action == "analyze":

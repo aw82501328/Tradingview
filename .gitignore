@@ -43,6 +43,7 @@ data/bars.db-wal
 data/bars.db-shm
 
 # 调试残留：probe/shot/截屏/中间 dump（一次性脚本与产物，不入库）
+.probe/
 _probe*.py
 _shot*.py
 _shot*.png
@@ -70,3 +71,10 @@ py_chain/web/module_params.json
 py_chain/bars.db
 py_chain/bars.db-wal
 py_chain/bars.db-shm
+
+# 实盘运行时：真实账号配置（敏感，只提交 live_config.json 模板）、开闸/急停标记、probe/对拍产物（不入库）
+py_chain/web/live_config.local.json
+data/LIVE_ARMED
+data/LIVE_KILL
+data/mt5_probe.json
+data/mt5_align_*.json
