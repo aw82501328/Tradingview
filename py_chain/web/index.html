@@ -233,6 +233,15 @@
   #bt-detail-body { overflow: auto; }
   .bt-params { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
     gap: 6px 14px; padding: 10px 16px; font-size: 12px; }
+  /* 参数区可折叠：结果图形置顶，参数收起为摘要行 */
+  .bt-params-wrap { border-bottom: 1px solid var(--border); background: var(--card-2); }
+  .bt-params-wrap > summary { padding: 8px 16px; font-size: 12px; color: var(--muted);
+    cursor: pointer; user-select: none; list-style: none; }
+  .bt-params-wrap > summary::-webkit-details-marker { display: none; }
+  .bt-params-wrap > summary::before { content: '▸'; margin-right: 6px; display: inline-block;
+    transition: transform .15s ease; }
+  .bt-params-wrap[open] > summary::before { transform: rotate(90deg); }
+  .bt-params-wrap[open] > summary { border-bottom: 1px dashed var(--border); }
   .bt-params .k { color: var(--muted); margin-right: 4px; }
   .bt-summary { display: flex; gap: 14px; flex-wrap: wrap; padding: 8px 16px;
     border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
@@ -246,6 +255,49 @@
   .bt-loss-summary b { color: var(--text); font-weight: 600; }
   .bt-loss-summary .pnl-pos { color: var(--buy); }
   .bt-loss-summary .pnl-neg { color: var(--sell); }
+  /* 明细弹窗盈亏图形化：表内双向条 / 汇总瓦片 / 亏损归因 */
+  .pnl-cell { display: inline-flex; align-items: center; gap: 8px; }
+  .pnl-bar-track { position: relative; width: 64px; height: 6px; flex: none;
+    border-radius: 3px; background: var(--input); }
+  .pnl-bar-track::before { content: ''; position: absolute; left: 50%; top: -2px; bottom: -2px;
+    width: 1px; background: var(--border); }
+  .pnl-bar { position: absolute; top: 0; bottom: 0; min-width: 1px; }
+  .pnl-bar.pos { left: 50%; border-radius: 0 3px 3px 0; background: var(--buy); }
+  .pnl-bar.neg { right: 50%; border-radius: 3px 0 0 3px; background: var(--sell); }
+  /* 汇总瓦片（明细弹窗专用；#pnl-summary 实时汇总条不受影响）：3 列两行——
+     行1 盈亏数字+双向条，行2 盈亏比对条+胜率/出场分布环形图 */
+  .bt-summary-graphic { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px 16px; padding: 12px 16px; }
+  .sum-tile { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .sum-tile-donut { flex-direction: row; align-items: center; gap: 10px; }
+  .sum-tile-donut svg { flex: none; }
+  .sum-donut-side { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .sum-label { font-size: 11px; color: var(--muted); }
+  .sum-value { font-size: 15px; font-weight: 600; color: var(--text);
+    font-variant-numeric: tabular-nums; }
+  .sum-legend { font-size: 11px; color: var(--muted); white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  .sum-graph { display: flex; flex-direction: column; gap: 4px; }
+  .sum-graph svg { display: block; }
+  .sum-graph .pnl-bar-track { width: 100%; }
+  .sum-pair { display: flex; flex-direction: column; gap: 3px; }
+  .sum-pair-row { display: grid; grid-template-columns: 26px 1fr auto; gap: 6px;
+    align-items: center; font-size: 11px; color: var(--muted);
+    font-variant-numeric: tabular-nums; }
+  .sum-pair-row .bar { position: relative; height: 6px; border-radius: 3px;
+    background: var(--input); overflow: hidden; }
+  .sum-pair-row .bar > i { position: absolute; left: 0; top: 0; bottom: 0;
+    border-radius: 0 3px 3px 0; }
+  .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; }
+  /* 亏损归因图形化 */
+  .bt-loss-graphic { display: flex; flex-direction: column; gap: 8px; }
+  .loss-main { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; min-width: 0; }
+  .loss-main svg { display: block; flex: none; }
+  .loss-side { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .loss-cats { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+  .loss-cat { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .loss-cat b { color: var(--text); }
+  .loss-cat .pnl-bar-track { width: 72px; }
   .bt-analyze-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
     font-size: 12px; color: var(--muted); }
   .bt-analyze-bar input[type="number"] {
@@ -257,6 +309,94 @@
   #bt-compare-view .equity-chart {
     border: 1px solid var(--border); border-radius: 8px;
     margin: 4px 0 10px; padding: 8px 10px 10px;
+  }
+  /* 历史明细看板：布局与表格规则仅作用于此弹窗。 */
+  #bt-detail-modal { padding: 16px; backdrop-filter: blur(4px); }
+  #bt-detail-modal .bt-modal-card { width: min(1440px, 100%); max-width: 100%; height: 92vh;
+    max-height: 92vh; border-radius: 14px; box-shadow: 0 24px 80px #0008; }
+  #bt-detail-modal.maximized .bt-modal-card { width: 100%; height: 100%; max-height: 100%; border-radius: 0; }
+  #bt-detail-modal .bt-modal-head { padding: 18px 24px; align-items: flex-start; flex: none; }
+  #bt-detail-modal .bt-heading { min-width: 0; }
+  #bt-detail-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
+    overflow: hidden; font-size: 20px; line-height: 1.4; overflow-wrap: anywhere; }
+  #bt-detail-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px;
+    color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+  #bt-detail-modal .bt-modal-actions { flex-wrap: wrap; justify-content: flex-end; }
+  #bt-detail-tabs { display: flex; gap: 24px; padding: 0 24px; flex: none; border-bottom: 1px solid var(--border); }
+  #bt-detail-tabs button { border: 0; border-radius: 0; border-bottom: 2px solid transparent;
+    background: transparent; color: var(--muted); padding: 10px 2px; }
+  #bt-detail-tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+  #bt-detail-modal #bt-detail-body { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+  #bt-detail-overview { overflow: auto; min-height: 0; padding: 20px 24px; }
+  #bt-detail-modal .bt-kpis { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap: 12px; }
+  #bt-detail-modal .bt-kpi { min-width: 0; background: var(--card-2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+  #bt-detail-modal .bt-kpi:first-child { background: color-mix(in srgb,var(--accent) 8%,var(--card-2)); border-color: var(--control-border); }
+  #bt-detail-modal .bt-kpi strong { font-size: clamp(18px,1.65vw,26px); line-height: 1.3; overflow-wrap: anywhere; }
+  #bt-detail-modal .bt-kpi:first-child strong { font-weight: 750; }
+  #bt-detail-modal .bt-kpi small { font-size: 11px; color: var(--muted); }
+  #bt-detail-modal .bt-kpi-label { color: var(--muted); font-size: 12px; }
+  #bt-detail-modal .bt-kpi strong, #bt-detail-modal table, #bt-detail-modal .bt-distribution { font-variant-numeric: tabular-nums; }
+  #bt-detail-modal .pnl-pos { color: var(--buy); }
+  #bt-detail-modal .pnl-neg { color: var(--sell); }
+  #bt-detail-modal .bt-panel { border: 1px solid var(--border); border-radius: 10px; background: var(--card-2);
+    padding: 18px; min-width: 0; margin-top: 16px; }
+  #bt-detail-modal .bt-panel h3 { font-size: 14px; margin: 0 0 14px; }
+  #bt-detail-modal .bt-chart-panel { padding: 6px; }
+  #bt-detail-modal .equity-chart { background: transparent; border: 0; }
+  #bt-detail-modal .eq-head { flex-wrap: wrap; }
+  #bt-detail-modal .eq-legend { overflow-wrap: anywhere; }
+  #bt-detail-modal .bt-insights { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
+  #bt-detail-modal .bt-distribution { display: flex; align-items: center; gap: 20px; }
+  #bt-detail-modal .bt-distribution > svg { flex: none; width: 96px; height: 96px; }
+  #bt-detail-modal .bt-exit-legend { flex: 1; min-width: 0; display: grid; gap: 9px; }
+  #bt-detail-modal .bt-exit-row { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 16px; font-size: 12px; }
+  #bt-detail-modal .bt-exit-row > :last-child { color: var(--muted); min-width: 40px; text-align: right; }
+  #bt-detail-modal .bt-note { color: var(--muted); font-size: 12px; margin-top: 12px; }
+  #bt-detail-modal .bt-loss-summary { background: transparent; padding: 0; border: 0; }
+  #bt-detail-modal .sum-legend { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+  #bt-detail-modal .loss-main { flex-wrap: nowrap; align-items: flex-start; }
+  #bt-detail-modal .loss-side { flex: 1; }
+  #bt-detail-modal .loss-cats { flex-direction: column; gap: 8px; }
+  #bt-detail-modal .loss-cat { flex-wrap: wrap; }
+  #bt-detail-modal .bt-analyze-bar { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
+  #bt-detail-modal .bt-params-wrap { margin-top: 16px; border: 1px solid var(--border); border-radius: 10px; }
+  #bt-detail-modal .bt-params-wrap > summary { padding: 14px 18px; }
+  #bt-detail-modal .bt-params { gap: 12px 20px; padding: 16px 18px; }
+  #bt-detail-modal .bt-params > div { overflow-wrap: anywhere; }
+  #bt-detail-records { display: flex; flex-direction: column; flex: 1; min-height: 0; padding: 16px 24px 20px; }
+  #bt-detail-modal .bt-record-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; margin-bottom: 10px; font-size: 12px; }
+  #bt-detail-modal .bt-record-head span { color: var(--muted); }
+  #bt-detail-modal .bt-detail-locate { padding: 0 0 12px; border: 0; background: transparent; }
+  #bt-detail-modal #bt-detail-records .scroll { flex: 1; min-height: 0; max-height: none; overflow: auto;
+    border: 1px solid var(--border); border-radius: 8px; }
+  #bt-detail-modal table th { top: 0; z-index: 2; }
+  #bt-detail-modal table th:first-child, #bt-detail-sig-body tr[data-signal-id]:not(.exit-continuation) td:first-child {
+    position: sticky; left: 0; background: var(--card); z-index: 1; min-width: 48px; border-right: 1px solid var(--border); }
+  #bt-detail-modal table th:first-child { z-index: 3; }
+  #bt-detail-sig-body tr.selected:not(.exit-continuation) td:first-child { background: color-mix(in srgb,var(--accent) 18%,var(--card)); }
+  #bt-detail-modal td.bt-number, #bt-detail-modal th.bt-number { text-align: right; }
+  #bt-detail-modal .pnl-cell { justify-content: flex-end; }
+  #bt-detail-modal .bt-empty { padding: 40px 20px; text-align: center; color: var(--muted); font-size: 13px; }
+  #bt-detail-sig-body .bt-empty { text-align: left; max-width: 280px; white-space: normal; }
+  #bt-detail-modal .bt-error { color: var(--buy); }
+  @media(max-width:1100px) { #bt-detail-modal .bt-kpis { grid-template-columns: repeat(3,minmax(0,1fr)); } }
+  @media(max-width:800px) {
+    #bt-detail-modal .bt-kpis { grid-template-columns: repeat(2,minmax(0,1fr)); }
+    #bt-detail-modal .bt-insights { grid-template-columns: minmax(0,1fr); gap: 0; }
+    #bt-detail-modal .bt-modal-head { padding: 14px 16px; }
+    #bt-detail-tabs { padding: 0 16px; }
+    #bt-detail-overview, #bt-detail-records { padding: 16px; }
+  }
+  @media(max-width:480px) {
+    #bt-detail-modal { padding: 8px; }
+    #bt-detail-modal .bt-modal-head { flex-wrap: wrap; gap: 10px; }
+    #bt-detail-modal .bt-modal-actions { width: 100%; }
+    #bt-detail-modal .bt-kpis { grid-template-columns: minmax(0,1fr); }
+    #bt-detail-modal .bt-kpi strong { font-size: 24px; }
+    #bt-detail-title { font-size: 17px; }
+    #bt-detail-modal .bt-panel { padding: 12px; }
+    #bt-detail-modal .bt-distribution { gap: 12px; }
   }
 </style>
 <link rel="stylesheet" href="/theme.css">
@@ -373,21 +513,19 @@
   </section>
 </div>
 
-<!-- 历史方案明细弹窗：参数 + 固化汇总 + 信号表（静态快照，不可定位） -->
+<!-- 历史方案明细弹窗：固化看板与可定位的交易快照 -->
 <div id="bt-detail-modal" hidden role="dialog" aria-modal="true" aria-labelledby="bt-detail-title">
   <div class="bt-modal-card">
     <div class="bt-modal-head">
-      <strong id="bt-detail-title"></strong>
+      <div class="bt-heading"><strong id="bt-detail-title"></strong><div id="bt-detail-meta"></div></div>
       <div class="bt-modal-actions">
-        <div class="bt-analyze-bar" title="用检测周期信号后 N 根收盘对比信号价，判定亏损是方向问题还是进出场问题">
-          <span>信号后</span>
-          <input id="bt-detail-lookahead" type="number" min="1" step="1" value="20" aria-label="归因回看K线根数">
-          <span>根</span>
-          <button id="bt-detail-analyze" type="button">分析方案</button>
-        </div>
         <button id="bt-detail-max" type="button" title="全屏最大化明细窗口">最大化</button>
         <button id="bt-detail-close" type="button">关闭</button>
       </div>
+    </div>
+    <div id="bt-detail-tabs" role="tablist" aria-label="方案明细">
+      <button id="bt-detail-tab-overview" type="button" role="tab" data-detail-tab="overview" aria-controls="bt-detail-overview" aria-selected="true">概览</button>
+      <button id="bt-detail-tab-records" type="button" role="tab" data-detail-tab="records" aria-controls="bt-detail-records" aria-selected="false" tabindex="-1">交易记录</button>
     </div>
     <div id="bt-detail-body"></div>
   </div>
@@ -472,12 +610,6 @@ function isAnyModeRunning() {
 
 // ---------- 卡片渲染 ----------
 function buildCard(m) {
-  const cfg = {
-    symbol: { label: '品种', type: 'text', def: 'OANDA:XAUUSD' },
-    periods: { label: '周期', type: 'text', def: 'D,240,60,15,3' },
-    from: { label: '起始日期', type: 'text', def: '2026-07-02' },
-    extra: [],
-  };
   const extras = {
     backtest: [
       { k: 'lead_days', label: '预热提前（天）·0=从起始日交易', type: 'text', def: '60' },
@@ -509,7 +641,7 @@ function buildCard(m) {
     <input type="hidden" data-cfg="periods" value="${PERIOD_OPTIONS.join(',')}">
   </div></div>`;
   rows.push(`<div class="row">
-    <div class="field"><label>品种</label><input data-cfg="symbol" value="OANDA:XAUUSD"></div>
+    <div class="field"><label>品种</label><select data-cfg="symbol"><option>OANDA:XAUUSD</option><option>OANDA:XAGUSD</option><option>FX:NAS100</option><option>TVC:USOIL</option><option>BITSTAMP:BTCUSD</option></select></div>
     ${periodsHtml}
     <div class="field"><label>${m.id === 'backtest' ? '起始日期（开始交易）' : '起始日期'}</label><input type="date" data-cfg="from" value="2026-07-02"></div>
     ${m.id === 'backtest' ? '<div class="field"><label>结束日期（空=到最新）</label><input type="date" data-cfg="to"></div>' : ''}
@@ -885,11 +1017,88 @@ function summaryStats(rows) {
     exits: ex,
   };
 }
-function summaryHtml(s) {
+// 零点居中双向迷你条：maxAbs 为展示行（含分批出场行）|pnl| 最大值；0 只画空轨道
+function pnlBarHtml(pnl, maxAbs) {
+  if (pnl == null || !maxAbs) return '';
+  const v = Number(pnl);
+  if (!Number.isFinite(v)) return '';
+  if (v === 0) return '<span class="pnl-bar-track" aria-hidden="true"></span>';
+  const w = Math.min(50, Math.abs(v) / maxAbs * 50).toFixed(2);
+  return `<span class="pnl-bar-track" aria-hidden="true"><i class="pnl-bar ${v > 0 ? 'pos' : 'neg'}" style="width:${w}%"></i></span>`;
+}
+// 环形图：segments [{n, color, label}]，中心主/副文本；段间留缝，单段画整环，空数据显示空轨道
+function donutHtml(segments, c1, c2) {
+  const R = 24, C = 32, SW = 9, TAU = Math.PI * 2;
+  const total = segments.reduce((s, g) => s + g.n, 0);
+  const track = `<circle cx="${C}" cy="${C}" r="${R}" fill="none" stroke="var(--input)" stroke-width="${SW}"/>`;
+  let arcs = '';
+  const items = total > 0 ? segments.filter(g => g.n > 0) : [];
+  if (items.length === 1) {
+    arcs = `<circle cx="${C}" cy="${C}" r="${R}" fill="none" stroke="${items[0].color}" stroke-width="${SW}"><title>${items[0].label} ${items[0].n}</title></circle>`;
+  } else if (items.length > 1) {
+    let a = -Math.PI / 2;
+    const GAP = TAU / 240;  // 段间缝隙约 1.5°，露出轨道底色
+    const pt = ang => `${(C + R * Math.cos(ang)).toFixed(2)} ${(C + R * Math.sin(ang)).toFixed(2)}`;
+    arcs = items.map(g => {
+      const seg = g.n / total * TAU;
+      const gap = Math.min(GAP, seg / 4);
+      const path = `<path d="M ${pt(a + gap)} A ${R} ${R} 0 ${seg > Math.PI ? 1 : 0} 1 ${pt(a + seg - gap)}" fill="none" stroke="${g.color}" stroke-width="${SW}"><title>${g.label} ${g.n}</title></path>`;
+      a += seg;
+      return path;
+    }).join('');
+  }
+  return `<svg width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="${c1} ${c2}">${track}${arcs}
+    <text x="${C}" y="31" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--text)">${c1}</text>
+    <text x="${C}" y="41.5" text-anchor="middle" font-size="7.5" fill="var(--muted)">${c2}</text></svg>`;
+}
+// 汇总条：默认纯文本（实时表格 #pnl-summary 用）；opts.graphics 为明细弹窗图形瓦片版，数字口径一致
+function summaryHtml(s, opts = {}) {
   const total = (s.realized || 0) + (s.floating || 0);
   const fmtV = v => (v > 0 ? '+' : '') + v.toFixed(2);
   const cls = v => (v > 0 ? 'pnl-pos' : v < 0 ? 'pnl-neg' : '');
   const payoff = s.payoff_ratio != null ? s.payoff_ratio.toFixed(2) : (s.win ? '∞' : '—');
+  if (opts.graphics) {
+    const num = v => Number(v || 0);
+    const ex = s.exits || {};
+    const win = num(s.win), lose = num(s.lose), closed = num(s.closed);
+    const be = Math.max(0, closed - win - lose);  // 保本单：盈亏均不计
+    const realized = num(s.realized), floating = num(s.floating);
+    const maxRF = Math.max(Math.abs(realized), Math.abs(floating), Math.abs(total), 0);
+    const avgWin = num(s.avg_win), avgLoss = num(s.avg_loss);
+    const maxAvg = Math.max(avgWin, avgLoss);
+    const exitN = num(ex.stopBe) + num(ex.stopSr) + num(ex.close);
+    const tile = (label, value, graph, legend) =>
+      `<div class="sum-tile"><span class="sum-label">${label}</span><span class="sum-value">${value}</span><span class="sum-graph">${graph}</span>${legend ? `<span class="sum-legend">${legend}</span>` : ''}</div>`;
+    const pairBar = (label, val, txt, color) => `
+      <div class="sum-pair-row"><span>${label}</span><span class="bar"><i style="width:${maxAvg > 0 ? Math.min(100, val / maxAvg * 100).toFixed(2) : 0}%;background:${color}"></i></span><span>${txt}</span></div>`;
+    const donutTile = (label, donut, legend) =>
+      `<div class="sum-tile sum-tile-donut">${donut}<span class="sum-donut-side"><span class="sum-label">${label}</span>${legend ? `<span class="sum-legend">${legend}</span>` : ''}</span></div>`;
+    return [
+      // 行1：盈亏结果（数字 + 共享比例尺双向条）
+      tile('已平仓盈亏', `<b class="${cls(realized)}">${fmtV(realized)}</b>`, pnlBarHtml(realized, maxRF)),
+      tile('浮盈', `<b class="${cls(floating)}">${fmtV(floating)}</b>`, pnlBarHtml(floating, maxRF)),
+      tile('合计', `<b class="${cls(total)}" title="已平仓盈亏 + 浮盈">${fmtV(total)}</b>`, pnlBarHtml(total, maxRF)),
+      // 行2：结构比率（盈亏比对条 + 胜率/出场分布环形图）
+      tile('盈亏比',
+        `<span title="已平仓平均盈利 ÷ 平均亏损绝对值；不含保本单和持仓浮盈。仅盈利显示∞，仅亏损显示0.00，无盈亏样本显示—。">${payoff}</span>`,
+        `<span class="sum-pair">${pairBar('均盈', avgWin, '+' + avgWin.toFixed(2), 'var(--buy)')}${pairBar('均亏', avgLoss, '-' + avgLoss.toFixed(2), 'var(--sell)')}</span>`,
+        `均盈 ${avgWin.toFixed(2)} · 均亏 ${avgLoss.toFixed(2)}`),
+      donutTile('胜率',
+        donutHtml([
+          { n: win, color: 'var(--buy)', label: '盈' },
+          { n: be, color: 'var(--muted)', label: '保本' },
+          { n: lose, color: 'var(--sell)', label: '亏' },
+        ], s.win_rate != null ? s.win_rate + '%' : '—', '胜率'),
+        `盈 ${win} · 保本 ${be} · 亏 ${lose} · 共 ${closed}`),
+      donutTile('出场分布',
+        donutHtml([
+          { n: num(ex.stopBe), color: '#5a8de6', label: '保损' },
+          { n: num(ex.stopSr), color: '#c8742a', label: '止损' },
+          { n: num(ex.close), color: '#8f6ce8', label: '全平' },
+        ], String(exitN), '次出场'),
+        `保损 ${num(ex.stopBe)} · 止损 ${num(ex.stopSr)} · 全平 ${num(ex.close)}${ex.half ? ' · 半平 ' + num(ex.half) : ''}`),
+    ].join('');
+  }
   const parts = [
     `已平仓 <b>${s.closed}</b>（盈 ${s.win} / 亏 ${s.lose}${s.win_rate != null ? ' · 胜率 ' + s.win_rate + '%' : ''}）`,
     `<span title="已平仓平均盈利 ÷ 平均亏损绝对值；不含保本单和持仓浮盈。仅盈利显示∞，仅亏损显示0.00，无盈亏样本显示—。">盈亏比 <b>${payoff}</b></span>`,
@@ -955,6 +1164,10 @@ function signalRowsHtml(rows, opts = {}) {
       const pnl = exit.pnl;
       const pnlCls = pnl == null || pnl === 0 ? '' : (pnl > 0 ? 'pnl-pos' : 'pnl-neg');
       const pnlTxt = pnl == null ? '-' : (pnl > 0 ? '+' : '') + pnl.toFixed(2);
+      // 明细弹窗（opts.pnlBars=展示行|pnl|最大值）数字旁加零点双向条；主表不传则纯文本
+      const pnlBody = opts.pnlBars && pnl != null
+        ? `<span class="pnl-cell">${pnlTxt}${pnlBarHtml(pnl, opts.pnlBars)}</span>`
+        : pnlTxt;
       const totalTxt = r.pnl == null ? '-' : Number(r.pnl).toFixed(2);
       const selected = interactive && selectedId === r.id;
       const classes = [selected ? 'selected' : '', i ? 'exit-continuation' : ''].filter(Boolean).join(' ');
@@ -967,7 +1180,7 @@ function signalRowsHtml(rows, opts = {}) {
         <td>${exit.price != null ? Number(exit.price).toFixed(2) : '-'}</td>
         <td title="${exitEventsDesc(r)}">${exit.label}</td>
         <td>${exit.lots != null ? exit.lots : '-'}</td>
-        <td class="${pnlCls}" title="${exits.length > 1 ? (exit.type ? '本次出场盈亏' : '剩余持仓浮盈') + '；整笔交易合计：' + totalTxt : '整笔交易盈亏'}">${pnlTxt}</td>
+        <td class="${pnlCls}" title="${exits.length > 1 ? (exit.type ? '本次出场盈亏' : '剩余持仓浮盈') + '；整笔交易合计：' + totalTxt : '整笔交易盈亏'}">${pnlBody}</td>
         ${i === 0 ? lossCell : ''}
       </tr>`;
     }).join('');
@@ -1008,11 +1221,14 @@ function copySignalInfo(event, text) {
     const ta = document.createElement('textarea');
     ta.value = text;
     ta.style.cssText = 'position:fixed;opacity:0;';
-    document.body.appendChild(ta);
+    const modal = el('bt-detail-modal');
+    const focused = document.activeElement;
+    (modal && !modal.hidden ? modal : document.body).appendChild(ta);
     ta.select();
     let ok = false;
     try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
     ta.remove();
+    if (focused?.isConnected) focused.focus({ preventScroll: true });
     showCopyTip(ok ? '已复制交易信息' : '复制失败，请手动复制');
   };
   if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -1025,8 +1241,10 @@ function showCopyTip(msg) {
   if (!tip) {
     tip = document.createElement('div');
     tip.id = 'copy-tip';
-    document.body.appendChild(tip);
   }
+  // 全屏元素之外的节点不会显示；明细里的复制反馈跟随弹窗。
+  const modal = el('bt-detail-modal');
+  (modal && !modal.hidden ? modal : document.body).appendChild(tip);
   tip.textContent = msg;
   tip.classList.add('show');
   clearTimeout(copyTipTimer);
@@ -1074,6 +1292,13 @@ function finishLocate(job) {
   const mode = locatePending.mode;
   const source = locatePending.source;
   const id = locatePending.id;
+  const staleDetail = source === 'detail' && locatePending.detailEpoch !== btDetailEpoch;
+  if (staleDetail) {
+    locatePending = null;
+    clearTimeout(locatePoll);
+    updateMarkButtons();
+    return;
+  }
   if (job.state === 'done') {
     // 单行标记结果：定位成功后同一任务内已画该行进出场箭头+支阻横线
     const mk = job.result.mark;
@@ -1110,7 +1335,9 @@ async function pollLocate() {
   } catch (e) {
     if (locatePending === pending) {
       const msg = `${pending.source === 'detail' ? `#${btDetailLabelOf(pending.id)}` : locateLabel(pending.mode, pending.id)} 定位状态连接中断，正在重新查询…`;
-      if (pending.source === 'detail') setBtDetailLocateMsg(msg);
+      if (pending.source === 'detail') {
+        if (pending.detailEpoch === btDetailEpoch) setBtDetailLocateMsg(msg);
+      }
       else {
         locateMessages[pending.mode] = msg;
         renderTable();
@@ -1222,7 +1449,7 @@ function addLog(m, msg) {
 }
 
 // ---------- 控制调用 ----------
-async function api(path, body) {
+async function api(path, body, reqOpts = {}) {
   const r = await fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1230,7 +1457,7 @@ async function api(path, body) {
   });
   const data = await r.json();
   if (!r.ok || !data.ok) {
-    alert(data.error || `请求失败 ${r.status}`);
+    if (!reqOpts.noAlert) alert(data.error || `请求失败 ${r.status}`);
     return null;
   }
   return data;
@@ -1465,8 +1692,7 @@ function renderBtRuns() {
         <td>${r.signal_count}</td>
         <td title="${esc(btRunStateLabel(r))}">${btRunStateLabel(r)}</td>
         <td class="bt-actions">
-          <button data-bt-act="detail">明细</button>
-          <button data-bt-act="analyze" title="打开明细并对亏损单做方向/进出场归因">分析方案</button>
+          <button data-bt-act="detail" title="打开明细弹窗；未做过亏损归因的方案自动分析一次，重算用弹窗头部「分析方案」">明细</button>
           <button data-bt-act="load" title="把该方案的参数回填到表单（不自动启动）">载参数</button>
           <button data-bt-act="rename">重命名</button>
           <button data-bt-act="delete" class="danger">删除</button>
@@ -1491,7 +1717,6 @@ function onBtRunsClick(e) {
   if (!run) return;
   const act = btn.dataset.btAct;
   if (act === 'detail') openBtDetail(run.id);
-  else if (act === 'analyze') openBtDetail(run.id, { analyze: true });
   else if (act === 'load') loadBtCfg(run);
   else if (act === 'rename') renameBtRun(run);
   else if (act === 'delete') deleteBtRun(run);
@@ -1531,12 +1756,13 @@ const BT_METRICS = [
 // 参数对比展示顺序与汉化（键为保存的规范化 cfg 字段名）
 const BT_CFG_KEYS = ['symbol', 'from', 'to', 'periods', 'data_source', 'lead_days', 'warmup', 'lots',
                      'slip_stop', 'slip_stop_atr_k', 'slip_fallback', 'slip_fallback_atr_k', 'slip_be', 'slip_be_atr_k',
-                     'near', 'sr_preset', 'diverge_confirm', 'expect_bi', 'with_30s'];
+                     'near', 'sr_preset', 'diverge_confirm', 'expect_bi', 'entry_macd_shrink', 'stop_entry_bar_floor', 'with_30s'];
 const BT_CFG_LABELS = { symbol: '品种', from: '起始日期', to: '结束日期', periods: '周期', data_source: '数据源',
                         lead_days: '预热提前(天)', warmup: '预热根数', lots: '手数', slip_stop: '止损滑点', slip_stop_atr_k: '止损滑点ATR系数',
                         slip_fallback: '兜底止损滑点', slip_fallback_atr_k: '兜底滑点ATR系数',
                         slip_be: '保本滑点', slip_be_atr_k: '保本滑点ATR系数',
-                        near: '近支阻阈值', sr_preset: '支阻预设', diverge_confirm: '背驰进场', expect_bi: '检测周期够笔', with_30s: '30秒级别' };
+                        near: '近支阻阈值', sr_preset: '支阻预设', diverge_confirm: '背驰进场', expect_bi: '检测周期够笔',
+                        entry_macd_shrink: '柱缩闸', stop_entry_bar_floor: '止损下限', with_30s: '30秒级别' };
 function btCfgVal(k, v) {
   if (k === 'periods') return Array.isArray(v) ? v.join('+') : (v ?? '—');
   if (k === 'data_source') return { store: '本地数据存储', live: '实时拉取', cache: '本地缓存' }[v] || v || '—';
@@ -1638,11 +1864,88 @@ let btDetailSummary = null;
 let btDetailName = '';
 let btAnalyzeBusy = false;
 let btDetailPnlSort = 'none';    // 明细信号表盈亏：none / descending / ascending
+let btDetailTab = 'overview';
+let btDetailEpoch = 0;          // 每次打开/关闭递增，丢弃旧会话的异步响应
+let btDetailReturnFocus = null;
+let btDetailBodyOverflow = '';
+let btDetailScroll = { overview: 0, top: 0, left: 0 };
 
+function rememberBtDetailScroll() {
+  const overview = el('bt-detail-overview'), records = el('bt-detail-records');
+  const scroll = el('bt-detail-table-scroll');
+  if (overview && !overview.hidden) btDetailScroll.overview = overview.scrollTop;
+  if (records && !records.hidden && scroll) {
+    btDetailScroll.top = scroll.scrollTop;
+    btDetailScroll.left = scroll.scrollLeft;
+  }
+}
+
+function selectBtDetailTab(tab, focus = false, remember = true) {
+  if (remember) rememberBtDetailScroll();
+  btDetailTab = tab === 'records' ? 'records' : 'overview';
+  for (const name of ['overview', 'records']) {
+    const active = name === btDetailTab;
+    const button = el('bt-detail-tab-' + name);
+    button.setAttribute('aria-selected', String(active));
+    button.tabIndex = active ? 0 : -1;
+    const panel = el('bt-detail-' + name);
+    if (panel) panel.hidden = !active;
+    if (active && focus) button.focus();
+  }
+  restoreBtDetailScroll();
+  if (btDetailTab === 'overview') requestAnimationFrame(redrawBtDetailEquity);
+}
+
+function restoreBtDetailScroll() {
+  const activeScroll = el(btDetailTab === 'overview' ? 'bt-detail-overview' : 'bt-detail-table-scroll');
+  if (activeScroll) {
+    activeScroll.scrollTop = btDetailTab === 'overview' ? btDetailScroll.overview : btDetailScroll.top;
+    if (btDetailTab === 'records') activeScroll.scrollLeft = btDetailScroll.left;
+  }
+}
+
+function btDetailMetricsHtml(s) {
+  const realized = Number(s.realized || 0), floating = Number(s.floating || 0);
+  const payoff = s.payoff_ratio != null ? Number(s.payoff_ratio).toFixed(2) : (s.win ? '∞' : '—');
+  const tile = (label, value, note, color = '') => `<div class="bt-kpi"><span class="bt-kpi-label">${label}</span>
+    <strong class="${color}">${value}</strong><small>${note}</small></div>`;
+  return tile('合计盈亏', fmtPnlText(realized + floating), '已平仓盈亏 + 浮盈', pnlClass(realized + floating)) +
+    tile('已平仓盈亏', fmtPnlText(realized), '已实现收益', pnlClass(realized)) +
+    tile('浮盈', fmtPnlText(floating), '剩余持仓浮动盈亏', pnlClass(floating)) +
+    tile('胜率', s.win_rate != null ? esc(s.win_rate) + '%' : '—', `盈利 ${s.win || 0} / 亏损 ${s.lose || 0}`) +
+    tile('盈亏比', payoff, `均盈 ${Number(s.avg_win || 0).toFixed(2)} / 均亏 ${Number(s.avg_loss || 0).toFixed(2)}`) +
+    tile('已平仓笔数', s.closed || 0, `保本 ${Math.max(0, (s.closed || 0) - (s.win || 0) - (s.lose || 0))} 笔`);
+}
+
+function btDetailExitsHtml(s) {
+  const ex = s.exits || {};
+  const cats = [
+    { label: '保损', n: Number(ex.stopBe || 0), color: '#5a8de6' },
+    { label: '止损', n: Number(ex.stopSr || 0), color: '#c8742a' },
+    { label: '全平', n: Number(ex.close || 0), color: '#8f6ce8' },
+  ];
+  const total = cats.reduce((n, c) => n + c.n, 0);
+  return `<div class="bt-distribution">${donutHtml(cats, String(total), '次出场')}
+    <div class="bt-exit-legend">${cats.map(c => `<div class="bt-exit-row"><span><i class="sw" style="background:${c.color}"></i>${c.label}</span><b>${c.n} 次</b><span>${total ? Math.round(c.n / total * 100) + '%' : '—'}</span></div>`).join('')}</div></div>
+    <p class="bt-note">半平 ${Number(ex.half || 0)} 次，单独计数，不纳入上方占比。${total ? '' : '暂无完整出场样本。'}</p>`;
+}
+
+function showBtDetailShell() {
+  const modal = el('bt-detail-modal');
+  if (modal.hidden) {
+    btDetailReturnFocus = document.activeElement;
+    btDetailBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    modal.hidden = false;
+    el('bt-detail-tab-overview').focus();
+  }
+}
+
+// 亏损归因条（明细弹窗专用）：占比堆叠条 + 分类明细（计数、占比、双向盈亏条），数字口径与旧文本版一致
 function lossAnalysisHtml(la) {
   if (!la) {
     return `<div class="bt-loss-summary" id="bt-detail-loss-summary">
-      <span style="color:var(--muted)">尚未分析亏损原因；可在上方设置回看根数后点「分析方案」</span>
+      <span style="color:var(--muted)">尚未分析亏损原因；可在下方设置回看根数后点「分析方案」</span>
     </div>`;
   }
   const lose = la.lose ?? 0;
@@ -1651,17 +1954,36 @@ function lossAnalysisHtml(la) {
   const ins = la.insufficient || { count: 0 };
   const pct = (n) => lose ? Math.round(100 * n / lose) : 0;
   const fmtV = v => (v > 0 ? '+' : '') + Number(v || 0).toFixed(2);
-  const parts = [
-    `亏损归因（信号后 <b>${la.lookahead ?? '?'}</b> 根）`,
-    `亏损 <b>${lose}</b> 笔`,
-    `方向问题 <b>${d.count ?? 0}</b>${lose ? `（${pct(d.count || 0)}%` : ''}${lose ? `，合计 <span class="pnl-neg">${fmtV(d.pnl)}</span>）` : ''}`,
-    `进出场问题 <b>${e.count ?? 0}</b>${lose ? `（${pct(e.count || 0)}%` : ''}${lose ? `，合计 <span class="pnl-neg">${fmtV(e.pnl)}</span>）` : ''}`,
+  const head = `<div>亏损归因（信号后 <b>${la.lookahead ?? '?'}</b> 根） · 亏损 <b>${lose}</b> 笔</div>`;
+  if (!lose) {
+    return `<div class="bt-loss-summary bt-loss-graphic" id="bt-detail-loss-summary">${head}<span>无亏损样本</span></div>`;
+  }
+  // 占比堆叠条：分类色与出场分布一致（蓝/橙），数据不足为中性灰
+  const cats = [
+    { name: '方向问题', n: d.count ?? 0, pnl: d.pnl, color: '#5a8de6', hasBar: true },
+    { name: '进出场问题', n: e.count ?? 0, pnl: e.pnl, color: '#c8742a', hasBar: true },
+    { name: '数据不足', n: ins.count || 0, pnl: null, color: 'var(--muted)', hasBar: false },
   ];
-  if (ins.count) parts.push(`数据不足 <b>${ins.count}</b>`);
-  return `<div class="bt-loss-summary" id="bt-detail-loss-summary">${parts.map(p => `<span>${p}</span>`).join('')}</div>`;
+  const maxLossPnl = Math.max(Math.abs(Number(d.pnl) || 0), Math.abs(Number(e.pnl) || 0), 0);
+  const donut = donutHtml(cats.map(c => ({ n: c.n, color: c.color, label: c.name })), String(lose), '笔亏损');
+  const rows = cats.filter(c => c.n > 0).map(c => `
+    <span class="loss-cat"><i class="sw" style="background:${c.color}"></i>${c.name}
+      <b>${c.n}</b>（${pct(c.n)}%）${c.hasBar
+        ? `${pnlBarHtml(Number(c.pnl) || 0, maxLossPnl)}<span class="pnl-neg">${fmtV(c.pnl)}</span>`
+        : ''}</span>`).join('');
+  return `<div class="bt-loss-summary bt-loss-graphic" id="bt-detail-loss-summary">
+    ${head}
+    <div class="loss-main">${donut}<div class="loss-side"><div class="loss-cats">${rows}</div></div></div>
+  </div>`;
 }
 
-function fillBtDetail(run) {
+function fillBtDetail(run, preserve = false) {
+  if (preserve) rememberBtDetailScroll();
+  else btDetailScroll = { overview: 0, top: 0, left: 0 };
+  const view = preserve ? {
+    paramsOpen: el('bt-detail-params')?.open, focusId: document.activeElement?.id,
+    lookahead: el('bt-detail-lookahead')?.value,
+  } : null;
   const cfg = run.cfg || {};
   btDetailRunId = run.id;
   btDetailName = run.name || '';
@@ -1672,75 +1994,148 @@ function fillBtDetail(run) {
     symbol: r.symbol || cfg.symbol,
     mode: r.mode || 'backtest',
   }));
-  btDetailSelectedId = null;
-  btDetailLocateMsg = '点击记录，定位到 TradingView 的信号K线并标记该行进出场与支阻位';
-  const paramsHtml = BT_CFG_KEYS.filter(k => k in cfg).map(k =>
+  if (!preserve) {
+    btDetailSelectedId = null;
+    btDetailTab = 'overview';
+    btDetailPnlSort = 'none';
+    btDetailLocateMsg = '点击记录，定位到 TradingView 的信号K线并标记该行进出场与支阻位';
+  }
+  const paramKeys = BT_CFG_KEYS.filter(k => k in cfg);
+  const paramsHtml = paramKeys.map(k =>
     `<div><span class="k">${BT_CFG_LABELS[k] || k}</span>${esc(btCfgVal(k, cfg[k]))}</div>`).join('');
-  const stateBit = run.worker_state === 'stopped' ? '中途停止' : '完整';
-  const durBit = fmtDuration(run.summary?.duration_sec);
-  el('bt-detail-title').textContent =
-    `${run.name}（保存于 ${fmtTime(run.saved_at)} · ${stateBit}${durBit === '—' ? '' : ' · ' + durBit}）`;
-  // 若 summary 已有归因结果，回填 N 输入框
+  el('bt-detail-title').textContent = run.name || '未命名方案';
+  el('bt-detail-title').title = run.name || '未命名方案';
+  el('bt-detail-meta').innerHTML = [cfg.symbol || '—', (cfg.periods || []).join(' / ') || '—',
+    `${cfg.from || '最早数据'} → ${cfg.to || '最新数据'}`, `保存于 ${fmtTime(run.saved_at)}`, btRunStateLabel(run)
+  ].map(v => `<span>${esc(v)}</span>`).join('');
   const la = run.summary?.loss_analysis;
-  if (la?.lookahead != null) el('bt-detail-lookahead').value = la.lookahead;
   el('bt-detail-body').innerHTML = `
-    <div class="bt-params">${paramsHtml}</div>
-    <div class="bt-summary">${summaryHtml(run.summary || {})}</div>
-    ${lossAnalysisHtml(la)}
-    <div class="equity-chart" id="bt-detail-equity"></div>
-    <div id="bt-detail-locate" class="bt-detail-locate" role="status">${esc(btDetailLocateMsg)}</div>
-    <div class="scroll"><table>
-      <thead><tr>${SIG_TABLE_HEADERS}</tr></thead>
-      <tbody id="bt-detail-sig-body">${btDetailRowsHtml()}</tbody>
-    </table></div>`;
-  el('bt-detail-modal').hidden = false;
+    <section id="bt-detail-overview" role="tabpanel" aria-labelledby="bt-detail-tab-overview" tabindex="0">
+      <div class="bt-kpis">${btDetailMetricsHtml(btDetailSummary)}</div>
+      <section class="bt-panel bt-chart-panel"><div class="equity-chart" id="bt-detail-equity"></div>
+        <div id="bt-detail-equity-empty" class="bt-empty" hidden>暂无已实现盈亏记录，产生出场记录后可展示资金曲线。</div></section>
+      <div class="bt-insights">
+        <section class="bt-panel"><h3>出场分布</h3>${btDetailExitsHtml(btDetailSummary)}</section>
+        <section class="bt-panel"><h3>亏损归因</h3>${lossAnalysisHtml(la)}
+          <div class="bt-analyze-bar" title="用检测周期信号后 N 根收盘对比信号价，判定亏损是方向问题还是进出场问题">
+            <label for="bt-detail-lookahead">信号后</label><input id="bt-detail-lookahead" type="number" min="1" step="1" value="20" aria-label="归因回看K线根数">
+            <span>根</span><button id="bt-detail-analyze" type="button">分析方案</button>
+          </div><div id="bt-detail-analysis-status" class="bt-note" role="status"></div>
+        </section>
+      </div>
+      <details id="bt-detail-params" class="bt-params-wrap"><summary>回测参数 · ${paramKeys.length} 项</summary><div class="bt-params">${paramsHtml || '暂无参数快照'}</div></details>
+    </section>
+    <section id="bt-detail-records" role="tabpanel" aria-labelledby="bt-detail-tab-records" hidden>
+      <div class="bt-record-head"><strong>交易记录 · ${btDetailSignals.length} 条信号</strong><span>分批出场分行展示 · 点击定位 · 右键复制</span></div>
+      <div id="bt-detail-locate" class="bt-detail-locate" role="status">${esc(btDetailLocateMsg)}</div>
+      <div class="scroll" id="bt-detail-table-scroll" tabindex="0" aria-label="交易记录表，可横向滚动"><table>
+        <thead><tr>${SIG_TABLE_HEADERS}</tr></thead>
+        <tbody id="bt-detail-sig-body">${btDetailRowsHtml()}</tbody>
+      </table></div>
+    </section>`;
+  el('bt-detail-lookahead').value = view?.lookahead ?? la?.lookahead ?? 20;
+  showBtDetailShell();
+  if (view) el('bt-detail-params').open = !!view.paramsOpen;
+  selectBtDetailTab(btDetailTab, false, false);
   const eq = (Array.isArray(run.summary?.equity) && run.summary.equity.length)
     ? run.summary.equity
     : equityPoints(btDetailSignals);
   drawEquityChart(el('bt-detail-equity'), eq.length ? [{ name: run.name, points: eq }] : [], {
-    height: 280, title: '资金曲线', note: '本方案出场盈亏累加（含半平）',
+    height: 280, title: '资金曲线', note: '出场盈亏累加（含半平）；终点含浮盈',
   });
+  el('bt-detail-equity-empty').hidden = !!eq.length;
+  restoreBtDetailScroll();
+  if (view) {
+    if (view.focusId) el(view.focusId)?.focus({ preventScroll: true });
+  }
+  styleBtDetailTable();
   syncBtDetailPnlSortButton();
 }
 
-async function openBtDetail(id, opts = {}) {
+async function openBtDetail(id) {
+  const epoch = ++btDetailEpoch;
+  btAnalyzeBusy = false;
+  btDetailRunId = null;
+  btDetailSignals = [];
+  btDetailSelectedId = null;
+  btDetailSummary = null;
+  btDetailPnlSort = 'none';
+  el('bt-detail-title').textContent = '方案明细';
+  el('bt-detail-title').title = '';
+  el('bt-detail-meta').textContent = '';
+  el('bt-detail-body').innerHTML = '<div class="bt-empty" role="status">正在加载方案…</div>';
+  showBtDetailShell();
+  selectBtDetailTab('overview');
   let run;
   try {
     const resp = await fetch(`/api/bt/runs/detail?id=${encodeURIComponent(id)}`);
     const d = await resp.json();
     if (!resp.ok || !d.ok) throw Error(d.error || `请求失败 ${resp.status}`);
     run = d.run;
-  } catch (e) { alert('明细加载失败：' + e.message); return; }
-  btDetailPnlSort = 'none';
+  } catch (e) {
+    if (epoch !== btDetailEpoch) return;
+    el('bt-detail-body').innerHTML = `<div class="bt-empty" role="status"><p class="bt-error">明细加载失败：${esc(e.message)}</p><button id="bt-detail-retry" type="button">重新加载</button></div>`;
+    el('bt-detail-retry').onclick = () => openBtDetail(id);
+    return;
+  }
+  if (epoch !== btDetailEpoch) return;
   fillBtDetail(run);
-  if (opts.analyze) await analyzeBtDetail();
+  // 未做过亏损归因的方案自动分析一次；失败在卡片内提示，已分析的直接展示快照。
+  if (!(run.summary?.loss_analysis?.lookahead != null)) await analyzeBtDetail();
 }
 
 async function analyzeBtDetail() {
   if (!btDetailRunId || btAnalyzeBusy) return;
   const raw = el('bt-detail-lookahead').value;
-  const lookahead = parseInt(raw, 10);
-  if (!Number.isFinite(lookahead) || lookahead < 1) {
-    alert('回看根数须为正整数');
+  const lookahead = Number(raw);
+  if (!Number.isSafeInteger(lookahead) || lookahead < 1) {
+    setBtAnalysisStatus('回看根数须为正整数', true);
     return;
   }
+  const epoch = btDetailEpoch, runId = btDetailRunId;
   btAnalyzeBusy = true;
   const btn = el('bt-detail-analyze');
   if (btn) { btn.disabled = true; btn.textContent = '分析中…'; }
+  setBtAnalysisStatus('正在分析亏损原因…');
   try {
-    const r = await api('/api/bt/runs/analyze', { id: btDetailRunId, lookahead });
-    if (!r || !r.run) return;
+    const response = await fetch('/api/bt/runs/analyze', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: runId, lookahead }),
+    });
+    const r = await response.json();
+    if (epoch !== btDetailEpoch || runId !== btDetailRunId) return;
+    if (!response.ok || !r.ok || !r.run) throw Error(r.error || `请求失败 ${response.status}`);
     // 同步列表缓存里的 summary.loss_analysis
-    const cached = btRuns.find(x => x.id === btDetailRunId);
+    const cached = btRuns.find(x => x.id === runId);
     if (cached) {
       if (!cached.summary) cached.summary = {};
       cached.summary.loss_analysis = r.run.summary?.loss_analysis;
     }
-    fillBtDetail(r.run);
+    fillBtDetail(r.run, true);
+    setBtAnalysisStatus('分析完成 · 信号后 ' + lookahead + ' 根');
+  } catch (e) {
+    if (epoch === btDetailEpoch && runId === btDetailRunId) setBtAnalysisStatus('分析失败：' + e.message + '。可点击“分析方案”重试。', true);
   } finally {
-    btAnalyzeBusy = false;
-    if (btn) { btn.disabled = false; btn.textContent = '分析方案'; }
+    if (epoch === btDetailEpoch && runId === btDetailRunId) {
+      btAnalyzeBusy = false;
+      const current = el('bt-detail-analyze');
+      if (current) { current.disabled = false; current.textContent = '分析方案'; }
+    }
   }
+}
+
+function setBtAnalysisStatus(message, error = false) {
+  const status = el('bt-detail-analysis-status');
+  if (!status) return;
+  status.textContent = message;
+  status.classList.toggle('bt-error', error);
+}
+
+function styleBtDetailTable() {
+  // 以逻辑列定位，分批出场的后续行仅有第 12–16 列，不能直接用 nth-child。
+  el('bt-detail-table-scroll')?.querySelectorAll('tr').forEach(row => {
+    const offset = row.classList.contains('exit-continuation') ? 11 : 0;
+    [...row.cells].forEach((cell, i) => cell.classList.toggle('bt-number', [6, 7, 10, 12, 14, 15].includes(i + offset)));
+  });
 }
 
 function btDetailLabelOf(id) {
@@ -1770,7 +2165,18 @@ function toggleBtDetailPnlSort() {
   renderBtDetailRows();
 }
 
+// 条形比例尺 = 全部展示盈亏（含半平行）的 |pnl| 最大值；取出场级而非交易级，
+// 因半平部分与剩余腿之和可能超过任何单笔 |pnl|；无有效样本返回 null（表格回退纯文本）
+function pnlScaleMax(rows) {
+  let m = 0;
+  for (const r of rows) for (const x of exitDisplayRows(r)) {
+    const v = x.pnl == null ? NaN : Number(x.pnl);
+    if (Number.isFinite(v) && Math.abs(v) > m) m = Math.abs(v);
+  }
+  return m > 0 ? m : null;
+}
 function btDetailRowsHtml() {
+  if (!btDetailSignals.length) return '<tr><td colspan="17"><div class="bt-empty">本方案暂无信号记录</div></td></tr>';
   // 仅排列展示副本；序号仍按方案原始顺序；无盈亏的记录始终置后
   const rows = btDetailSignals.slice();
   const sort = btDetailPnlSort;
@@ -1788,12 +2194,14 @@ function btDetailRowsHtml() {
     selectedId: btDetailSelectedId,
     labelById: btDetailLabelById(),
     showLossReason: true,
+    pnlBars: pnlScaleMax(rows),
   });
 }
 
 function renderBtDetailRows() {
   const body = el('bt-detail-sig-body');
   if (body) body.innerHTML = btDetailRowsHtml();
+  styleBtDetailTable();
 }
 
 function setBtDetailLocateMsg(msg, isError) {
@@ -1815,7 +2223,7 @@ async function locateDetailRow(id) {
     return;
   }
   const mode = row.mode === 'replay' || row.mode === 'live' ? row.mode : 'backtest';
-  const pending = { mode, id, source: 'detail' };
+  const pending = { mode, id, source: 'detail', detailEpoch: btDetailEpoch };
   locatePending = pending;
   setBtDetailLocateMsg(`#${btDetailLabelOf(id)} 定位并标记中…（实时历史不够时会用K线回放跳转，最多等待360秒）`);
   renderBtDetailRows();
@@ -1836,7 +2244,7 @@ async function locateDetailRow(id) {
     pending.jobId = data.job.jobId;
     pollLocate();
   } catch (e) {
-    setBtDetailLocateMsg(`#${btDetailLabelOf(id)} 定位失败：${e.message}`, true);
+    if (pending.detailEpoch === btDetailEpoch) setBtDetailLocateMsg(`#${btDetailLabelOf(id)} 定位失败：${e.message}`, true);
     locatePending = null;
     updateMarkButtons();
     renderBtDetailRows();
@@ -1861,11 +2269,12 @@ function onBtDetailSigCopy(event) {
 }
 
 function redrawBtDetailEquity() {
+  if (el('bt-detail-modal').hidden || btDetailTab !== 'overview') return;
   const host = el('bt-detail-equity');
   if (!host || !host._eqSeries?.length) return;
   // 最大化/还原后容器宽度变了，按缓存系列重画
   drawEquityChart(host, host._eqSeries, host._eqOpts || {
-    height: 280, title: '资金曲线', note: '本方案出场盈亏累加（含半平）',
+    height: 280, title: '资金曲线', note: '出场盈亏累加（含半平）；终点含浮盈',
   });
 }
 
@@ -1916,6 +2325,8 @@ function toggleBtDetailMax() {
 }
 
 function closeBtDetail() {
+  ++btDetailEpoch;
+  btAnalyzeBusy = false;
   // 关闭前先退出浏览器全屏，避免残留全屏态
   if (btDetailIsFullscreen() || el('bt-detail-modal').classList.contains('maximized')) {
     exitBtDetailFullscreen();
@@ -1928,6 +2339,9 @@ function closeBtDetail() {
   btDetailRunId = null;
   btDetailSummary = null;
   btDetailPnlSort = 'none';
+  document.body.style.overflow = btDetailBodyOverflow;
+  if (btDetailReturnFocus?.isConnected) btDetailReturnFocus.focus({ preventScroll: true });
+  btDetailReturnFocus = null;
 }
 
 // ---------- 载参数：collectCfg 的逆映射（只回填表单，不自动启动） ----------
@@ -1937,7 +2351,12 @@ function loadBtCfg(run) {
   card.querySelectorAll('[data-cfg]').forEach(inp => {
     const k = inp.dataset.cfg;
     if (k === 'periods' || k === 'with_30s' || !(k in cfg)) return;  // 这两项由 periods 推导
-    inp.value = typeof cfg[k] === 'boolean' ? String(cfg[k]) : cfg[k];
+    const v = typeof cfg[k] === 'boolean' ? String(cfg[k]) : cfg[k];
+    // select 遇到不在选项里的值会静默重置为首项（如品种已删库、预设已删）：先补临时选项再赋值
+    if (inp.tagName === 'SELECT' && typeof v === 'string' && v && ![...inp.options].some(o => o.value === v)) {
+      inp.appendChild(new Option(v, v));
+    }
+    inp.value = v;
   });
   const periods = Array.isArray(cfg.periods) ? cfg.periods : [];
   card.querySelectorAll('[data-ms-opt]').forEach(c => { c.checked = periods.includes(c.value); });
@@ -1978,8 +2397,18 @@ function bindBtRuns() {
   el('bt-runs-body').onchange = onBtRunsCheck;
   el('bt-detail-close').onclick = closeBtDetail;
   el('bt-detail-max').onclick = toggleBtDetailMax;
-  el('bt-detail-analyze').onclick = () => analyzeBtDetail();
+  el('bt-detail-tabs').onclick = e => {
+    const tab = e.target.closest('[data-detail-tab]');
+    if (tab) selectBtDetailTab(tab.dataset.detailTab);
+  };
+  el('bt-detail-tabs').onkeydown = e => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    e.preventDefault();
+    const tab = e.key === 'Home' ? 'overview' : e.key === 'End' ? 'records' : btDetailTab === 'overview' ? 'records' : 'overview';
+    selectBtDetailTab(tab, true);
+  };
   el('bt-detail-body').onclick = e => {
+    if (e.target.closest('#bt-detail-analyze')) { analyzeBtDetail(); return; }
     if (e.target.closest('#sort-bt-detail-pnl')) { toggleBtDetailPnlSort(); return; }
     onBtDetailSigActivate(e);
   };
@@ -2007,7 +2436,26 @@ function bindBtRuns() {
       return;
     }
     if (e.key === 'F10') { e.preventDefault(); toggleBtDetailMax(); }
+    if (e.key === 'Tab') {
+      const items = [...el('bt-detail-modal').querySelectorAll('button:not(:disabled), input:not(:disabled), summary, [tabindex]')]
+        .filter(n => n.tabIndex >= 0 && n.getClientRects().length);
+      const first = items[0], last = items[items.length - 1];
+      if (!first) return;
+      if (e.shiftKey && (document.activeElement === first || !items.includes(document.activeElement))) {
+        e.preventDefault(); last.focus();
+      } else if (!e.shiftKey && (document.activeElement === last || !items.includes(document.activeElement))) {
+        e.preventDefault(); first.focus();
+      }
+    }
   });
+  if (typeof ResizeObserver !== 'undefined') {
+    let width = 0;
+    const observer = new ResizeObserver(entries => {
+      const next = Math.round(entries[0].contentRect.width);
+      if (next > 0 && next !== width) { width = next; requestAnimationFrame(redrawBtDetailEquity); }
+    });
+    observer.observe(el('bt-detail-body'));
+  }
 }
 
 // ---------- 初始化 ----------
@@ -2025,6 +2473,21 @@ async function loadSrPresetOptions() {
       sel.appendChild(o);
     });
   } catch (e) { /* 预设列表拉取失败：保留「默认」选项，不影响回测 */ }
+}
+
+// 品种下拉（三张卡共用 data-cfg="symbol"）：选项 = 静态默认 ∪ 基础数据已入库品种，
+// 与基础数据页 refreshFetchSymbol 同口径（去重、保留当前选择）
+async function loadStoreSymbols() {
+  try {
+    const s = await fetch('/api/data/stats').then(x => x.json());
+    const stored = ((s.stats || {}).symbols || []).map(x => x.symbol);
+    document.querySelectorAll('select[data-cfg="symbol"]').forEach(sel => {
+      const symbols = [...new Set([...sel.options].map(o => o.value).concat(stored))];
+      const cur = sel.value;
+      sel.innerHTML = symbols.map(x => `<option>${x}</option>`).join('');
+      if (symbols.includes(cur)) sel.value = cur;
+    });
+  } catch (e) { /* /api/data/stats 拉取失败：保留静态默认选项 */ }
 }
 
 async function init() {
@@ -2048,6 +2511,7 @@ async function init() {
   });
   selectMode(selectedMode);
   loadSrPresetOptions();
+  loadStoreSymbols();
   el('mode-nav').onclick=e=>{const b=e.target.closest('[data-mode]');if(b)selectMode(b.dataset.mode)};
   if(parent!==window)parent.postMessage({type:'modes-ready'},location.origin);
   el('btn-clear').onclick = () => clearModeRows(selectedMode);

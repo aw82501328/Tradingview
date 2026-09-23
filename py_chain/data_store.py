@@ -78,13 +78,34 @@ def _ensure_schema(conn):
     conn.execute("""
         CREATE TABLE IF NOT EXISTS stores (
             symbol TEXT PRIMARY KEY, updated_at INTEGER)""")
+    # v1：周期级更新时间 store_res。此前只有品种级 stores.updated_at，任何周期
+    # 入库都会刷新它、而汇总页把它显示在每个周期行里，单周期更新会"带亮"全品种
+    # 行。旧库一次性回填（各周期先取品种级时间，之后各自独立），user_version 防重跑
+    if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
+        with conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS store_res (
+                    symbol TEXT NOT NULL, res TEXT NOT NULL, updated_at INTEGER,
+                    PRIMARY KEY (symbol, res)) WITHOUT ROWID""")
+            conn.execute("""
+                INSERT OR IGNORE INTO store_res(symbol, res, updated_at)
+                SELECT src.symbol, src.res, stores.updated_at
+                FROM (SELECT DISTINCT symbol, res FROM bars) src
+                JOIN stores ON stores.symbol = src.symbol""")
+            conn.execute("PRAGMA user_version = 1")
 
 
-def _touch_store(conn, symbol):
+def _touch_store(conn, symbol, res):
+    """刷新品种级与周期级更新时间（页面「最近更新」按周期展示）。"""
+    now = int(time.time())
     conn.execute(
         "INSERT INTO stores(symbol, updated_at) VALUES(?, ?) "
         "ON CONFLICT(symbol) DO UPDATE SET updated_at=excluded.updated_at",
-        (symbol, int(time.time())))
+        (symbol, now))
+    conn.execute(
+        "INSERT INTO store_res(symbol, res, updated_at) VALUES(?, ?, ?) "
+        "ON CONFLICT(symbol, res) DO UPDATE SET updated_at=excluded.updated_at",
+        (symbol, res, now))
 
 
 def upsert_bars(symbol, res, bars):
@@ -106,14 +127,15 @@ def upsert_bars(symbol, res, bars):
                     "low=excluded.low, close=excluded.close",
                     rows)
                 n = conn.total_changes - before
-                _touch_store(conn, symbol)
+                _touch_store(conn, symbol, res)
             return n
         finally:
             conn.close()
 
 
 def list_stores():
-    """列出所有已存储品种：[{symbol, updated_at, periods: {res: {count, first, last}}}]."""
+    """列出所有已存储品种：[{symbol, updated_at, periods: {res: {count, first,
+    last, updated_at}}}].（symbol.updated_at 为品种级最近写入，periods 内为各周期自身。）"""
     with _store_lock:
         conn = _connect()
         try:
@@ -121,13 +143,16 @@ def list_stores():
             for sym, updated_at in conn.execute(
                     "SELECT symbol, updated_at FROM stores ORDER BY symbol"):
                 out[sym] = {"symbol": sym, "updated_at": updated_at, "periods": {}}
+            touch = {(sym, res): t for sym, res, t in conn.execute(
+                "SELECT symbol, res, updated_at FROM store_res")}
             for sym, res, n, first, last in conn.execute(
                     "SELECT symbol, res, COUNT(*), MIN(time), MAX(time) "
                     "FROM bars GROUP BY symbol, res"):
                 if sym not in out:  # stores 行缺失时兜底（理论上不该发生）
                     out[sym] = {"symbol": sym, "updated_at": None, "periods": {}}
                 out[sym]["periods"][res] = {
-                    "count": n, "first": first, "last": last}
+                    "count": n, "first": first, "last": last,
+                    "updated_at": touch.get((sym, res))}
             return list(out.values())
         finally:
             conn.close()
@@ -194,6 +219,7 @@ def delete_store(symbol):
                 return False
             with conn:
                 conn.execute("DELETE FROM bars WHERE symbol=?", (actual,))
+                conn.execute("DELETE FROM store_res WHERE symbol=?", (actual,))
                 conn.execute("DELETE FROM stores WHERE symbol=?", (actual,))
             return True
         finally:
@@ -203,7 +229,7 @@ def delete_store(symbol):
 def delete_res(symbol, res):
     """删除某品种单个周期的数据；返回是否删除了内容。
 
-    stores 行保留（其余周期还在，updated_at 不动）；
+    stores 行与该周期的 store_res 时间戳一并清理（其余周期不动）；
     若删除后该品种已无任何K线，顺带清掉 stores 行。
     """
     with _store_lock:
@@ -216,6 +242,9 @@ def delete_res(symbol, res):
                 cur = conn.execute(
                     "DELETE FROM bars WHERE symbol=? AND res=?", (actual, res))
                 deleted = cur.rowcount > 0
+                conn.execute(
+                    "DELETE FROM store_res WHERE symbol=? AND res=?",
+                    (actual, res))
                 if deleted and not conn.execute(
                         "SELECT 1 FROM bars WHERE symbol=? LIMIT 1", (actual,)
                 ).fetchone():
@@ -263,7 +292,7 @@ def stats():
 
     @returns {"total_bars", "symbol_count",
               "symbols": [{"symbol", "updated_at", "periods": {
-                  res: {"count","first","last","span_days",
+                  res: {"count","first","last","updated_at","span_days",
                         "months": [{"ym","count","sparse"}...],
                         "gaps": [{"from","to","days"}...]}}}]}
               gaps 只收相邻间隔 > FILL_GAP_SEC（5 天）的真缺段；周末/假日休市不计入
@@ -276,6 +305,9 @@ def stats():
             for sym, updated_at in conn.execute(
                     "SELECT symbol, updated_at FROM stores ORDER BY symbol"):
                 periods = {}
+                touch = {res: t for res, t in conn.execute(
+                    "SELECT res, updated_at FROM store_res WHERE symbol=?",
+                    (sym,))}
                 for res, n, first, last in conn.execute(
                         "SELECT res, COUNT(*), MIN(time), MAX(time) FROM bars "
                         "WHERE symbol=? GROUP BY res", (sym,)):
@@ -295,6 +327,7 @@ def stats():
                             if b - a > FILL_GAP_SEC]
                     periods[res] = {
                         "count": n, "first": first, "last": last,
+                        "updated_at": touch.get(res),
                         "span_days": round((last - first) / 86400.0, 1)
                         if first and last and last > first else 0.0,
                         "months": months, "gaps": gaps}

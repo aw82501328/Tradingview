@@ -109,7 +109,7 @@
   <h2><span>拉取入库</span><span class="badge" id="fetch-badge">idle</span></h2>
   <div class="row">
     <div class="field"><label>品种</label>
-      <select id="symbol"><option>OANDA:XAUUSD</option></select></div>
+      <select id="symbol"><option>OANDA:XAUUSD</option><option>OANDA:XAGUSD</option><option>FX:NAS100</option><option>TVC:USOIL</option><option>BITSTAMP:BTCUSD</option></select></div>
     <div class="field"><label>起始日期</label><input type="date" id="from" value="2026-01-02"></div>
     <div class="field"><label>结束日期（空=到最新）</label><input type="date" id="to"></div>
   </div>
@@ -329,7 +329,7 @@ async function loadStats() {
         <td class="link" data-q="${sym.symbol}|${res}" title="点击查询明细">${res}</td>
         <td>${p.count}</td><td>${p.span_days}</td>
         <td>${fmtTime(p.first)}</td><td>${fmtTime(p.last)}</td>
-        <td>${sym.updated_at ? fmtTime(sym.updated_at) : ''}</td>
+        <td>${p.updated_at ? fmtTime(p.updated_at) : ''}</td>
         <td>${monthStrip(p.months)}</td><td>${gapCell(p.gaps)}</td>
         <td><button data-upd="${sym.symbol}|${res}" title="从该周期末根增量拉取到最新">更新</button> <button class="danger" data-del="${sym.symbol}|${res}" title="删除该品种此周期的存储">删除</button></td>
       </tr>`);
@@ -388,7 +388,7 @@ $('btn-stats').onclick = () => loadStats();
 let qPage = 0, qTotal = 0;
 // 拉取品种下拉：默认品种 + 已入库品种（去重），保留当前选择
 function refreshFetchSymbol() {
-  const symbols = [...new Set(['OANDA:XAUUSD', ...storesData.map(s => s.symbol)])];
+  const symbols = [...new Set(['OANDA:XAUUSD', 'OANDA:XAGUSD', 'FX:NAS100', 'TVC:USOIL', 'BITSTAMP:BTCUSD', ...storesData.map(s => s.symbol)])];
   const cur = $('symbol').value;
   $('symbol').innerHTML = symbols.map(x => `<option>${x}</option>`).join('');
   if (symbols.includes(cur)) $('symbol').value = cur;

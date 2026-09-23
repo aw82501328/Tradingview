@@ -65,3 +65,8 @@ chan_strategy/
 
 # 参数中心运行时状态（overrides-only，机器本地，可随时重生成，不入库）
 py_chain/web/module_params.json
+
+# 基础数据存储（SQLite，运行时生成，不入库；py_chain 目录下误生成同样挡掉）
+py_chain/bars.db
+py_chain/bars.db-wal
+py_chain/bars.db-shm

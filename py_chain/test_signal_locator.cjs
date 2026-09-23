@@ -24,7 +24,7 @@ const flush = () => new Promise(resolve=>setImmediate(resolve));
   run(`sigRows=[{id:1,mode:'backtest',status:'信号',pnl:null},{id:2,mode:'backtest',status:'已平仓',pnl:-10},{id:3,mode:'backtest',status:'已平仓',pnl:100},{id:4,mode:'live',status:'信号'}]; bindSignalRows(); togglePnlSort();`);
   assert.ok(node('sig-body').innerHTML.indexOf('data-signal-id="3"') < node('sig-body').innerHTML.indexOf('data-signal-id="2"'));
   node('sig-body').onclick({type:'click',target:{closest:()=>({dataset:{signalId:'2'}})}});
-  assert.deepEqual(JSON.parse(calls[0].opts.body),{mode:'backtest',id:2,colors:{buy:'',sell:'',exit:'',sr:''}});
+  assert.deepEqual(JSON.parse(calls[0].opts.body),{mode:'backtest',id:2,after_bars:60,colors:{buy:'',sell:'',exit:'',sr:''}});
   node('mark-color-buy').value='#F23645'; node('mark-color-sell').value='#089981';
   node('mark-color-exit').value='#FFEB3B'; node('mark-color-sr').value='#787B86';
   assert.match(node('sig-body').innerHTML,/data-signal-id="2"[^>]*class="selected"/);
