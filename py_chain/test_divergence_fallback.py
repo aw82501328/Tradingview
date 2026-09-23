@@ -61,13 +61,14 @@ class TestSinkFallback(unittest.TestCase):
     def setUp(self):
         self.saved = {k: CHAN_CFG.get(k) for k in
                       ("sinkFallback", "sinkFallbackRearm", "nearEqualAtrK", "nearEqualPct",
-                       "expectBiEnough", "divergeConfirm")}
+                       "expectBiEnough", "divergeConfirm", "entryMacdShrink")}
         CHAN_CFG["sinkFallback"] = False
         CHAN_CFG["sinkFallbackRearm"] = False
         CHAN_CFG["nearEqualAtrK"] = 0.0
         CHAN_CFG["nearEqualPct"] = 0.0
         CHAN_CFG["expectBiEnough"] = False
         CHAN_CFG["divergeConfirm"] = False
+        CHAN_CFG["entryMacdShrink"] = False
 
     def tearDown(self):
         CHAN_CFG.update(self.saved)
@@ -124,11 +125,13 @@ class TestExpectBi(unittest.TestCase):
 
     def setUp(self):
         self.saved = {k: CHAN_CFG.get(k) for k in
-                      ("sinkFallback", "expectBiEnough", "expectBiMinBars", "divergeConfirm")}
+                      ("sinkFallback", "expectBiEnough", "expectBiMinBars", "divergeConfirm",
+                       "entryMacdShrink")}
         CHAN_CFG["sinkFallback"] = True   # 预期模式下停止级 3m 失败需回退到 15
         CHAN_CFG["expectBiEnough"] = True
         CHAN_CFG["expectBiMinBars"] = 5
         CHAN_CFG["divergeConfirm"] = False
+        CHAN_CFG["entryMacdShrink"] = False
 
     def tearDown(self):
         CHAN_CFG.update(self.saved)
@@ -204,6 +207,64 @@ class TestExpectBi(unittest.TestCase):
                       for i in range(6)]}
         self.assertFalse(BacktestEngine(bars, periods=["3"], expect_bi=False).expect_bi)
         self.assertTrue(BacktestEngine(bars, periods=["3"]).expect_bi)  # setUp 中 CHAN_CFG=True
+
+
+class TestEntryMacdShrink(unittest.TestCase):
+    """进场MACD柱缩闸：背驰级别最近两根已收K线柱状体(|macd|)变小才出信号。"""
+
+    def setUp(self):
+        self.saved = {k: CHAN_CFG.get(k) for k in
+                      ("sinkFallback", "sinkFallbackRearm", "nearEqualAtrK", "nearEqualPct",
+                       "expectBiEnough", "divergeConfirm", "entryMacdShrink")}
+        CHAN_CFG["sinkFallback"] = True       # 回退命中 15m（与 test_fallback_hits_upper_level 同型）
+        CHAN_CFG["sinkFallbackRearm"] = False
+        CHAN_CFG["nearEqualAtrK"] = 0.0
+        CHAN_CFG["nearEqualPct"] = 0.0
+        CHAN_CFG["expectBiEnough"] = False
+        CHAN_CFG["divergeConfirm"] = False
+        CHAN_CFG["entryMacdShrink"] = True
+
+    def tearDown(self):
+        CHAN_CFG.update(self.saved)
+
+    def test_shrink_allows_signal(self):
+        pd = buildPeriodData()
+        pd["15"]["macdArr"][-1] = macd(1200, -0.3, -0.3)   # |−0.3| < |−0.5| 柱缩 → 放行
+        out = realtimeLowerDiverge(pd, "60", "long", 1305, periodTimes=PERIOD_TIMES)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["res"], "15")
+
+    def test_expand_blocks_signal(self):
+        pd = buildPeriodData()
+        pd["15"]["macdArr"][-1] = macd(1200, -1.5, -1.5)   # |−1.5| > |−0.5| 柱放 → 拦截
+        self.assertEqual(realtimeLowerDiverge(pd, "60", "long", 1305,
+                                              periodTimes=PERIOD_TIMES), [])
+
+    def test_equal_blocks_signal(self):
+        pd = buildPeriodData()                             # 末两柱相等（默认夹具）→ 严格变小不满足
+        self.assertEqual(realtimeLowerDiverge(pd, "60", "long", 1305,
+                                              periodTimes=PERIOD_TIMES), [])
+
+    def test_too_few_entries_blocks(self):
+        pd = buildPeriodData()
+        pd["15"]["macdArr"] = [macd(1200, -0.5, -0.5)]     # 不足两根无从判定 → 保守拦截
+        self.assertEqual(realtimeLowerDiverge(pd, "60", "long", 1305,
+                                              periodTimes=PERIOD_TIMES), [])
+
+    def test_param_false_overrides_cfg(self):
+        pd = buildPeriodData()                             # 末两柱相等，但显式关闸 → 旧行为
+        out = realtimeLowerDiverge(pd, "60", "long", 1305, periodTimes=PERIOD_TIMES,
+                                   entryMacdShrink=False)
+        self.assertEqual(len(out), 1)
+
+    def test_engine_param(self):
+        bars = {"3": [{"time": i * 180, "open": 100, "high": 101, "low": 99, "close": 100}
+                      for i in range(6)]}
+        self.assertTrue(BacktestEngine(bars, periods=["3"],
+                                       entry_macd_shrink=True).entry_macd_shrink)
+        self.assertFalse(BacktestEngine(bars, periods=["3"],
+                                        entry_macd_shrink=False).entry_macd_shrink)
+        self.assertTrue(BacktestEngine(bars, periods=["3"]).entry_macd_shrink)  # CHAN_CFG 默认开
 
 
 class TestRearm(unittest.TestCase):

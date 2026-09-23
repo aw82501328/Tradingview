@@ -15,6 +15,7 @@
 
 import unittest
 
+from py_chain.chan_core import CHAN_CFG
 from py_chain.mark_entry import (
     levelsBelow, filterDetectPeriods, sinkChainRealtime, sinkChainConfirm,
     realtimeLowerDiverge, lowerDiverge, findDivergePoints,
@@ -196,6 +197,14 @@ class TestSinkChainConfirm(unittest.TestCase):
 
 
 class TestRealtimeLowerDiverge(unittest.TestCase):
+    def setUp(self):
+        # 本类测下沉链路逻辑，柱缩闸（默认开）另行专测——这里固定关闭
+        self.saved_shrink = CHAN_CFG.get("entryMacdShrink")
+        CHAN_CFG["entryMacdShrink"] = False
+
+    def tearDown(self):
+        CHAN_CFG["entryMacdShrink"] = self.saved_shrink
+
     def _macd_for_diverge(self):
         """15m：参照段（60300..70200）红柱强，末段（78300..82800）红柱弱 → 顶背驰成立。"""
         entries = []

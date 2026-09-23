@@ -195,7 +195,8 @@ class BacktestEngine:
                  slip_fallback_atr_k=DEFAULT_SLIP_FALLBACK_ATR_K,
                  slip_be_atr_k=DEFAULT_SLIP_BE_ATR_K,
                  near=DEFAULT_NEAR, sr_kwargs=None,
-                 diverge_confirm=None, expect_bi=None, module_params=None):
+                 diverge_confirm=None, expect_bi=None, module_params=None,
+                 entry_macd_shrink=None):
         self.periods = list(periods or DEFAULT_PERIODS)
         # 各周期按时间升序整理 + 缓存时间数组
         self.bars = {}
@@ -286,6 +287,11 @@ class BacktestEngine:
         # True = 极值K线右邻K收盘后才出信号（分型确认后下一根 fine 开盘进场）。
         self.diverge_confirm = (bool(CHAN_CFG.get("divergeConfirm"))
                                 if diverge_confirm is None else bool(diverge_confirm))
+        # 进场MACD柱缩闸（回测页面可选）：None → 读 CHAN_CFG 一次固化为本轮值。
+        # True = 背驰级别最近两根已收K线柱状体（|macd|）变小才出信号——上一根K
+        # 确认背驰且柱缩，下一根开盘进场；闸未过不消耗段去重键，下一拍自动重评。
+        self.entry_macd_shrink = (bool(CHAN_CFG.get("entryMacdShrink"))
+                                  if entry_macd_shrink is None else bool(entry_macd_shrink))
         # M4 检测周期够笔口径（回测页面可选）：True（默认）= 预期够笔（末笔反向 + 端点后
         # ≥expectBiMinBars 根K线即视为回调/反弹中）；False = 旧口径（末笔须已是确认的反向笔）。
         self.expect_bi = (bool(CHAN_CFG.get("expectBiEnough"))
@@ -1141,6 +1147,7 @@ class BacktestEngine:
             periodMerged=self._merged,
             divergeConfirm=self.diverge_confirm,
             expectBiEnabled=self.expect_bi,
+            entryMacdShrink=self.entry_macd_shrink,
             realtimeMinBars=self.realtime_min_bars,
             zsExitWeakRatio=self.zs_exit_weak_ratio,
             trend_res=self.trend_res,
@@ -1302,7 +1309,8 @@ def run_backtest(bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
                  slip_fallback_atr_k=DEFAULT_SLIP_FALLBACK_ATR_K,
                  slip_be_atr_k=DEFAULT_SLIP_BE_ATR_K,
                  near=DEFAULT_NEAR, sr_kwargs=None,
-                 diverge_confirm=None, expect_bi=None, module_params=None):
+                 diverge_confirm=None, expect_bi=None, module_params=None,
+                 entry_macd_shrink=None):
     """便捷入口：构建引擎并运行。start_ts=交易开始时刻（None=预热 warmup_bars 根后开始，
     见 BacktestEngine.run）；fill_mode 见 BacktestEngine（anchor=锚点当拍成交，confirm=确认成交）；
     signal_mode：realtime=当下背驰（每拍评估形成中段，默认），confirm=确认制（结构变化时收集）；
@@ -1326,7 +1334,8 @@ def run_backtest(bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
                             slip_be_atr_k=slip_be_atr_k,
                             near=near, sr_kwargs=sr_kwargs,
                             diverge_confirm=diverge_confirm, expect_bi=expect_bi,
-                            module_params=module_params)
+                            module_params=module_params,
+                            entry_macd_shrink=entry_macd_shrink)
     return engine.run(to_ts=to_ts, start_ts=start_ts, log=log)
 
 

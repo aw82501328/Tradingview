@@ -64,6 +64,9 @@ CHAN_CFG = {
     "expectBiMinBars": 5,        # 预期够笔的K线数门槛（本级原始K线数）
     "divergeConfirm": False,     # M4 背驰进场时机（回测页面可选，默认当下）：True=极值K线
                                   # 右邻K收盘（分型可见最早时刻的代理）后的下一根 fine 开盘成交
+    "entryMacdShrink": True,     # 进场MACD柱缩闸（2026-09-23）：背驰级别最近两根已收K线的
+                                  # 柱状体（|macd|）变小才出信号——动能仍在放大时不进场；
+                                  # 闸未过不消耗段去重键，下一拍自动重评（等柱缩才进）
     "macdZeroTol": 5.0,          # 2买/2卖 MACD 0 轴容差（2026-09-16）：2买 dif > -tol、
                                   # 2卖 dif < +tol 视为「上/下过 0 轴后回调/反弹未破 0 轴太多」，
                                   # 动能还在（原严格口径 dif>0 / dif<0，tol=0 即回退）

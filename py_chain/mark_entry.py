@@ -779,7 +779,8 @@ def _evalRealtimeNode(periodData, node, wantDir, tCut, periodTimes, minBars):
 
 def realtimeLowerDiverge(periodData, X, wantDir, tCut,
                           periodTimes=None, minBars=REALTIME_MIN_BARS,
-                          divergeConfirm=None, expectBiEnabled=None):
+                          divergeConfirm=None, expectBiEnabled=None,
+                          entryMacdShrink=None):
     """当下背驰（区间套下沉版，每根 fine 收盘调用）。
 
     形成中段 = 笔列表最后一笔——回测引擎的增量状态已用 extendLastBiFrom
@@ -817,6 +818,8 @@ def realtimeLowerDiverge(periodData, X, wantDir, tCut,
         return []  # 链不通 / 停止级=检测周期自身 → 无严格更低级别背驰，不产信号
     if divergeConfirm is None:
         divergeConfirm = bool(CHAN_CFG.get("divergeConfirm"))
+    if entryMacdShrink is None:
+        entryMacdShrink = bool(CHAN_CFG.get("entryMacdShrink"))
     last = len(nodes) - 1
     order = range(last, 0, -1) if CHAN_CFG.get("sinkFallback") else [last]
     for depth in order:  # 停止级优先；M1 开启时逐级向粗回退（不含 X 自身）
@@ -830,6 +833,16 @@ def realtimeLowerDiverge(periodData, X, wantDir, tCut,
                 confirmAt = cand["point"]["time"] + 2 * (intervalSecOf(cand["res"]) or 0)
                 if tCut < confirmAt:
                     return []
+            # 进场MACD柱缩闸（CHAN_CFG.entryMacdShrink，2026-09-23）：背驰级别最近两根
+            # 已收K线的柱状体（|macd|）变小才出信号——动能仍在放大时不进场，等收缩确认。
+            # 上一根=决策拍最近已收的背驰级别K线（macdArr 仅含已收K线，无前视）；
+            # 闸未过不消耗段去重键（fired.add 只在真正发出处），下一拍自动重评；
+            # 不足两根无从判定 → 拦截（保守）。
+            if entryMacdShrink:
+                arr = (periodData.get(cand["res"]) or {}).get("macdArr") or []
+                if (len(arr) < 2
+                        or not abs(arr[-1]["macd"]) < abs(arr[-2]["macd"])):
+                    return []
             if depth < last:
                 cand["fallback"] = True  # 非停止级命中 = 回退候选
             return [cand]
@@ -841,7 +854,8 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
                             periodTimes=None, periodMacdTimes=None, divergeConfirm=None,
                             expectBiEnabled=None, realtimeMinBars=None,
                             zsExitWeakRatio=None, trend_res=None, trend_state=None,
-                            periodMerged=None, periodBars=None, firedIndex=None):
+                            periodMerged=None, periodBars=None, firedIndex=None,
+                            entryMacdShrink=None):
     """当下模式进场评估（每根 fine 收盘调用，信号无需等反向笔确认）。
 
     三条件与确认制同构，差异只在"何时评"与"②用什么评"：
@@ -865,6 +879,10 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
                              缺省时 realtimeLowerDiverge 内部现建）
     @param divergeConfirm    M4 背驰进场时机（None → 读 CHAN_CFG.divergeConfirm）：
                              True=极值K线右邻K收盘后才出信号（分型确认后下一根开盘进场）
+    @param entryMacdShrink   进场MACD柱缩闸（None → 读 CHAN_CFG.entryMacdShrink）：
+                             True=背驰级别最近两根已收K线柱状体（|macd|）变小才出信号
+                             （上一根K确认背驰且柱缩，下一根开盘进场；闸未过不消耗
+                             段去重键，下一拍自动重评）
     @param trend_res         顺势参考周期（None→TREND_RES 默认 "240"；""=关闭）。
                              参考周期及以上不作检测周期；方向与信号相反时跳过信号
                              （规则见 trading_plan.trend_direction）。
@@ -977,7 +995,8 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
         for c in realtimeLowerDiverge(periodData, X, direction, tCut,
                                       periodTimes=periodTimes or {},
                                       divergeConfirm=divergeConfirm,
-                                      expectBiEnabled=expectBiEnabled):
+                                      expectBiEnabled=expectBiEnabled,
+                                      entryMacdShrink=entryMacdShrink):
             fkey = (X, key, c["res"], c["segStart"])
             if fkey in fired:
                 continue  # 该形成段已发过，段延伸不重发

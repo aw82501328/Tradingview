@@ -602,10 +602,12 @@ class BacktestWorker(ModeWorker):
                                 sr_kwargs=self._sr_preset_kwargs(cfg, periods),
                                 diverge_confirm=cfg.get("diverge_confirm"),
                                 expect_bi=cfg.get("expect_bi"),
-                                module_params=_engine_module_params(pm))
+                                module_params=_engine_module_params(pm),
+                                entry_macd_shrink=cfg.get("entry_macd_shrink"))
         self.log(f"回测开始（最小周期 {engine.fine_res}，成交口径 {engine.fill_mode}，"
                  f"信号模式 {'当下背驰' if engine.signal_mode == 'realtime' else '确认制'}，"
                  f"背驰进场 {'分型确认后下一根开盘' if engine.diverge_confirm else '当下'}，"
+                 f"柱缩闸 {'开' if engine.entry_macd_shrink else '关'}，"
                  f"检测周期够笔 {'预期' if engine.expect_bi else '分型确认'}）...")
         result = engine.run(
             start_ts=start_ts,
