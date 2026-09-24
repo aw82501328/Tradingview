@@ -208,13 +208,15 @@ class BacktestEngine:
                  sr_types=None, fib_levels=None, boll_length=None, boll_mult=None,
                  fill_at_open_bar=False,
                  lots=DEFAULT_LOTS, contract_mult=1.0, slip_stop=DEFAULT_SLIP_STOP,
+                 # fine_res：显式覆盖自动探测（实盘 live_trader 专用——各周期数据
+                 # 深度不齐时自动探测可能误选粗周期作时间轴；回测不传保持原行为）
                  slip_fallback=DEFAULT_SLIP_FALLBACK, slip_be=DEFAULT_SLIP_BE,
                  slip_stop_atr_k=DEFAULT_SLIP_STOP_ATR_K,
                  slip_fallback_atr_k=DEFAULT_SLIP_FALLBACK_ATR_K,
                  slip_be_atr_k=DEFAULT_SLIP_BE_ATR_K,
                  near=DEFAULT_NEAR, sr_kwargs=None,
                  diverge_confirm=None, expect_bi=None, module_params=None,
-                 entry_macd_shrink=None, stop_entry_bar_floor=None):
+                 entry_macd_shrink=None, stop_entry_bar_floor=None, fine_res=None):
         self.periods = list(periods or DEFAULT_PERIODS)
         # 各周期按时间升序整理 + 缓存时间数组
         self.bars = {}
@@ -233,6 +235,7 @@ class BacktestEngine:
             if len(bl) >= 2:
                 spans[res] = bl[-1]["time"] - bl[0]["time"]
         max_span = max(spans.values()) if spans else 0
+        fine_override = fine_res            # 显式覆盖优先（自动探测后应用）
         fine_res = None
         for allow_30s in (False, True):
             for res in sorted(self.periods, key=lambda r: intervalSecOf(r) or 0):
@@ -245,7 +248,11 @@ class BacktestEngine:
                 break
         if fine_res is None:
             fine_res = min(self.periods, key=lambda r: intervalSecOf(r) or 0)
+        if fine_override is not None:
+            fine_res = fine_override
         self.fine_res = fine_res
+        if self.fine_res is None or str(self.fine_res) not in [str(p) for p in self.periods]:
+            raise ValueError(f"fine_res {self.fine_res!r} 不在 periods {self.periods} 中")
         if not self.bars[self.fine_res]["_list"]:
             raise ValueError(f"最小周期 {self.fine_res} 无K线数据")
         self.warmup_bars = warmup_bars

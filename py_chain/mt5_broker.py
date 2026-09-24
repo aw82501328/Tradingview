@@ -16,6 +16,8 @@
 import time
 from dataclasses import dataclass, field
 
+from .mt5_feed import server_offset_from_tick
+
 try:
     import MetaTrader5 as mt5
 except ImportError:  # CI/无终端：MockBroker 与纯函数可用
@@ -98,6 +100,7 @@ class MT5Broker:
         self.log = log or (lambda *a, **k: print(*a))
         self._spec = None
         self._fills = None      # filling 候选缓存
+        self._srv_offset = None  # 服务器-UTC 偏移缓存（server_now 用）
 
     # -- 连接与守卫 -----------------------------------------------------------
 
@@ -177,8 +180,21 @@ class MT5Broker:
         return None if acc is None else acc.equity
 
     def server_now(self):
-        """服务器时间（epoch 秒）——时段阻断窗以服务器时间为准。"""
-        return int(mt5.TimeTradeServer())
+        """服务器时间（epoch 秒）——时段阻断窗以服务器时间为准。
+        Python 包无 TimeTradeServer（MQL5 专属）：UTC 当前时刻 + 最近 tick 实测
+        偏移（整点量化，见 mt5_feed.server_offset_from_tick）；tick 不可用/停盘
+        残 tick 时退化为上次偏移（首次为 0，仅影响阻断窗分钟级精度）。"""
+        try:
+            t = mt5.symbol_info_tick(self.symbol)
+        except Exception:               # pragma: no cover - IPC 异常兜底
+            t = None
+        now = int(time.time())
+        off = server_offset_from_tick(
+            int(t.time) if (t is not None and t.time) else None,
+            now, prev=self._srv_offset)
+        if off is not None:
+            self._srv_offset = off
+        return now + (off or 0)
 
     # -- 归一化（spec 驱动） --------------------------------------------------
 
@@ -198,7 +214,8 @@ class MT5Broker:
         if magic:
             args["magic"] = magic  # 部分版本支持按 magic 过滤；不支持时下面兜底
         ps = mt5.positions_get(**args) or []
-        return [p for p in ps if not magic or p.magic == magic]
+        # 字段一律下标访问：numpy≥2 的结构化元素不再支持属性式访问
+        return [p for p in ps if not magic or p["magic"] == magic]
 
     def market_order(self, direction, volume, sl=None, comment=""):
         """市价单（带 SL；filling 旋转；成交以返回结果实际量价回填）。"""
@@ -314,14 +331,15 @@ class MT5Broker:
         deals = mt5.history_deals_get(d0, d1) or []
         out = []
         for d in deals:
-            if d.symbol != self.symbol:
+            if d["symbol"] != self.symbol:
                 continue
-            if magic and d.magic != magic:
+            if magic and d["magic"] != magic:
                 continue
-            out.append({"ticket": d.ticket, "order": d.order, "deal_time": int(d.time),
-                        "entry": d.entry, "direction": "long" if d.type == _BUY else "short",
-                        "volume": d.volume, "price": d.price, "profit": d.profit,
-                        "position_id": d.position_id, "comment": d.comment})
+            out.append({"ticket": d["ticket"], "order": d["order"],
+                        "deal_time": int(d["time"]), "entry": d["entry"],
+                        "direction": "long" if d["type"] == _BUY else "short",
+                        "volume": d["volume"], "price": d["price"], "profit": d["profit"],
+                        "position_id": d["position_id"], "comment": d["comment"]})
         return out
 
     # -- 内部 -----------------------------------------------------------------
@@ -331,8 +349,9 @@ class MT5Broker:
         if not ps:
             raise RuntimeError(f"持仓不存在：ticket={ticket}")
         p = ps[0]
-        return {"ticket": p.ticket, "type": p.type, "volume": p.volume, "sl": p.sl,
-                "price_open": p.price_open, "magic": p.magic, "comment": p.comment}
+        return {"ticket": p["ticket"], "type": p["type"], "volume": p["volume"],
+                "sl": p["sl"], "price_open": p["price_open"], "magic": p["magic"],
+                "comment": p["comment"]}
 
 
 # ---------------------------------------------------------------------------

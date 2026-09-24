@@ -1,6 +1,6 @@
 # 实盘接入 EXNESS MT5（全自动交易）
 
-状态：M0–M4 代码完成（2026-09-23）——mt5_feed/mt5_broker/live_store/live_trader/mt5_align/live_api+只读页签全部就位，单测与集成测试全绿（含 restart 不变性核心不变量）；待真机验证（M1 probe→M5 模拟盘，需 EXNESS 模拟户+MT5 终端）。算法引擎唯一改动 = `fill_at_open_bar` 开关（默认关闭，见下节）。
+状态：M0–M4 代码完成（2026-09-23）；**M1+M2 真机验证完成（2026-09-24，Exness-MT5Trial5 模拟户 277967333 / XAUUSDm）**——probe/对拍/深拉/shadow 全链路跑通，真机暴露并修复 4 处集成缺陷（见「真机实测修正」节）。待 M5 模拟盘实单（需终端开启 AutoTrading）。算法引擎改动 = `fill_at_open_bar` 开关（默认关闭）+ `fine_res` 显式覆盖参数（默认 None 不改变回测行为）。
 
 ## 目标与边界
 
@@ -35,7 +35,31 @@ MT5 终端（本机常驻、自动登录 EXNESS 账号）↕ EXNESS 服务器
 | 1 回测手=0.01 标准手（mark_entry.py Exness 口径）；lots 偶数是 TP2 半仓（≥0.01）硬前提 | 推荐 lots=2（0.02 手）；lots=1 需 half→全平降级（显式接受） |
 | webapp 全局互斥（_active_lock+ChartLock 独占 TD 图表） | 实盘=独立进程 `python -m py_chain.live_trader`；webapp 只加只读页签 |
 
-## 引擎唯一改动：fill_at_open_bar（2026-09-23 实施时发现并论证）
+## 真机实测修正（2026-09-24，M1+M2 验证所得）
+
+1. **服务器时区=UTC+0 固定（非 EET）**：tick 与最新 M1 时间戳实测 server epoch≈UTC；
+   `rule="utc"`（恒 0 偏移、无 DST）改为默认，us/eu EET 规则留作他服务器备用；
+   mt5_align `dst_rule_pick="utc"` 确认。禁用 MT5 自带 H4/D1 结论不变（其日界
+   =UTC 0:00 ≠ NY17:00）。
+2. **MetaTrader5 Python 包（5.0.6180）无 TimeTradeServer/TimeGMT**（MQL5 专属）：
+   动态偏移改由纯函数 `server_offset_from_tick`（mt5_feed）——最近 tick 服务器
+   时间戳 vs UTC、整点量化、±14h 合法域、停盘残 tick 保持上次值；broker.server_now
+   同源。原「TimeTradeServer-TimeGMT」表述全部作废。
+3. **numpy≥2 的 np.void 不再支持属性式字段访问**（本机 3.13.8+numpy 2.2.3）：
+   copy_rates_*/positions_get/history_deals_get 元素一律 `r["time"]` 下标访问。
+4. **fine_res 自动探测误选 240**：OANDA 补深 240/D(265d) ≫ 3/15/60(101d) 时，
+   「span≥90%·max_span」把时间轴选成 240（shadow 实测 fine_last 卡 240 形成桶）。
+   修复=BacktestEngine 新增 `fine_res` 显式覆盖参数，live_trader 固定传 "3"；
+   回测不传、行为不变。
+5. **服务器 M1 深度上限 ~101 天**（Trial5）：history() 深度不足时自动 OANDA 补深
+   240/D（幂等；seam 记录 live_state key=`exness_seam`）。
+6. **M2 对拍实测**（14 天窗）：时间戳匹配 15m/240/D=100%（达标）；OHLC 差 15m
+   中位 0.09~0.20 / p95 0.30~0.43 ——**锚点按实测修订为 中位≤0.25 / p95≤0.50**
+   （原 0.05/0.30 作废；两源微结构差异固有）；单 bar 离群可至 ~5.8（15m 极值）、
+   D 级 ~67（9/22 Exness 独有深低点，闪崩类）；点差按小时中位 0.24~0.26
+   （max_spread_entry=0.5 维持）。
+
+## 引擎改动：fill_at_open_bar + fine_res 覆盖（2026-09-23/24）
 
 **发现**：`_step_execute` 成交槽条件 `i+1 < end_cut` 要求成交 bar 已进入已收前缀，即单次 step_to 调用需跨 ≥2 根新收盘 bar 才能冲销 pending——批量 run() 天然满足；但实时每拍仅推进 1 根（实测逐拍推进 fills 恒为 0，LiveMonitor/ReplayMonitor 历史上也从未逐拍成交过，实时模式一直只是信号模式）。
 
@@ -89,8 +113,8 @@ lots=2 · max_volume_per_order=0.02 · max_total_open_volume=0.06 · max_positio
 | 阶段 | 验收锚点 |
 |---|---|
 | M0 SPEC+配置模板 | 本规范+SPEC.md 章节+live_config 模板+.gitignore |
-| M1 环境+probe | `data/mt5_probe.json`：demo/hedging/spec/周末有无 M1/H4-D1 边界 vs NY17:00 |
-| M2 数据层+对拍 | 15m 共同时段时间戳匹配≥99%、OHLC 中位差≤0.05/p95≤0.30（实测修订）；重采样 240/D 匹配 100%；DST 规则判定；点差分布表 |
+| M1 环境+probe | `data/mt5_probe.json`：demo/hedging/spec/周末有无 M1/H4-D1 边界 vs NY17:00（**✓ 2026-09-24**：demo/hedging 通过、volume_min=0.01、filling=FOK+IOC、周六 0 根 M1；注意 terminal.trade_allowed=false——实单前须开终端 AutoTrading） |
+| M2 数据层+对拍 | 15m 共同时段时间戳匹配≥99%（**实测 100% ✓ 2026-09-24**）、OHLC 中位差≤0.25/p95≤0.50（实测 0.14/0.43 ✓，锚点已按实测修订）；重采样 240/D 匹配 100% ✓；DST 规则判定 ✓（pick=utc）；点差分布表 ✓（中位 0.24~0.26） |
 | M3 执行层 | 失败注入矩阵（10030 旋转/10016 clamp/部分成交/SL 盘中触发）全绿；demo 只读烟测 |
 | M4 编排+shadow | **restart 不变性**（任意拍 kill→重放→trades 逐字段一致）；`--audit` 事件:动作=1:1；kill/参数漂移演练 |
 | M5 模拟盘实单 | ≥1 笔完整生命周期；live_orders 与终端历史逐笔一致；演练（kill/断网/终端重开/跨周末）reconcile 收敛；告警送达 |

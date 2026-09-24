@@ -85,7 +85,7 @@ def _abspath(p):
 def in_block_windows(srv_ts, windows):
     """服务器时刻是否落在阻断窗（"HH:MM"-"HH:MM"，支持跨午夜）。纯函数。
 
-    srv_ts 为服务器时间 epoch（TimeTradeServer 口径）：按 UTC 渲染即服务器墙上钟，
+    srv_ts 为服务器时间 epoch（server_now 实测口径）：按 UTC 渲染即服务器墙上钟，
     不能用本机时区 fromtimestamp。"""
     hm = datetime.fromtimestamp(int(srv_ts), timezone.utc).strftime("%H:%M")
     for w in windows or []:
@@ -252,8 +252,8 @@ class LiveTrader:
         finfo = self.feed.connect()
         self.log(f"[live] 行情源就绪：{finfo}")
         # ④ 参数中心（进程内全局 CHAN_CFG 与引擎 module_params 同 webapp 口径）
-        self._pm = param_center.effective_all()
-        chan_core.apply_cfg(param_center.chan_cfg_effective())
+        self._pm = param_center.effective_all(c.get("symbol"))
+        chan_core.apply_cfg(param_center.chan_cfg_effective(c.get("symbol")))
         # ⑤ 会话与参数漂移守卫
         h = config_hash(self._pm, self.cfg)
         st = live_store.load_state("session")
@@ -316,7 +316,10 @@ class LiveTrader:
             bars, periods=periods, warmup_bars=0, lots=self.cfg["lots"],
             contract_mult=contract_mult_of(self.cfg["symbol"]),
             module_params=param_center.engine_module_params(self._pm),
-            fill_at_open_bar=True)   # 逐拍同拍成交（见 backtest.py 注释；批量口径不变）
+            fill_at_open_bar=True,   # 逐拍同拍成交（见 backtest.py 注释；批量口径不变）
+            fine_res="3")            # 显式固定 fine=3m：OANDA 补深 240/D 后各周期数据
+                                    # 跨度不齐，自动探测会误选 240 作时间轴（2026-09-24
+                                    # shadow 实测踩中：fine_last 卡在 240 形成桶）
 
     def _restore(self, t_start):
         """确定性重放恢复：预热到 T_start → execute=True 重放到当前（抑制下单）。"""

@@ -12,7 +12,8 @@
    XAUUSDm，需在配置 symbol 中对应）。
 3. **终端设置**：Tools → Options → Charts：Max bars in history / in chart 均
    **Unlimited**；保存密码自动登录（无人值守重启自动连上）。
-4. **Python**：`py -3.12 -m pip install -r requirements.txt`（MetaTrader5 库仅 Windows）。
+4. **Python**：`python -m pip install -r requirements.txt`（MetaTrader5 库仅 Windows；
+   本机实测 3.13.8+numpy2.2 可用，代码已适配 numpy≥2 下标字段访问）。
 5. **Windows**：电源计划禁睡眠；（服务器）任务计划设终端开机自启。
 6. **配置**：复制 `py_chain/web/live_config.json` 为 `live_config.local.json`（已
    gitignore），填入 `account.login`（登录号）与 `account.server`（服务器名）。
@@ -22,20 +23,20 @@
 
 ```powershell
 # M1 环境 probe（账号守卫/spec/周末有无/维护窗/H4-D1 边界 → data/mt5_probe.json）
-py -3.12 -m py_chain.mt5_feed probe
+python -m py_chain.mt5_feed probe
 # M2 数据对拍（重采样 vs bars.db OANDA → data/mt5_align_<date>.json，锚点物证）
-py -3.12 -m py_chain.mt5_align --days 14
+python -m py_chain.mt5_align --days 14
 # M2 深拉历史 M1 入库（EXNESS:XAUUSD，绝不写 OANDA:*）
-py -3.12 -m py_chain.mt5_feed history --days 365
+python -m py_chain.mt5_feed history --days 365
 # 单测（无需终端）
-py -3.12 -m unittest py_chain.test_mt5_feed py_chain.test_mt5_broker py_chain.test_live_trader
+python -m unittest py_chain.test_mt5_feed py_chain.test_mt5_broker py_chain.test_live_trader
 # shadow 模式启动（默认；只记录不下单，日志 data/live_trader.log）
-py -3.12 -m py_chain.live_trader
+python -m py_chain.live_trader
 # 模拟盘真实下单（确认 shadow 链路无误后）
-py -3.12 -m py_chain.live_trader --no-shadow
+python -m py_chain.live_trader --no-shadow
 # 单拍联调 / 审计
-py -3.12 -m py_chain.live_trader --once
-py -3.12 -m py_chain.live_trader --audit
+python -m py_chain.live_trader --once
+python -m py_chain.live_trader --audit
 ```
 
 **上线顺序（不可跳步）**：shadow ≥2 交易日（`--audit` 全绿）→ 模拟盘真实下单 ≥1 完整
@@ -47,7 +48,7 @@ py -3.12 -m py_chain.live_trader --audit
 
 ```powershell
 schtasks /Create /TN "live_trader" /RL HIGHEST /SC ONSTART /RU <用户名> ^
-  /TR "py -3.12 -m py_chain.live_trader --no-shadow" /F
+  /TR "python -m py_chain.live_trader --no-shadow" /F
 # 崩溃自动重启：任务计划 GUI → live_trader → 设置 → "如果任务失败，按以下频率重新启动
 # 每 1 分钟，尝试 999 次"；或导出 XML 后改 <RestartOnFailure>。
 ```
@@ -97,7 +98,7 @@ symbol=`EXNESS:XAUUSD`。
 
 Windows Server VPS（2C/4G/60G，伦敦机房低延迟）：装 Python 3.12 + MT5 终端（自动
 登录）+ git clone 本仓库 + `pip install -r requirements.txt` →
-`py -3.12 -m py_chain.mt5_feed history --days 365`（重建 EXNESS:XAUUSD 数据）→
+`python -m py_chain.mt5_feed history --days 365`（重建 EXNESS:XAUUSD 数据）→
 注册任务计划 → SSH 隧道访问 webapp 只读「实盘」页签（127.0.0.1:8001）。
 上线顺序：VPS shadow 与本地对照 1 周 → 模拟盘 1 周 → 实盘小手数。
 

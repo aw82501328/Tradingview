@@ -10,8 +10,8 @@ import unittest
 from datetime import datetime, timezone
 
 from .mt5_feed import (BIN_SEC, closed_bars, ny_day_start_utc, ny_session_bins,
-                       offset_at, resample, resample_epoch, session_keep,
-                       srv_to_utc, MT5Feed)
+                       offset_at, resample, resample_epoch, server_offset_from_tick,
+                       session_keep, srv_to_utc, MT5Feed)
 from .data_store import DB_PATH
 
 
@@ -61,6 +61,41 @@ class TestSrvToUtc(unittest.TestCase):
         sum_ = datetime(2026, 7, 15, tzinfo=timezone.utc).timestamp()
         self.assertEqual(offset_at(int(win), "us"), 2 * 3600)
         self.assertEqual(offset_at(int(sum_), "us"), 3 * 3600)
+
+    def test_utc_rule_identity(self):
+        # Exness-MT5Trial5 实测（2026-09-24）：服务器钟=UTC+0 固定（无 DST）
+        # → rule="utc" 恒等转换，夏冬令时时刻均偏移 0
+        for utc in [1758600000, 1793563800]:
+            self.assertEqual(offset_at(utc, "utc"), 0)
+            self.assertEqual(srv_to_utc(utc, "utc"), utc)
+
+
+class TestServerOffsetFromTick(unittest.TestCase):
+    """动态偏移纯函数：最近 tick 服务器时间戳 → 整点量化偏移。
+    （TimeTradeServer/TimeGMT 在 Python 包不存在——2026-09-24 真机实测修正。）"""
+
+    def test_fresh_tick_hour_snap(self):
+        utc = 1758600000                       # 2026-09-23（EET 夏令时 +3h）
+        # 真偏移 +3h、tick 龄 42s → 量化回 10800
+        self.assertEqual(server_offset_from_tick(utc + 10800 - 42, utc), 10800)
+        # tick 龄 25 分钟仍在容忍内
+        self.assertEqual(server_offset_from_tick(utc + 10800 - 1500, utc), 10800)
+
+    def test_dst_shift_follows(self):
+        utc = 1758600000
+        # EU DST 切换后真偏移 +2h、tick 龄 5s → 7200 覆盖旧 prev
+        self.assertEqual(server_offset_from_tick(utc + 7200 - 5, utc, prev=10800), 7200)
+
+    def test_weekend_stale_keeps_prev(self):
+        utc = 1758600000
+        # 周末残 tick：服务器时间比 UTC 旧 ~2 天（|raw|>14h）→ 保持上次值
+        self.assertEqual(server_offset_from_tick(utc - 172800, utc, prev=10800), 10800)
+        # 首次即遇残 tick → None（调用方走 DST 规则表）
+        self.assertIsNone(server_offset_from_tick(utc - 172800, utc))
+
+    def test_none_tick_keeps_prev(self):
+        self.assertEqual(server_offset_from_tick(None, 1758600000, prev=7200), 7200)
+        self.assertIsNone(server_offset_from_tick(0, 1758600000))
 
 
 class TestNyDayStart(unittest.TestCase):
@@ -175,7 +210,7 @@ class TestFeedSpecOffline(unittest.TestCase):
     def test_importable_without_terminal(self):
         f = MT5Feed(symbol="XAUUSD", periods=("D", "240", "60", "15", "3"))
         self.assertEqual(f.db_symbol, "EXNESS:XAUUSD")
-        self.assertEqual(f.rule, "us")
+        self.assertEqual(f.rule, "utc")   # 2026-09-24 实测 Exness 服务器钟=UTC+0
 
     def test_never_oanda_db_symbol(self):
         f = MT5Feed(db_symbol="OANDA:XAUUSD")

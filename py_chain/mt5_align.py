@@ -94,11 +94,12 @@ def compare_window(days=14, symbol="XAUUSD", log=print):
                                "sample": only_ond[:10]},
             }
 
-        # DST 规则判定：UTC M1 反推回服务器时间，再分别按 us/eu 正转重采样 240，
-        # 与 OANDA 240 边界匹配率高者为应选规则（仅历史段受规则影响；近3天走动态offset）
+        # DST 规则判定：UTC M1 反推回服务器时间，再分别按 utc/us/eu 正转重采样 240，
+        # 与 OANDA 240 边界匹配率高者为应选规则（仅历史段受规则影响；近3天走动态offset）。
+        # 2026-09-24 实测 Exness-MT5Trial5 服务器钟=UTC+0 → 预期 pick="utc"
         rules = {}
         rates = feed.m1_range(now - 14 * 86400, now)
-        for rule in ("us", "eu"):
+        for rule in ("utc", "us", "eu"):
             m1_r = []
             for b in rates:
                 srv = b["time"] + offset_at(b["time"], feed.rule)   # 反推服务器时间
