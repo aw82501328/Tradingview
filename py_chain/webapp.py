@@ -169,6 +169,84 @@ def ensure_idle():
     return True, None
 
 
+def run_sr_compute(app, cfg, mode):
+    """多品种支阻位计算（/api/sr/compute 线程体；抽出为模块级函数便于单测 mock）。
+
+    统一参数、逐品种顺序：ensure_data → build_chain_result；单品种失败记入
+    results[sym]["error"] 后继续下一个品种；每成功一个品种整体原子重写 app.sr
+    （顶层 result/meta = 第一个成功的品种，兼容旧单品种消费方），全部失败
+    不动旧槽（与旧单品种失败口径一致）。
+    @returns (err, per_symbol)  err 仅在全部品种失败时非 None；
+             per_symbol = { 品种: {ok, merged, drawn} | {ok:False, error} }
+    """
+    def log(msg):
+        app.broadcaster.emit("log", {"mode": "sr", "msg": str(msg)})
+
+    symbols = [s for s in (cfg.get("symbols") or []) if s] or [cfg.get("symbol")]
+    n = len(symbols)
+
+    def prog(phase, cur=0, total=0, symbol=None):
+        # 逐品种段折算（与旧单品种口径同形）：取数占段内 0~70%、重建笔 80、
+        # 计算 95、全部完成后 100；payload 增补可选 symbol 供前端加 [品种] 前缀
+        i = symbols.index(symbol) if symbol in symbols else 0
+        if phase == "fetch":
+            frac = 0.70 * ((cur / total) if total else 0.0)
+        else:
+            frac = {"bis": 0.80, "compute": 0.95, "done": 1.0}.get(phase, 0.0)
+        pct = 100 if phase == "done" else int(min(99, ((i + frac) / n) * 100))
+        app.broadcaster.emit("progress", {"mode": "sr", "phase": phase,
+                                          "current": cur, "total": total,
+                                          "symbol": symbol, "pct": pct})
+
+    results = {}
+    first_ok = None
+    first_err = None
+    for i, sym in enumerate(symbols):
+        try:
+            log(f"—— 品种 {i + 1}/{n}：{sym} ——")
+            prog("fetch", i + 1, n, symbol=sym)
+            bars = sr_service.ensure_data(cfg["periods"], cfg["from_ts"],
+                                          log=log, refresh=(mode == "refresh"),
+                                          symbol=sym)
+            prog("bis", i + 1, n, symbol=sym)
+            result, meta = sr_service.build_chain_result(
+                bars, dict(cfg, symbol=sym), log=log)
+            results[sym] = {"result": result, "meta": meta}
+            if first_ok is None:
+                first_ok = (result, meta)
+            with _sr_result_lock:
+                app.sr = {"cfg": cfg, "computed_at": int(time.time()),
+                          "result": first_ok[0], "meta": first_ok[1],
+                          "results": dict(results)}
+            prog("compute", i + 1, n, symbol=sym)
+            log(f"计算完成 {sym}：当前价 {result.get('currentPrice')}，"
+                f"候选池 {len(result.get('merged') or [])} 条，"
+                f"图上 {sum(len(v) for v in (result.get('drawnByPeriod') or {}).values())} 条")
+        except Exception as e:  # 含 CDPError——单品种失败不拦截其余品种
+            results[sym] = {"error": str(e)}
+            if first_err is None:
+                first_err = str(e)
+            try:
+                log(f"支阻位计算失败（{sym}）：{e}")
+            except Exception:
+                pass
+    per_symbol = {}
+    for sym, v in results.items():
+        if "result" in v:
+            res = v["result"] or {}
+            per_symbol[sym] = {
+                "ok": True,
+                "merged": len(res.get("merged") or []),
+                "drawn": sum(len(x) for x in (res.get("drawnByPeriod") or {}).values()),
+            }
+        else:
+            per_symbol[sym] = {"ok": False, "error": v.get("error")}
+    if first_ok is None:
+        return first_err or "全部品种计算失败", per_symbol
+    prog("done", n, n)
+    return None, per_symbol
+
+
 # ============================================================
 # SignalLog：线程安全信号表
 # ============================================================
@@ -543,27 +621,39 @@ class BacktestWorker(ModeWorker):
 
     @staticmethod
     def _sr_preset_kwargs(cfg, periods):
-        """回测「支阻预设」下拉：载入与 /sr、工作台共享的预设（识别参数+叠加开关+人工位），
-        以回测周期 ∩ 支阻级别过滤后映射为 compute_srflip kwargs（engine_kwargs_of）；
-        30S 是回测时间轴/背驰次级别，不属于支阻级别（白名单刻意拒收），不透传。
-        未选预设（空）→ None（走引擎默认：密集区+BOLL；叠加开关只存在于预设的 srTypes）。
-        兼容：旧 cfg 里的 overlay_fib/overlay_boll 键不再读取（2026-09-13 移除回测页叠加开关）。"""
-        name = str(cfg.get("sr_preset") or "").strip()
-        if not name:
-            return None
+        """按 cfg.symbol 读参数中心该品种支阻桶 → normalize → engine_kwargs_of。
+        以回测周期 ∩ 支阻级别过滤；30S 不属于支阻级别，不透传。
+        空/无效 → None（引擎默认：密集区+BOLL）。
+        历史快照若仍带 sr_preset 名：品种桶 normalize 失败时回退旧 _presets_load。"""
         from .sr_service import engine_kwargs_of
-        preset = next((p for p in _presets_load()
-                       if isinstance(p, dict) and p.get("name") == name), None)
-        if preset is None or not isinstance(preset.get("cfg"), dict):
-            raise ValueError(f"未找到支阻预设「{name}」，请刷新预设列表后重选")
         sr_periods = ([p for p in periods
                        if str(p).strip().upper() in sr_service.CANONICAL_LEVELS]
                       or list(sr_service.DEFAULT_LEVELS))
-        pcfg = dict(preset["cfg"])
-        pcfg.update(periods=sr_periods, symbol=cfg.get("symbol") or pcfg.get("symbol"),
-                    **{"from": cfg.get("from") or pcfg.get("from") or "2026-06-30"})
-        pcfg = ControlApp.normalize_sr_cfg(pcfg)   # 校验 + manualLevels 按支阻周期过滤
-        return engine_kwargs_of(pcfg)
+        symbol = cfg.get("symbol")
+
+        def _to_kwargs(raw):
+            pcfg = dict(raw)
+            pcfg.pop("symbols", None)
+            pcfg.update(periods=sr_periods, symbol=symbol or pcfg.get("symbol"),
+                        **{"from": cfg.get("from") or pcfg.get("from") or "2026-06-30"})
+            return engine_kwargs_of(ControlApp.normalize_sr_cfg(pcfg))
+
+        try:
+            return _to_kwargs(param_center.effective_sr(symbol))
+        except (ValueError, TypeError, KeyError):
+            pass
+        # 历史兼容：旧预设名
+        name = str(cfg.get("sr_preset") or "").strip()
+        if not name:
+            return None
+        preset = next((p for p in _presets_load()
+                       if isinstance(p, dict) and p.get("name") == name), None)
+        if preset is None or not isinstance(preset.get("cfg"), dict):
+            return None
+        try:
+            return _to_kwargs(preset["cfg"])
+        except (ValueError, TypeError, KeyError):
+            return None
 
     @staticmethod
     def _engine_kwargs_of(cfg, periods):
@@ -571,17 +661,15 @@ class BacktestWorker(ModeWorker):
         多品种 _run_batch 共用，逐参等价）。会回写 cfg（lots/滑点等缺省值），保持
         bt_runs 历史方案快照/对比表显示实际生效参数的既有口径。
         diverge_confirm/expect_bi 页面不再传入（None → 引擎读 CHAN_CFG）。"""
-        pm = param_center.effective_all()
-        chan_core.apply_cfg(param_center.chan_cfg_effective())  # 幂等重放（启动已应用；防参数文件被手改）
+        pm = param_center.effective_all(cfg.get("symbol"))
+        chan_core.apply_cfg(param_center.chan_cfg_effective(cfg.get("symbol")))  # 幂等重放（启动已应用；防参数文件被手改）
         ep = pm["entry"]
         for k in ("slip_stop", "slip_fallback", "slip_be", "near",
                   "slip_stop_atr_k", "slip_fallback_atr_k", "slip_be_atr_k"):
             if cfg.get(k) is None:
                 cfg[k] = ep[k]
-        # 手数按品种解析（2026-09-23）：显式 cfg["lots"]（API/历史方案复现）优先
-        # → 参数中心品种键 → 全局 lots；合约乘数按品种（1 手 = 0.01 标准手）。
-        # 回写 cfg 保持快照/对比表显示实际生效值的既有口径；批量模式无 symbol，
-        # 在 _run_batch 循环内按品种覆盖并在 _save_one 回写各自值。
+        # 手数按品种解析（2026-09-24 起整套进出场按品种分桶）：显式 cfg["lots"]
+        # （API/历史方案复现）优先 → 该品种桶 lots。回写 cfg 保持快照/对比表口径。
         if cfg.get("lots") is None:
             cfg["lots"] = param_center.lots_of(ep, cfg.get("symbol"))
         cfg["contract_mult"] = mark_entry.contract_mult_of(cfg.get("symbol"))
@@ -699,12 +787,11 @@ class BacktestWorker(ModeWorker):
         to_ts = int(cfg.get("to_ts") or 0) or None
         if lead_days > 0:
             self.log(f"预热提前 {lead_days} 天：数据起点 {fmtT(data_from_ts)}，交易起点 {fmtT(from_ts)}")
-        self.log(f"批量并行回测：{len(symbols)} 个品种 {symbols}（数据源=本地存储，参数统一）")
+        self.log(f"批量并行回测：{len(symbols)} 个品种 {symbols}（数据源=本地存储，进出场参数按品种）")
         # 父进程预计算一切配置（子进程不读参数文件/不解析日期）；
         # chan_cfg 由子进程各自 apply_cfg 重放 → CHAN_CFG 进程级隔离天然成立
-        base_kwargs = self._engine_kwargs_of(cfg, periods)
-        pm_entry = param_center.effective_all()["entry"]
-        chan_cfg = param_center.chan_cfg_effective()
+        ENTRY_FILL_KEYS = ("lots", "near", "slip_stop", "slip_fallback", "slip_be",
+                           "slip_stop_atr_k", "slip_fallback_atr_k", "slip_be_atr_k")
         # 无数据品种预检：标 skipped 不 spawn（预检失败不拦截，交给子进程报具体错误）
         try:
             have = {s.get("symbol") for s in data_store.list_stores()}
@@ -730,15 +817,15 @@ class BacktestWorker(ModeWorker):
             for sym in todo:
                 scfg = dict(cfg)
                 scfg["symbol"] = sym
-                kw = dict(base_kwargs)
-                kw["sr_kwargs"] = self._sr_preset_kwargs(scfg, periods)  # 支阻预设按品种重算
-                # 手数/合约乘数按品种解析（2026-09-23，父进程解析 → 纯数字 pickle 安全）；
+                # 进出场按品种取桶：清掉共享 cfg 可能带来的统一 near/滑点/手数
+                for k in ENTRY_FILL_KEYS:
+                    scfg.pop(k, None)
+                kw = self._engine_kwargs_of(scfg, periods)
                 # 记入 self.batch[sym] 供 _save_one 回写各自 cfg 快照
-                kw["lots"] = param_center.lots_of(pm_entry, sym)
-                kw["contract_mult"] = mark_entry.contract_mult_of(sym)
                 self.batch[sym]["lots"] = kw["lots"]
                 self.batch[sym]["contract_mult"] = kw["contract_mult"]
-                child_cfg = {"chan_cfg": chan_cfg, "engine_kwargs": kw, "periods": periods,
+                child_cfg = {"chan_cfg": param_center.chan_cfg_effective(sym),
+                             "engine_kwargs": kw, "periods": periods,
                              "data_from_ts": data_from_ts, "to_ts": to_ts, "start_ts": start_ts}
                 p = ctx.Process(target=bt_batch.run_symbol,
                                 args=(child_cfg, sym, msg_q, pause_e, stop_e),
@@ -895,8 +982,8 @@ class LiveWorker(ModeWorker):
     def _run(self):
         cfg = self.cfg
         periods = cfg.get("periods") or DEFAULT_PERIODS
-        pm = param_center.effective_all()
-        chan_core.apply_cfg(param_center.chan_cfg_effective())
+        pm = param_center.effective_all(cfg.get("symbol"))
+        chan_core.apply_cfg(param_center.chan_cfg_effective(cfg.get("symbol")))
         m = LiveMonitor(symbol=cfg.get("symbol"), periods=periods,
                         from_ts=cfg.get("from_ts", 0), port=cfg.get("port", DEFAULT_CDP_PORT),
                         interval=cfg.get("interval", 15.0), tail=cfg.get("tail", 100),
@@ -941,8 +1028,8 @@ class ReplayWorker(ModeWorker):
     def _run(self):
         cfg = self.cfg
         periods = cfg.get("periods") or DEFAULT_PERIODS
-        pm = param_center.effective_all()
-        chan_core.apply_cfg(param_center.chan_cfg_effective())
+        pm = param_center.effective_all(cfg.get("symbol"))
+        chan_core.apply_cfg(param_center.chan_cfg_effective(cfg.get("symbol")))
         m = ReplayMonitor(symbol=cfg.get("symbol"), periods=periods,
                           from_ts=cfg.get("from_ts", 0), port=cfg.get("port", DEFAULT_CDP_PORT),
                           start_ts=cfg.get("start_ts"),
@@ -1025,7 +1112,8 @@ class ControlApp:
         # 全量回测历史方案存储（bt_runs/bt_signals 表，建在基础数据库 bars.db 里）
         self.bt_runs = bt_runs.BtRunStore()
         self.sr_tune = sr_tune.TuneManager(store=tune_store, emit=self.broadcaster.emit)
-        self.td_launcher = td_launcher.TDLauncher(acquire_active, release_active)
+        self.td_launcher = td_launcher.TDLauncher(acquire_active, release_active,
+                                                  compat=self._td_launch_compat)
         self.analysis = analysis_service.AnalysisManager(
             self.broadcaster.emit, acquire_active, release_active, _marks_lock,
             self.normalize_sr_cfg, self.publish_analysis_sr)
@@ -1033,19 +1121,35 @@ class ControlApp:
         # zs/plan 在每次任务启动时读取，无需预热应用）
         chan_core.apply_cfg(param_center.chan_cfg_effective())
 
+    def _td_launch_compat(self, owner):
+        """TD启动与当前互斥占用者能否并行：仅本地数据源（store=SQLite、cache=JSON，
+        多品种批量已被 normalize_cfg 强制 store，天然覆盖）回测不连CDP不碰TD；
+        live源/回放/实时/基础数据/图表操作仍互斥。数据源口径与 BacktestWorker._run
+        的 src 表达式保持一致。"""
+        if active_mode() != "backtest":
+            return False
+        w = self.workers["backtest"]
+        if w.thread is not None and not w.thread.is_alive():
+            return True   # 回测线程已结束（锁即将释放），无实际并行冲突
+        cfg = w.cfg or {}
+        src = cfg.get("data_source") or ("cache" if cfg.get("use_cache") else "live")
+        return src in ("store", "cache")
+
     def publish_analysis_sr(self, cfg, result, meta):
         with _sr_result_lock:
             self.sr = {"cfg": cfg, "computed_at": time.time(), "result": result, "meta": meta}
 
     def sr_counts(self):
-        """支阻位结果概要（小载荷，供 /api/sr/state 与 status() 使用）。"""
+        """支阻位结果概要（小载荷，供 /api/sr/state 与 status() 使用）。
+        多品种计算时附 by_symbol（每品种 ok/merged/drawn）；旧单品种形状无该键。"""
         with _sr_result_lock:
             sr = self.sr or {}
             result = sr.get("result") or {}
             computed_at = sr.get("computed_at")
             periods = (sr.get("cfg") or {}).get("periods") or []
+            results = sr.get("results") or {}
         drawn = result.get("drawnByPeriod") or {}
-        return {
+        out = {
             "has_result": bool(result),
             "computed_at": computed_at,
             "periods": [str(p) for p in periods],
@@ -1053,6 +1157,18 @@ class ControlApp:
             "merged": len(result.get("merged") or []),
             "by_period": {str(k): len(v) for k, v in drawn.items()},
         }
+        if results:
+            by_symbol = {}
+            for sym, v in results.items():
+                res = (v or {}).get("result") or {}
+                by_symbol[sym] = {
+                    "ok": bool(res),
+                    "error": (v or {}).get("error"),
+                    "merged": len(res.get("merged") or []),
+                    "drawn": sum(len(x) for x in (res.get("drawnByPeriod") or {}).values()),
+                }
+            out["by_symbol"] = by_symbol
+        return out
 
     @staticmethod
     def normalize_sr_cfg(cfg):
@@ -1071,6 +1187,21 @@ class ControlApp:
         cfg["periods"] = periods
         symbol = str(cfg.get("symbol") or "OANDA:XAUUSD").strip()
         cfg["symbol"] = symbol or "OANDA:XAUUSD"
+        # 品种多选（2026-09-24，对齐回测 normalize_cfg 口径）：列表/逗号串 → 去重保序；
+        # cfg["symbol"] = 第一个（调参页工作区 / 预设 / Excel / 回测支阻预设兼容）；
+        # symbols 键优先于旧 symbol 单值；无 symbols 键时旧路径不动
+        raw_syms = cfg.get("symbols")
+        if isinstance(raw_syms, str):
+            raw_syms = raw_syms.split(",")
+        if raw_syms is not None:
+            syms = [s for s in dict.fromkeys(
+                str(x).strip() for x in raw_syms if str(x).strip())]
+            if not syms:
+                raise ValueError("请至少选择一个品种")
+            if len(syms) > 10:
+                raise ValueError("品种一次最多 10 个")
+            cfg["symbols"] = syms
+            cfg["symbol"] = syms[0]
         from_s = str(cfg.get("from") or sr_service.DEFAULT_FROM)
         try:
             cfg["from_ts"] = parse_from(from_s)
@@ -1376,6 +1507,18 @@ def make_handler(app):
                     if not has:
                         self._send_json({"ok": False, "error": "尚无计算结果，请先计算"})
                         return
+
+                    def _view(result, meta):
+                        """单个品种结果 → 前端视图（periods/merged/drawn/现价/ATR/meta）。"""
+                        return {
+                            "ok": True,
+                            "periods": (result or {}).get("periods") or {},
+                            "merged": (result or {}).get("merged") or [],
+                            "drawn_by_period": (result or {}).get("drawnByPeriod") or {},
+                            "current_price": (result or {}).get("currentPrice"),
+                            "period_atrs": (result or {}).get("periodAtrs") or {},
+                            "meta": meta,
+                        }
                     payload = {
                         "ok": True, "has_result": True,
                         "computed_at": sr.get("computed_at"),
@@ -1387,6 +1530,19 @@ def make_handler(app):
                         "current_price": sr["result"].get("currentPrice"),
                         "period_atrs": sr["result"].get("periodAtrs") or {},
                     }
+                    # 多品种：by_symbol 逐品种完整视图（含失败品种的 error）；
+                    # 旧单品种形状（工作台分析发布）无 results → 用顶层合成单键，前端无分支
+                    results = sr.get("results") or {}
+                    if results:
+                        payload["by_symbol"] = {
+                            sym: (_view(v.get("result"), v.get("meta"))
+                                  if v.get("result") is not None
+                                  else {"ok": False, "error": v.get("error")})
+                            for sym, v in results.items()}
+                    else:
+                        payload["by_symbol"] = {
+                            (sr.get("cfg") or {}).get("symbol") or "OANDA:XAUUSD":
+                                _view(sr.get("result"), sr.get("meta"))}
                 self._send_json(payload)
                 return
             if path == "/api/sr/presets":
@@ -1732,50 +1888,20 @@ def make_handler(app):
                     _set_sr_busy("refresh" if mode == "refresh" else "compute")
 
                 def _job():
-                    def log(msg):
-                        app.broadcaster.emit("log", {"mode": "sr", "msg": str(msg)})
-
-                    def prog(phase, cur=0, total=0):
-                        # 取数 0–70、重建笔 80、计算 95、全部完成后 100（到头）
-                        if phase == "fetch":
-                            pct = int(cur / total * 70) if total else 0
-                        else:
-                            pct = {"bis": 80, "compute": 95, "done": 100}.get(phase, 0)
-                        app.broadcaster.emit("progress", {"mode": "sr", "phase": phase,
-                                                          "current": cur, "total": total,
-                                                          "pct": pct})
                     err = None
-                    counts = None
+                    per_symbol = None
                     try:
-                        prog("fetch", 0, 1)
-                        bars = sr_service.ensure_data(cfg["periods"], cfg["from_ts"],
-                                                      log=log, refresh=(mode == "refresh"),
-                                                      symbol=cfg["symbol"])
-                        prog("bis")
-                        result, meta = sr_service.build_chain_result(bars, cfg, log=log)
-                        with _sr_result_lock:
-                            app.sr["cfg"] = cfg
-                            app.sr["computed_at"] = int(time.time())
-                            app.sr["result"] = result
-                            app.sr["meta"] = meta
-                        counts = app.sr_counts()
-                        prog("compute", 1, 1)
-                        prog("done", 1, 1)
-                        log(f"计算完成：当前价 {result.get('currentPrice')}，"
-                            f"候选池 {len(result.get('merged') or [])} 条，"
-                            f"图上 {sum(len(v) for v in (result.get('drawnByPeriod') or {}).values())} 条")
-                    except Exception as e:  # 含 CDPError——原样透出给前端
+                        err, per_symbol = run_sr_compute(app, cfg, mode)
+                    except Exception as e:  # 理论不可达（循环内已兜底）；保底透出
                         err = str(e)
-                        try:
-                            log(f"支阻位计算失败：{e}")
-                        except Exception:
-                            pass
                     finally:
                         with _sr_busy_lock:
                             _set_sr_busy(None)
                         _marks_lock.release()
-                        app.broadcaster.emit("sr_done", {"op": "compute",
-                                                         "error": err, "counts": counts})
+                        app.broadcaster.emit("sr_done", {
+                            "op": "compute", "error": err,
+                            "counts": None if err else app.sr_counts(),
+                            "per_symbol": per_symbol})
                 threading.Thread(target=_job, daemon=True, name="sr-compute").start()
                 self._send_json({"ok": True, "started": True})
                 return
@@ -1788,10 +1914,23 @@ def make_handler(app):
                     self._send_json({"ok": False, "error": "已有标记/支阻操作进行中，请稍候"}, 409)
                     return
                 body = self._read_body()
+                # 画图品种（多品种计算后逐品种查看/画图）：显式传入时必须命中该品种
+                # 的计算结果（不静默回退顶层）；未传 → 旧单品种顶层路径不变
+                draw_symbol = str(body.get("symbol") or "").strip()
                 with _sr_result_lock:
                     has = (app.sr or {}).get("result") is not None
                     result = (app.sr or {}).get("result")
                     cfg = (app.sr or {}).get("cfg") or {}
+                    results = (app.sr or {}).get("results") or {}
+                if draw_symbol:
+                    pick = results.get(draw_symbol)
+                    if not pick or pick.get("result") is None:
+                        _marks_lock.release()
+                        self._send_json(
+                            {"ok": False,
+                             "error": f"该品种无计算结果：{draw_symbol}"}, 400)
+                        return
+                    result = pick["result"]
                 if not has:
                     _marks_lock.release()
                     self._send_json({"ok": False, "error": "尚无计算结果，请先计算"}, 409)
@@ -1816,7 +1955,8 @@ def make_handler(app):
                         res = sr_draw.draw_sr_lines(
                             main_by_period=main_by_period, raw_by_period=raw_by_period,
                             cfg=CDPConfig(), clear_first=bool(clear_first),
-                            color=color, draw_text=draw_text, log=log)
+                            color=color, draw_text=draw_text, log=log,
+                            symbol=draw_symbol or None)
                     except Exception as e:
                         err = str(e)
                         try:

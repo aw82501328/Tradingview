@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>参数配置 · 标记进出场多品种 TAB 原型</title>
+<style>
+/* 色板与 params.html / theme.css 对齐，单文件可双击打开 */
+:root{
+  color-scheme:dark;
+  --bg:#10151e;--panel:#19212e;--card:var(--panel);--card-2:#131c29;
+  --line:#2c384a;--border:var(--line);--text:#e7edf7;--muted:#99a9c0;
+  --blue:#8eb7ff;--accent:var(--blue);--primary:#5086e5;--warn:#f0b90b;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:13px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;padding:14px 18px}
+h1{font-size:19px;color:#fff}
+h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
+.banner{margin:10px 0 0;padding:8px 12px;border:1px solid #51412d;border-radius:6px;
+  background:#32291c;color:#edbc70;font-size:12px;max-width:1180px}
+.ptabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin:10px 0 0;flex-wrap:wrap}
+.ptabs button{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;
+  color:var(--muted);font-size:13px;padding:8px 16px;cursor:pointer}
+.ptabs button:hover{color:var(--text)}
+.ptabs button.on{border-color:var(--accent);color:#bad4ff;font-weight:600}
+/* 品种子页签：嵌在模块内容区顶部，略缩进以示层级 */
+.stabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin:12px 0 0;flex-wrap:wrap}
+.stabs button{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;
+  color:var(--muted);font-size:12.5px;padding:7px 14px;cursor:pointer}
+.stabs button:hover{color:var(--text)}
+.stabs button.on{border-color:#55d7b0;color:#92d1b4;font-weight:600}
+.stabs button .scode{color:var(--muted);font-size:11px;margin-left:6px;font-weight:400}
+.stabs button.on .scode{color:#6aa89a}
+.pane{padding-top:14px}
+.placeholder{color:var(--muted);font-size:13px;padding:24px 4px;max-width:640px}
+.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:8px 16px;max-width:1180px}
+.prow{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--border);
+  border-radius:6px;padding:7px 10px;cursor:default}
+.pgroup{grid-column:1/-1;color:var(--muted);font-size:11.5px;display:flex;align-items:center;gap:8px;margin-top:4px}
+.pgroup::after{content:'';flex:1;border-top:1px solid var(--border)}
+.pgroup:first-child{margin-top:0}
+.prow .pname{flex:1;min-width:0}
+.prow .plabel{color:var(--text);font-size:12.5px;display:block}
+.prow .pdef{color:var(--muted);font-size:11px}
+.prow.mod{border-color:#7a5c1e;background:#1d1a10}
+.prow .badge{display:none;background:#3d3208;color:var(--warn);font-size:10px;padding:0 6px;
+  border-radius:8px;margin-left:6px;border:0}
+.prow.mod .badge{display:inline-block}
+.prow input[type=number]{width:86px;text-align:right;background:var(--bg);color:var(--text);
+  border:1px solid var(--border);border-radius:4px;padding:3px 6px;font:inherit}
+.prow input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px}
+.prow .slip-k{display:flex;align-items:center;gap:4px;color:var(--muted);font-size:11.5px;white-space:nowrap;flex-shrink:0}
+.prow .slip-k input{width:64px;text-align:right}
+.pfoot{display:flex;gap:10px;align-items:center;margin:14px 0 0;flex-wrap:wrap}
+.pfoot .state{color:var(--muted);font-size:11px}
+.pnote{color:var(--muted);font-size:12px;margin-top:10px;max-width:1180px}
+button.primary,button.ghost{font:inherit;cursor:pointer;border-radius:5px;padding:7px 14px}
+button.primary{background:var(--primary);border:1px solid #427fea;color:#fff}
+button.primary:hover{filter:brightness(1.08)}
+button.ghost{background:#243247;border:1px solid var(--border);color:var(--text)}
+button.ghost:hover{background:#2f4058}
+.toast{position:fixed;right:18px;bottom:18px;background:#1f4aa8;color:#fff;border-radius:6px;
+  padding:8px 16px;font-size:12.5px;opacity:.96;z-index:40}
+.toast.err{background:#5a1d1d}
+</style>
+</head>
+<body>
+<h1>参数配置<span class="sub">分模块统一管理 · 本页为「标记进出场」多品种 TAB 交互原型</span></h1>
+<p class="banner">交互原型 · 静态演示 · 五个品种各自独立一套进出场参数（不含「其他品种」兜底）· 不写入参数中心</p>
+
+<nav class="ptabs" id="moduleTabs" aria-label="参数模块"></nav>
+
+<div class="pane" id="pane-other" hidden>
+  <p class="placeholder">原型只演示「标记进出场」。正式页中本模块参数照常可编辑。</p>
+</div>
+
+<div class="pane" id="pane-entry">
+  <nav class="stabs" id="symbolTabs" aria-label="品种"></nav>
+  <div class="pgrid" id="pgrid" style="margin-top:14px"></div>
+  <div class="pfoot">
+    <button class="primary" id="saveBtn" type="button">保存本模块</button>
+    <button class="ghost" id="resetBtn" type="button">恢复默认</button>
+    <span class="state" id="stateLine"></span>
+  </div>
+  <p class="pnote" id="noteLine">
+    标记进出场参数按品种独立存储：切换上方品种页签编辑各自的近支阻、手数、滑点、出场判定、进场扩展与进场闸门。
+    手数仅当前品种一行。三个滑点支持 ATR 动态分量：有效滑点 = 固定值 + ATR系数×背驰周期ATR(14)。
+    保存 / 恢复默认在本原型中仅弹提示，不落盘。
+  </p>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script>
+'use strict';
+// ─── 模块 / 品种页签 ───────────────────────────────────────────
+const MODULE_TABS = [
+  ['chan', '画笔'], ['zs', '画中枢'], ['points', '标记买卖点'],
+  ['sr', '支阻位'], ['plan', '交易计划'], ['entry', '标记进出场'],
+];
+const SYMBOLS = [
+  { id: 'XAUUSD', label: '黄金', code: 'OANDA:XAUUSD' },
+  { id: 'XAGUSD', label: '白银', code: 'OANDA:XAGUSD' },
+  { id: 'USOIL',  label: '原油', code: 'TVC:USOIL' },
+  { id: 'BTCUSD', label: 'BTC',  code: 'BITSTAMP:BTCUSD' },
+  { id: 'NAS100', label: '纳指', code: 'FX:NAS100' },
+];
+
+// 参数 schema（与 param_center entry 模块字段对齐；手数收成单行 lots）
+const SCHEMA = {
+  near:               { label: '近支阻阈值',     type: 'num', def: 10,   desc: '背驰点价与支阻位价差 ≤ 该值视为接近（绝对价差）' },
+  lots:               { label: '手数',           type: 'int', def: 4,    desc: '本品种进场手数；1手=0.01标准手' },
+  slip_stop:          { label: '止损滑点',       type: 'num', def: 3,    desc: '正确侧支阻位外侧偏移；有效值=该值+ATR系数×ATR' },
+  slip_stop_atr_k:    { label: '止损滑点ATR系数', type: 'num', def: 0,  desc: '有效止损滑点附加 ATR 分量；0=关闭', min: 0 },
+  slip_fallback:      { label: '兜底止损滑点',   type: 'num', def: 10,   desc: '无正确侧支阻位时 止损=进场价±该值' },
+  slip_fallback_atr_k:{ label: '兜底滑点ATR系数', type: 'num', def: 0,  desc: '有效兜底滑点附加 ATR 分量；0=关闭', min: 0 },
+  slip_be:            { label: '保本滑点',       type: 'num', def: 3,    desc: '保本止损位=进场成交K线极值±该值' },
+  slip_be_atr_k:      { label: '保本滑点ATR系数', type: 'num', def: 0,  desc: '有效保本滑点附加 ATR 分量；0=关闭', min: 0 },
+  exit_min_merged:    { label: '出场成笔预期门槛', type: 'int', def: 5,  desc: '形成段合并后 ≥ 该值根K视为成笔预期' },
+  realtime_min_bars:  { label: '当下制够笔K线数', type: 'int', def: 5,  desc: '检测周期形成段达到该块数才评估' },
+  zs_exit_weak_ratio: { label: '出中枢力度衰减比例', type: 'num', def: 1, desc: '离开笔幅度 < 进入笔×该值 视为力度变弱' },
+  sinkFallback:       { label: 'M1下沉链回退',   type: 'bool', def: true,  desc: '下沉停止级无候选时沿链向上一级重评' },
+  sinkFallbackRearm:  { label: 'M1终局后重置去重', type: 'bool', def: true, desc: '同向持仓终局后重置段去重' },
+  nearEqualAtrK:      { label: 'M2近等容差ATR',  type: 'num', def: 0,    desc: '创新低/新高近等容差（×ATR；0=关闭）' },
+  nearEqualPct:       { label: 'M2近等容差比例', type: 'num', def: 0,    desc: '近等容差价格比例（0=关闭）' },
+  expectBiEnough:     { label: 'M4预期够笔',     type: 'bool', def: true,  desc: '允许预期段在合并K线够笔后进场' },
+  expectBiMinBars:    { label: 'M4够笔K线数',    type: 'int', def: 5,    desc: '预期够笔的本级合并K线块数门槛' },
+  divergeConfirm:     { label: 'M4背驰确认后成交', type: 'bool', def: false, desc: '开启=分型右邻K收盘后的下一根开盘成交' },
+  macdZeroTol:        { label: '2买卖0轴容差',   type: 'num', def: 0,    desc: '2买 DIF > -该值 / 2卖 DIF < +该值 视为动能还在' },
+  entryMacdShrink:    { label: '进场MACD柱缩闸', type: 'bool', def: false, desc: '背驰级别上一根已收K线柱缩才出信号' },
+  stopEntryBarFloor:  { label: '进场K线止损下限', type: 'bool', def: false, desc: '止损至少在进场背驰周期K线极值外侧加滑点处' },
+};
+
+const SLIP_ATR_K = {
+  slip_stop: 'slip_stop_atr_k',
+  slip_fallback: 'slip_fallback_atr_k',
+  slip_be: 'slip_be_atr_k',
+};
+
+const ENTRY_GROUPS = [
+  ['支阻', ['near']],
+  ['手数', ['lots']],
+  ['滑点（ATR系数内嵌各行）', ['slip_stop', 'slip_fallback', 'slip_be']],
+  ['出场判定', ['exit_min_merged', 'realtime_min_bars', 'zs_exit_weak_ratio']],
+  ['进场扩展（M1/M2/M4、0轴容差）', [
+    'sinkFallback', 'sinkFallbackRearm', 'nearEqualAtrK', 'nearEqualPct',
+    'expectBiEnough', 'expectBiMinBars', 'divergeConfirm', 'macdZeroTol',
+  ]],
+  ['进场闸门', ['entryMacdShrink', 'stopEntryBarFloor']],
+];
+
+// 五套示意默认值：价差量纲随品种拉开，便于看出分品种存储
+const SYMBOL_DEFAULTS = {
+  XAUUSD: {
+    near: 10, lots: 4,
+    slip_stop: 3, slip_stop_atr_k: 0,
+    slip_fallback: 10, slip_fallback_atr_k: 0,
+    slip_be: 3, slip_be_atr_k: 0,
+    exit_min_merged: 5, realtime_min_bars: 5, zs_exit_weak_ratio: 1,
+    sinkFallback: true, sinkFallbackRearm: true,
+    nearEqualAtrK: 0, nearEqualPct: 0,
+    expectBiEnough: true, expectBiMinBars: 5, divergeConfirm: false, macdZeroTol: 0,
+    entryMacdShrink: false, stopEntryBarFloor: false,
+  },
+  XAGUSD: {
+    near: 0.15, lots: 4,
+    slip_stop: 0.05, slip_stop_atr_k: 0,
+    slip_fallback: 0.2, slip_fallback_atr_k: 0,
+    slip_be: 0.05, slip_be_atr_k: 0,
+    exit_min_merged: 5, realtime_min_bars: 5, zs_exit_weak_ratio: 1,
+    sinkFallback: true, sinkFallbackRearm: true,
+    nearEqualAtrK: 0, nearEqualPct: 0,
+    expectBiEnough: true, expectBiMinBars: 5, divergeConfirm: false, macdZeroTol: 0,
+    entryMacdShrink: false, stopEntryBarFloor: false,
+  },
+  USOIL: {
+    near: 0.4, lots: 4,
+    slip_stop: 0.15, slip_stop_atr_k: 0,
+    slip_fallback: 0.5, slip_fallback_atr_k: 0,
+    slip_be: 0.15, slip_be_atr_k: 0,
+    exit_min_merged: 5, realtime_min_bars: 5, zs_exit_weak_ratio: 1,
+    sinkFallback: true, sinkFallbackRearm: true,
+    nearEqualAtrK: 0, nearEqualPct: 0,
+    expectBiEnough: true, expectBiMinBars: 5, divergeConfirm: false, macdZeroTol: 0.05,
+    entryMacdShrink: false, stopEntryBarFloor: false,
+  },
+  BTCUSD: {
+    near: 80, lots: 4,
+    slip_stop: 25, slip_stop_atr_k: 0.1,
+    slip_fallback: 120, slip_fallback_atr_k: 0,
+    slip_be: 25, slip_be_atr_k: 0,
+    exit_min_merged: 5, realtime_min_bars: 5, zs_exit_weak_ratio: 1,
+    sinkFallback: true, sinkFallbackRearm: true,
+    nearEqualAtrK: 0, nearEqualPct: 0,
+    expectBiEnough: true, expectBiMinBars: 5, divergeConfirm: false, macdZeroTol: 5,
+    entryMacdShrink: true, stopEntryBarFloor: false,
+  },
+  NAS100: {
+    near: 25, lots: 4,
+    slip_stop: 8, slip_stop_atr_k: 0,
+    slip_fallback: 40, slip_fallback_atr_k: 0.05,
+    slip_be: 8, slip_be_atr_k: 0,
+    exit_min_merged: 4, realtime_min_bars: 5, zs_exit_weak_ratio: 1,
+    sinkFallback: true, sinkFallbackRearm: true,
+    nearEqualAtrK: 0, nearEqualPct: 0,
+    expectBiEnough: true, expectBiMinBars: 5, divergeConfirm: false, macdZeroTol: 2,
+    entryMacdShrink: false, stopEntryBarFloor: true,
+  },
+};
+
+// 示意「已修改」项（相对本品种默认值的初始 override，切品种后仍保留）
+const INITIAL_OVERRIDES = {
+  XAUUSD: { near: 12 },
+  XAGUSD: { near: 0.2, lots: 6 },
+  USOIL:  { slip_stop: 0.2 },
+  BTCUSD: { near: 100, slip_stop_atr_k: 0.15 },
+  NAS100: { exit_min_merged: 5, stopEntryBarFloor: true },
+};
+
+const $ = id => document.getElementById(id);
+let activeModule = 'entry';
+let activeSymbol = 'XAUUSD';
+let toastTimer;
+
+// 页内按品种分开存：values = 当前有效值；defaults = 本品种示意默认（恢复时用）
+const store = {};
+for (const s of SYMBOLS) {
+  const base = { ...SYMBOL_DEFAULTS[s.id] };
+  const ov = INITIAL_OVERRIDES[s.id] || {};
+  store[s.id] = {
+    defaults: { ...base },
+    values: { ...base, ...ov },
+  };
+}
+
+function toast(msg, err) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.classList.toggle('err', !!err);
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, 2200);
+}
+
+function drawModuleTabs() {
+  $('moduleTabs').innerHTML = MODULE_TABS.map(([id, name]) =>
+    `<button type="button" data-mod="${id}" class="${id === activeModule ? 'on' : ''}"
+      aria-pressed="${id === activeModule}">${name}</button>`).join('');
+}
+
+function drawSymbolTabs() {
+  $('symbolTabs').innerHTML = SYMBOLS.map(s =>
+    `<button type="button" data-sym="${s.id}" class="${s.id === activeSymbol ? 'on' : ''}"
+      aria-pressed="${s.id === activeSymbol}">${s.label}<span class="scode">${s.id}</span></button>`
+  ).join('');
+}
+
+function defText(key) {
+  const spec = SCHEMA[key];
+  const d = store[activeSymbol].defaults[key];
+  if (spec.type === 'bool') return d ? '默认开' : '默认关';
+  return `默认 ${d}`;
+}
+
+function isMod(key) {
+  const s = store[activeSymbol];
+  const emb = SLIP_ATR_K[key];
+  if (s.values[key] !== s.defaults[key]) return true;
+  if (emb && s.values[emb] !== s.defaults[emb]) return true;
+  return false;
+}
+
+function rowHtml(key) {
+  const spec = SCHEMA[key];
+  const val = store[activeSymbol].values[key];
+  const embKey = SLIP_ATR_K[key];
+  let control;
+  if (spec.type === 'bool') {
+    control = `<input type="checkbox" data-k="${key}" ${val ? 'checked' : ''}>`;
+  } else {
+    const step = spec.type === 'int' ? '1' : 'any';
+    control = `<input type="number" step="${step}" data-k="${key}" value="${val}">`;
+  }
+  let embed = '';
+  if (embKey) {
+    const ek = SCHEMA[embKey];
+    const ev = store[activeSymbol].values[embKey];
+    embed = `<span class="slip-k" title="${ek.desc}">+ ATR×`
+      + `<input type="number" step="any" min="0" data-k="${embKey}" value="${ev}" aria-label="${ek.label}">`
+      + `</span>`;
+  }
+  return `<div class="prow ${isMod(key) ? 'mod' : ''}" title="${spec.desc}">
+    <span class="pname"><span class="plabel">${spec.label}<span class="badge">已修改</span></span>
+    <span class="pdef">${defText(key)} · ${spec.desc}</span></span>${control}${embed}</div>`;
+}
+
+function renderForm() {
+  $('pgrid').innerHTML = ENTRY_GROUPS.map(([title, keys]) =>
+    `<div class="pgroup">${title}</div>` + keys.map(k => rowHtml(k)).join('')
+  ).join('');
+  const s = store[activeSymbol];
+  const n = Object.keys(SCHEMA).filter(k => s.values[k] !== s.defaults[k]).length;
+  const sym = SYMBOLS.find(x => x.id === activeSymbol);
+  $('stateLine').textContent = `${sym.label}（${sym.code}）· 已修改 ${n} 项 · 页内示意，未落盘`;
+}
+
+function collectIntoStore() {
+  const cfg = store[activeSymbol].values;
+  document.querySelectorAll('#pgrid [data-k]').forEach(inp => {
+    const k = inp.dataset.k;
+    if (inp.type === 'checkbox') cfg[k] = inp.checked;
+    else if (SCHEMA[k] && SCHEMA[k].type === 'int') cfg[k] = parseInt(inp.value, 10);
+    else cfg[k] = parseFloat(inp.value);
+  });
+}
+
+function switchModule(id) {
+  activeModule = id;
+  drawModuleTabs();
+  const isEntry = id === 'entry';
+  $('pane-entry').hidden = !isEntry;
+  $('pane-other').hidden = isEntry;
+}
+
+function switchSymbol(id) {
+  if (id === activeSymbol) return;
+  collectIntoStore();  // 切走前把当前表单写回该品种
+  activeSymbol = id;
+  drawSymbolTabs();
+  renderForm();
+}
+
+$('moduleTabs').addEventListener('click', e => {
+  const b = e.target.closest('button[data-mod]');
+  if (b) switchModule(b.dataset.mod);
+});
+$('symbolTabs').addEventListener('click', e => {
+  const b = e.target.closest('button[data-sym]');
+  if (b) switchSymbol(b.dataset.sym);
+});
+// 改动即时刷新「已修改」角标（仍留在当前品种 store）
+$('pgrid').addEventListener('change', () => {
+  collectIntoStore();
+  renderForm();
+});
+$('pgrid').addEventListener('input', e => {
+  if (e.target && e.target.dataset && e.target.dataset.k) {
+    collectIntoStore();
+    // input 时只更新 badge，避免 number 输入过程中整表重绘丢焦点
+    const key = e.target.dataset.k;
+    const mainKey = Object.entries(SLIP_ATR_K).find(([, v]) => v === key)?.[0] || key;
+    const row = e.target.closest('.prow');
+    if (row) row.classList.toggle('mod', isMod(mainKey));
+    const s = store[activeSymbol];
+    const n = Object.keys(SCHEMA).filter(k => s.values[k] !== s.defaults[k]).length;
+    const sym = SYMBOLS.find(x => x.id === activeSymbol);
+    $('stateLine').textContent = `${sym.label}（${sym.code}）· 已修改 ${n} 项 · 页内示意，未落盘`;
+  }
+});
+
+$('saveBtn').onclick = () => {
+  collectIntoStore();
+  toast('原型演示，未写入参数中心');
+};
+$('resetBtn').onclick = () => {
+  if (!window.confirm(`恢复「${SYMBOLS.find(x => x.id === activeSymbol).label}」全部进出场参数为示意默认值？`)) return;
+  const s = store[activeSymbol];
+  s.values = { ...s.defaults };
+  renderForm();
+  toast('原型演示，未写入参数中心');
+};
+
+drawModuleTabs();
+drawSymbolTabs();
+renderForm();
+</script>
+</body>
+</html>

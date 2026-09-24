@@ -45,11 +45,12 @@ class TestPure(unittest.TestCase):
         self.assertFalse(in_block_windows(_ts("2026-09-23 12:00"), cross))
 
     def test_provisional_sl(self):
-        # long：近支阻-3 在 bid 下方 → 用支阻侧；错误侧 → 兜底
-        self.assertEqual(provisional_sl("long", 4000.0, 4000.2, 3980.0), 3977.0)
+        # long：近支阻-3 更远 → 抬到 bid−最大止损；错误侧 / 无近支阻同为最大止损价
+        self.assertEqual(provisional_sl("long", 4000.0, 4000.2, 3980.0), 3990.0)
         self.assertEqual(provisional_sl("long", 4000.0, 4000.2, 4005.0), 3990.0)
         self.assertEqual(provisional_sl("long", 4000.0, 4000.2, None), 3990.0)
-        self.assertEqual(provisional_sl("short", 4000.0, 4000.2, 4020.0), 4023.0)
+        # short：近支阻+3 更远 → 压到 ask+最大止损；错误侧同为最大止损价
+        self.assertEqual(provisional_sl("short", 4000.0, 4000.2, 4020.0), 4010.2)
         self.assertEqual(provisional_sl("short", 4000.0, 4000.2, 3995.0), 4010.2)
 
 

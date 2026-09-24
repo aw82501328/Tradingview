@@ -19,8 +19,9 @@
   - 成交统一「下一根K线开盘」：止损/保本止损/平一半/全平的事件时间 = 触发 bar 的
     下一根 bar 时间、价格 = 其开盘价（跳空自然体现）；触发 bar 无下一根 → 未成交
     （持仓保持 open，mark-to-market 收尾）；
-  - 止损位：正确侧最近支阻位 ± slip_stop（short 上方+ / long 下方−）；无正确侧位兜底
-    进场价 ± slip_fallback（止损位永不为 None，不再有「不设止损」仓位）；
+  - 止损位：正确侧最近支阻位 ± slip_stop（short 上方+ / long 下方−）；再按最大止损
+    硬上限夹紧（多 ≥ 进场价−slip_fallback / 空 ≤ 进场价+slip_fallback；无正确侧位
+    时止损即落在此价，止损位永不为 None）；
   - 保本止损位 beStop：进场成交K线极值 ± slip_be（short: high+ / long: low−；
     run() 批量路径成交 bar 当拍未收盘，存在 ≤1 根 fine bar 的微前视，step_to 实时
     路径无前视——研究口径可接受）；
@@ -131,7 +132,8 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
         return "close"
     # 进场K线止损下限（stopEntryBarFloor）：进场背驰周期K线仍在走（bar 落在其窗口内）
     # 且未保本 → 用当根极值更新运行极值并把止损外推到 运行极值±有效止损滑点（只放松，
-    # 与支阻位止损取更宽者）；bar 越出窗口即自然冻结。状态全在 pos 上，三模式共用本函数。
+    # 与支阻位止损取更宽者）；外推后再按最大止损价夹紧，避免冲破硬上限。
+    # bar 越出窗口即自然冻结。状态全在 pos 上，三模式共用本函数。
     bs, be = pos.get("entryBarStart"), pos.get("entryBarEnd")
     if (bs is not None and not pos.get("beDone")
             and bs <= bar["time"] < be):
@@ -143,8 +145,13 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
                  else pos["entryBarExt"] - pos["slipStopEff"])
         pos["stopRef"] = max(pos["stopRef"], floor) if is_short \
             else min(pos["stopRef"], floor)
+        # 最大止损硬上限：外推不得越过进场价±最大止损
+        ml = pos.get("maxLoss")
+        if ml is not None:
+            pos["stopRef"] = min(pos["stopRef"], ml) if is_short \
+                else max(pos["stopRef"], ml)
     stop = pos.get("beStop") if pos.get("beDone") else pos.get("stopRef")
-    if stop is not None:  # 止损位永不为 None（兜底进场价±slip_fallback），此保护仅防御旧持仓数据
+    if stop is not None:  # 止损位永不为 None（最大止损兜底），此保护仅防御旧持仓数据
         hit = bar["high"] > stop if is_short else bar["low"] < stop
         if hit:
             typ = "stopBe" if pos.get("beDone") else "stopSr"
@@ -304,7 +311,7 @@ class BacktestEngine:
         #   lots 手数（盈亏 × lots）；contract_mult 合约乘数（2026-09-23 统一 MT4/MT5
         #   口径 1 手 = 0.01 标准手，乘数 = 每标准手规模 × 0.01，成交时快照进 trade 行；
         #   未知品种缺省 1.0 与旧口径一致）；slip_stop 止损位滑点（支阻位外侧）；
-        #   slip_fallback 兜底止损滑点（无正确侧支阻位 → 进场价±该值）；
+        #   slip_fallback 最大止损（支阻位更远时收到进场价±该值；无正确侧位亦落此价）；
         #   slip_be 保本滑点（beStop = 进场成交K线极值 ± 该值）；
         #   slip_*_atr_k 三滑点 ATR 系数（2026-09-19）：有效滑点 = 固定值 + 系数 ×
         #   ATR(14, 背驰周期 markRes)；0=关闭（默认，结果与无 ATR 分量一致）
@@ -330,7 +337,8 @@ class BacktestEngine:
         self.entry_macd_shrink = (bool(CHAN_CFG.get("entryMacdShrink"))
                                   if entry_macd_shrink is None else bool(entry_macd_shrink))
         # 进场K线止损下限（参数中心可调）：None → 读 CHAN_CFG 一次固化为本轮值。
-        # True = 止损至少在进场背驰周期K线极值外侧加滑点处（运行中外推、收盘冻结）。
+        # True = 止损至少在进场背驰周期K线极值外侧加滑点处（运行中外推、收盘冻结；
+        # 外推后仍受最大止损硬上限约束）。
         self.stop_entry_bar_floor = (bool(CHAN_CFG.get("stopEntryBarFloor"))
                                      if stop_entry_bar_floor is None
                                      else bool(stop_entry_bar_floor))
@@ -1283,6 +1291,9 @@ class BacktestEngine:
             # 时间戳均为周期整数倍（DB 已验证），barStart 直接模周期对齐。
             barStart = barEnd = extSeed = None
             slipStopEff = self.slip_stop + self.slip_stop_atr_k * mrAtr
+            # 最大止损价（硬上限）：多单止损不得低于此价、空单不得高于此价
+            slipFbEff = self.slip_fallback + self.slip_fallback_atr_k * mrAtr
+            maxLoss = entryPrice + (slipFbEff if d == "short" else -slipFbEff)
             if self.stop_entry_bar_floor:
                 sec = intervalSecOf(s.get("markRes")) or 0
                 if sec:
@@ -1297,6 +1308,9 @@ class BacktestEngine:
                         floor = (extSeed - slipStopEff) if d == "long" \
                             else (extSeed + slipStopEff)
                         stopRef = min(stopRef, floor) if d == "long" else max(stopRef, floor)
+                        # 外推后仍受最大止损约束
+                        stopRef = max(stopRef, maxLoss) if d == "long" \
+                            else min(stopRef, maxLoss)
             trades.append({
                 "tradeNo": len(trades) + 1,
                 "periodX": s["periodX"],
@@ -1320,6 +1334,7 @@ class BacktestEngine:
                 # 出场状态机字段（advance_exit_decision/execute_pending_exit 增量维护）
                 "stopRef": stopRef,
                 "beStop": beStop,
+                "maxLoss": maxLoss,  # 最大止损价；进场K线外推后夹紧用，保本后不再参与
                 # 进场K线止损下限状态（advance_exit_decision 运行极值外推用；
                 # ext=None=窗口内尚无已收 bar，下限暂不生效）
                 "entryBarStart": barStart,
@@ -1392,7 +1407,7 @@ def run_backtest(bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
     signal_mode：realtime=当下背驰（每拍评估形成中段，默认），confirm=确认制（结构变化时收集）；
     sr_types/fib_levels 透传支阻位类型开关与黄金分割比率（None → compute_srflip 默认）；
     boll_length/boll_mult 透传 BOLL 布林带周期与标准差倍数（None → compute_srflip 默认 26/2）；
-    lots/slip_stop/slip_fallback/slip_be 透传出场参数（手数/止损滑点/兜底止损滑点/保本滑点，
+    lots/slip_stop/slip_fallback/slip_be 透传出场参数（手数/止损滑点/最大止损/保本滑点，
     默认 4 / 3 / 10 / 3，绝对价格单位）；contract_mult 合约乘数（2026-09-23 统一 MT4/MT5
     口径 1 手 = 0.01 标准手，缺省 1.0 与旧口径一致）；
     slip_stop_atr_k/slip_fallback_atr_k/slip_be_atr_k

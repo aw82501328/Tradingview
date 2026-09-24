@@ -102,17 +102,19 @@ def in_block_windows(srv_ts, windows):
 
 def provisional_sl(direction, bid, ask, near_sr, slip=DEFAULT_SLIP_STOP,
                    fallback=DEFAULT_SLIP_FALLBACK):
-    """信号拍临时 SL（引擎 stopRef 在成交拍才冻结）：近支阻 ± 滑点，错误侧兜底
-    进场参考价 ± fallback（与 stop_ref_of 同口径）。"""
+    """信号拍临时 SL（引擎 stopRef 在成交拍才冻结）：近支阻 ± 滑点；
+    再按最大止损夹紧（多 ≥ bid−fallback / 空 ≤ ask+fallback，与 stop_ref_of 同口径）。"""
     if direction == "long":
+        max_loss = bid - fallback
         cand = (near_sr - slip) if near_sr is not None else None
         if cand is None or cand >= bid:
-            cand = bid - fallback
-        return cand
+            cand = max_loss
+        return max(cand, max_loss)
+    max_loss = ask + fallback
     cand = (near_sr + slip) if near_sr is not None else None
     if cand is None or cand <= ask:
-        cand = ask + fallback
-    return cand
+        cand = max_loss
+    return min(cand, max_loss)
 
 
 def config_hash(pm, cfg):

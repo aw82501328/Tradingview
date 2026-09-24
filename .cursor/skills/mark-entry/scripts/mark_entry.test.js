@@ -12,6 +12,7 @@ const assert = require("node:assert/strict");
 const {
   findDivergePoints, lowerDiverge, levelsBelow, sinkChainConfirm,
   stopRefOf, findBiEvent, trendFollowingOf, favSeg5Time, simulatePosition,
+  entryStrategyOf,
 } = require("./mark_entry.js");
 
 const bi = (type, startTime, endTime, startPrice, endPrice) => ({
@@ -137,37 +138,67 @@ const bar = (time, open, high, low, close) => ({ time, open, high, low, close })
 // 交替高低的无包含K线：每根各自成块 → born = 各 bar 时间（与 py 用例的 T8/T7 同构）
 const altBars = (times) => times.map((t, i) => bar(t, 10, i % 2 ? 11 : 10, i % 2 ? 10 : 9, 10));
 
-describe("出场规则：stopRefOf（支阻位±滑点/兜底）", () => {
-  test("short 上方支阻位 + 止损滑点；nearSr 错侧重选/正确侧沿用", () => {
+describe("出场规则：stopRefOf（支阻位±滑点/最大止损）", () => {
+  test("short 上方支阻位 + 止损滑点，再按最大止损夹紧；nearSr 错侧重选/正确侧沿用", () => {
     const sig = { direction: "short", price: 4450 };
-    assert.equal(stopRefOf(sig, [{ price: 4460 }, { price: 4420 }]), 4463);
-    assert.equal(stopRefOf({ ...sig, nearSr: 4420 }, [{ price: 4460 }]), 4463);
-    assert.equal(stopRefOf({ ...sig, nearSr: 4465 }, [{ price: 4460 }]), 4468);
+    // 4460+3=4463 → 最大止损 4460；nearSr 错侧重选同；正确侧 4465+3=4468 → 4460
+    assert.equal(stopRefOf(sig, [{ price: 4460 }, { price: 4420 }]), 4460);
+    assert.equal(stopRefOf({ ...sig, nearSr: 4420 }, [{ price: 4460 }]), 4460);
+    assert.equal(stopRefOf({ ...sig, nearSr: 4465 }, [{ price: 4460 }]), 4460);
   });
 
-  test("无正确侧位 → 兜底 进场价±兜底滑点（永不为 null）", () => {
+  test("无正确侧位 → 进场价±最大止损（永不为 null）", () => {
     const sig = { direction: "short", price: 4450 };
     assert.equal(stopRefOf(sig, [{ price: 4400 }]), 4460);
     assert.equal(stopRefOf(sig, []), 4460);
     assert.equal(stopRefOf({ direction: "long", price: 4450 }, []), 4440);
   });
 
-  test("自定义滑点", () => {
+  test("自定义滑点；支阻更近时保持", () => {
     const sig = { direction: "short", price: 4450 };
     assert.equal(stopRefOf(sig, [{ price: 4460 }], 5, 20), 4465);
     assert.equal(stopRefOf(sig, [], 5, 20), 4470);
+    assert.equal(stopRefOf(sig, [{ price: 4455 }]), 4458);
+    assert.equal(stopRefOf({ direction: "long", price: 4450 }, [{ price: 4445 }]), 4442);
   });
 
-  test("ATR 分量：有效滑点 = 固定值 + 系数×ATR；k=0 回归（成对 py test_atr_component）", () => {
+  test("ATR 分量：有效滑点 = 固定值 + 系数×ATR；再按有效最大止损夹紧", () => {
     const sig = { direction: "short", price: 4450 };
-    // 支阻位路径：4460 + (3 + 0.5×2) = 4464；兜底路径：4450 + (10 + 1×2) = 4462
-    assert.equal(stopRefOf(sig, [{ price: 4460 }], 3, 10, 2, 0.5, 1), 4464);
+    // 4460+(3+0.5×2)=4464 → 最大止损 4462；无正确侧 4462；nearSr 4470 → 4460
+    assert.equal(stopRefOf(sig, [{ price: 4460 }], 3, 10, 2, 0.5, 1), 4462);
     assert.equal(stopRefOf(sig, [], 3, 10, 2, 0.5, 1), 4462);
-    // nearSr 正确侧路径：4465 + (3 + 1×2) = 4470
-    assert.equal(stopRefOf({ ...sig, nearSr: 4465 }, [{ price: 4460 }], 3, 10, 2, 1, 0), 4470);
-    // k=0（或 atr=0）→ 与无 ATR 分量一致
-    assert.equal(stopRefOf(sig, [{ price: 4460 }], 3, 10, 2, 0, 0), 4463);
-    assert.equal(stopRefOf(sig, [{ price: 4460 }], 3, 10, 0, 0.7, 0.9), 4463);
+    assert.equal(stopRefOf({ ...sig, nearSr: 4465 }, [{ price: 4460 }], 3, 10, 2, 1, 0), 4460);
+    // k=0（或 atr=0）→ 仍受默认最大止损 10 约束
+    assert.equal(stopRefOf(sig, [{ price: 4460 }], 3, 10, 2, 0, 0), 4460);
+    assert.equal(stopRefOf(sig, [{ price: 4460 }], 3, 10, 0, 0.7, 0.9), 4460);
+  });
+});
+
+describe("entryStrategyOf：策略文案 → 进场 key（2026-09-24 三档文案扩展）", () => {
+  test("10 条文案全部映射到 6 个进场 key", () => {
+    const cases = {
+      "等待反弹后做2卖": ["wait2Sell", "short"],
+      "等待回调后做2买": ["wait2Buy", "long"],
+      "等待高点附近的一卖": ["wait1Sell", "short"],
+      "等待低点附近的一买": ["wait1Buy", "long"],
+      "等待回调后的新买点": ["waitBuy", "long"],   // 3类点强档（thirdStrongTrend 开）
+      "等待反弹后的新卖点": ["waitSell", "short"],
+      "等待回调后的3买点": ["waitBuy", "long"],     // 2买/类2买 强档
+      "等待回调后的类2买点": ["waitBuy", "long"],   // 2买 中间档（前高附近/回到2买点）
+      "等待反弹后的3卖点": ["waitSell", "short"],   // 2卖/类2卖 强档
+      "等待反弹后的类2卖点": ["waitSell", "short"], // 2卖 中间档（前低附近/回到2卖点）
+    };
+    for (const [text, [key, direction]] of Object.entries(cases)) {
+      const s = entryStrategyOf(text);
+      assert.ok(s, text);
+      assert.equal(s.key, key, text);
+      assert.equal(s.direction, direction, text);
+    }
+  });
+
+  test("观望类文案不产生进场策略", () => {
+    assert.equal(entryStrategyOf("震荡整理，观望等待方向选择"), null);
+    assert.equal(entryStrategyOf("趋势中无匹配买卖点"), null);
   });
 });
 

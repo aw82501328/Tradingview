@@ -41,10 +41,10 @@ class ParamCenterTests(unittest.TestCase):
                          {"gapFilter": 0.8})
 
     def test_update_stores_only_non_defaults(self):
-        param_center.update("chan", {"wickRatio": 0.9, "gapFilter": 1.0})  # gapFilter=默认
+        param_center.update("chan", {"wickRatio": 0.9, "gapFilter": 1.0})  # gapFilter=默认；空 symbol→黄金
         with open(param_center.PARAMS_FILE, encoding="utf-8") as f:
             data = json.load(f)
-        self.assertEqual(data["modules"]["chan"], {"wickRatio": 0.9})  # 默认值键被剔除
+        self.assertEqual(data["modules"]["chan"], {"XAUUSD": {"wickRatio": 0.9}})
         self.assertEqual(param_center.effective("chan")["gapFilter"], 1.0)
         self.assertEqual(chan_core.active_overrides(), {"wickRatio": 0.9})
 
@@ -121,17 +121,44 @@ class ParamCenterTests(unittest.TestCase):
         self.assertIn("plan", param_center.effective_all()) # 全模块快照可用
 
     def test_per_symbol_lots_keys_and_lots_of(self):
-        # 按品种手数（2026-09-23）：五品种键默认全 4；lots_of 品种键优先 → 全局 → DEFAULT
-        eff = param_center.effective("entry")
-        for key in ("lots_xauusd", "lots_xagusd", "lots_usoil", "lots_btcusd", "lots_nas100"):
-            self.assertIn(key, eff)
-            self.assertEqual(eff[key], param_center.mark_entry.DEFAULT_LOTS)
-        self.assertEqual(param_center.lots_of(eff, "OANDA:XAUUSD"), eff["lots_xauusd"])
-        # 未列品种 → 全局 lots
-        self.assertEqual(param_center.lots_of(eff, "FOO:BAR"), eff["lots"])
-        # 覆盖品种键后按品种生效
-        param_center.update("entry", {"lots_xagusd": 2})
-        self.assertEqual(param_center.lots_of(param_center.effective("entry"), "OANDA:XAGUSD"), 2)
+        # 进出场按品种分桶（2026-09-24）：手数在各品种桶的 lots；未列品种走代码默认
+        gold = param_center.effective("entry", "OANDA:XAUUSD")
+        self.assertEqual(gold["lots"], param_center.mark_entry.DEFAULT_LOTS)
+        self.assertNotIn("lots_xauusd", gold)
+        self.assertEqual(param_center.lots_of(gold, "OANDA:XAUUSD"), gold["lots"])
+        other = param_center.effective("entry", "FOO:BAR")
+        self.assertEqual(param_center.lots_of(other, "FOO:BAR"),
+                         param_center.mark_entry.DEFAULT_LOTS)
+        param_center.update("entry", {"lots": 2}, symbol="OANDA:XAGUSD")
+        self.assertEqual(param_center.lots_of(
+            param_center.effective("entry", "OANDA:XAGUSD"), "OANDA:XAGUSD"), 2)
+        self.assertEqual(param_center.effective("entry", "OANDA:XAUUSD")["lots"],
+                         param_center.mark_entry.DEFAULT_LOTS)
+
+    def test_entry_per_symbol_isolation_and_legacy(self):
+        # 改黄金不影响白银；CHAN_CFG 按品种拼合
+        param_center.update("entry", {"near": 12, "macdZeroTol": 8.0}, symbol="XAUUSD")
+        param_center.update("entry", {"near": 0.2}, symbol="XAGUSD")
+        self.assertEqual(param_center.effective("entry", "XAUUSD")["near"], 12)
+        self.assertEqual(param_center.effective("entry", "XAGUSD")["near"], 0.2)
+        self.assertEqual(param_center.chan_cfg_effective("XAUUSD")["macdZeroTol"], 8.0)
+        self.assertEqual(param_center.chan_cfg_effective("XAGUSD")["macdZeroTol"],
+                         chan_core.CHAN_CFG_DEFAULTS["macdZeroTol"])
+        # 旧扁平 lots_* + 全局 near → 分到各品种桶
+        Path(param_center.PARAMS_FILE).write_text(json.dumps({
+            "version": 1,
+            "modules": {"entry": {"near": 15.0, "lots_xagusd": 6, "lots": 4}},
+            "savedAt": {},
+        }), encoding="utf-8")
+        self.assertEqual(param_center.effective("entry", "XAGUSD")["lots"], 6)
+        self.assertEqual(param_center.effective("entry", "XAGUSD")["near"], 15)
+        self.assertEqual(param_center.effective("entry", "XAUUSD")["near"], 15)
+        self.assertEqual(param_center.effective("entry", "XAUUSD")["lots"],
+                         param_center.mark_entry.DEFAULT_LOTS)
+        snap = param_center.snapshot()["entry"]
+        self.assertIn("bySymbol", snap)
+        self.assertEqual([s["id"] for s in snap["symbols"]],
+                         list(param_center.ENTRY_SYMBOLS))
 
     def test_corrupt_file_degrades_to_defaults(self):
         Path(param_center.PARAMS_FILE).write_text("{ not json", encoding="utf-8")
@@ -140,7 +167,10 @@ class ParamCenterTests(unittest.TestCase):
                           "rangeRes": trading_plan.RANGE_RES,
                           "trendRebound": trading_plan.TREND_REBOUND,
                           "reboundNearPts": trading_plan.REBOUND_NEAR_PTS,
-                          "reboundAngleRef": trading_plan.REBOUND_ANGLE_REF})
+                          "reboundAngleRef": trading_plan.REBOUND_ANGLE_REF,
+                          "prevHighNearPts": trading_plan.PREV_HIGH_NEAR_PTS,
+                          "secondNearPts": trading_plan.SECOND_NEAR_PTS,
+                          "thirdStrongTrend": trading_plan.THIRD_STRONG_TREND})
 
     def test_plan_cfg_changes_range_verdict(self):
         # 震荡阈值收得很紧（kMult=0.5 必不满足）→ 原本判震荡的窗口变趋势；
@@ -231,6 +261,73 @@ class ParamCenterTests(unittest.TestCase):
         self.assertEqual(param_center.effective("entry")["slip_be_atr_k"], 0.3)
         param_center.reset("entry")
         self.assertEqual(param_center.effective("entry")["slip_be_atr_k"], 0.0)
+
+    def test_chan_per_symbol_isolation_and_legacy_flat(self):
+        # 改 chan 黄金不影响白银；旧扁平 chan 迁到五品种
+        param_center.update("chan", {"wickRatio": 0.88}, symbol="XAUUSD")
+        param_center.update("chan", {"wickRatio": 0.55}, symbol="XAGUSD")
+        self.assertEqual(param_center.effective("chan", "XAUUSD")["wickRatio"], 0.88)
+        self.assertEqual(param_center.effective("chan", "XAGUSD")["wickRatio"], 0.55)
+        self.assertEqual(param_center.effective("chan", "USOIL")["wickRatio"],
+                         chan_core.CHAN_CFG_DEFAULTS["wickRatio"])
+        Path(param_center.PARAMS_FILE).write_text(json.dumps({
+            "version": 1,
+            "modules": {"chan": {"wickRatio": 0.77, "gapFilter": 0.4}},
+            "savedAt": {},
+        }), encoding="utf-8")
+        for sid in param_center.SYMBOLS:
+            self.assertEqual(param_center.effective("chan", sid)["wickRatio"], 0.77)
+            self.assertEqual(param_center.effective("chan", sid)["gapFilter"], 0.4)
+
+    def test_chan_cfg_effective_per_symbol_merges(self):
+        # chan/points/entry 均按品种桶拼合
+        param_center.update("chan", {"gapFilter": 0.3}, symbol="XAUUSD")
+        param_center.update("points", {"divergeDurRatio": 9}, symbol="XAUUSD")
+        param_center.update("entry", {"macdZeroTol": 6.0}, symbol="XAUUSD")
+        param_center.update("chan", {"gapFilter": 0.8}, symbol="XAGUSD")
+        gold = param_center.chan_cfg_effective("XAUUSD")
+        silver = param_center.chan_cfg_effective("XAGUSD")
+        self.assertEqual(gold["gapFilter"], 0.3)
+        self.assertEqual(gold["divergeDurRatio"], 9)
+        self.assertEqual(gold["macdZeroTol"], 6.0)
+        self.assertEqual(silver["gapFilter"], 0.8)
+        self.assertEqual(silver["divergeDurRatio"],
+                         chan_core.CHAN_CFG_DEFAULTS["divergeDurRatio"])
+        self.assertEqual(silver["macdZeroTol"],
+                         chan_core.CHAN_CFG_DEFAULTS["macdZeroTol"])
+
+    def test_sr_per_symbol_and_snapshot(self):
+        # sr 按品种隔离；snapshot 含 sr.bySymbol
+        param_center.update_sr("XAUUSD", {
+            "srTypes": ["cluster", "boll"], "periods": ["D", "60"],
+            "symbol": "OANDA:XAUUSD", "from_ts": 1,  # 运行时键应剔除
+        })
+        param_center.update_sr("XAGUSD", {
+            "srTypes": ["boll"], "periods": ["15"],
+        })
+        gold = param_center.effective_sr("XAUUSD")
+        self.assertEqual(gold["srTypes"], ["cluster", "boll"])
+        self.assertEqual(gold["periods"], ["D", "60"])
+        self.assertNotIn("symbol", gold)
+        self.assertNotIn("from_ts", gold)
+        self.assertEqual(param_center.effective_sr("XAGUSD")["srTypes"], ["boll"])
+        self.assertEqual(param_center.effective_sr("USOIL"),
+                         param_center.SR_DEFAULTS)
+        snap = param_center.snapshot()
+        self.assertIn("sr", snap)
+        self.assertIsNone(snap["sr"]["schema"])
+        self.assertIn("bySymbol", snap["sr"])
+        self.assertEqual(snap["sr"]["bySymbol"]["XAUUSD"]["effective"]["periods"],
+                         ["D", "60"])
+        self.assertEqual([s["id"] for s in snap["sr"]["symbols"]],
+                         list(param_center.SYMBOLS))
+        # 各 PARAM_MODULES 也带 bySymbol
+        for name in param_center.PARAM_MODULES:
+            self.assertIn("bySymbol", snap[name])
+        param_center.reset_sr("XAUUSD")
+        self.assertEqual(param_center.effective_sr("XAUUSD"),
+                         param_center.SR_DEFAULTS)
+        self.assertEqual(param_center.effective_sr("XAGUSD")["srTypes"], ["boll"])
 
 
 if __name__ == "__main__":

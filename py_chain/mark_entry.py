@@ -9,7 +9,7 @@
 
 信号画在「背驰级别」（更低周期）。出场规则（止损 + 滑点/兜底 + 三档止盈）的状态机由
 backtest.BacktestEngine 增量推进；本模块提供出场构件（与 mark_entry.js 对齐）：
-  - stop_ref_of        方向感知止损参考位（支阻位 ± 滑点，无正确侧位兜底 进场价 ± 滑点，永不为 None）
+  - stop_ref_of        方向感知止损参考位（支阻位 ± 滑点，最大止损硬上限 进场价±滑点，永不为 None）
   - trend_following_of 顺势/逆势判定（计划 direction ∈ {多头多,空头空} 为顺势）
   - forming_seg_ready  检测周期形成段「合并后≥5根K成笔预期」判定（TP2 / 逆势 TP3b 事件源）
   - find_bi_event      笔事件查找（TP1/TP3a 事件源，返回含 startTime）
@@ -64,7 +64,7 @@ def contract_mult_of(symbol):
     return 1.0 if size is None else size * 0.01
 # 止损位滑点（绝对价格）：正确侧支阻位外侧偏移（short 上方+ / long 下方−）
 DEFAULT_SLIP_STOP = 3.0
-# 兜底止损滑点：无正确侧支阻位时 止损 = 进场价 ± slip_fallback（止损位永不为 None）
+# 最大止损（绝对价格）：止损离进场价最远不超过该值；支阻位更远时收到进场价±该值（键名仍为 slip_fallback）
 DEFAULT_SLIP_FALLBACK = 10.0
 # 保本滑点：保本止损位 beStop = 进场成交K线极值 ± slip_be（short: high+ / long: low−）
 DEFAULT_SLIP_BE = 3.0
@@ -409,8 +409,11 @@ def sinkChainConfirm(periodData, X, pTime, pDir):
 
 
 def entryStrategyOf(planStrategy):
-    """交易计划策略 → 进场策略映射（用户规则）。
+    """交易计划策略 → 进场策略映射（用户规则，2026-09-24 三档文案扩展）。
     震荡/数据不足/趋势中无匹配（方向=观望）等不产生进场策略，返回 None。
+    新增文案（2买/2卖 强档「等3买点/3卖点」、中间档「等类2买点/类2卖点」）与
+    「等待回调后的新买点/新卖点」（3类点强档，thirdStrongTrend 开）同走 waitBuy/waitSell
+    校验（够笔+以下级别背驰+支阻位附近，无专属条件）。
     @returns None 或 { key, direction, label }
     """
     mapping = {
@@ -420,6 +423,10 @@ def entryStrategyOf(planStrategy):
         "等待低点附近的一买": {"key": "wait1Buy", "direction": "long", "label": "等待一买"},
         "等待回调后的新买点": {"key": "waitBuy", "direction": "long", "label": "等待回调后买点"},
         "等待反弹后的新卖点": {"key": "waitSell", "direction": "short", "label": "等待反弹后卖点"},
+        "等待回调后的3买点": {"key": "waitBuy", "direction": "long", "label": "等待回调后买点"},
+        "等待回调后的类2买点": {"key": "waitBuy", "direction": "long", "label": "等待回调后买点"},
+        "等待反弹后的3卖点": {"key": "waitSell", "direction": "short", "label": "等待反弹后卖点"},
+        "等待反弹后的类2卖点": {"key": "waitSell", "direction": "short", "label": "等待反弹后卖点"},
     }
     return mapping.get(planStrategy)
 
@@ -1197,41 +1204,46 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
 def stop_ref_of(direction, entry_price, near_sr, sr_levels,
                 slip_stop=DEFAULT_SLIP_STOP, slip_fallback=DEFAULT_SLIP_FALLBACK,
                 atr=0.0, k_stop=0.0, k_fallback=0.0):
-    """方向感知的止损参考位（含滑点偏移与兜底，返回值永不为 None）：
+    """方向感知的止损参考位（含滑点偏移与最大止损硬上限，返回值永不为 None）：
     short 取进场价上方最近支阻位（阻力）+ slip_stop、long 取下方最近（支撑）− slip_stop。
 
     near_sr（进场校验按绝对价差最近命中的支阻位价，不分上下方）已在正确侧直接沿用；
     否则从 sr_levels 重选正确侧最近位（进场判定逻辑不变，仅供出场止损参考）。
-    无正确侧位 → 兜底止损 = 进场价 ± slip_fallback（不再有「不设止损」情形）。
+    无正确侧位 → 止损 = 进场价 ± slip_fallback。
+    最大止损硬上限：多单止损 ≥ 进场价−有效最大止损，空单止损 ≤ 进场价+有效最大止损
+    （支阻位更远时收到此价，亏损不超过该滑点）。
     @param direction     "long" | "short"
     @param entry_price   进场价
     @param near_sr       信号自带的近支阻位价格（可为 None）
     @param sr_levels     支阻位列表（dict 含 "price"，或直接为价格数值）
     @param slip_stop     支阻位滑点（绝对价格，short + / long −）
-    @param slip_fallback 兜底止损滑点（绝对价格，short + / long −）
+    @param slip_fallback 最大止损（绝对价格；键名历史遗留）
     @param atr           背驰周期 ATR(14)（2026-09-19 ATR 分量，缺省 0 = 纯固定滑点）
     @param k_stop        止损滑点 ATR 系数：有效滑点 = slip_stop + k_stop×atr（0=关闭）
-    @param k_fallback    兜底滑点 ATR 系数：有效滑点 = slip_fallback + k_fallback×atr
+    @param k_fallback    最大止损 ATR 系数：有效最大止损 = slip_fallback + k_fallback×atr
     """
     atr = atr or 0.0
     slip_stop = slip_stop + k_stop * atr
     slip_fallback = slip_fallback + k_fallback * atr
     is_short = direction == "short"
     slip = slip_stop if is_short else -slip_stop
+    # 最大止损价：多单不低于此价、空单不高于此价
+    max_loss = entry_price + (slip_fallback if is_short else -slip_fallback)
     if near_sr is not None and (near_sr > entry_price if is_short else near_sr < entry_price):
-        return near_sr + slip
-    best = None
-    for sr in (sr_levels or []):
-        p = sr.get("price") if isinstance(sr, dict) else sr
-        if p is None:
-            continue
-        if (p > entry_price) if is_short else (p < entry_price):
-            d = abs(p - entry_price)
-            if best is None or d < best[1]:
-                best = (p, d)
-    if best is None:
-        return entry_price + (slip_fallback if is_short else -slip_fallback)
-    return best[0] + slip
+        ref = near_sr + slip
+    else:
+        best = None
+        for sr in (sr_levels or []):
+            p = sr.get("price") if isinstance(sr, dict) else sr
+            if p is None:
+                continue
+            if (p > entry_price) if is_short else (p < entry_price):
+                d = abs(p - entry_price)
+                if best is None or d < best[1]:
+                    best = (p, d)
+        ref = max_loss if best is None else best[0] + slip
+    # 支阻位更远时收到最大止损价（多抬高 / 空压低）
+    return min(ref, max_loss) if is_short else max(ref, max_loss)
 
 
 def trend_following_of(plan_direction, strategy_key=None):

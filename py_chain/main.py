@@ -31,9 +31,8 @@ DEFAULT_PERIODS = ["D", "240", "60", "15", "3"]
 
 
 def _load_sr_preset(name):
-    """按名读取支阻位预设 cfg（与 /sr 调试页、工作台共享 py_chain/web/sr_presets.json，
-    同一存储结构 [{name, saved_at, cfg}]）。
-    @raises SystemExit 预设不存在 / 文件不可读（列出可用名便于纠正）"""
+    """按名读取旧版支阻位预设 cfg（历史兼容：py_chain/web/sr_presets.json）。
+    @raises SystemExit 预设不存在 / 文件不可读"""
     import json
     import os
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "sr_presets.json")
@@ -50,6 +49,21 @@ def _load_sr_preset(name):
         if p.get("name") == name and isinstance(p.get("cfg"), dict):
             return dict(p["cfg"])
     raise SystemExit(f"未找到支阻位预设「{name}」（可用：{names or '无'}）")
+
+
+def _sr_cfg_for_symbol(symbol, preset_name=None):
+    """优先读该品种 effective_sr；若仍传旧预设名且需要兼容则回退旧文件。"""
+    from . import param_center
+    cfg = dict(param_center.effective_sr(symbol))
+    if preset_name:
+        try:
+            legacy = _load_sr_preset(preset_name)
+            # 优先品种桶：桶已有非默认内容则保留；否则用旧预设名
+            if cfg == param_center.SR_DEFAULTS:
+                cfg = legacy
+        except SystemExit:
+            pass  # 旧名不可用时仍用品种桶
+    return cfg
 
 
 def parse_from(s):
@@ -189,20 +203,21 @@ def main(argv=None):
     ap.add_argument("--slip-stop", type=float, default=None,
                     help="止损位滑点（绝对价格：正确侧支阻位外侧偏移）；缺省用参数中心值（默认 3）")
     ap.add_argument("--slip-fallback", type=float, default=None,
-                    help="兜底止损滑点（无正确侧支阻位时 止损 = 进场价 ± 该值）；缺省用参数中心值（默认 10）")
+                    help="最大止损（买点止损不低于进场价−该值，卖点不高于进场价+该值；"
+                         "支阻位更远时收到此价）；缺省用参数中心值（默认 10）")
     ap.add_argument("--slip-be", type=float, default=None,
                     help="保本滑点（beStop = 进场成交K线极值 ± 该值）；缺省用参数中心值（默认 3）")
     ap.add_argument("--slip-stop-atr-k", type=float, default=None,
                     help="止损滑点ATR系数（有效滑点=固定值+系数×ATR(14,背驰周期)，0=关闭）；缺省用参数中心值（默认 0）")
     ap.add_argument("--slip-fallback-atr-k", type=float, default=None,
-                    help="兜底止损滑点ATR系数（同上口径）；缺省用参数中心值（默认 0）")
+                    help="最大止损ATR系数（同上口径）；缺省用参数中心值（默认 0）")
     ap.add_argument("--slip-be-atr-k", type=float, default=None,
                     help="保本滑点ATR系数（同上口径）；缺省用参数中心值（默认 0）")
     ap.add_argument("--near", type=float, default=None,
                     help="近支阻阈值（绝对价差，不乘 ATR）；缺省用参数中心值（默认 10）")
     ap.add_argument("--sr-preset", default=None,
-                    help="支阻位预设名称（读 py_chain/web/sr_presets.json，与 /sr、工作台共享；"
-                         "载入识别参数+人工位，优先于 --sr-types 等独立参数）")
+                    help="支阻位：优先读该 --symbol 的参数中心品种桶；若仍传旧预设名可作兼容回退"
+                         "（新任务不依赖预设名）")
     args = ap.parse_args(argv)
 
     periods = [p.strip() for p in args.periods.split(",") if p.strip()]
@@ -233,8 +248,8 @@ def main(argv=None):
     # 2. 全链路（实时态摘要）—— 参数中心（参数配置页）：CLI 显式值优先，缺省用参数中心值
     from . import param_center
     from .chan_core import apply_cfg
-    pm = param_center.effective_all()
-    apply_cfg(param_center.chan_cfg_effective())
+    pm = param_center.effective_all(args.symbol)
+    apply_cfg(param_center.chan_cfg_effective(args.symbol))
     ep = pm["entry"]
     lots = args.lots if args.lots is not None else param_center.lots_of(ep, args.symbol)
     slip_stop = args.slip_stop if args.slip_stop is not None else ep["slip_stop"]
@@ -258,18 +273,17 @@ def main(argv=None):
                              module_params=module_params)
     print_chain(chain, periods)
 
-    # 3. 点状回测（--sr-preset：载入支阻预设（含人工位）→ normalize → engine_kwargs）
-    sr_kwargs = None
-    if args.sr_preset:
-        from .webapp import ControlApp
-        from .sr_service import engine_kwargs_of
-        preset_cfg = _load_sr_preset(args.sr_preset)
-        preset_cfg.update(periods=periods, symbol=args.symbol,
-                          **{"from": args.from_date})
-        preset_cfg = ControlApp.normalize_sr_cfg(preset_cfg)
-        sr_kwargs = engine_kwargs_of(preset_cfg)
-        print(f"支阻位预设「{args.sr_preset}」已载入：srTypes={preset_cfg['srTypes']}"
-              + (f" 人工周期={list(preset_cfg.get('manualLevels') or {})}" if preset_cfg.get("manualLevels") else ""))
+    # 3. 点状回测（支阻：优先该品种参数中心桶 → normalize → engine_kwargs）
+    from .webapp import ControlApp
+    from .sr_service import engine_kwargs_of
+    preset_cfg = _sr_cfg_for_symbol(args.symbol, args.sr_preset)
+    preset_cfg.pop("symbols", None)
+    preset_cfg.update(periods=periods, symbol=args.symbol,
+                      **{"from": args.from_date})
+    preset_cfg = ControlApp.normalize_sr_cfg(preset_cfg)
+    sr_kwargs = engine_kwargs_of(preset_cfg)
+    print(f"支阻位（品种桶）已载入：srTypes={preset_cfg['srTypes']}"
+          + (f" 人工周期={list(preset_cfg.get('manualLevels') or {})}" if preset_cfg.get("manualLevels") else ""))
     print("\n回测中（逐根K线重放整条链路）...")
     result = run_backtest(bars_by_period, periods=periods,
                           warmup_bars=args.warmup, with_marks=not args.no_marks,

@@ -34,6 +34,12 @@ RANGE_DEFAULTS = {
     "rangeZsOn": True,     # ②中枢内判定开关（关闭后跳过未离开中枢+现价在箱内）
 }
 
+# 2买/2卖 中间档「附近」容差默认值（绝对点数；参数中心 plan 模块同名透传，cfg 逐键覆盖）
+PREV_HIGH_NEAR_PTS = 5.0  # 前高/前低附近：2买（2卖）后首段上涨（下跌）终点距前高（前低）≤ 该值 → 等回调后的类2买点（类2卖点）
+SECOND_NEAR_PTS = 5.0     # 回到2买/2卖点：未过前高（前低）时最近一笔回调（反弹）终点距点价 ≤ 该值 → 等回调后的类2买点（类2卖点）
+# ③3类点强档开关：开=3买/类3买（3卖/类3卖）过前高不背驰时顺势「等待回调后的新买点/新卖点」（现状）；关=3类点一律弱档
+THIRD_STRONG_TREND = True
+
 
 def isRangeBound(bis, bars, atr, cfg=None):
     """震荡（横盘整理）判定：K线重叠度高、价格变化不大、无明确方向。
@@ -112,35 +118,59 @@ def isRangeBound(bis, bars, atr, cfg=None):
 # ============================================================
 
 
-def strategyOf(res, type_, reason, label, cls):
-    """依据买卖点类型生成交易策略（用户规则）。与 JS 版 strategyOf 对齐。
-    方向命名「X头Y」：X = 结构方向，Y = 操作方向。"""
+def strategyOf(res, type_, reason, label, cls, cfg=None):
+    """依据买卖点类型生成交易策略（用户规则，2026-09-24 三档映射）。与 JS 版 strategyOf 对齐。
+    方向命名「X头Y」：X = 结构方向，Y = 操作方向。
+    三档（按序判定）：强档（过左高/左低不背驰）→ 中间档（仅 2买/2卖：前高/前低附近、
+    或未过前高/前低且回调回到点附近）→ 弱档（多头空/空头多）。
+    3类点强档受 thirdStrongTrend 开关控制（默认开=保持现状「等待回调后的新买点/新卖点」）。"""
+    cfg = cfg or {}
+    third_strong = cfg.get("thirdStrongTrend", THIRD_STRONG_TREND)
     base = {"res": res, "reason": reason, "label": label}
     if type_ == "1卖":
         return dict(base, direction="空头空", strategy="等待反弹后做2卖")
     if type_ == "1买":
         return dict(base, direction="多头多", strategy="等待回调后做2买")
-    if type_ in ("2买", "类2买", "3买", "类3买"):
+    if type_ in ("2买", "类2买"):
         if cls == "过左高不背驰":
+            return dict(base, direction="多头多", strategy="等待回调后的3买点")
+        if type_ == "2买" and cls in ("前高附近", "回到2买点"):
+            return dict(base, direction="多头多", strategy="等待回调后的类2买点")
+        return dict(base, direction="多头空", strategy="等待高点附近的一卖")
+    if type_ in ("2卖", "类2卖"):
+        if cls == "过左低不背驰":
+            return dict(base, direction="空头空", strategy="等待反弹后的3卖点")
+        if type_ == "2卖" and cls in ("前低附近", "回到2卖点"):
+            return dict(base, direction="空头空", strategy="等待反弹后的类2卖点")
+        return dict(base, direction="空头多", strategy="等待低点附近的一买")
+    if type_ in ("3买", "类3买"):
+        if third_strong and cls == "过左高不背驰":
             return dict(base, direction="多头多", strategy="等待回调后的新买点")
         return dict(base, direction="多头空", strategy="等待高点附近的一卖")
-    if type_ in ("2卖", "类2卖", "3卖", "类3卖"):
-        if cls == "过左低不背驰":
+    if type_ in ("3卖", "类3卖"):
+        if third_strong and cls == "过左低不背驰":
             return dict(base, direction="空头空", strategy="等待反弹后的新卖点")
         return dict(base, direction="空头多", strategy="等待低点附近的一买")
     return dict(base, direction="观望", strategy="趋势中")
 
 
-def classifySecond(bis, macdArr, p):
-    """2/3 类买卖点的后续分类判定（用户规则，与 JS 版对齐）：
-      买点（2买/类2买/3买）：买点后第一笔上涨是否「过左高」且「不背驰」。
+def classifySecond(bis, macdArr, p, cfg=None):
+    """2/3 类买卖点的后续分类判定（用户规则，2026-09-24 三档，与 JS 版对齐）：
+      强档——买点（2买/类2买/3买）：买点后第一笔上涨「过左高」且「不背驰」。
         左高 = 买点之前时间最近的前顶（同一时刻多端点取最高）；
         过左高 = after（买点后第一笔上涨）终点价 > 左高价；
         不背驰 = after 相对紧邻的前一同向上涨参照笔 isBiDiverge=false。
+      中间档（仅 2买/2卖 在 strategyOf 消费，这里一并返回）：
+        前高附近 = after 终点距左高 ≤ prevHighNearPts（绝对点数，含刚越过但背驰的情形）；
+        回到2买点 = 未过左高，且 after 之后最近一笔反向笔（回调/反弹，含形成中）
+                    终点价距点价 ≤ secondNearPts。
       卖点（2卖/类2卖/3卖）：对称判定（左低取时间最近前底、参照取紧邻前一同向笔）。
       注：左高/左低取「时间最近」而非全史价格极值；参照笔不按幅度过滤。
-    @returns "过左高不背驰" | "过左低不背驰" | "其他"
+    @returns "过左高不背驰" | "过左低不背驰" | "前高附近" | "前低附近" | "回到2买点" | "回到2卖点" | "其他"
     """
+    cfg = cfg or {}
+    prev_high_near = cfg.get("prevHighNearPts", PREV_HIGH_NEAR_PTS)
+    second_near = cfg.get("secondNearPts", SECOND_NEAR_PTS)
     wantUp = p["type"].endswith("买")
     # 买卖点之前时间最近的顶/底端点（同一时刻多端点取价格更极端者）
     extreme = {"time": -1, "price": float("-inf") if wantUp else float("inf")}
@@ -175,19 +205,30 @@ def classifySecond(bis, macdArr, p):
         return "其他"
     # 过左高 / 过左低
     passed = after["endPrice"] > extreme["price"] if wantUp else after["endPrice"] < extreme["price"]
+    diverge = False
+    if passed:
+        # 不背驰：after 相对紧邻的前一同向参照笔 isBiDiverge=false
+        refer = None
+        for i in range(bis.index(after) - 1, -1, -1):
+            if bis[i]["type"] != after["type"]:
+                continue
+            refer = bis[i]  # 紧邻前一同向笔（中间隔一次级反向运动，即同级别对照段）
+            break
+        diverge = isBiDiverge(after, refer, macdArr) if refer is not None else False
+    if passed and not diverge:
+        return "过左高不背驰" if wantUp else "过左低不背驰"
+    # 中间档A：前高/前低附近（after 终点距左高/左低 ≤ prevHighNearPts，含刚越过但背驰的情形）
+    if abs(after["endPrice"] - extreme["price"]) <= prev_high_near:
+        return "前高附近" if wantUp else "前低附近"
+    # 中间档B：未过左高/左低，且之后最近一笔反向笔（回调/反弹，含形成中）终点回到点价附近
     if not passed:
-        return "其他"
-    # 不背驰：after 相对紧邻的前一同向参照笔 isBiDiverge=false
-    refer = None
-    for i in range(bis.index(after) - 1, -1, -1):
-        if bis[i]["type"] != after["type"]:
-            continue
-        refer = bis[i]  # 紧邻前一同向笔（中间隔一次级反向运动，即同级别对照段）
-        break
-    diverge = isBiDiverge(after, refer, macdArr) if refer is not None else False
-    if diverge:
-        return "其他"
-    return "过左高不背驰" if wantUp else "过左低不背驰"
+        pullback = None
+        for b in bis[bis.index(after) + 1:]:
+            if b["type"] == ("down" if wantUp else "up"):
+                pullback = b  # 取最近一笔回调/反弹
+        if pullback is not None and abs(pullback["endPrice"] - p["price"]) <= second_near:
+            return "回到2买点" if wantUp else "回到2卖点"
+    return "其他"
 
 
 def _rangeVerdict(bis, bars, atr, upperBis, lastPrice, barSec, range_cfg):
@@ -322,8 +363,8 @@ def predictPlan(res, bis, upperBis, macdArr, lastPrice, bars, atr=0, barSec=None
     if lastMatch:
         p = lastMatch["point"]
         reason = f"找到最近买卖点 {p['type']} @ {fmtT(p['time'])} {p['price']:.2f}（最后一笔端点）"
-        cls = classifySecond(bis, macdArr, p) if p["type"] in ("2买", "类2买", "3买", "类3买", "2卖", "类2卖", "3卖", "类3卖") else "其他"
-        out = strategyOf(res, p["type"], reason, f"趋势|{p['type']}", cls)
+        cls = classifySecond(bis, macdArr, p, range_cfg) if p["type"] in ("2买", "类2买", "3买", "类3买", "2卖", "类2卖", "3卖", "类3卖") else "其他"
+        out = strategyOf(res, p["type"], reason, f"趋势|{p['type']}", cls, range_cfg)
         out["strategyLabel"] = out["strategy"]
         out["pointDesc"] = f"{p['type']}@{fmtT(p['time'])}({p['price']:.2f})"
         return out
@@ -337,8 +378,8 @@ def predictPlan(res, bis, upperBis, macdArr, lastPrice, bars, atr=0, barSec=None
     if prevMatch:
         p = prevMatch["point"]
         reason = f"找到最近买卖点 {p['type']} @ {fmtT(p['time'])} {p['price']:.2f}（向前扫描最近笔端点）"
-        cls = classifySecond(bis, macdArr, p) if p["type"] in ("2买", "类2买", "3买", "类3买", "2卖", "类2卖", "3卖", "类3卖") else "其他"
-        out = strategyOf(res, p["type"], reason, f"趋势|{p['type']}", cls)
+        cls = classifySecond(bis, macdArr, p, range_cfg) if p["type"] in ("2买", "类2买", "3买", "类3买", "2卖", "类2卖", "3卖", "类3卖") else "其他"
+        out = strategyOf(res, p["type"], reason, f"趋势|{p['type']}", cls, range_cfg)
         out["strategyLabel"] = out["strategy"]
         out["pointDesc"] = f"{p['type']}@{fmtT(p['time'])}({p['price']:.2f})"
         return out

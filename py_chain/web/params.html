@@ -9,7 +9,15 @@
 body{background:var(--bg);color:var(--text);font:13px/1.6 "Segoe UI",system-ui,sans-serif;padding:14px 18px}
 h1{font-size:19px;color:#fff}
 h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
-.ptabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin:10px 0 0;flex-wrap:wrap}
+/* 顶层品种 TAB（全局上下文）在上，模块 TAB 在下 */
+.stabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin:12px 0 0;flex-wrap:wrap}
+.stabs button{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;
+  color:var(--muted);font-size:13px;padding:8px 16px;cursor:pointer}
+.stabs button:hover{color:var(--text)}
+.stabs button.on{border-color:#55d7b0;color:#92d1b4;font-weight:600}
+.stabs button .scode{color:var(--muted);font-size:11px;margin-left:6px;font-weight:400}
+.stabs button.on .scode{color:#6aa89a}
+.ptabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin:0;flex-wrap:wrap}
 .ptabs button{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;
   color:var(--muted);font-size:13px;padding:8px 16px;cursor:pointer}
 .ptabs button:hover{color:var(--text)}
@@ -86,7 +94,8 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 <link rel="stylesheet" href="/legacy-theme.css">
 </head>
 <body>
-<h1>参数配置<span class="sub">分模块统一管理，页签顺序与工作台一致；画笔/买卖点/进出场中的算法阈值保存后全局即时生效，其余下一轮任务生效</span></h1>
+<h1>参数配置<span class="sub">顶层选品种，各模块参数按品种独立；画笔/买卖点/进出场算法阈值保存后对该品种即时生效，其余下一轮任务生效</span></h1>
+<nav class="stabs" id="symbolTabs" aria-label="品种"></nav>
 <nav class="ptabs" id="tabs" aria-label="参数模块"></nav>
 <div class="pane" id="pane-sr" hidden><iframe id="srFrame" title="支阻位参数" loading="lazy"></iframe></div>
 <div class="pane" id="pane-form">
@@ -112,7 +121,7 @@ const $ = id => document.getElementById(id);
 const PARAM_MODULES = ['chan', 'zs', 'points', 'entry', 'plan'];
 const TAB_IDS = ['chan', 'zs', 'points', 'sr', 'plan', 'entry'];
 const TABS = [['chan', '画笔'], ['zs', '画中枢'], ['points', '标记买卖点'], ['sr', '支阻位'], ['plan', '交易计划'], ['entry', '标记进出场']];
-let modules = {}, active = 'chan', toastTimer;
+let modules = {}, active = 'chan', activeSymbol = 'XAUUSD', toastTimer;
 
 // 模块逻辑规则说明（renderModule 时渲染在参数网格下方；顺势规则已并入图解表2 标题下方，
 // 与 trading_plan.trend_direction 同步维护）
@@ -195,22 +204,26 @@ const LOGIC_BODY = `
 <p class="lnote"><b>近中枢上/下沿</b>＝当前段极值离「锚点前最近一个中枢」的箱顶(ZG)/箱底(ZD) ≤「相位近位容差(点)」参数（默认5点，绝对点数）；上沿和下沿结论相同，合在一起判；没有这样的中枢 → 按「其他位置」。<b>前低/前高</b>（只用于2/3类锚点）＝锚点前最近的低点/高点笔端点，容差同上。</p>
 <p class="lnote"><b>观望</b>＝方向不拦（多空都放行），但信号仍带注记（如 多（{TREND_REF}1卖后方向不明））。<b>买侧完全镜像</b>：1买/2\\3买后多空互换、前低↔前高、反弹↔回调，注记如 空（{TREND_REF}1买转空预期）、空（{TREND_REF}1买强回）、多（{TREND_REF}2买预期）。</p>
 <p class="lnote" id="trendNote"></p>
-<h4>表3 · 买卖点 → 方向和策略</h4>
+<h4>表3 · 买卖点 → 方向和策略（2026-09-24 三档）</h4>
 <table class="ltable" id="t3">
-<tr><th>最近贴上的买卖点</th><th>附带条件</th><th>方向</th><th>接下来做什么</th></tr>
-<tr><td>1卖</td><td>—</td><td>空头空（跌势做空）</td><td>等反弹后做2卖</td></tr>
+<tr><th>最近买卖点</th><th>附带条件</th><th>方向</th><th>计划买卖点</th></tr>
+<tr><td>非一类卖点</td><td>没破前低，或力度变弱</td><td>空头多（跌势做多）</td><td>等低点附近的一买</td></tr>
+<tr><td>非一类买点</td><td>没冲过前高，或力度变弱</td><td>多头空（涨势做空）</td><td>等高点附近的一卖</td></tr>
 <tr><td>1买</td><td>—</td><td>多头多（涨势做多）</td><td>等回调后做2买</td></tr>
-<tr><td>2买/类2买/3买/类3买</td><td>冲过前高且力度没变弱</td><td>多头多</td><td>等回调后的新买点</td></tr>
-<tr><td>2买/类2买/3买/类3买</td><td>没冲过前高，或力度变弱</td><td>多头空（涨势做空）</td><td>等高点附近的一卖</td></tr>
-<tr><td>2卖/类2卖/3卖/类3卖</td><td>跌破前低且力度没变弱</td><td>空头空</td><td>等反弹后的新卖点</td></tr>
-<tr><td>2卖/类2卖/3卖/类3卖</td><td>没破前低，或力度变弱</td><td>空头多（跌势做多）</td><td>等低点附近的一买</td></tr>
+<tr><td>1卖</td><td>—</td><td>空头空（跌势做空）</td><td>等反弹后做2卖</td></tr>
+<tr><td>2买</td><td>上涨在前高附近（参数化），或者未过前高，回调又回到2买点附近（参数化）</td><td>多头多</td><td>等回调后的类2买点</td></tr>
+<tr><td>2卖</td><td>下跌在前低附近（参数化），或者未过前低，反弹又回到2卖点附近（参数化）</td><td>空头空</td><td>等反弹后的类2卖点</td></tr>
+<tr><td>2买/类2买</td><td>冲过前高且力度没变弱</td><td>多头多</td><td>等回调后的3买点</td></tr>
+<tr><td>2卖/类2卖</td><td>跌破前低且力度没变弱</td><td>空头空</td><td>等反弹后的3卖点</td></tr>
+<tr><td>3买/类3买</td><td>冲过前高且力度没变弱（开关③3类点强档顺势 开，默认开）</td><td>多头多</td><td>等回调后的新买点</td></tr>
+<tr><td>3卖/类3卖</td><td>跌破前低且力度没变弱（开关③开）</td><td>空头空</td><td>等反弹后的新卖点</td></tr>
 </table>
-<p class="lnote">方向命名：前两个字＝现在的结构是涨是跌，后一个字＝做多还是做空。</p>
-<p class="lnote"><b>附带条件怎么判</b>（只对 2类/3类点——上表「附带条件」列的三步判定，卖点全程对称）：</p>
-<p class="lnote">① 找参照：买点之前时间最近的高点（卖点：之前的低点）。</p>
-<p class="lnote">② 冲过了吗：买点后第一波上涨的终点 &gt; 前高（卖点：终点 &lt; 前低）。</p>
-<p class="lnote">③ 力度变弱了吗：这波上涨和前一波同向上涨比 MACD——柱子总面积变小、或 DIF 峰变低、或最高柱变矮，任一个＝变弱（背驰）。</p>
-<p class="lnote">结论：②过了 且 ③没变弱 →「冲过前高且力度没变弱」；任一步不过 →「其他」。</p>
+<p class="lnote">方向命名：前两个字＝现在的结构是涨是跌，后一个字＝做多还是做空。三档按序判定：强档（过前高不背驰）→ 中间档（仅 2买/2卖）→ 弱档。</p>
+<p class="lnote"><b>附带条件怎么判</b>（只对 2类/3类点——卖点全程对称）：</p>
+<p class="lnote">① 找参照：买点之前时间最近的高点（卖点：之前的低点）；买点后第一波上涨记为 after。</p>
+<p class="lnote">② 强档：after 终点 &gt; 前高（卖点：&lt; 前低），且和前一波同向比 MACD 没变弱（柱子总面积、DIF 峰、最高柱任一变弱＝背驰）。</p>
+<p class="lnote">③ 中间档（仅 2买/2卖）：after 终点距前高/前低 ≤「前高/前低附近容差」参数（默认5点，含刚越过一点但背驰）；或未过前高/前低且之后最近一笔回调/反弹的终点回到 2买/2卖点价 ≤「回踩2买/2卖点容差」参数（默认5点）。</p>
+<p class="lnote">结论：② → 强档；③ → 中间档；都不满足 → 弱档（非一类行）。类2买/类2卖不走中间档；3类点强档受开关③控制（关＝一律弱档）。</p>
 <p class="lnote llast">观望的周期不出信号；定了策略的周期还要由进出场模块检查进场条件（笔够不够、低级别有没有背驰、离支阻位近不近、策略自己的条件）才发信号——那是「进出场」的事。以上是回测引擎口径；工作台分析页跑的 JS 版暂无「小周期听参考周期」这条，这点两边不同。</p>`;
 
 const DIA_MAIN = `flowchart LR
@@ -252,7 +265,7 @@ const MERMAID_THEME = {
 let logicKey = '';
 
 function logicRefs() {
-  const eff = (modules.plan && modules.plan.effective) || {};
+  const eff = (moduleView('plan') || {}).effective || {};
   const rr = String(eff.rangeRes != null ? eff.rangeRes : ''), tr = String(eff.trendRes != null ? eff.trendRes : '');
   const rOn = !!REF_OPTS[rr], tOn = !!REF_OPTS[tr];
   return {
@@ -349,13 +362,44 @@ function drawTabs() {
     `<button data-tab="${id}" class="${id === active ? 'on' : ''}" aria-pressed="${id === active}">${name}</button>`).join('');
 }
 
+function drawSymbolTabs() {
+  // 品种列表取任一模块的 symbols（全模块同分桶名单）
+  const list = (modules.entry || modules.chan || modules.sr || {}).symbols || [];
+  $('symbolTabs').innerHTML = list.map(s =>
+    `<button type="button" data-sym="${s.id}" class="${s.id === activeSymbol ? 'on' : ''}"
+      aria-pressed="${s.id === activeSymbol}">${s.label}<span class="scode">${s.id}</span></button>`
+  ).join('');
+}
+
+/** 通知支阻 iframe 当前品种（embed 模式） */
+function notifySrSymbol() {
+  const frame = $('srFrame');
+  if (!frame || !frame.contentWindow) return;
+  frame.contentWindow.postMessage({ type: 'params-symbol', symbol: activeSymbol }, location.origin);
+}
+
+/** 当前品种下某模块的有效视图（bySymbol 分桶） */
+function moduleView(name) {
+  const m = modules[name];
+  if (!m) return null;
+  const bucket = (m.bySymbol && m.bySymbol[activeSymbol]) || {};
+  return {
+    schema: m.schema, defaults: m.defaults,
+    overrides: bucket.overrides || {},
+    effective: bucket.effective || m.effective || {},
+    savedAt: bucket.savedAt, label: bucket.label, code: bucket.code,
+  };
+}
+
 function switchTab(name) {
   active = name;
   const isSr = name === 'sr';
   $('pane-sr').hidden = !isSr;
   $('pane-form').hidden = isSr;
   if (isSr) {
-    if (!$('srFrame').getAttribute('src')) $('srFrame').src = '/sr.html?embed=1';  // 懒加载（含自动调参面板）
+    const src = `/sr.html?embed=1&symbol=${encodeURIComponent(activeSymbol)}`;
+    if (!$('srFrame').getAttribute('src')) $('srFrame').src = src;
+    else notifySrSymbol();
   } else {
     renderModule(name);
   }
@@ -377,7 +421,7 @@ const BREAK_BEFORE_KEYS = new Set(['trendRes']);
 // 键集与 param_center entry 模块对应，未列键自动排尾部兜底渲染）
 const ENTRY_GROUPS = [
   ['支阻', ['near']],
-  ['手数', ['lots', 'lots_xauusd', 'lots_xagusd', 'lots_usoil', 'lots_btcusd', 'lots_nas100']],
+  ['手数', ['lots']],
   ['滑点（ATR系数内嵌各行）', ['slip_stop', 'slip_fallback', 'slip_be']],
   ['出场判定', ['exit_min_merged', 'realtime_min_bars', 'zs_exit_weak_ratio']],
   ['进场扩展（M1/M2/M4、0轴容差）', ['sinkFallback', 'sinkFallbackRearm', 'nearEqualAtrK', 'nearEqualPct',
@@ -459,8 +503,8 @@ function zsRowsHtml(m) {
 }
 
 function renderModule(name) {
-  const m = modules[name];
-  if (!m) return;
+  const m = moduleView(name);
+  if (!m || !m.schema) return;
   $('pgrid').innerHTML = name === 'zs'
     ? zsRowsHtml(m)
     : name === 'entry'
@@ -471,13 +515,14 @@ function renderModule(name) {
       .map(([key]) => paramRow(m, key))
       .join('');
   const n = Object.keys(m.overrides).length;
-  $('stateLine').textContent = `已修改 ${n} 项 · 最近保存 ${timeText(m.savedAt)}`;
+  const who = m.label ? `${m.label}（${m.code}）· ` : '';
+  $('stateLine').textContent = `${who}已修改 ${n} 项 · 最近保存 ${timeText(m.savedAt)}`;
   $('noteLine').textContent = {
-    chan: '画笔参数保存后立即全局生效（成笔阈值，画笔/回测/监控共用）。有任务运行中时会拒绝保存。',
-    points: '标记买卖点参数：邻近合并/保留数/中枢容差在工作台与回测读取；背驰时长可比上限写入 CHAN_CFG，保存后立即全局生效。有任务运行中时会拒绝保存。',
-    zs: '画中枢参数在工作台「画中枢 / 更新全部」时读取：控制各周期是否绘制、以及每周期只保留最近几个中枢。',
-    entry: '标记进出场参数在工作台分析与回测读取生效；进场扩展（M1/M2/M4、0轴容差）写入 CHAN_CFG，保存后立即全局生效。「当下制够笔K线数」仅回测/监控引擎使用。三个滑点支持 ATR 动态分量：有效滑点 = 固定值 + ATR系数×背驰周期ATR(14)，系数内嵌在各滑点行（0=关闭）。手数口径（2026-09-23）：1 手 = 0.01 标准手（MT4/MT5 经纪商口径），盈亏 = 价差 × 方向 × 手数 × 合约乘数（黄金 ×1、原油 ×10、白银 ×50、BTC/纳指 ×0.01、未列品种 ×1）；黄金/白银/原油/BTC/纳指五个手数行各自独立，其余品种用「默认手数」。有任务运行中时会拒绝保存。',
-    plan: '交易计划参数在工作台分析与回测运行时读取生效；「顺势参考周期」额外过滤进出场信号方向，锚点后的「方向相位判定/相位近位容差(点)/相位角度45°基准(点/根)」按相位表定方向含观望态（规则见图解表2/2a/2b；仅回测/监控引擎，JS技能无此参数）。下方可展开「交易计划逻辑图解」。',
+    chan: '画笔参数按当前品种独立；保存后该品种成笔阈值即时生效（画笔/回测/监控）。有任务运行中时会拒绝保存。',
+    points: '标记买卖点按当前品种：邻近合并/保留数/中枢容差在工作台与回测读取；背驰时长可比上限写入该品种 CHAN_CFG。有任务运行中时会拒绝保存。',
+    zs: '画中枢按当前品种：各周期是否绘制、以及每周期只保留最近几个中枢。',
+    entry: '标记进出场按当前品种：近支阻、手数、滑点、出场判定、进场扩展与闸门。进场扩展写入该品种 CHAN_CFG。「当下制够笔K线数」仅回测/监控引擎。有效滑点 = 固定值 + ATR系数×ATR(14)。手数口径：1手=0.01标准手。有任务运行中时会拒绝保存。',
+    plan: '交易计划按当前品种：震荡阈值与顺势参考周期在工作台/回测读取；「方向相位判定」等见下方图解。',
   }[name] || '';
   const rules = MODULE_RULES[name];
   const rb = $('rulesBlock');
@@ -542,22 +587,30 @@ async function refresh() {
 }
 
 async function save(name) {
+  if (name === 'sr') return;  // 支阻在 iframe 内保存
+  const body = { cfg: collect(name), symbol: activeSymbol };
   const r = await fetch(`/api/params/${name}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                                 body: JSON.stringify({ cfg: collect(name) }) });
+                                                 body: JSON.stringify(body) });
   const d = await r.json();
   if (!r.ok || d.ok === false) { toast(d.error || '保存失败', true); return; }
   await refresh();
+  drawSymbolTabs();
   renderModule(name);
   toast('已保存，下一轮任务生效');
 }
 
 async function reset(name) {
-  if (!window.confirm('恢复该模块全部参数为默认值？')) return;
+  if (name === 'sr') return;
+  const mv = moduleView(name);
+  const modName = (TABS.find(([id]) => id === name) || [])[1] || name;
+  const hint = `恢复「${(mv && mv.label) || activeSymbol}」的「${modName}」为默认值？`;
+  if (!window.confirm(hint)) return;
   const r = await fetch(`/api/params/${name}/reset`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                                       body: '{}' });
+                                                       body: JSON.stringify({ symbol: activeSymbol }) });
   const d = await r.json();
   if (!r.ok || d.ok === false) { toast(d.error || '操作失败', true); return; }
   await refresh();
+  drawSymbolTabs();
   renderModule(name);
   toast('已恢复默认');
 }
@@ -566,6 +619,12 @@ document.addEventListener('click', e => {
   const b = e.target.closest('button');
   if (!b) return;
   if (b.dataset.tab) switchTab(b.dataset.tab);
+  if (b.dataset.sym && b.dataset.sym !== activeSymbol) {
+    activeSymbol = b.dataset.sym;
+    drawSymbolTabs();
+    if (active === 'sr') notifySrSymbol();
+    else renderModule(active);
+  }
 });
 // 横盘开关变化时即时变灰/恢复（不立刻保存，点「保存本模块」才落盘）
 document.addEventListener('change', e => {
@@ -578,6 +637,7 @@ $('resetBtn').onclick = () => reset(active).catch(err => toast(err.message, true
 (async function init() {
   if (new URLSearchParams(location.search).has('embed')) document.body.classList.add('embedded');
   await refresh();
+  drawSymbolTabs();
   drawTabs();
   const saved = new URLSearchParams(location.search).get('tab');
   switchTab(TAB_IDS.includes(saved) ? saved : 'chan');

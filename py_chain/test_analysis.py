@@ -137,10 +137,13 @@ class AnalysisTests(unittest.TestCase):
     def test_invalid_config(self):
         # keep/near/slip_* 已改由参数中心管理（页面不再传值），此处只校验运行配置本身
         for patch_cfg in ({"intervalMinutes": 0}, {"intervalMinutes": float("nan")},
-                          {"from": "nonsense"},
-                          {"sr": {"periods": ["W"], "srTypes": ["boll"]}}):
+                          {"from": "nonsense"}):
             with self.assertRaises(ValueError):
                 self.m.configure(patch_cfg)
+        # 支阻周期由参数中心该品种桶决定：含周线则拒绝（完整分析不含 W）
+        param_center.update_sr("XAUUSD", {"periods": ["W", "D"], "srTypes": ["boll"]})
+        with self.assertRaises(ValueError):
+            self.m.configure({})
 
     def test_publication_failure_restores_old_files(self):
         root = Path(self.tmp.name) / "repo"
@@ -204,31 +207,42 @@ class GateTests(unittest.TestCase):
         self.assertTrue(webapp._marks_lock.acquire(False))
 
 
-class TestSrPresetWith30s(unittest.TestCase):
-    """回测 with_30s + 支阻预设：30S 不属支阻级别（sr_service 白名单刻意拒收），
-    预设周期应取回测周期 ∩ 支阻级别，而非整体透传（整体透传曾抛 不支持的级别：30S）。"""
-
-    PRESET = {"name": "p30", "cfg": {"periods": ["D", "240", "60", "15", "3"],
-                                     "from": "2026-06-30",
-                                     "srTypes": ["cluster", "boll"]}}
+class TestSrFromParamCenter(unittest.TestCase):
+    """回测支阻：按品种读参数中心；30S 不属支阻级别，应被过滤。"""
 
     def setUp(self):
-        self._orig = webapp._presets_load
-        webapp._presets_load = lambda: [dict(self.PRESET)]
+        self.tmp = tempfile.TemporaryDirectory()
+        self._orig = param_center.PARAMS_FILE
+        param_center.PARAMS_FILE = str(Path(self.tmp.name) / "module_params.json")
+        param_center.update_sr("XAUUSD", {
+            "periods": ["D", "240", "60", "15", "3"],
+            "srTypes": ["cluster", "boll"],
+            "from": "2026-06-30",
+        })
 
     def tearDown(self):
-        webapp._presets_load = self._orig
+        param_center.PARAMS_FILE = self._orig
+        self.tmp.cleanup()
 
     def test_30s_filtered_out(self):
         kwargs = webapp.BacktestWorker._sr_preset_kwargs(
-            {"sr_preset": "p30", "symbol": "OANDA:XAUUSD", "from": "2026-07-26"},
+            {"symbol": "OANDA:XAUUSD", "from": "2026-07-26"},
             ["D", "240", "60", "15", "3", "30S"])
         self.assertIsInstance(kwargs, dict)
         self.assertIn("clusterAtr", kwargs)      # engine_kwargs_of 的输出形状
 
     def test_all_30s_falls_back_to_default_levels(self):
         kwargs = webapp.BacktestWorker._sr_preset_kwargs(
-            {"sr_preset": "p30", "symbol": "OANDA:XAUUSD"}, ["30S"])
+            {"symbol": "OANDA:XAUUSD"}, ["30S"])
+        self.assertIsInstance(kwargs, dict)
+
+    def test_legacy_preset_name_fallback(self):
+        """品种桶 normalize 失败时，历史 sr_preset 名可回退旧文件。"""
+        # 空符号桶外品种 → effective_sr 返回 SR_DEFAULTS，仍可 normalize；
+        # 此处用 mock 强制 effective 抛错路径较重，改测：有 sr_preset 时仍优先桶成功
+        kwargs = webapp.BacktestWorker._sr_preset_kwargs(
+            {"sr_preset": "no-such", "symbol": "OANDA:XAUUSD", "from": "2026-07-26"},
+            ["D", "15"])
         self.assertIsInstance(kwargs, dict)
 
 

@@ -24,7 +24,7 @@ index.html 的 clear_all_marks 扩展后会把 SRT·/RAW· 一并清掉（同属
 import json
 import time
 
-from .data_loader import CDPClient, CDPConfig
+from .data_loader import CDPClient, CDPConfig, CDPError, _set_symbol
 from .marks import _ensure_hist_loaded, _purge_broken_marks, _scroll_realtime
 from .monitor import RES_WAIT
 from .sr_flip import LEVEL_ORDER
@@ -57,6 +57,39 @@ def _ensure_res_norm(c, res):
         return False
     c.evaluate(f"TradingViewApi.activeChart().setResolution({json.dumps(res)});")
     return True
+
+
+def _ensure_symbol(c, symbol, log=None, timeout=60.0):
+    """切换品种并等待新数据就绪。就绪条件镜像 signal_locator.locate_signal：
+    chart.symbol 与 mainSeries.symbolInfo().full_name 均等于目标、非 loading、
+    bars 已可读。切品种后旧品种 bars 有一段残留窗口——此时走周期切换/历史
+    覆盖判定会误判「已覆盖」产生坏线，因此必须等就绪后才能做任何其它操作。
+    @returns 是否发生了切换（当前已在目标品种上则原样返回 False）
+    @raises CDPError 超时未就绪"""
+    log = log or (lambda *a, **k: None)
+    target = str(symbol)
+    cur = c.evaluate("String(TradingViewApi.activeChart().symbol());")
+    if str(cur) == target:
+        return False
+    log(f"切换图表品种：{cur} → {target} ...")
+    _set_symbol(c, target)
+    expr = (
+        "(function(){ const c = TradingViewApi.activeChart(); "
+        "const s = c.chartModel().mainSeries(); "
+        f"const T = {json.dumps(target)}; "
+        "if (c.symbol() !== T || !s.symbolInfo() || "
+        "s.symbolInfo().full_name !== T || s.isLoading()) return false; "
+        "const it = s.data().m_bars._items; return !!(it && it.length); })()"
+    )
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if c.evaluate(expr):
+                return True
+        except Exception:
+            pass  # 切换途中短暂求值失败，继续轮询
+        time.sleep(1.0)
+    raise CDPError(f"切换品种 {target} 超时（{timeout:.0f}s 未就绪）")
 
 
 def _iv_single_cfg(res):
@@ -229,7 +262,7 @@ def _draw_group(c, items, ids_key, res, iv_lit, log, tag, cfg):
 
 
 def draw_sr_lines(main_by_period=None, raw_by_period=None, cfg=None, clear_first=True,
-                  color=DEFAULT_SR_COLOR, draw_text=True, log=None):
+                  color=DEFAULT_SR_COLOR, draw_text=True, log=None, symbol=None):
     """把调试页的支阻线画到 TradingView 图（按显示周期 L 分组、单周期可见）。
 
     @param main_by_period { L: [ {time, price, label} ] } 主线（drawnByPeriod）
@@ -237,6 +270,9 @@ def draw_sr_lines(main_by_period=None, raw_by_period=None, cfg=None, clear_first
     @param clear_first    画前清掉本模块上次 SRT·/RAW· 全部线
     @param color          主线颜色（默认统一灰 #787B86）
     @param draw_text      是否写 text（关闭时仅 title，清除仍可命中）
+    @param symbol         结果所属品种：图表不在该品种上时先切换并等就绪
+                          （多品种逐品种画图；画完不切回，与 locate 先例一致——
+                          画的线留在本模块单一集合里，切回旧品种只会看到错价线）
     @returns { drawn, raw_drawn, cleared, errors, skipped }
     """
     cfg = cfg or CDPConfig()
@@ -256,6 +292,15 @@ def draw_sr_lines(main_by_period=None, raw_by_period=None, cfg=None, clear_first
     levels = sorted(set(main_by_period) | set(raw_by_period), key=order)
     drawn = raw_drawn = cleared = errors = skipped = 0
     with CDPClient(cfg, log=log) as c:
+        # 切品种必须最先做：就绪前旧品种 bars 残留会让历史覆盖判定误判（坏线）
+        if symbol:
+            try:
+                if _ensure_symbol(c, symbol, log=log):
+                    time.sleep(RES_WAIT)
+            except Exception as e:
+                log(f"切换品种 {symbol} 失败：{e}")
+                return {"drawn": 0, "raw_drawn": 0, "cleared": 0,
+                        "errors": len(levels), "skipped": 0}
         try:
             display_res = str(c.evaluate("String(TradingViewApi.activeChart().resolution());"))
         except Exception:

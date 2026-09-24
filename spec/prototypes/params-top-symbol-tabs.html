@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>参数配置 · 顶层品种 TAB 原型</title>
+<style>
+:root{
+  color-scheme:dark;
+  --bg:#10151e;--panel:#19212e;--card:var(--panel);--card-2:#131c29;
+  --line:#2c384a;--border:var(--line);--text:#e7edf7;--muted:#99a9c0;
+  --blue:#8eb7ff;--accent:var(--blue);--primary:#5086e5;--warn:#f0b90b;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:13px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;padding:14px 18px}
+h1{font-size:19px;color:#fff}
+h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
+.banner{margin:10px 0 0;padding:8px 12px;border:1px solid #51412d;border-radius:6px;
+  background:#32291c;color:#edbc70;font-size:12px;max-width:1180px}
+/* 顶层品种 TAB（全局上下文） */
+.stabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin:12px 0 0;flex-wrap:wrap}
+.stabs button{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;
+  color:var(--muted);font-size:13px;padding:8px 16px;cursor:pointer}
+.stabs button:hover{color:var(--text)}
+.stabs button.on{border-color:#55d7b0;color:#92d1b4;font-weight:600}
+.stabs button .scode{color:var(--muted);font-size:11px;margin-left:6px;font-weight:400}
+.stabs button.on .scode{color:#6aa89a}
+/* 模块 TAB 在品种之下 */
+.ptabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin:0;flex-wrap:wrap}
+.ptabs button{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;
+  color:var(--muted);font-size:13px;padding:8px 16px;cursor:pointer}
+.ptabs button:hover{color:var(--text)}
+.ptabs button.on{border-color:var(--accent);color:#bad4ff;font-weight:600}
+.pane{padding-top:14px}
+.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:8px 16px;max-width:1180px}
+.prow{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--border);
+  border-radius:6px;padding:7px 10px}
+.pgroup{grid-column:1/-1;color:var(--muted);font-size:11.5px;display:flex;align-items:center;gap:8px;margin-top:4px}
+.pgroup::after{content:'';flex:1;border-top:1px solid var(--border)}
+.pgroup:first-child{margin-top:0}
+.prow .pname{flex:1;min-width:0}
+.prow .plabel{color:var(--text);font-size:12.5px;display:block}
+.prow .pdef{color:var(--muted);font-size:11px}
+.prow.mod{border-color:#7a5c1e;background:#1d1a10}
+.prow .badge{display:none;background:#3d3208;color:var(--warn);font-size:10px;padding:0 6px;
+  border-radius:8px;margin-left:6px;border:0}
+.prow.mod .badge{display:inline-block}
+.prow input[type=number],.prow input[type=text],.prow select{
+  background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;
+  padding:3px 6px;font:inherit}
+.prow input[type=number]{width:86px;text-align:right}
+.prow input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px}
+.prow .slip-k{display:flex;align-items:center;gap:4px;color:var(--muted);font-size:11.5px;white-space:nowrap;flex-shrink:0}
+.prow .slip-k input{width:64px;text-align:right}
+.sr-table{width:100%;max-width:1180px;border-collapse:collapse;font-size:12.5px;margin-bottom:12px}
+.sr-table th,.sr-table td{border:1px solid var(--border);padding:6px 8px;text-align:left}
+.sr-table th{color:var(--muted);font-weight:400;background:var(--card-2)}
+.sr-table input[type=text],.sr-table select{
+  background:var(--bg);color:var(--text);border:1px solid var(--border);
+  border-radius:4px;padding:3px 6px;font:inherit}
+.sr-table input[type=text]{width:100%;font:12px Consolas,monospace}
+.sr-actions{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 4px}
+.pfoot{display:flex;gap:10px;align-items:center;margin:14px 0 0;flex-wrap:wrap}
+.pfoot .state{color:var(--muted);font-size:11px}
+.pnote{color:var(--muted);font-size:12px;margin-top:10px;max-width:1180px}
+button.primary,button.ghost{font:inherit;cursor:pointer;border-radius:5px;padding:7px 14px}
+button.primary{background:var(--primary);border:1px solid #427fea;color:#fff}
+button.primary:hover{filter:brightness(1.08)}
+button.ghost{background:#243247;border:1px solid var(--border);color:var(--text)}
+button.ghost:hover{background:#2f4058}
+.toast{position:fixed;right:18px;bottom:18px;background:#1f4aa8;color:#fff;border-radius:6px;
+  padding:8px 16px;font-size:12.5px;opacity:.96;z-index:40}
+</style>
+</head>
+<body>
+<h1>参数配置<span class="sub">顶层品种 TAB · 所有模块跟当前品种走</span></h1>
+<p class="banner">交互原型 · 静态演示 · 五个品种各自独立全套参数（画笔/中枢/买卖点/支阻/计划/进出场）· 支阻位无多选、无命名预设 · 不写入参数中心</p>
+
+<nav class="stabs" id="symbolTabs" aria-label="品种"></nav>
+<nav class="ptabs" id="moduleTabs" aria-label="参数模块"></nav>
+
+<div class="pane">
+  <div id="srBlock" hidden>
+    <table class="sr-table" id="srTable"></table>
+    <div class="pgrid" id="srGrid"></div>
+    <div class="sr-actions">
+      <button class="primary" id="computeBtn" type="button">计算（当前品种）</button>
+      <button class="ghost" id="drawBtn" type="button">画图（当前品种）</button>
+    </div>
+  </div>
+  <div class="pgrid" id="pgrid"></div>
+  <div class="pfoot">
+    <button class="primary" id="saveBtn" type="button">保存本模块</button>
+    <button class="ghost" id="resetBtn" type="button">恢复默认</button>
+    <span class="state" id="stateLine"></span>
+  </div>
+  <p class="pnote" id="noteLine"></p>
+</div>
+<div class="toast" id="toast" hidden></div>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const MODULE_TABS = [
+  ['chan', '画笔'], ['zs', '画中枢'], ['points', '标记买卖点'],
+  ['sr', '支阻位'], ['plan', '交易计划'], ['entry', '标记进出场'],
+];
+const SYMBOLS = [
+  { id: 'XAUUSD', label: '黄金', code: 'OANDA:XAUUSD' },
+  { id: 'XAGUSD', label: '白银', code: 'OANDA:XAGUSD' },
+  { id: 'USOIL',  label: '原油', code: 'TVC:USOIL' },
+  { id: 'BTCUSD', label: 'BTC',  code: 'BITSTAMP:BTCUSD' },
+  { id: 'NAS100', label: '纳指', code: 'FX:NAS100' },
+];
+const NOTES = {
+  chan: '画笔参数按当前品种独立；保存后该品种的成笔阈值即时生效。',
+  zs: '画中枢：各周期是否绘制、最近保留个数，按当前品种存储。',
+  points: '标记买卖点：邻近合并/保留数/中枢容差按当前品种。',
+  sr: '支阻位参数按当前品种独立存储。计算 / 画图只针对上方选中的品种。无多选、无命名预设；工作台与回测直接读该品种已保存的一套。',
+  plan: '交易计划震荡阈值与顺势参考周期按当前品种。',
+  entry: '标记进出场：近支阻、手数、滑点、出场判定、进场扩展与闸门均按当前品种。手数仅一行。',
+};
+
+const SLIP_ATR_K = { slip_stop: 'slip_stop_atr_k', slip_fallback: 'slip_fallback_atr_k', slip_be: 'slip_be_atr_k' };
+const GROUPS = {
+  chan: [['成笔', ['gapFilter', 'wickRatio', 'wickAtrK']]],
+  zs: [['周期', ['drawD', 'draw240', 'draw60', 'draw15', 'draw3']]],
+  points: [['买卖点', ['nearAtrRatio', 'keep', 'class2ZsTol', 'thirdZsTol']]],
+  plan: [['震荡 / 顺势', ['rangeBoundOn', 'rangeKMult', 'trendRes', 'reboundNearPts']]],
+  entry: [
+    ['支阻', ['near']],
+    ['手数', ['lots']],
+    ['滑点（ATR系数内嵌各行）', ['slip_stop', 'slip_fallback', 'slip_be']],
+    ['出场判定', ['exit_min_merged', 'realtime_min_bars', 'zs_exit_weak_ratio']],
+    ['进场扩展', ['expectBiEnough', 'macdZeroTol']],
+    ['进场闸门', ['entryMacdShrink', 'stopEntryBarFloor']],
+  ],
+  sr: [['通用', ['clusterAtr', 'maxDistAtr', 'sideCount', 'overlayBoll']]],
+};
+const SCHEMA = {
+  gapFilter: { label: '跳空成笔阈值', type: 'num', desc: '缺口 ≥ 该值×ATR 时强制独立成笔' },
+  wickRatio: { label: '长影线比例阈值', type: 'num', desc: '影线占比达该值视为插针' },
+  wickAtrK: { label: '长影线长度下限', type: 'num', desc: '影线绝对长度下限×TR' },
+  drawD: { label: '日线画中枢', type: 'bool', desc: '是否绘制日线中枢' },
+  draw240: { label: '4小时画中枢', type: 'bool', desc: '是否绘制4小时中枢' },
+  draw60: { label: '1小时画中枢', type: 'bool', desc: '是否绘制1小时中枢' },
+  draw15: { label: '15分钟画中枢', type: 'bool', desc: '是否绘制15分钟中枢' },
+  draw3: { label: '3分钟画中枢', type: 'bool', desc: '是否绘制3分钟中枢' },
+  nearAtrRatio: { label: '邻近合并阈值(×ATR)', type: 'num', desc: '1买与2买价差合并门槛' },
+  keep: { label: '每周期保留标记数', type: 'int', desc: '买卖点标记总数上限' },
+  class2ZsTol: { label: '类2破中枢容差(点)', type: 'num', desc: '允许越过中枢边界的点数' },
+  thirdZsTol: { label: '3类进中枢容差(点)', type: 'num', desc: '允许进入中枢的点数' },
+  rangeBoundOn: { label: '①横盘判定', type: 'bool', desc: '参考周期横盘整理判定' },
+  rangeKMult: { label: 'K线区间阈值(×ATR)', type: 'num', desc: '窗口高低差判震荡' },
+  trendRes: { label: '顺势参考周期', type: 'str', choices: ['', '240', 'D'], desc: '关闭 / 4小时 / 日线' },
+  reboundNearPts: { label: '相位近位容差(点)', type: 'num', desc: '距中枢沿或前低前高的点数' },
+  near: { label: '近支阻阈值', type: 'num', desc: '背驰点与支阻价差阈值（绝对价差）' },
+  lots: { label: '手数', type: 'int', desc: '本品种进场手数；1手=0.01标准手' },
+  slip_stop: { label: '止损滑点', type: 'num', desc: '支阻位外侧偏移' },
+  slip_stop_atr_k: { label: '止损滑点ATR系数', type: 'num', desc: '0=关闭' },
+  slip_fallback: { label: '最大止损', type: 'num', desc: '买点止损≥进场价−该值；卖点≤进场价+该值' },
+  slip_fallback_atr_k: { label: '最大止损ATR系数', type: 'num', desc: '0=关闭' },
+  slip_be: { label: '保本滑点', type: 'num', desc: '成交K线极值±该值' },
+  slip_be_atr_k: { label: '保本滑点ATR系数', type: 'num', desc: '0=关闭' },
+  exit_min_merged: { label: '出场成笔预期门槛', type: 'int', desc: '合并后K线数门槛' },
+  realtime_min_bars: { label: '当下制够笔K线数', type: 'int', desc: '形成段评估门槛' },
+  zs_exit_weak_ratio: { label: '出中枢力度衰减比例', type: 'num', desc: '离开笔相对进入笔' },
+  expectBiEnough: { label: 'M4预期够笔', type: 'bool', desc: '允许预期段够笔后进场' },
+  macdZeroTol: { label: '2买卖0轴容差', type: 'num', desc: 'DIF 0轴容差' },
+  entryMacdShrink: { label: '进场MACD柱缩闸', type: 'bool', desc: '柱缩才出信号' },
+  stopEntryBarFloor: { label: '进场K线止损下限', type: 'bool', desc: '止损不低于进场K极值' },
+  clusterAtr: { label: '密集区ATR倍数', type: 'num', desc: '系统计算聚类半径' },
+  maxDistAtr: { label: '距离上限(×ATR)', type: 'num', desc: '距现价超过则不画' },
+  sideCount: { label: '每侧条数', type: 'int', desc: '现价上下各保留几条' },
+  overlayBoll: { label: '叠加BOLL', type: 'bool', desc: 'BOLL 作为叠加层' },
+  srcD: { label: '日线来源', type: 'str', choices: ['系统', '人工'], desc: '' },
+  manD: { label: '日线人工位', type: 'text', desc: '逗号分隔价位' },
+  src240: { label: '4h来源', type: 'str', choices: ['系统', '人工'], desc: '' },
+  man240: { label: '4h人工位', type: 'text', desc: '' },
+  src60: { label: '1h来源', type: 'str', choices: ['系统', '人工'], desc: '' },
+  man60: { label: '1h人工位', type: 'text', desc: '' },
+};
+const CHOICE_LABELS = { trendRes: { '': '关闭', '240': '4小时', 'D': '日线' } };
+
+// 五品种示意默认：价差量纲随品种拉开
+const SCALE = {
+  XAUUSD: { px: 1, lots: 4, macd: 0 },
+  XAGUSD: { px: 0.02, lots: 4, macd: 0 },
+  USOIL:  { px: 0.04, lots: 4, macd: 0.05 },
+  BTCUSD: { px: 8, lots: 4, macd: 5 },
+  NAS100: { px: 2.5, lots: 4, macd: 2 },
+};
+function baseOf(sid) {
+  const s = SCALE[sid];
+  return {
+    gapFilter: 1, wickRatio: 0.5, wickAtrK: 0.3,
+    drawD: false, draw240: false, draw60: true, draw15: false, draw3: false,
+    nearAtrRatio: 0.3, keep: 8, class2ZsTol: 0, thirdZsTol: 0,
+    rangeBoundOn: true, rangeKMult: 3, trendRes: '240', reboundNearPts: 5 * s.px,
+    near: 10 * s.px, lots: s.lots,
+    slip_stop: 3 * s.px, slip_stop_atr_k: 0,
+    slip_fallback: 10 * s.px, slip_fallback_atr_k: 0,
+    slip_be: 3 * s.px, slip_be_atr_k: 0,
+    exit_min_merged: 5, realtime_min_bars: 5, zs_exit_weak_ratio: 1,
+    expectBiEnough: true, macdZeroTol: s.macd,
+    entryMacdShrink: false, stopEntryBarFloor: false,
+    clusterAtr: 0.5, maxDistAtr: 8, sideCount: 6, overlayBoll: true,
+    srcD: '系统', manD: '', src240: '系统', man240: '', src60: '系统', man60: '',
+  };
+}
+const INITIAL_OV = {
+  XAUUSD: { near: 12, wickRatio: 0.55 },
+  XAGUSD: { lots: 6, clusterAtr: 0.35 },
+  USOIL:  { slip_stop: 0.2 },
+  BTCUSD: { near: 100, macdZeroTol: 8 },
+  NAS100: { reboundNearPts: 20, overlayBoll: false },
+};
+
+const store = {};
+for (const s of SYMBOLS) {
+  const defaults = baseOf(s.id);
+  store[s.id] = { defaults, values: { ...defaults, ...(INITIAL_OV[s.id] || {}) } };
+}
+
+let activeModule = 'entry', activeSymbol = 'XAUUSD', toastTimer;
+
+function toast(msg) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, 2200);
+}
+function drawSymbolTabs() {
+  $('symbolTabs').innerHTML = SYMBOLS.map(s =>
+    `<button type="button" data-sym="${s.id}" class="${s.id === activeSymbol ? 'on' : ''}"
+      aria-pressed="${s.id === activeSymbol}">${s.label}<span class="scode">${s.id}</span></button>`).join('');
+}
+function drawModuleTabs() {
+  $('moduleTabs').innerHTML = MODULE_TABS.map(([id, name]) =>
+    `<button type="button" data-mod="${id}" class="${id === activeModule ? 'on' : ''}"
+      aria-pressed="${id === activeModule}">${name}</button>`).join('');
+}
+function isMod(key) {
+  const s = store[activeSymbol];
+  const emb = SLIP_ATR_K[key];
+  return s.values[key] !== s.defaults[key] || (emb && s.values[emb] !== s.defaults[emb]);
+}
+function defText(key) {
+  const spec = SCHEMA[key], d = store[activeSymbol].defaults[key];
+  if (spec.type === 'bool') return d ? '默认开' : '默认关';
+  if (spec.type === 'str') return `默认 ${CHOICE_LABELS[key] ? (CHOICE_LABELS[key][d] || d || '关闭') : d}`;
+  return `默认 ${d}`;
+}
+function controlHtml(key) {
+  const spec = SCHEMA[key], val = store[activeSymbol].values[key];
+  if (spec.type === 'bool')
+    return `<input type="checkbox" data-k="${key}" ${val ? 'checked' : ''}>`;
+  if (spec.type === 'str') {
+    const ch = spec.choices || [];
+    return `<select data-k="${key}">` + ch.map(c =>
+      `<option value="${c}" ${c === val ? 'selected' : ''}>${(CHOICE_LABELS[key] && CHOICE_LABELS[key][c]) || c || '关闭'}</option>`
+    ).join('') + '</select>';
+  }
+  if (spec.type === 'text')
+    return `<input type="text" data-k="${key}" value="${val}" style="width:160px">`;
+  const step = spec.type === 'int' ? '1' : 'any';
+  return `<input type="number" step="${step}" data-k="${key}" value="${val}">`;
+}
+function rowHtml(key) {
+  const spec = SCHEMA[key];
+  const embKey = SLIP_ATR_K[key];
+  let embed = '';
+  if (embKey) {
+    const ev = store[activeSymbol].values[embKey];
+    embed = `<span class="slip-k">+ ATR×<input type="number" step="any" min="0" data-k="${embKey}" value="${ev}"></span>`;
+  }
+  return `<div class="prow ${isMod(key) ? 'mod' : ''}" title="${spec.desc}">
+    <span class="pname"><span class="plabel">${spec.label}<span class="badge">已修改</span></span>
+    <span class="pdef">${defText(key)}${spec.desc ? ' · ' + spec.desc : ''}</span></span>
+    ${controlHtml(key)}${embed}</div>`;
+}
+
+function renderSrTable() {
+  const rows = [
+    ['D', '日线', 'srcD', 'manD'],
+    ['240', '4小时', 'src240', 'man240'],
+    ['60', '1小时', 'src60', 'man60'],
+  ];
+  const v = store[activeSymbol].values;
+  $('srTable').innerHTML = `<thead><tr><th>周期</th><th>来源</th><th>人工价位（当前品种）</th></tr></thead><tbody>` +
+    rows.map(([, name, srcK, manK]) => {
+      const sys = v[srcK] === '系统';
+      return `<tr>
+        <td>${name}</td>
+        <td><select data-k="${srcK}"><option value="系统" ${sys ? 'selected' : ''}>系统计算</option>
+          <option value="人工" ${!sys ? 'selected' : ''}>人工输入</option></select></td>
+        <td><input type="text" data-k="${manK}" value="${v[manK]}" ${sys ? 'disabled' : ''}
+          placeholder="${sys ? '系统计算，无需填写' : '例如 2650, 2688'}"></td>
+      </tr>`;
+    }).join('') + `</tbody>`;
+}
+
+function collect() {
+  const cfg = store[activeSymbol].values;
+  document.querySelectorAll('[data-k]').forEach(inp => {
+    const k = inp.dataset.k;
+    if (!(k in cfg) && !SCHEMA[k]) return;
+    if (inp.type === 'checkbox') cfg[k] = inp.checked;
+    else if (SCHEMA[k] && SCHEMA[k].type === 'int') cfg[k] = parseInt(inp.value, 10) || 0;
+    else if (SCHEMA[k] && SCHEMA[k].type === 'num') cfg[k] = parseFloat(inp.value) || 0;
+    else cfg[k] = inp.value;
+  });
+}
+
+function render() {
+  const isSr = activeModule === 'sr';
+  $('srBlock').hidden = !isSr;
+  $('pgrid').hidden = isSr;
+  if (isSr) {
+    renderSrTable();
+    $('srGrid').innerHTML = GROUPS.sr.map(([t, keys]) =>
+      `<div class="pgroup">${t}</div>` + keys.map(k => rowHtml(k)).join('')).join('');
+  } else {
+    $('pgrid').innerHTML = GROUPS[activeModule].map(([t, keys]) =>
+      `<div class="pgroup">${t}</div>` + keys.map(k => rowHtml(k)).join('')).join('');
+  }
+  const s = store[activeSymbol];
+  const keys = Object.keys(s.defaults);
+  const n = keys.filter(k => s.values[k] !== s.defaults[k]).length;
+  const sym = SYMBOLS.find(x => x.id === activeSymbol);
+  const modName = MODULE_TABS.find(x => x[0] === activeModule)[1];
+  $('stateLine').textContent = `${sym.label} · ${modName} · 本品种已修改 ${n} 项 · 页内示意，未落盘`;
+  $('noteLine').textContent = NOTES[activeModule];
+}
+
+function switchSymbol(id) {
+  if (id === activeSymbol) return;
+  collect();
+  activeSymbol = id;
+  drawSymbolTabs();
+  render();
+}
+function switchModule(id) {
+  collect();
+  activeModule = id;
+  drawModuleTabs();
+  render();
+}
+
+$('symbolTabs').addEventListener('click', e => {
+  const b = e.target.closest('[data-sym]');
+  if (b) switchSymbol(b.dataset.sym);
+});
+$('moduleTabs').addEventListener('click', e => {
+  const b = e.target.closest('[data-mod]');
+  if (b) switchModule(b.dataset.mod);
+});
+document.addEventListener('change', e => {
+  if (!e.target.dataset || !e.target.dataset.k) return;
+  collect();
+  render();
+});
+$('saveBtn').onclick = () => { collect(); toast('原型演示，未写入参数中心'); };
+$('resetBtn').onclick = () => {
+  const name = SYMBOLS.find(x => x.id === activeSymbol).label;
+  const mod = MODULE_TABS.find(x => x[0] === activeModule)[1];
+  if (!confirm(`恢复「${name}」的「${mod}」为示意默认值？`)) return;
+  const s = store[activeSymbol];
+  const grouped = new Set(GROUPS[activeModule].flatMap(([, keys]) => keys));
+  if (activeModule === 'sr') ['srcD','manD','src240','man240','src60','man60'].forEach(k => grouped.add(k));
+  Object.values(SLIP_ATR_K).forEach(k => grouped.add(k));
+  for (const k of grouped) if (k in s.defaults) s.values[k] = s.defaults[k];
+  render();
+  toast('原型演示，未写入参数中心');
+};
+$('computeBtn').onclick = () => {
+  collect();
+  const name = SYMBOLS.find(x => x.id === activeSymbol).label;
+  toast(`将用「${name}」当前支阻参数计算（原型未真正计算）`);
+};
+$('drawBtn').onclick = () => {
+  const name = SYMBOLS.find(x => x.id === activeSymbol).label;
+  toast(`将在图表上画「${name}」支阻（原型未真正画图）`);
+};
+
+drawSymbolTabs();
+drawModuleTabs();
+render();
+</script>
+</body>
+</html>

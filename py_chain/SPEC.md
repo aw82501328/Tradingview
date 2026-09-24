@@ -130,8 +130,14 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 | 等待回调后做 2 买 | `wait2Buy` | 做多 |
 | 等待高点附近的一卖 | `wait1Sell` | 做空 |
 | 等待低点附近的一买 | `wait1Buy` | 做多 |
-| 等待回调后的新买点 | `waitBuy` | 做多 |
-| 等待反弹后的新卖点 | `waitSell` | 做空 |
+| 等待回调后的新买点（3 类点强档，`thirdStrongTrend` 开） | `waitBuy` | 做多 |
+| 等待反弹后的新卖点（3 类点强档） | `waitSell` | 做空 |
+| 等待回调后的 3 买点（2买/类2买 强档） | `waitBuy` | 做多 |
+| 等待回调后的类 2 买点（2买 中间档） | `waitBuy` | 做多 |
+| 等待反弹后的 3 卖点（2卖/类2卖 强档） | `waitSell` | 做空 |
+| 等待反弹后的类 2 卖点（2卖 中间档） | `waitSell` | 做空 |
+
+> 2026-09-24 交易计划三档化：新增 4 条文案与「新买点/新卖点」同走 `waitBuy`/`waitSell`（无专属条件），进场校验不变。
 
 映射函数 `entryStrategyOf`（`mark_entry.py` L290 / `mark_entry.js` L360）；计划策略本身由 `trading_plan.strategyOf` 产出。
 
@@ -411,6 +417,17 @@ run() 批量路径成交 bar 当拍未收盘，存在 ≤1 根 fine bar 的微�
   纯密集区来源，`--sr-types=cluster,fib` 可复现旧黄金分割行为。
 - py 侧不做 fromTs 过滤（窗口由调用方决定，与 JS「买卖点在 from 过滤笔上算」的最终
   最新点结果一致）。
+
+**多品种计算（2026-09-24，/sr 调参页品种多选，对齐回测批量口径）**：`normalize_sr_cfg`
+接受 `symbols` 列表/逗号串（去重保序、≤10、空报错），`cfg["symbol"]` 恒为第一个（调参页
+工作区/预设/Excel/回测支阻预设均消费单值）。计算为**统一参数、逐品种顺序**
+（`webapp.run_sr_compute`：逐品种 `ensure_symbol_data` 校验存储取数 → `build_chain_result`），
+单品种失败记入 `results[sym]["error"]` 继续下一个，全部失败不动旧结果槽；结果槽
+`app.sr` 增 `results: {品种: {result, meta} | {error}}`（顶层 `result`/`meta` = 第一个成功
+品种，兼容旧消费方；工作台分析发布的单品种形状无 `results`，`/api/sr/result` 合成单键
+`by_symbol`）。「画图」带 `symbol` 参数画**当前查看品种**：显式品种无结果直接 400 不回退；
+`sr_draw.draw_sr_lines(symbol=)` 在一切周期/历史操作**之前**切图表品种并等就绪（就绪条件
+镜像 `locate_signal`——旧品种 bars 残留窗口会误判历史覆盖 → 坏线），画完不切回。
 
 ## 3. 文件清单与状态（截至 2026-09-01）
 

@@ -807,7 +807,7 @@ def main(argv=None):
     from_ts = parse_from(args.from_date)
     # 手数按品种取参数中心（2026-09-23 与 main.py 回测 CLI 对齐）
     from . import param_center
-    lots = param_center.lots_of(param_center.effective_all()["entry"], args.symbol)
+    lots = param_center.lots_of(param_center.effective_all(args.symbol)["entry"], args.symbol)
     if args.mode == "replay":
         start_ts = parse_from(args.start_date) if args.start_date else from_ts
         monitor = ReplayMonitor(symbol=args.symbol, periods=periods,

@@ -2,7 +2,7 @@
 """出场规则单元测试（出场阶梯重构 2026-09-09，对应 mark-entry SPEC §2.4）
 
 覆盖（与 .cursor/skills/mark-entry/scripts/mark_entry.test.js 的「出场规则」describe 成对同构）：
-  - stop_ref_of：支阻位 ± 滑点 / nearSr 错侧重选 / 无正确侧兜底（返回值永不为 None）
+  - stop_ref_of：支阻位 ± 滑点 / nearSr 错侧重选 / 最大止损硬上限（返回值永不为 None）
   - forming_seg_ready：合并后 ≥5 块门槛 / 末笔方向 / 延伸归零
   - advance_exit_decision：TP1→beStop→stopBe / TP2 顺势（无需 TP1）→ half 后止损=beStop /
     TP3a 顺势 breakPrev / TP3b 逆势 seg5 全平（无 half）/ stopSr / 同拍顺序 half 优先
@@ -46,53 +46,60 @@ T7 = [0, 100, 200, 300, 400, 500, 600]        # 其后 3 块 → 未就绪
 
 class TestStopRefOf(unittest.TestCase):
     def test_short_upper_sr_plus_slip(self):
-        # short：上方最近支阻 4460 + 滑点3 = 4463；下方 4420 不参与
-        self.assertEqual(stop_ref_of("short", 4450.0, None, [{"price": 4460.0}, {"price": 4420.0}]), 4463.0)
+        # short：上方最近支阻 4460+3=4463，最大止损 4450+10=4460 → 收到 4460
+        self.assertEqual(stop_ref_of("short", 4450.0, None, [{"price": 4460.0}, {"price": 4420.0}]), 4460.0)
 
     def test_near_sr_wrong_side_reselect(self):
-        # nearSr=4420 在 short 的错误侧（下方）→ 从 sr_levels 重选 4460+3
-        self.assertEqual(stop_ref_of("short", 4450.0, 4420.0, [{"price": 4460.0}]), 4463.0)
+        # nearSr=4420 在 short 的错误侧（下方）→ 从 sr_levels 重选 4460+3，再夹到 4460
+        self.assertEqual(stop_ref_of("short", 4450.0, 4420.0, [{"price": 4460.0}]), 4460.0)
 
     def test_near_sr_correct_side_direct(self):
-        # nearSr 已在正确侧 → 直接沿用 + 滑点
-        self.assertEqual(stop_ref_of("short", 4450.0, 4465.0, [{"price": 4460.0}]), 4468.0)
+        # nearSr 已在正确侧 → 4465+3=4468，最大止损 4460 → 收到 4460
+        self.assertEqual(stop_ref_of("short", 4450.0, 4465.0, [{"price": 4460.0}]), 4460.0)
 
     def test_no_correct_side_fallback(self):
-        # 无正确侧位 → 兜底 进场价 ± slip_fallback（永不为 None）
+        # 无正确侧位 → 止损 = 进场价 ± 最大止损（永不为 None）
         self.assertEqual(stop_ref_of("short", 4450.0, None, [{"price": 4400.0}]), 4460.0)
         self.assertEqual(stop_ref_of("short", 4450.0, None, []), 4460.0)
 
     def test_long_symmetric(self):
-        self.assertEqual(stop_ref_of("long", 4450.0, None, [{"price": 4430.0}, {"price": 4470.0}]), 4427.0)
+        # long：4430−3=4427，最大止损 4440 → 抬到 4440；无正确侧同为 4440
+        self.assertEqual(stop_ref_of("long", 4450.0, None, [{"price": 4430.0}, {"price": 4470.0}]), 4440.0)
         self.assertEqual(stop_ref_of("long", 4450.0, None, []), 4440.0)
 
     def test_custom_slip(self):
+        # 最大止损 20：4460+5=4465 < 4470 → 保持支阻；无正确侧 = 4470
         self.assertEqual(stop_ref_of("short", 4450.0, None, [{"price": 4460.0}],
                                      slip_stop=5.0, slip_fallback=20.0), 4465.0)
         self.assertEqual(stop_ref_of("short", 4450.0, None, [], slip_stop=5.0, slip_fallback=20.0), 4470.0)
 
+    def test_sr_closer_than_max_loss(self):
+        # 支阻更近：空 4455+3=4458 < 4460 → 保持；多 4445−3=4442 > 4440 → 保持
+        self.assertEqual(stop_ref_of("short", 4450.0, None, [{"price": 4455.0}]), 4458.0)
+        self.assertEqual(stop_ref_of("long", 4450.0, None, [{"price": 4445.0}]), 4442.0)
+
     def test_atr_component(self):
-        # ATR 分量（2026-09-19）：有效滑点 = 固定值 + 系数×ATR，三条路径全覆盖
-        # 支阻位路径：4460 + (3 + 0.5×2) = 4464
+        # ATR 分量：有效滑点 = 固定值 + 系数×ATR，再按有效最大止损夹紧
+        # 支阻 4460+(3+0.5×2)=4464，最大止损 4450+(10+1×2)=4462 → 4462
         self.assertEqual(stop_ref_of("short", 4450.0, None, [{"price": 4460.0}],
                                      slip_stop=3.0, slip_fallback=10.0,
-                                     atr=2.0, k_stop=0.5, k_fallback=1.0), 4464.0)
-        # 兜底路径：4450 + (10 + 1×2) = 4462
+                                     atr=2.0, k_stop=0.5, k_fallback=1.0), 4462.0)
+        # 无正确侧：4450 + (10 + 1×2) = 4462
         self.assertEqual(stop_ref_of("short", 4450.0, None, [],
                                      slip_stop=3.0, slip_fallback=10.0,
                                      atr=2.0, k_stop=0.5, k_fallback=1.0), 4462.0)
-        # nearSr 正确侧路径：4465 + (3 + 1×2) = 4470
+        # nearSr 4465+(3+1×2)=4470，最大止损 4450+10=4460 → 4460
         self.assertEqual(stop_ref_of("short", 4450.0, 4465.0, [{"price": 4460.0}],
                                      slip_stop=3.0, slip_fallback=10.0,
-                                     atr=2.0, k_stop=1.0, k_fallback=0.0), 4470.0)
-        # long 镜像：4430 − (3 + 0.5×2) = 4426
+                                     atr=2.0, k_stop=1.0, k_fallback=0.0), 4460.0)
+        # long：4430−(3+0.5×2)=4426，最大止损 4440 → 4440
         self.assertEqual(stop_ref_of("long", 4450.0, None, [{"price": 4430.0}],
-                                     atr=2.0, k_stop=0.5), 4426.0)
+                                     atr=2.0, k_stop=0.5), 4440.0)
 
     def test_atr_zero_regression(self):
-        # 系数默认 0 / atr=0 → 与无 ATR 分量完全一致（回归锚点）
+        # 系数默认 0 / atr=0 → 与无 ATR 分量一致（仍受默认最大止损 10 夹紧）
         self.assertEqual(stop_ref_of("short", 4450.0, None, [{"price": 4460.0}],
-                                     atr=0.0, k_stop=0.7, k_fallback=0.9), 4463.0)
+                                     atr=0.0, k_stop=0.7, k_fallback=0.9), 4460.0)
         self.assertEqual(stop_ref_of("short", 4450.0, None, [],
                                      atr=2.0, k_stop=0.0, k_fallback=0.0), 4460.0)
 
@@ -297,6 +304,15 @@ class TestEntryBarFloor(unittest.TestCase):
         advance_exit_decision(pos, 930, bar(900, 95, 96, 88, 89), [], [])
         self.assertEqual(pos["stopRef"], 80.0)
 
+    def test_max_loss_reclamps_floor(self):
+        # 外推到 85 后抬回最大止损 90；当根 low 88 已破 90 → 立即支阻位止损
+        pos = self._floor_pos()
+        pos["maxLoss"] = 90.0
+        r = advance_exit_decision(pos, 930, bar(900, 95, 96, 88, 89), [], [])
+        self.assertEqual(r, "stopSr")
+        self.assertEqual(pos["entryBarExt"], 88.0)
+        self.assertEqual(pos["stopRef"], 90.0)
+
     def test_short_symmetric(self):
         pos = make_pos(direction="short", entryPrice=4450.0, stopRef=4463.0, beStop=4445.0)
         pos.update({"entryBarStart": 900, "entryBarEnd": 1800,
@@ -324,13 +340,15 @@ class TestEntryBarFloor(unittest.TestCase):
 
 
 class TestFillEntryBarSeed(unittest.TestCase):
-    """_fill_pending 的下限种子：窗口内已收 fine bar 极值 + 与支阻位止损取更宽者。"""
+    """_fill_pending 的下限种子：窗口内已收 fine bar 极值 + 与支阻位止损取更宽者；
+    再按最大止损硬上限夹紧。"""
 
     def _fill(self, **kw):
         lows = kw.pop("lows", [100, 98, 97, 96, 90, 88])     # 0,180,...,900（900 低点 88）
         bars = {"3": [bar(i * 180, 100, 101, lo, 100)
                       for i, lo in enumerate(lows)]}
-        eng = BacktestEngine(bars, periods=["3"], slip_stop=3.0, slip_fallback=10.0,
+        eng = BacktestEngine(bars, periods=["3"], slip_stop=3.0,
+                             slip_fallback=kw.pop("slip_fallback", 10.0),
                              stop_entry_bar_floor=kw.pop("floor", True))
         sig = {"direction": "long", "periodX": "60", "markRes": "15",
                "time": 880, "price": 94.0, "nearSr": 94.0, "realtime": True,
@@ -341,24 +359,34 @@ class TestFillEntryBarSeed(unittest.TestCase):
         return trades[0]
 
     def test_seed_extends_stop(self):
-        # 进场 1080（15m 窗口 [900,1800)）：已收 bar 900 low=88 → 下限 88−3=85 < 支阻位 91
+        # 进场价=nextOpen=95；支阻 94−3=91；已收 low=88 → 下限 85；最大止损 95−10=85
+        # → 外推后夹在 85（与最大止损重合）
         tr = self._fill()
         self.assertEqual(tr["entryBarStart"], 900)
         self.assertEqual(tr["entryBarEnd"], 1800)
         self.assertEqual(tr["entryBarExt"], 88.0)
         self.assertEqual(tr["slipStopEff"], 3.0)
-        self.assertEqual(tr["stopRef"], 85.0)     # min(94−3, 88−3)
+        self.assertEqual(tr["maxLoss"], 85.0)
+        self.assertEqual(tr["stopRef"], 85.0)
+
+    def test_seed_floor_when_max_loss_wider(self):
+        # 最大止损放宽到 20 → maxLoss=75，外推 85 不必夹回
+        tr = self._fill(slip_fallback=20.0)
+        self.assertEqual(tr["maxLoss"], 75.0)
+        self.assertEqual(tr["stopRef"], 85.0)
 
     def test_boundary_entry_no_seed(self):
         # 进场恰在 15m 边界 900：窗口 [900,900) 空 → 无种子，下限暂不生效
         tr = self._fill(nextTime=900, lows=[100, 98, 97, 96, 88, 90])
         self.assertIsNone(tr["entryBarExt"])
-        self.assertEqual(tr["stopRef"], 91.0)     # 纯支阻位 94−3
+        self.assertEqual(tr["stopRef"], 91.0)     # 纯支阻位 94−3（大于最大止损 85）
+        self.assertEqual(tr["maxLoss"], 85.0)
 
     def test_floor_off_legacy(self):
         tr = self._fill(floor=False)
         self.assertIsNone(tr["entryBarStart"])
         self.assertEqual(tr["stopRef"], 91.0)
+        self.assertEqual(tr["maxLoss"], 85.0)
 
 
 if __name__ == "__main__":

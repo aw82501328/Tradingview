@@ -17,7 +17,8 @@ NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
 REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 LIMIT = 2 * 1024 * 1024
 HEADERS = ['参数路径', '参数说明', '数据类型', '参数值']
-LABELS = dict(symbol='品种', **{'from': '计算起始日期'}, periods='参与计算的周期',
+LABELS = dict(symbol='品种', symbols='品种（多选，首个另存 symbol）',
+              **{'from': '计算起始日期'}, periods='参与计算的周期',
               minTouchs='各周期触及次数', clusterParamsByPeriod='周期独立参数',
               manualLevels='人工支阻位（周期→价位）',
               clusterAtr='flip 聚类容差 × ATR', recentClusterAtr='recent 聚类容差 × ATR',

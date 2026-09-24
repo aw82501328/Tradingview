@@ -639,9 +639,6 @@ function buildCard(m) {
       { k: 'locate-after-bars', label: '定位后保留K线', type: 'number', def: '60',
         cfg: false, min: 0, step: 1,
         title: '点击信号行在图上定位时，出场（无出场则进场）之后再显示的K线根数' },
-      { k: 'sr_preset', label: '支阻预设', type: 'select', def: '', options: [
-        ['', '默认（引擎参数：密集区+BOLL）'],
-      ] },
     ],
     replay: [
       { k: 'start', label: '回放起点', type: 'date', def: '2026-08-01' },
@@ -754,7 +751,7 @@ function candidateBadges(r) {
   if (r.expectBi) b.push(['预期', '检测周期末笔反向、按预期够笔口径放行（M4）']);
   return b.map(([t, tip]) => `<span class="mini-badge" title="${tip}">${t}</span>`).join('');
 }
-// 出场类型：stopSr=支阻位止损（支阻位±止损滑点；无正确侧位兜底 进场价±兜底滑点）
+// 出场类型：stopSr=支阻位止损（支阻位±止损滑点，再按最大止损夹紧）
 //          | stopBe=保本止损（beStop=进场K线极值±保本滑点）| close=全平（顺势=有利方向破前高/低；
 //          逆势=形成段≥5合并K）；exits 含 half=平一半（顺势形成段≥5合并K）/breakeven=保本
 function exitTypeName(t) {
@@ -1923,7 +1920,7 @@ const BT_CFG_KEYS = ['symbol', 'from', 'to', 'periods', 'data_source', 'lead_day
                      'near', 'sr_preset', 'diverge_confirm', 'expect_bi', 'entry_macd_shrink', 'stop_entry_bar_floor', 'with_30s'];
 const BT_CFG_LABELS = { symbol: '品种', from: '起始日期', to: '结束日期', periods: '周期', data_source: '数据源',
                         lead_days: '预热提前(天)', warmup: '预热根数', lots: '手数', contract_mult: '合约乘数', slip_stop: '止损滑点', slip_stop_atr_k: '止损滑点ATR系数',
-                        slip_fallback: '兜底止损滑点', slip_fallback_atr_k: '兜底滑点ATR系数',
+                        slip_fallback: '最大止损', slip_fallback_atr_k: '最大止损ATR系数',
                         slip_be: '保本滑点', slip_be_atr_k: '保本滑点ATR系数',
                         near: '近支阻阈值', sr_preset: '支阻预设', diverge_confirm: '背驰进场', expect_bi: '检测周期够笔',
                         entry_macd_shrink: '柱缩闸', stop_entry_bar_floor: '止损下限', with_30s: '30秒级别' };
@@ -2634,21 +2631,7 @@ function bindBtRuns() {
 }
 
 // ---------- 初始化 ----------
-// 支阻预设下拉：选项来自 /api/sr/presets（与 /sr 调试页、工作台共享同一预设源）。
-// 叠加层（fib/BOLL）开关只存在于 /sr 预设里（srTypes）——回测页不再单独提供叠加开关：
-// 选预设 = 预设的 srTypes；默认 = 引擎默认（密集区+BOLL）。
-async function loadSrPresetOptions() {
-  const sel = document.querySelector('#card-backtest [data-cfg="sr_preset"]');
-  if (!sel) return;
-  try {
-    const r = await fetch('/api/sr/presets').then(x => x.json());
-    (r.presets || []).forEach(p => {
-      const o = document.createElement('option');
-      o.value = p.name; o.textContent = p.name;
-      sel.appendChild(o);
-    });
-  } catch (e) { /* 预设列表拉取失败：保留「默认」选项，不影响回测 */ }
-}
+// 支阻参数按回测品种从参数中心读取（不再提供「支阻预设」下拉）
 
 // 品种下拉（三张卡共用 data-cfg="symbol"）：选项 = 静态默认 ∪ 基础数据已入库品种，
 // 与基础数据页 refreshFetchSymbol 同口径（去重、保留当前选择）
@@ -2689,7 +2672,6 @@ async function init() {
     }
   });
   selectMode(selectedMode);
-  loadSrPresetOptions();
   loadStoreSymbols();
   el('mode-nav').onclick=e=>{const b=e.target.closest('[data-mode]');if(b)selectMode(b.dataset.mode)};
   if(parent!==window)parent.postMessage({type:'modes-ready'},location.origin);

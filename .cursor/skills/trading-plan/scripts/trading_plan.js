@@ -58,6 +58,10 @@ const RANGE_CFG = {
   rangeBiMult: numArg("range-bi-mult", 7.0),
   rangeBreakMult: numArg("range-break-mult", 1.0),
   rangeZsOn: getStrArg("range-zs-on", "1") !== "0",
+  // 2买/2卖 中间档容差 + 3类点强档开关（默认值与 py_chain/trading_plan.py 常量一致）
+  prevHighNearPts: numArg("prev-high-near-pts", 5.0),
+  secondNearPts: numArg("second-near-pts", 5.0),
+  thirdStrongTrend: getStrArg("third-strong-trend", "1") !== "0",
 };
 // 参数中心（WEB 参数配置页）整体覆盖；未知键在 JS 侧闲置无害
 const CHAN_CFG_JSON = getStrArg("chan-cfg", "");
@@ -158,54 +162,83 @@ function isRangeBound(bis, bars, atr, cfg) {
 // ============================================================
 
 /**
- * 依据买卖点类型生成交易策略（用户规则）。
+ * 依据买卖点类型生成交易策略（用户规则，2026-09-24 三档映射）。
  * 方向命名「X头Y」：X = 结构方向，Y = 操作方向。
+ * 三档（按序判定）：强档（过左高/左低不背驰）→ 中间档（仅 2买/2卖：前高/前低附近、
+ * 或未过前高/前低且回调回到点附近）→ 弱档（多头空/空头多）。
  *   1卖 → 空头空（结构空、操作做空），等待反弹后做2卖；
  *   1买 → 多头多（结构多、操作做多），等待回调后做2买；
- *   2买/类2买/3买 → 买点后过左高不背驰：多头多，等待回调后的新买点；
- *                    其他分类：多头空（结构多、逆势等一卖），等待高点附近的一卖；
- *   2卖/类2卖/3卖 → 卖点后过左低不背驰：空头空，等待反弹后的新卖点；
- *                    其他分类：空头多（结构空、逆势等一买），等待低点附近的一买。
+ *   2买/类2买 → 过左高不背驰：多头多，等待回调后的3买点；
+ *               2买 + 前高附近/回到2买点：多头多，等待回调后的类2买点；
+ *               其他：多头空（结构多、逆势等一卖），等待高点附近的一卖；
+ *   2卖/类2卖 → 过左低不背驰：空头空，等待反弹后的3卖点；
+ *               2卖 + 前低附近/回到2卖点：空头空，等待反弹后的类2卖点；
+ *               其他：空头多（结构空、逆势等一买），等待低点附近的一买；
+ *   3买/类3买 → 过左高不背驰 且 thirdStrongTrend 开（默认开，保持现状）：多头多，等待回调后的新买点；
+ *               其他（含开关关）：多头空，等待高点附近的一卖；
+ *   3卖/类3卖 → 过左低不背驰 且 thirdStrongTrend 开：空头空，等待反弹后的新卖点；
+ *               其他（含开关关）：空头多，等待低点附近的一买。
  * @param {string} res       周期名
  * @param {string} type      买卖点类型（如 "1卖"、"2买"）
  * @param {string} reason    原因描述
  * @param {string} label     图上标记文案
- * @param {string} cls       2/3类买卖点的后续分类：买点 "过左高不背驰"/"其他"，卖点 "过左低不背驰"/"其他"
+ * @param {string} cls       2/3类买卖点的后续分类（classifySecond 4 态）
+ * @param {object} cfg       可选参数覆盖（thirdStrongTrend；用于测试/参数中心透传）
  */
-function strategyOf(res, type, reason, label, cls) {
+function strategyOf(res, type, reason, label, cls, cfg) {
+  const thirdStrong = cfg && cfg.thirdStrongTrend != null ? cfg.thirdStrongTrend : true;
   const base = { res, reason, label };
   if (type === "1卖") return { ...base, direction: "空头空", strategy: "等待反弹后做2卖" };
   if (type === "1买") return { ...base, direction: "多头多", strategy: "等待回调后做2买" };
-  if (type === "2买" || type === "类2买" || type === "3买" || type === "类3买") {
-    if (cls === "过左高不背驰") return { ...base, direction: "多头多", strategy: "等待回调后的新买点" };
+  if (type === "2买" || type === "类2买") {
+    if (cls === "过左高不背驰") return { ...base, direction: "多头多", strategy: "等待回调后的3买点" };
+    if (type === "2买" && (cls === "前高附近" || cls === "回到2买点")) {
+      return { ...base, direction: "多头多", strategy: "等待回调后的类2买点" };
+    }
     return { ...base, direction: "多头空", strategy: "等待高点附近的一卖" };
   }
-  if (type === "2卖" || type === "类2卖" || type === "3卖" || type === "类3卖") {
-    if (cls === "过左低不背驰") return { ...base, direction: "空头空", strategy: "等待反弹后的新卖点" };
+  if (type === "2卖" || type === "类2卖") {
+    if (cls === "过左低不背驰") return { ...base, direction: "空头空", strategy: "等待反弹后的3卖点" };
+    if (type === "2卖" && (cls === "前低附近" || cls === "回到2卖点")) {
+      return { ...base, direction: "空头空", strategy: "等待反弹后的类2卖点" };
+    }
+    return { ...base, direction: "空头多", strategy: "等待低点附近的一买" };
+  }
+  if (type === "3买" || type === "类3买") {
+    if (thirdStrong && cls === "过左高不背驰") return { ...base, direction: "多头多", strategy: "等待回调后的新买点" };
+    return { ...base, direction: "多头空", strategy: "等待高点附近的一卖" };
+  }
+  if (type === "3卖" || type === "类3卖") {
+    if (thirdStrong && cls === "过左低不背驰") return { ...base, direction: "空头空", strategy: "等待反弹后的新卖点" };
     return { ...base, direction: "空头多", strategy: "等待低点附近的一买" };
   }
   return { ...base, direction: "观望", strategy: "趋势中" };
 }
 
 /**
- * 2/3 类买卖点的后续分类判定（用户规则）：
- *   买点（2买/类2买/3买）：买点后第一笔上涨是否「过左高」且「不背驰」。
+ * 2/3 类买卖点的后续分类判定（用户规则，2026-09-24 三档）：
+ *   强档——买点（2买/类2买/3买）：买点后第一笔上涨是否「过左高」且「不背驰」。
  *     左高 = 买点之前时间最近的前顶（上涨笔终点 / 下跌笔起点；同一时刻多端点取最高）；
  *     过左高 = after（买点后第一笔上涨）终点价 > 左高价；
  *     不背驰 = after 相对紧邻的前一同向上涨参照笔 isBiDiverge=false（MACD 动能未减弱）。
- *   卖点（2卖/类2卖/3卖）：对称判定。
- *     左低 = 卖点之前时间最近的前底（下跌笔终点 / 上涨笔起点；同一时刻多端点取最低）；
- *     过左低 = after（卖点后第一笔下跌）终点价 < 左低价；
- *     不背驰 = after 相对紧邻的前一同向下跌参照笔 isBiDiverge=false。
+ *   中间档（仅 2买/2卖 在 strategyOf 消费，这里一并返回）：
+ *     前高附近 = after 终点距左高 ≤ prevHighNearPts（绝对点数，含刚越过但背驰的情形）；
+ *     回到2买点 = 未过左高，且 after 之后最近一笔反向笔（回调/反弹，含形成中）
+ *                 终点价距点价 ≤ secondNearPts。
+ *   卖点（2卖/类2卖/3卖）：对称判定（左低取时间最近前底、参照取紧邻前一同向笔）。
  *   注：左高/左低取「时间最近」而非全史价格极值（全史极值可追溯到久远顶底，
  *   使 2卖 后须跌破数周前低点才算过左低，与「前高/前低」语义不符）；
  *   参照笔取紧邻前一同向笔（中间隔一次级反向运动即反弹/回调段），不按幅度过滤。
  * @param {Array} bis      本周期笔列表
  * @param {Array} macdArr  MACD 数组（可为空，为空时 isBiDiverge 视为不背驰）
  * @param {object} p       买卖点 { type, time, price }
- * @returns {string} "过左高不背驰" | "过左低不背驰" | "其他"
+ * @param {object} cfg     可选容差覆盖（prevHighNearPts/secondNearPts；缺省 5.0）
+ * @returns {string} "过左高不背驰" | "过左低不背驰" | "前高附近" | "前低附近" | "回到2买点" | "回到2卖点" | "其他"
  */
-function classifySecond(bis, macdArr, p) {
+function classifySecond(bis, macdArr, p, cfg) {
+  const pick = (k, def) => (cfg && cfg[k] != null ? cfg[k] : def);
+  const prevHighNear = pick("prevHighNearPts", 5.0);
+  const secondNear = pick("secondNearPts", 5.0);
   const wantUp = /买$/.test(p.type);
   // 买卖点之前时间最近的顶/底端点（同一时刻多端点取价格更极端者）
   const extreme = { time: -1, price: wantUp ? -Infinity : Infinity };
@@ -234,17 +267,33 @@ function classifySecond(bis, macdArr, p) {
   if (!after) return "其他";
   // 过左高 / 过左低
   const passed = wantUp ? after.endPrice > extreme.price : after.endPrice < extreme.price;
-  if (!passed) return "其他";
-  // 不背驰：after 相对紧邻的前一同向参照笔 isBiDiverge=false
-  let refer = null;
-  for (let i = bis.indexOf(after) - 1; i >= 0; i--) {
-    if (bis[i].type !== after.type) continue;
-    refer = bis[i]; // 紧邻前一同向笔（中间隔一次级反向运动，即同级别对照段）
-    break;
+  let diverge = false;
+  if (passed) {
+    // 不背驰：after 相对紧邻的前一同向参照笔 isBiDiverge=false
+    let refer = null;
+    for (let i = bis.indexOf(after) - 1; i >= 0; i--) {
+      if (bis[i].type !== after.type) continue;
+      refer = bis[i]; // 紧邻前一同向笔（中间隔一次级反向运动，即同级别对照段）
+      break;
+    }
+    diverge = refer ? isBiDiverge(after, refer, macdArr) : false;
   }
-  const diverge = refer ? isBiDiverge(after, refer, macdArr) : false;
-  if (diverge) return "其他";
-  return wantUp ? "过左高不背驰" : "过左低不背驰";
+  if (passed && !diverge) return wantUp ? "过左高不背驰" : "过左低不背驰";
+  // 中间档A：前高/前低附近（after 终点距左高/左低 ≤ prevHighNearPts，含刚越过但背驰的情形）
+  if (Math.abs(after.endPrice - extreme.price) <= prevHighNear) {
+    return wantUp ? "前高附近" : "前低附近";
+  }
+  // 中间档B：未过左高/左低，且之后最近一笔反向笔（回调/反弹，含形成中）终点回到点价附近
+  if (!passed) {
+    let pullback = null;
+    for (let i = bis.indexOf(after) + 1; i < bis.length; i++) {
+      if (bis[i].type === (wantUp ? "down" : "up")) pullback = bis[i]; // 取最近一笔回调/反弹
+    }
+    if (pullback && Math.abs(pullback.endPrice - p.price) <= secondNear) {
+      return wantUp ? "回到2买点" : "回到2卖点";
+    }
+  }
+  return "其他";
 }
 
 /**
@@ -348,8 +397,8 @@ function predictPlan(opts) {
   if (lastMatch) {
     const p = lastMatch.point;
     const reason = `找到最近买卖点 ${p.type} @ ${fmtT(p.time)} ${p.price.toFixed(2)}（最后一笔端点）`;
-    const cls = /^(2买|类2买|3买|类3买|2卖|类2卖|3卖|类3卖)$/.test(p.type) ? classifySecond(bis, macdArr, p) : "其他";
-    const out = strategyOf(res, p.type, reason, `趋势|${p.type}`, cls);
+    const cls = /^(2买|类2买|3买|类3买|2卖|类2卖|3卖|类3卖)$/.test(p.type) ? classifySecond(bis, macdArr, p, RANGE_CFG) : "其他";
+    const out = strategyOf(res, p.type, reason, `趋势|${p.type}`, cls, RANGE_CFG);
     out.strategyLabel = out.strategy;
     out.pointDesc = `${p.type}@${fmtT(p.time)}(${p.price.toFixed(2)})`;
     return out;
@@ -366,8 +415,8 @@ function predictPlan(opts) {
   if (prevMatch) {
     const p = prevMatch.point;
     const reason = `找到最近买卖点 ${p.type} @ ${fmtT(p.time)} ${p.price.toFixed(2)}（向前扫描最近笔端点）`;
-    const cls = /^(2买|类2买|3买|类3买|2卖|类2卖|3卖|类3卖)$/.test(p.type) ? classifySecond(bis, macdArr, p) : "其他";
-    const out = strategyOf(res, p.type, reason, `趋势|${p.type}`, cls);
+    const cls = /^(2买|类2买|3买|类3买|2卖|类2卖|3卖|类3卖)$/.test(p.type) ? classifySecond(bis, macdArr, p, RANGE_CFG) : "其他";
+    const out = strategyOf(res, p.type, reason, `趋势|${p.type}`, cls, RANGE_CFG);
     out.strategyLabel = out.strategy;
     out.pointDesc = `${p.type}@${fmtT(p.time)}(${p.price.toFixed(2)})`;
     return out;

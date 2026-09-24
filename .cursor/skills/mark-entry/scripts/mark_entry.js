@@ -11,8 +11,8 @@
  *
  * 出场规则（出场阶梯重构 2026-09-09，与 py_chain/backtest.py 引擎口径对齐；
  * 同向持仓互斥：同方向持仓未终局不再开新仓，多空互不影响）：
- *   - 止损位：正确侧最近支阻位 ± 止损滑点（short 上方+ / long 下方−）；无正确侧位
- *     兜底 进场价 ± 兜底滑点（永不为 null，不再有「不设止损」仓位）
+ *   - 止损位：正确侧最近支阻位 ± 止损滑点（short 上方+ / long 下方−）；再按最大止损
+ *     硬上限夹紧（多 ≥ 进场价−最大止损 / 空 ≤ 进场价+最大止损；无正确侧位即落此价）
  *   - 保本止损位 beStop：进场K线极值 ± 保本滑点（short: high+ / long: low−）
  *   - 止盈1 保本：背驰周期够笔（有利方向笔完成）→ 止损位上移至 beStop（仅状态迁移）
  *   - 止盈2 平一半（仅顺势：计划 direction ∈ 多头多/空头空）：检测周期首个有利方向、
@@ -32,10 +32,10 @@
  *   --near=K            靠近支阻位阈值（绝对价差，默认 10；2026-09-13 起不乘 ATR）
  *   --lots=N            每笔进场手数（仅落盘记录，默认 4；盈亏口径 = 价格差×方向×手数）
  *   --slip-stop=K       止损位滑点（绝对价格，默认 3）
- *   --slip-fallback=K   兜底止损滑点（无正确侧支阻位 → 进场价±该值，默认 10）
+ *   --slip-fallback=K   最大止损（买点止损≥进场价−该值，卖点≤进场价+该值，默认 10）
  *   --slip-be=K         保本滑点（beStop = 进场K线极值±该值，默认 3）
  *   --slip-stop-atr-k=K    止损滑点ATR系数（有效滑点=固定值+系数×ATR(14,背驰周期)，默认 0=关闭）
- *   --slip-fallback-atr-k=K 兜底止损滑点ATR系数（同上口径，默认 0）
+ *   --slip-fallback-atr-k=K 最大止损ATR系数（同上口径，默认 0）
  *   --slip-be-atr-k=K      保本滑点ATR系数（同上口径，默认 0）
  *   --dry               只计算不绘图
  *   --debug             打印调试信息
@@ -74,7 +74,7 @@ const NEAR = Math.max(parseFloat(getArg("near", 10)) || 10, 0.01);  // 绝对价
 const LOTS = Math.max(1, Math.round(getArg("lots", 4) || 4));
 // 止损位滑点：正确侧支阻位外侧偏移（short 上方+ / long 下方−）
 const SLIP_STOP = getArg("slip-stop", 3);
-// 兜底止损滑点：无正确侧支阻位时 止损 = 进场价 ± 该值（止损位永不为 null）
+// 最大止损：止损离进场价最远不超过该值（支阻位更远时收到进场价±该值；键名历史遗留）
 const SLIP_FALLBACK = getArg("slip-fallback", 10);
 // 保本滑点：beStop = 进场K线极值 ± 该值（short: high+ / long: low−）
 const SLIP_BE = getArg("slip-be", 3);
@@ -377,9 +377,12 @@ function sinkChainConfirm(periodData, X, pTime, pDir) {
 // ============================================================
 
 /**
- * 交易计划策略 → 进场策略映射（用户规则）。
+ * 交易计划策略 → 进场策略映射（用户规则，2026-09-24 三档文案扩展）。
  * plan.strategy 来自 trading-plan 的 strategyOf 输出；震荡/数据不足/趋势中无匹配
  * （方向=观望）等不产生进场策略，返回 null。
+ * 新增文案（2买/2卖 强档「等3买点/3卖点」、中间档「等类2买点/类2卖点」）与
+ * 「等待回调后的新买点/新卖点」（3类点强档，thirdStrongTrend 开）同走 waitBuy/waitSell
+ * 校验（够笔+以下级别背驰+支阻位附近，无专属条件）。
  * @param {string} planStrategy 交易计划 strategy 文本
  * @returns {null|{key:string, direction:string, label:string}} key 策略标识、direction long/short
  */
@@ -393,9 +396,17 @@ function entryStrategyOf(planStrategy) {
       return { key: "wait1Sell", direction: "short", label: "等待一卖" };
     case "等待低点附近的一买": // 状态=2/3卖+其他
       return { key: "wait1Buy", direction: "long", label: "等待一买" };
-    case "等待回调后的新买点": // 状态=2/3买+过左高不背驰
+    case "等待回调后的新买点": // 状态=3买/类3买+过左高不背驰（thirdStrongTrend 开）
       return { key: "waitBuy", direction: "long", label: "等待回调后买点" };
-    case "等待反弹后的新卖点": // 状态=2/3卖+过左低不背驰
+    case "等待反弹后的新卖点": // 状态=3卖/类3卖+过左低不背驰（thirdStrongTrend 开）
+      return { key: "waitSell", direction: "short", label: "等待反弹后卖点" };
+    case "等待回调后的3买点": // 状态=2买/类2买+过左高不背驰（强档）
+      return { key: "waitBuy", direction: "long", label: "等待回调后买点" };
+    case "等待回调后的类2买点": // 状态=2买+前高附近/回到2买点（中间档）
+      return { key: "waitBuy", direction: "long", label: "等待回调后买点" };
+    case "等待反弹后的3卖点": // 状态=2卖/类2卖+过左低不背驰（强档）
+      return { key: "waitSell", direction: "short", label: "等待反弹后卖点" };
+    case "等待反弹后的类2卖点": // 状态=2卖+前低附近/回到2卖点（中间档）
       return { key: "waitSell", direction: "short", label: "等待反弹后卖点" };
     default:
       return null;
@@ -631,18 +642,20 @@ function evaluateEntry(ctx, strategy) {
 // ============================================================
 
 /**
- * 方向感知的止损参考位（含滑点偏移与兜底，返回值永不为 null）：
+ * 方向感知的止损参考位（含滑点偏移与最大止损硬上限，返回值永不为 null）：
  * short 取进场价上方最近支阻位（阻力）+ slipStop、long 取下方最近（支撑）− slipStop。
  * 信号自带的 nearSr（进场校验时按绝对价差最近命中，不分上下方）若已在正确侧直接沿用；
  * 否则从 srLevels 重选正确侧最近位（进场判定逻辑不变，此处仅供出场止损参考）。
- * 无正确侧支阻位 → 兜底 进场价 ± slipFallback（不再有「不设止损」仓位）。
+ * 无正确侧支阻位 → 止损 = 进场价 ± slipFallback。
+ * 最大止损硬上限：多单止损 ≥ 进场价−有效最大止损，空单 ≤ 进场价+有效最大止损
+ * （支阻位更远时收到此价）。
  * @param {object} sig 进场信号（用 direction/price/nearSr）
  * @param {Array} srLevels 支阻位列表（每项含 price）
  * @param {number} [slipStop=SLIP_STOP] 止损位滑点（short + / long −）
- * @param {number} [slipFallback=SLIP_FALLBACK] 兜底止损滑点（short + / long −）
+ * @param {number} [slipFallback=SLIP_FALLBACK] 最大止损（绝对价格；键名历史遗留）
  * @param {number} [atr=0] 背驰周期 ATR(14)（2026-09-19 ATR 分量，缺省 0 = 纯固定滑点）
  * @param {number} [kStop=SLIP_STOP_ATR_K] 止损滑点 ATR 系数：有效滑点 = slipStop + kStop×atr（0=关闭）
- * @param {number} [kFallback=SLIP_FALLBACK_ATR_K] 兜底滑点 ATR 系数：有效滑点 = slipFallback + kFallback×atr
+ * @param {number} [kFallback=SLIP_FALLBACK_ATR_K] 最大止损 ATR 系数：有效 = slipFallback + kFallback×atr
  * @returns {number} 止损参考位价格（永不为 null）
  */
 function stopRefOf(sig, srLevels, slipStop = SLIP_STOP, slipFallback = SLIP_FALLBACK,
@@ -653,19 +666,23 @@ function stopRefOf(sig, srLevels, slipStop = SLIP_STOP, slipFallback = SLIP_FALL
   const sEff = slipStop + kStop * a;
   const fEff = slipFallback + kFallback * a;
   const slip = isShort ? sEff : -sEff;
+  const maxLoss = entryP + (isShort ? fEff : -fEff);
+  let ref;
   if (sig.nearSr != null && (isShort ? sig.nearSr > entryP : sig.nearSr < entryP)) {
-    return sig.nearSr + slip;
-  }
-  let best = null;
-  for (const sr of (srLevels || [])) {
-    const p = sr.price;
-    if (isShort ? p > entryP : p < entryP) {
-      const d = Math.abs(p - entryP);
-      if (!best || d < best.d) best = { p, d };
+    ref = sig.nearSr + slip;
+  } else {
+    let best = null;
+    for (const sr of (srLevels || [])) {
+      const p = sr.price;
+      if (isShort ? p > entryP : p < entryP) {
+        const d = Math.abs(p - entryP);
+        if (!best || d < best.d) best = { p, d };
+      }
     }
+    ref = best ? best.p + slip : maxLoss;
   }
-  if (!best) return entryP + (isShort ? fEff : -fEff);
-  return best.p + slip;
+  // 支阻位更远时收到最大止损价（多抬高 / 空压低）
+  return isShort ? Math.min(ref, maxLoss) : Math.max(ref, maxLoss);
 }
 
 /**

@@ -145,7 +145,7 @@ class AnalysisManager:
         # keep/near/slip_*：参数配置页统一管理（参数中心为唯一编辑入口），每次 configure
         # 强制刷新为参数中心当前值 → state.json/job cfg 快照随之更新，参数变化后旧结果
         # 走现有 resultsStale 机制标记"本轮未更新"。
-        pm = param_center.effective_all()
+        pm = param_center.effective_all(candidate["symbol"])
         candidate["keep"] = int(pm["points"]["keep"])
         candidate["near"] = float(pm["entry"]["near"])
         if not 1 <= candidate["keep"] <= 100 or not math.isfinite(candidate["near"]) or candidate["near"] <= 0:
@@ -161,13 +161,16 @@ class AnalysisManager:
             if not math.isfinite(candidate[k]) or candidate[k] < 0:
                 raise ValueError("滑点ATR系数须不小于0")
         candidate["with30s"] = candidate.get("with30s") is True
-        sr = copy.deepcopy(candidate.get("sr") or {"srTypes": ["cluster", "boll"]})
+        # 支阻：服务端按品种从参数中心填入（不再依赖客户端传入整份预设）
+        sr = copy.deepcopy(param_center.effective_sr(candidate["symbol"]))
+        # 丢掉可能残留的多选 symbols，避免 normalize 把 symbol 盖成 symbols[0]
+        sr.pop("symbols", None)
         sr.update(symbol=candidate["symbol"], **{"from": candidate["from"]})
         sr = self.normalize_sr(sr)
         if any(p not in PERIODS for p in sr["periods"]):
-            raise ValueError("完整分析支持D/240/60/15/3，请选择不含周线的支阻预设")
+            raise ValueError("完整分析支持D/240/60/15/3，请在参数配置中调整该品种支阻周期（勿含周线）")
         candidate["sr"] = sr
-        # JSON serialization also rejects non-finite nested preset values.
+        # JSON serialization also rejects non-finite nested values.
         json.dumps(candidate, allow_nan=False)
         with self.lock:
             self.cfg = candidate
@@ -349,8 +352,8 @@ class AnalysisManager:
                    str(ROOT / ".cursor" / "skills" / skill / "scripts" / (script + ".js")), "--from=" + cfg["from"]]
         # 参数中心（参数配置页）：--chan-cfg 透传拼合 CHAN_CFG（画笔/买卖点/进出场；
         # JS 子进程无法共享本进程全局 override，未知键在 JS 侧闲置不报错）；各模块专属参数按 stage 追加
-        pm = param_center.effective_all()
-        command.append("--chan-cfg=" + json.dumps(param_center.chan_cfg_effective(),
+        pm = param_center.effective_all(cfg["symbol"])
+        command.append("--chan-cfg=" + json.dumps(param_center.chan_cfg_effective(cfg["symbol"]),
                                                   separators=(",", ":")))
         if cfg["with30s"] and stage in ("bi", "entry"):
             command.append("--with-30s")
@@ -373,6 +376,10 @@ class AnalysisManager:
             # 两类震荡开关：True→1 / False→0（JS 侧 "0" 为关，缺省开）
             command.append("--range-bound-on=" + ("1" if pm["plan"].get("rangeBoundOn", True) else "0"))
             command.append("--range-zs-on=" + ("1" if pm["plan"].get("rangeZsOn", True) else "0"))
+            # 2买/2卖 中间档容差 + 3类点强档开关（trading_plan.js RANGE_CFG 同名解析）
+            command.append("--prev-high-near-pts=" + str(pm["plan"].get("prevHighNearPts", 5.0)))
+            command.append("--second-near-pts=" + str(pm["plan"].get("secondNearPts", 5.0)))
+            command.append("--third-strong-trend=" + ("1" if pm["plan"].get("thirdStrongTrend", True) else "0"))
         if stage == "entry":
             command.append("--near=" + str(cfg["near"]))
             command.append("--slip-stop=" + str(cfg.get("slip_stop", 3.0)))

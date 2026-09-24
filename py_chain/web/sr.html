@@ -76,13 +76,6 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
 .scrollbox{max-height:460px;overflow:auto;border:1px solid var(--border);border-radius:4px}
 .filterbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px;font-size:12px}
 .filterbar label{color:var(--muted)}
-.plist{border:1px solid var(--border);border-radius:4px;max-height:168px;overflow:auto;margin-top:6px;background:#0f1219}
-.plist-item{display:flex;align-items:center;gap:4px;padding:2px 6px;border-bottom:1px solid var(--border)}
-.plist-item:last-child{border-bottom:none}
-.plist-item.on{background:#1d2a44}
-.plist-item .nm{flex:1;min-width:35px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;background:transparent;border:none;color:var(--text);padding:3px 4px;cursor:pointer;font-size:12px}
-.plist-item .nm:hover{color:#fff}
-.plist-empty{color:var(--muted);padding:8px;font-size:11px}
 .src-sel{font-size:11px;padding:2px 4px}
 tr.edit-sub td{white-space:normal;background:#141926;padding:5px 9px 7px}
 tr.edit-sub:hover td{background:#1a2030}
@@ -93,6 +86,15 @@ tr.edit-sub:hover td{background:#1a2030}
 .manual-input{width:100%;font-family:Consolas,Menlo,monospace}
 .manual-meta{display:flex;justify-content:space-between;gap:8px;color:var(--muted);font-size:11px;margin-top:3px}
 .mono{font-family:Consolas,Menlo,monospace;font-variant-numeric:tabular-nums}
+/* 顶层品种 TAB（独立打开时；embed 由父页控制，本页 TAB 隐藏） */
+.stabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin:10px 0 0;flex-wrap:wrap}
+.stabs button{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;
+  color:var(--muted);font-size:13px;padding:8px 16px;cursor:pointer}
+.stabs button:hover{color:var(--text)}
+.stabs button.on{border-color:#55d7b0;color:#92d1b4;font-weight:600}
+.stabs button .scode{color:var(--muted);font-size:11px;margin-left:6px;font-weight:400}
+.stabs button.on .scode{color:#6aa89a}
+#cfg-symbol-label{color:var(--text);font-size:12.5px;padding:2px 0}
 @media (max-width:720px){.slot .param-grid{grid-template-columns:1fr 1fr}}
 </style>
 <link rel="stylesheet" href="/sr-tune.css">
@@ -103,26 +105,33 @@ tr.edit-sub:hover td{background:#1a2030}
 <h1>支阻位参数调试控制台 <span class="badge idle" id="badge-busy">idle</span>
   <a href="/" style="float:right;font-size:13px;">← 三模式控制台</a>
 </h1>
-<div class="statusline">支阻位（系统密集区/人工输入，逐周期二选一）+ 叠加层（黄金分割/BOLL，开关即叠加）· 不合并各周期独立 · 人工位全部画出 ·
+<div class="statusline">支阻位（系统密集区/人工输入，逐周期二选一）+ 叠加层（黄金分割/BOLL，开关即叠加）· 不合并各周期独立 · 人工位全部画出 · 按品种独立存储 ·
   <b id="occupy"></b></div>
+
+<!-- 独立打开时本页顶层品种 TAB；embed=1 时隐藏，听父页 postMessage -->
+<nav class="stabs" id="symbolTabs" aria-label="品种"></nav>
 
 <!-- 单网格两列：左=数据+显示/绘图+周期与参数，右=计算设置（列内紧挨无空隙） -->
 <div class="grid">
 <!-- ============ 左列 ============ -->
 <div>
-  <!-- 数据 -->
+  <!-- 数据（单品种：来自上方 TAB / URL / 父页） -->
   <div class="card">
     <h2>数据</h2>
-    <div class="row"><label>品种</label><input type="text" id="cfg-symbol" value="OANDA:XAUUSD">
+    <div class="row"><label>品种</label>
+      <span id="cfg-symbol-label" class="mono">黄金 · OANDA:XAUUSD</span>
       <label>起始</label><input type="text" id="cfg-from" value="2026-07-02"></div>
     <div class="row">
       <button class="primary" id="btn-compute">计算（缓存优先）</button>
       <button class="danger" id="btn-refresh" title="从 TradingView 全量重拉所选周期并计算（W 首拉可能数分钟）">刷新数据并计算</button>
+      <button class="primary" id="btn-save-module" title="保存当前表单到该品种参数桶">保存本模块</button>
+      <button id="btn-reset-module" title="恢复该品种支阻参数为默认">恢复默认</button>
     </div>
     <div class="merge-tip" id="cache-note"></div>
+    <div class="merge-tip" id="module-status"></div>
   </div>
 
-  <!-- 显示/绘图 + 预设（紧挨数据下方） -->
+  <!-- 显示/绘图 -->
   <div class="card">
     <h2>显示 / 绘图</h2>
     <div class="row">
@@ -135,17 +144,6 @@ tr.edit-sub:hover td{background:#1a2030}
       <button class="danger" id="btn-clear">清除本模块线</button>
     </div>
     <div class="merge-tip" id="raw-note" style="display:none;">叠加 RAW· 本周期原始候选线：每张图只显示 本图周期 的全部候选（密集区黄 / 黄金分割蓝 / BOLL 青），与灰线同框对照；只画距现价 ≤ 距离上限×本周期ATR 的候选。</div>
-    <div class="row" style="border-top:1px solid var(--border);margin-top:8px;padding-top:7px">
-      <span style="color:#fff;font-size:12px">预设</span>
-      <input type="text" id="preset-name" placeholder="新预设名称" maxlength="40">
-      <button class="sm primary" id="btn-preset-save">新建</button>
-    </div>
-    <div class="merge-tip">点名称载入 · 行内「保存」=用当前参数改写该项</div>
-    <input type="file" id="preset-excel-file" accept=".xlsx" hidden>
-    <div id="preset-excel-status" class="merge-tip" role="status"></div>
-    <button type="button" class="sm" id="preset-excel-new">导入 Excel 为新预设</button>
-    <div class="plist" id="preset-list"></div>
-    <div class="merge-tip" id="loaded-badge"></div>
   </div>
 
   <!-- 级别矩阵 -->
@@ -292,8 +290,9 @@ tr.edit-sub:hover td{background:#1a2030}
     </fieldset>
   </div>
 
-  <!-- 结果明细表 -->
+  <!-- 结果明细表（单品种） -->
   <div class="card">
+    <div class="statusline" id="sym-note" style="display:none"></div>
     <h2>结果明细表
       <span style="float:right;font-weight:400;font-size:12px">
         <span class="muted">过滤:</span>
@@ -325,6 +324,7 @@ tr.edit-sub:hover td{background:#1a2030}
       <li>不合并 = 全部候选逐条进全量候选池（价格=原始识别价，同价位不并条、不做加权平均；手动位与人工/系统支阻位同池）</li>
       <li>选取上图 = 系统周期：距现价最近上/下各 sideCount 条、≤距离上限×本周期ATR；<b>人工周期：输入几条画几条</b>（不受条数/距离限制），叠加层仍就近选取</li>
       <li>人工输入未填价位 = 该周期没有支阻位（不画线、不进候选池，叠加层照常）</li>
+      <li>按品种独立（2026-09-24）：顶层品种 TAB / 父页品种决定当前桶；计算与画图仅针对当前单品种；「保存本模块」写入该品种参数中心桶，自动调参「应用最优」只回写表单</li>
     </ul>
   </details>
   </div>
@@ -335,12 +335,51 @@ tr.edit-sub:hover td{background:#1a2030}
 const LEVELS = ['W', 'D', '240', '60', '15', '3'];
 const LEVEL_NAME = { W: 'W 周线', D: 'D 日线', 240: '240 4H', 60: '60 1H', 15: '15 15m', 3: '3 3m' };
 const FAMILY = { cluster: '密集区', fib: '黄金分割', boll: 'BOLL', manual: '手动位' };
+// 五品种（与参数中心 SYMBOL_META / params.html .stabs 一致）
+const SYMBOLS = [
+  { id: 'XAUUSD', label: '黄金', code: 'OANDA:XAUUSD' },
+  { id: 'XAGUSD', label: '白银', code: 'OANDA:XAGUSD' },
+  { id: 'USOIL',  label: '原油', code: 'TVC:USOIL' },
+  { id: 'BTCUSD', label: 'BTC',  code: 'BITSTAMP:BTCUSD' },
+  { id: 'NAS100', label: '纳指', code: 'FX:NAS100' },
+];
+const IS_EMBED = new URLSearchParams(location.search).has('embed');
+
+/** 解析品种桶 id（接受 XAUUSD 或 OANDA:XAUUSD） */
+function resolveSid(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  const byId = SYMBOLS.find(x => x.id === s || x.id === s.toUpperCase());
+  if (byId) return byId.id;
+  const suf = s.includes(':') ? s.split(':').pop().toUpperCase() : s.toUpperCase();
+  return SYMBOLS.some(x => x.id === suf) ? suf : null;
+}
+function metaOf(sid) { return SYMBOLS.find(x => x.id === sid) || SYMBOLS[0]; }
+function currentCode() { return metaOf(currentSid).code; }
+
+let currentSid = resolveSid(new URLSearchParams(location.search).get('symbol')) || 'XAUUSD';
+
+function drawSymbolTabs() {
+  const box = el('symbolTabs');
+  if (!box) return;
+  box.hidden = IS_EMBED;
+  if (IS_EMBED) { box.innerHTML = ''; return; }
+  box.innerHTML = SYMBOLS.map(s =>
+    `<button type="button" data-sid="${s.id}" class="${s.id === currentSid ? 'on' : ''}"
+      aria-pressed="${s.id === currentSid}">${s.label}<span class="scode">${s.id}</span></button>`
+  ).join('');
+}
+function updateSymbolLabel() {
+  const m = metaOf(currentSid);
+  const lab = el('cfg-symbol-label');
+  if (lab) lab.textContent = `${m.label} · ${m.code}`;
+}
 
 const state = { busy: null, active: null, hasResult: false, computedAt: null,
                 cfg: null, meta: null, periods: {}, merged: [], drawn: {}, current: null,
                 tab: 'periods', watchdogs: {},
                 sessionComputed: false,   // 本页面会话内是否真实计算成功（画图解锁的唯一依据）
-                loadedPreset: null };     // 当前列表高亮的预设名
+                results: {}, viewSymbol: null };
 let logs = [];
 let clusterParamsByPeriod = {};
 const defaultMinTouchs = {W:4,D:4,'240':4,'60':3,'15':3,'3':8};
@@ -449,7 +488,8 @@ function updateButtons() {
   el('btn-refresh').disabled = occupied;
 
   el('btn-draw').disabled = occupied || !!drawForbidden;
-  el('btn-draw').title = drawForbidden || '把当前计算结果画到 TradingView';
+  el('btn-draw').title = drawForbidden
+    || `把 ${currentCode()} 的结果画到 TradingView（图表会切到该品种）`;
   el('btn-clear').disabled = occupied;
   el('occupy').textContent = state.active ? `三模式：${state.active} 运行中 —— 支阻操作已禁用` : '';
   // 全类型关闭时禁算
@@ -458,6 +498,12 @@ function updateButtons() {
     el('btn-compute').disabled = true; el('btn-refresh').disabled = true;
 
   }
+  // 保存/恢复：忙时禁用
+  const saveBtn = el('btn-save-module'), resetBtn = el('btn-reset-module');
+  if (saveBtn) saveBtn.disabled = occupied;
+  if (resetBtn) resetBtn.disabled = occupied;
+  // 品种 TAB：调参运行中禁用切换
+  qa('#symbolTabs button').forEach(b => { b.disabled = occupied; });
   syncParamDim();
 }
 function syncParamDim() {
@@ -473,8 +519,8 @@ function syncParamDim() {
 
 // ---------- 配置收集 / 应用 ----------
 function collectCfg() {
-  const cfg = { symbol: el('cfg-symbol').value.trim() || 'OANDA:XAUUSD',
-                from: el('cfg-from').value.trim() };
+  // 单品种：只发 symbol（不发 symbols 多选键）；保存前同样去掉
+  const cfg = { symbol: currentCode(), from: el('cfg-from').value.trim() };
   cfg.periods = qa('.chk-res:checked').map(c => c.closest('tr').dataset.res);
   cfg.minTouchs = {...minTouchsByPeriod};
   Object.assign(cfg, clusterDefaults);
@@ -509,7 +555,13 @@ function cfgSnapshot() {
 let lastComputedSnap = null;
 function applyCfgToUI(cfg) {
   clusterParamsByPeriod = cloneJSON(cfg.clusterParamsByPeriod);
-  el('cfg-symbol').value = cfg.symbol || 'OANDA:XAUUSD';
+  // 品种回填：优先 symbols[0] / symbol → 解析为五品种桶 id
+  const rawSym = Array.isArray(cfg.symbols) ? cfg.symbols[0]
+    : (typeof cfg.symbol === 'string' ? cfg.symbol : '');
+  const sid = resolveSid(rawSym);
+  if (sid) currentSid = sid;
+  drawSymbolTabs();
+  updateSymbolLabel();
   if (cfg.from) el('cfg-from').value = cfg.from;
   const want = new Set(cfg.periods || []);
   qa('.chk-res').forEach(c => { c.checked = want.has(c.closest('tr').dataset.res); });
@@ -561,108 +613,60 @@ function noteRawToggle() {
   el('raw-note').style.display = el('d-raw').checked ? 'block' : 'none';
 }
 
-// ---------- 预设（列表：点名称载入 / 行内保存与删除） ----------
-function markLoadedPreset(name) {
-  state.loadedPreset = name || null;
-  qa('#preset-list .plist-item').forEach(row => {
-    row.classList.toggle('on', row.dataset.name === name);
-  });
-  el('loaded-badge').textContent = name ? ('已载入: ' + name) : '';
-  el('loaded-badge').style.color = name ? 'var(--warn)' : '';
+// ---------- 参数中心：按品种加载 / 保存本模块 / 恢复默认 ----------
+function moduleStatus(text, ok) {
+  const eln = el('module-status');
+  if (!eln) return;
+  eln.textContent = text || '';
+  eln.style.color = ok === false ? 'var(--warn)' : (ok ? 'var(--ok)' : 'var(--muted)');
 }
-async function refreshPresetList() {
-  const r = await api('/api/sr/presets', undefined, 'GET');
-  const box = el('preset-list');
+/** 从参数中心载入当前品种桶的 effective 到表单（切品种 / 恢复默认后） */
+async function loadSymbolCfg(sid) {
+  const r = await api('/api/params', undefined, 'GET');
+  if (!r || !r.modules || !r.modules.sr) { log('无法读取参数中心支阻配置', true); return; }
+  const bucket = (r.modules.sr.bySymbol || {})[sid] || {};
+  const eff = bucket.effective || r.modules.sr.defaults || {};
+  const fromKeep = el('cfg-from').value.trim();
+  applyCfgToUI({ ...eff, symbol: metaOf(sid).code, from: fromKeep || eff.from });
+  const when = bucket.savedAt ? ' · 最近保存 ' + fmtTime(bucket.savedAt) : '';
+  moduleStatus(metaOf(sid).label + ' 参数已载入' + when, true);
+}
+/** 切换当前品种：更新 TAB/标签，载入该品种桶（计算态清空，需重算） */
+async function setCurrentSymbol(sidOrCode, { reload = true } = {}) {
+  const sid = resolveSid(sidOrCode);
+  if (!sid) { log('未知品种：' + sidOrCode, true); return; }
+  if (sid === currentSid && !reload) return;
+  currentSid = sid;
+  drawSymbolTabs();
+  updateSymbolLabel();
+  // 切品种后本会话计算结果不再对应当前表单
+  state.sessionComputed = false;
+  state.hasResult = false;
+  state.results = {};
+  state.viewSymbol = null;
+  lastComputedSnap = null;
+  if (reload) await loadSymbolCfg(sid);
+  else { updateSymbolLabel(); updateButtons(); }
+}
+/** 保存本模块 → POST /api/params/sr（去掉 symbols 多选键，保留单 symbol） */
+async function saveModule() {
+  if (busyNow() || anyModeRunning()) return;
+  const cfg = collectCfg();
+  delete cfg.symbols;
+  const r = await api('/api/params/sr', { cfg, symbol: currentSid });
   if (!r) return;
-  const presets = r.presets || [];
-  if (!presets.length) {
-    box.innerHTML = '<div class="plist-empty">暂无预设，输入名称后点新建，或导入 Excel</div>';
-    return;
-  }
-  box.innerHTML = presets.map(p => {
-    const n = esc(p.name);
-    return `<div class="plist-item" data-name="${n}">` +
-      `<button type="button" class="nm" data-act="load" title="载入">${n}</button>` +
-      `<button type="button" class="sm" data-act="save">保存</button>` +
-      `<button type="button" class="sm danger" data-act="del">删除</button>` +
-      `<button type="button" class="sm" data-act="import" title="从 Excel 更新此预设">导入</button>` +
-      `<button type="button" class="sm" data-act="export" title="导出此预设已保存的全部参数">导出</button></div>`;
-  }).join('');
-  markLoadedPreset(state.loadedPreset);
+  moduleStatus(metaOf(currentSid).label + ' 已保存，下一轮任务生效', true);
+  log('已保存支阻参数到品种桶 ' + currentSid);
 }
-let excelTarget = '', excelBusy = false;
-function excelStatus(text, error=false) {
-  el('preset-excel-status').textContent=text;
-  el('preset-excel-status').style.color=error?'var(--warn)':'var(--ok)';
-}
-function choosePresetExcel(name) {
-  if(excelBusy)return;
-  excelTarget=name;el('preset-excel-file').value='';el('preset-excel-file').click();
-}
-async function exportPresetExcel(name) {
-  if(excelBusy)return;excelBusy=true;
-  try {
-    const r=await fetch('/api/sr/presets/excel/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
-    if(!r.ok)throw Error((await r.json()).error||'导出失败');
-    const url=URL.createObjectURL(await r.blob()),a=document.createElement('a');
-    a.href=url;a.download=name.replace(/[\\/:*?"<>|]/g,'_')+'.xlsx';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);
-    excelStatus('已导出 '+name+' 的全部已保存参数。');
-  } catch(e){excelStatus(e.message,true);} finally{excelBusy=false;}
-}
-async function importPresetExcel() {
-  const file=el('preset-excel-file').files[0];if(!file||excelBusy)return;
-  if(!/\.xlsx$/i.test(file.name)||file.size>2*1024*1024){excelStatus('请选择不超过 2 MB 的 .xlsx 文件。',true);return;}
-  excelBusy=true;excelStatus('正在校验并导入…');
-  try {
-    let target=excelTarget;
-    if(!target){
-      const existing=await api('/api/sr/presets',undefined,'GET');if(!existing)throw Error('无法读取预设列表');
-      const base=(el('preset-name').value.trim()||file.name.replace(/\.xlsx$/i,'')).slice(0,34)||'导入预设';target=base;let i=1;
-      while((existing.presets||[]).some(p=>p.name===target))target=base+' ('+(i++)+')';
-    }
-    const r=await fetch('/api/sr/presets/excel/import?name='+encodeURIComponent(target),{method:'POST',headers:{'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'},body:await file.arrayBuffer()});
-    const data=await r.json();if(!r.ok||!data.ok)throw Error(data.error||'导入失败');
-    applyCfgToUI(data.cfg);el('preset-name').value=data.name;state.loadedPreset=data.name;await refreshPresetList();
-    excelStatus('已导入并载入 '+data.name+'，计算后生效。');
-  } catch(e){excelStatus(e.message,true);} finally{excelBusy=false;el('preset-excel-file').value='';}
-}
-async function savePreset(name) {
-  name = (name || el('preset-name').value).trim();
-  if (!name) { log('请输入预设名', true); return; }
-  const r = await api('/api/sr/presets', { name, cfg: collectCfg() });
-  if (r) {
-    log((r.overwritten ? '预设已保存：' : '预设已新建：') + name);
-    el('preset-name').value = '';
-    state.loadedPreset = name;
-    await refreshPresetList();
-  }
-}
-async function loadPreset(name) {
-  if (!name) return;
-  const r = await api('/api/sr/presets', undefined, 'GET');
+/** 恢复默认 → POST /api/params/sr/reset，再载入表单 */
+async function resetModule() {
+  if (busyNow() || anyModeRunning()) return;
+  if (!window.confirm('恢复「' + metaOf(currentSid).label + '」支阻参数为默认值？')) return;
+  const r = await api('/api/params/sr/reset', { symbol: currentSid });
   if (!r) return;
-  const p = (r.presets || []).find(x => x.name === name);
-  if (!p) { log('预设不存在：' + name, true); await refreshPresetList(); return; }
-  try {
-    applyCfgToUI(p.cfg);
-  } catch (e) {
-    // 回填失败必须可见（异步未捕获会变成「点了没反应」），并保留原始报错便于定位
-    log('载入预设失败：' + (e && e.message || e), true);
-    console.error(e);
-    return;
-  }
-  markLoadedPreset(name);
-  el('preset-name').value = name;
-  log(`已载入预设：${name}`);
-}
-async function delPreset(name) {
-  if (!name) return;
-  const r = await api('/api/sr/presets?name=' + encodeURIComponent(name), undefined, 'DELETE');
-  if (r) {
-    log(`已删除预设：${name}`);
-    if (state.loadedPreset === name) markLoadedPreset(null);
-    await refreshPresetList();
-  }
+  applyCfgToUI({ ...(r.effective || {}), symbol: currentCode(), from: el('cfg-from').value.trim() });
+  moduleStatus(metaOf(currentSid).label + ' 已恢复默认', true);
+  log('已恢复品种桶 ' + currentSid + ' 为默认');
 }
 
 // ---------- 结果渲染 ----------
@@ -710,6 +714,7 @@ function rowPass(f, drawnOnly, L) {
   return drawnSet().has(L + '|' + Number(f.price).toFixed(4));
 }
 function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function escAttr(s) { return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 // JSON 深拷贝（替代 structuredClone：老浏览器无此 API，缺失会让预设载入静默失败）
 function cloneJSON(o) { return JSON.parse(JSON.stringify(o == null ? {} : o)); }
 function renderTable() {
@@ -802,18 +807,42 @@ function updateLevelFilter() {
 async function fetchResult() {
   const r = await api('/api/sr/result', undefined, 'GET');
   if (!r || !r.has_result) return;
-  state.cfg = r.cfg; state.meta = r.meta; state.current = r.current_price;
-  state.periods = r.periods || {}; state.merged = r.merged || [];
-  state.drawn = r.drawn_by_period || {};
+  state.cfg = r.cfg;
   state.hasResult = true; state.computedAt = r.computed_at;
+  state.results = r.by_symbol || {};
   lastComputedSnap = cfgSnapshot();
-  // 级别 ATR 回填 + minTouch 显示已就位
+  // 单品种：优先当前品种 code，否则结果里第一个成功键
+  const syms = Object.keys(state.results);
+  const want = currentCode();
+  state.viewSymbol = syms.includes(want) ? want
+    : (syms.find(s => state.results[s] && state.results[s].ok) || syms[0] || want);
+  applyResultView(state.viewSymbol);
+  updateButtons();
+  log(`已载入结果（${fmtTime(state.computedAt)} 算）：${state.viewSymbol || '—'}`);
+}
+
+// 把某个品种的结果视图套到页面状态（明细表/ATR/覆盖提示/距现价列全部随之切换）
+function applyResultView(sym) {
+  const view = state.results[sym] || {};
+  state.viewSymbol = sym;
+  if (!view.ok) {
+    state.meta = null; state.periods = {}; state.merged = []; state.drawn = {}; state.current = null;
+    el('sym-note').textContent = view.error ? `该品种计算失败：${view.error}` : '';
+    el('sym-note').style.display = view.error ? '' : 'none';
+    qa('#tbl-levels tbody tr').forEach(tr => { tr.querySelector('.atr').textContent = '—'; });
+    renderTable();
+    return;
+  }
+  el('sym-note').style.display = 'none';
+  state.meta = view.meta; state.current = view.current_price;
+  state.periods = view.periods || {}; state.merged = view.merged || [];
+  state.drawn = view.drawn_by_period || {};
+  // 级别 ATR 回填
   qa('#tbl-levels tbody tr').forEach(tr => {
-    const a = (state.meta.per_level_atr || {})[tr.dataset.res];
+    const a = ((state.meta || {}).per_level_atr || {})[tr.dataset.res];
     tr.querySelector('.atr').textContent = a != null ? fmt(a) : '—';
   });
-  // 覆盖提示
-  const cov = state.meta.coverage || {};
+  const cov = (state.meta || {}).coverage || {};
   const partial = LEVELS.filter(l => cov[l] === 'partial');
   el('cache-note').textContent = partial.length
     ? `⚠ 数据源深度有限，${partial.join('/')} 早于所填起始日期的历史不可得（按可得全量计算）`
@@ -821,27 +850,28 @@ async function fetchResult() {
   el('cache-note').style.color = partial.length ? 'var(--warn)' : 'var(--ok)';
   checkStale();
   renderTable();
-  updateButtons();
-  const d = new Date((state.computedAt + 8 * 3600) * 1000);
-  log(`已载入结果：merged ${state.merged.length} · 图上 ${Object.values(state.drawn).reduce((s, v) => s + v.length, 0)}（${fmtTime(state.computedAt)} 算）`);
 }
 
 // ---------- 操作 ----------
 async function doCompute(mode) {
   if (busyNow() || anyModeRunning()) return;
-  setBusy(mode === 'refresh' ? 'refresh' : 'compute', 600000); // 拉取大周期可能数分钟
+  setBusy(mode === 'refresh' ? 'refresh' : 'compute', 600000);
   el('prog-bar').style.width = '2%';
   el('prog-label').textContent = '取数检查…';
-  const r = await api('/api/sr/compute', { cfg: collectCfg(), mode });
+  const cfg = collectCfg();
+  delete cfg.symbols;  // 只发单品种
+  const r = await api('/api/sr/compute', { cfg, mode });
   if (!r) setBusy(null);
 }
 async function doDraw() {
   if (busyNow() || anyModeRunning()) return;
   if (!state.sessionComputed) { log('请先点「计算」得到结果后再画图', true); return; }
-  setBusy('draw', 180000);
+  setBusy('draw', 240000);
   const cfg = collectCfg();
+  const sym = state.viewSymbol || cfg.symbol;
   const r = await api('/api/sr/draw', { color: cfg.color, draw_text: cfg.draw_text,
-                                        draw_raw: cfg.draw_raw, clear_first: true });
+                                        draw_raw: cfg.draw_raw, clear_first: true,
+                                        symbol: sym });
   if (!r) setBusy(null);
 }
 async function doClear() {
@@ -898,8 +928,9 @@ function connectSSE() {
     const pct = d.pct != null ? d.pct : 0;
     el('prog-bar').style.width = pct + '%';
     const ph = { fetch: '取数', bis: '重建笔', compute: '计算', done: '完成' }[d.phase] || d.phase;
-    el('prog-label').textContent = d.total ? `${ph} ${d.current}/${d.total} (${pct}%)`
-                                            : `${ph}… (${pct}%)`;
+    const tag = d.symbol ? `[${d.symbol}] ` : '';
+    el('prog-label').textContent = d.total ? `${tag}${ph} ${d.current}/${d.total} (${pct}%)`
+                                            : `${tag}${ph}… (${pct}%)`;
   });
   es.addEventListener('sr_done', e => {
     const d = JSON.parse(e.data);
@@ -920,6 +951,8 @@ function connectSSE() {
         state.computedAt = Date.now() / 1000 | 0;
         updateButtons();
       }
+      const fails = Object.entries(d.per_symbol || {}).filter(([, v]) => !v.ok);
+      if (fails.length) log('计算失败：' + fails.map(([s, v]) => `${s}（${v.error}）`).join('；'), true);
       fetchResult();
     } else if (d.op === 'draw') {
       el('prog-label').textContent = '';
@@ -936,24 +969,10 @@ function connectSSE() {
 function bindEvents() {
   el('btn-compute').onclick = () => doCompute('auto');
   el('btn-refresh').onclick = () => doCompute('refresh');
-
   el('btn-draw').onclick = doDraw;
   el('btn-clear').onclick = doClear;
-  el('btn-preset-save').onclick = () => savePreset();
-  el('preset-excel-new').onclick = () => choosePresetExcel('');
-  el('preset-excel-file').onchange = importPresetExcel;
-  el('preset-list').onclick = (e) => {
-    const btn = e.target.closest('[data-act]');
-    if (!btn) return;
-    const row = btn.closest('.plist-item');
-    if (!row) return;
-    const name = row.dataset.name;
-    if (btn.dataset.act === 'load') loadPreset(name);
-    else if (btn.dataset.act === 'save') savePreset(name);
-    else if (btn.dataset.act === 'del') delPreset(name);
-    else if (btn.dataset.act === 'import') choosePresetExcel(name);
-    else if (btn.dataset.act === 'export') exportPresetExcel(name);
-  };
+  el('btn-save-module').onclick = () => saveModule();
+  el('btn-reset-module').onclick = () => resetModule();
   el('d-raw').onchange = noteRawToggle;
   el('d-text').onchange = () => {};
   // 支阻来源（系统计算/人工输入）与人工价位输入；子行内容随来源切换
@@ -977,6 +996,16 @@ function bindEvents() {
     state.tab = b.dataset.tab;
     renderTable();
   });
+  // 本页品种 TAB（非 embed）
+  el('symbolTabs').onclick = (e) => {
+    const b = e.target.closest('[data-sid]');
+    if (b && b.dataset.sid !== currentSid) setCurrentSymbol(b.dataset.sid);
+  };
+  // embed：听父页品种切换
+  window.addEventListener('message', e => {
+    if (e.origin !== location.origin) return;
+    if (e.data?.type === 'params-symbol') setCurrentSymbol(e.data.symbol);
+  });
   ['f-family', 'f-type', 'f-level'].forEach(id => el(id).onchange = renderTable);
   el('f-drawnonly').onchange = renderTable;
   // 参数改动 → 横幅提示 + 画图按钮即时变灰（需重算后才能再画）
@@ -986,19 +1015,25 @@ function bindEvents() {
 }
 
 function init() {
+  if (IS_EMBED) {
+    document.body.classList.add('embedded');
+    const badge = el('badge-busy');
+    if (badge) document.querySelector('.statusline')?.append(badge);
+  }
+  drawSymbolTabs();
+  updateSymbolLabel();
   bindEvents();
   connectSSE();
-  refreshPresetList();
   updateButtons();
-  refreshState();                     // 立即与服务端对齐（历史结果/忙状态）
-  setInterval(refreshState, 4000);    // 轮询自愈：SSE 事件丢失不卡按钮
-  log('支阻位调试页就绪。步骤：选级别/类型/参数 → 计算 → 看明细表/画图 → 调整参数后点击左侧计算。');
+  refreshState();
+  setInterval(refreshState, 4000);
+  // 载入当前品种桶参数
+  loadSymbolCfg(currentSid).then(() => {
+    log('支阻位调试页就绪。当前品种 ' + currentCode() + '：调参 → 计算 → 看明细/画图 →「保存本模块」落盘。');
+  });
 }
 init();
 </script>
 <script src="/sr-tune.js"></script>
-<script>
-if (new URLSearchParams(location.search).has("embed")) { document.body.classList.add("embedded"); document.querySelector(".statusline").append(document.getElementById("badge-busy")); }
-</script>
 </body>
 </html>

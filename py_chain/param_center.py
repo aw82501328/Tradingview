@@ -1,21 +1,25 @@
 # -*- coding: utf-8 -*-
 """参数中心：分模块参数的 schema / 校验 / 持久化。
 
-模块清单（与 web/params.html 页签一一对应，顺序对齐工作台六步；支阻位走 sr_presets.json）：
+模块清单（与 web/params.html 页签一一对应，顺序对齐工作台六步）：
   chan   画笔（成笔相关 CHAN_CFG 子集；内部 id 仍为 chan，避免改 API / 落盘键）
   zs     画中枢（各周期是否绘制、每周期最近保留个数）
   points 标记买卖点（邻近合并/保留数/中枢容差 + divergeDurRatio）
   entry  标记进出场（near/lots/slip_* 与出场门槛 + 进场扩展 CHAN_CFG）
   plan   交易计划（震荡判定阈值 RANGE_DEFAULTS + 顺势参考周期 trendRes）
+  sr     支阻位（整份 cfg 按品种存于 modules.sr，不在 PARAM_MODULES / 无 schema）
 
-存储 web/module_params.json，**只存与代码默认不同的键（overrides-only）**：
+存储 web/module_params.json：
+  PARAM_MODULES → **只存与代码默认不同的键（overrides-only）**，按五品种分桶；
+  modules.sr → 整份支阻 cfg（调用方已 normalize），按品种分桶。
 代码默认值升级后不被旧存量静默覆盖，UI 可据此高亮"已修改"。
 默认值单一来源 = 各算法模块常量（CHAN_CFG_DEFAULTS / RANGE_DEFAULTS 等），schema 调用时活取。
 
 生效链路：
-  chan/points/entry 中含 CHAN_CFG 键的模块 → 保存后立即 chan_core.apply_cfg(chan_cfg_effective())
+  chan/points/entry 中含 CHAN_CFG 键的模块 → 保存后立即 chan_core.apply_cfg(chan_cfg_effective(symbol))
   zs/plan → 调用方（webapp Worker / analysis_service / main）读取
-           effective_all() 后以显式形参传入（BacktestEngine.module_params 等）。
+           effective_all(symbol) 后以显式形参传入（BacktestEngine.module_params 等）。
+  全部 PARAM_MODULES + sr 按五品种分桶（XAUUSD/XAGUSD/USOIL/BTCUSD/NAS100），任务侧按 symbol 取桶。
 """
 
 import json
@@ -107,16 +111,11 @@ PARAM_MODULES = {
         "title": "标记进出场",
         "params": {
             "near": ("近支阻阈值", "背驰点价与支阻位价差 ≤ 该值视为接近（绝对价差，不乘ATR）", 0.1, 1000.0),
-            "lots": ("默认手数(其他品种)", "未单列品种的进场手数;盈亏 = 价差 × 方向 × 手数 × 合约乘数(1手=0.01标准手)", 1, 100),
-            "lots_xauusd": ("黄金手数", "OANDA:XAUUSD;1手=0.01标准手=1盎司,$1波动=$1", 1, 100),
-            "lots_xagusd": ("白银手数", "OANDA:XAGUSD;1手=0.01标准手=50盎司,$1波动=$50", 1, 100),
-            "lots_usoil": ("原油手数", "TVC:USOIL;1手=0.01标准手=10桶,$1波动=$10", 1, 100),
-            "lots_btcusd": ("BTC手数", "BITSTAMP:BTCUSD;1手=0.01标准手=0.01 BTC,$1波动=$0.01", 1, 100),
-            "lots_nas100": ("纳指手数", "FX:NAS100;1手=0.01标准手=0.01合约,1点=$0.01", 1, 100),
+            "lots": ("手数", "本品种进场手数;盈亏 = 价差 × 方向 × 手数 × 合约乘数(1手=0.01标准手)", 1, 100),
             "slip_stop": ("止损滑点", "正确侧支阻位外侧偏移（绝对价格）；有效值 = 该值 + ATR系数×ATR(14,背驰周期)", 0.1, 100.0),
             "slip_stop_atr_k": ("止损滑点ATR系数", "有效止损滑点 = 止损滑点 + 该值×ATR(14,背驰周期)；0=关闭", 0.0, 10.0),
-            "slip_fallback": ("兜底止损滑点", "无正确侧支阻位时 止损=进场价±该值；有效值 = 该值 + ATR系数×ATR(14,背驰周期)", 0.1, 1000.0),
-            "slip_fallback_atr_k": ("兜底滑点ATR系数", "有效兜底滑点 = 兜底止损滑点 + 该值×ATR(14,背驰周期)；0=关闭", 0.0, 10.0),
+            "slip_fallback": ("最大止损", "买点止损不低于进场价−该值，卖点不高于进场价+该值；支阻位更远时收到此价；有效值 = 该值 + ATR系数×ATR(14,背驰周期)", 0.1, 1000.0),
+            "slip_fallback_atr_k": ("最大止损ATR系数", "有效最大止损 = 最大止损 + 该值×ATR(14,背驰周期)；0=关闭", 0.0, 10.0),
             "slip_be": ("保本滑点", "保本止损位 = 进场成交K线极值±该值；有效值 = 该值 + ATR系数×ATR(14,背驰周期)", 0.1, 100.0),
             "slip_be_atr_k": ("保本滑点ATR系数", "有效保本滑点 = 保本滑点 + 该值×ATR(14,背驰周期)；0=关闭", 0.0, 10.0),
             "exit_min_merged": ("出场成笔预期门槛", "形成段合并后 ≥ 该值根K视为成笔预期（TP2/逆势TP3b触发）", 2, 50),
@@ -154,6 +153,12 @@ PARAM_MODULES = {
                          0.0, 1000.0),
             "reboundAngleRef": ("相位角度45°基准(点/根)", "当前笔平均每根幅度 > 该值 = 角度>45°（强），≤ 为弱；下跌角度与反弹/回调力度同口径",
                          0.1, 100.0),
+            "prevHighNearPts": ("前高/前低附近容差(点)", "2买/2卖后首段上涨（下跌）终点距前高（前低）≤ 该值（绝对点数）视为附近 → 等回调后的类2买点/类2卖点",
+                         0.0, 1000.0),
+            "secondNearPts": ("回踩2买/2卖点容差(点)", "未过前高（前低）时，最近一笔回调（反弹）终点距2买（2卖）点价 ≤ 该值 视为回踩到位 → 等回调后的类2买点/类2卖点",
+                         0.0, 1000.0),
+            "thirdStrongTrend": ("③3类点强档顺势", "开=3买/类3买（3卖/类3卖）过前高不背驰时顺势「等待回调后的新买点/新卖点」（默认现状）；关=3类点一律弱档（多头空/空头多，等一卖/一买）",
+                         None, None),
         },
     },
 }
@@ -183,12 +188,6 @@ def defaults_of(module):
         return {
             "near": mark_entry.NEAR,
             "lots": mark_entry.DEFAULT_LOTS,
-            # 按品种手数（2026-09-23）：五品种各自独立，默认同 DEFAULT_LOTS（活取常量防漂移）
-            "lots_xauusd": mark_entry.DEFAULT_LOTS,
-            "lots_xagusd": mark_entry.DEFAULT_LOTS,
-            "lots_usoil": mark_entry.DEFAULT_LOTS,
-            "lots_btcusd": mark_entry.DEFAULT_LOTS,
-            "lots_nas100": mark_entry.DEFAULT_LOTS,
             "slip_stop": mark_entry.DEFAULT_SLIP_STOP,
             "slip_stop_atr_k": mark_entry.DEFAULT_SLIP_STOP_ATR_K,
             "slip_fallback": mark_entry.DEFAULT_SLIP_FALLBACK,
@@ -205,32 +204,66 @@ def defaults_of(module):
                 "rangeRes": trading_plan.RANGE_RES,
                 "trendRebound": trading_plan.TREND_REBOUND,
                 "reboundNearPts": trading_plan.REBOUND_NEAR_PTS,
-                "reboundAngleRef": trading_plan.REBOUND_ANGLE_REF}
+                "reboundAngleRef": trading_plan.REBOUND_ANGLE_REF,
+                "prevHighNearPts": trading_plan.PREV_HIGH_NEAR_PTS,
+                "secondNearPts": trading_plan.SECOND_NEAR_PTS,
+                "thirdStrongTrend": trading_plan.THIRD_STRONG_TREND}
     raise ValueError(f"未知参数模块：{module}")
 
 
-# 按品种手数键映射（2026-09-23）：symbol 后缀 → entry 模块参数键；未列品种走全局 lots
-SYMBOL_LOT_KEYS = {
-    "XAUUSD": "lots_xauusd",
-    "XAGUSD": "lots_xagusd",
-    "USOIL": "lots_usoil",
-    "BTCUSD": "lots_btcusd",
-    "NAS100": "lots_nas100",
+# 五品种分桶（2026-09-24）：与参数页子页签 / 回测多选品种一致；全 PARAM_MODULES + sr 共用
+ENTRY_SYMBOLS = ("XAUUSD", "XAGUSD", "USOIL", "BTCUSD", "NAS100")
+ENTRY_SYMBOL_META = (
+    ("XAUUSD", "黄金", "OANDA:XAUUSD"),
+    ("XAGUSD", "白银", "OANDA:XAGUSD"),
+    ("USOIL", "原油", "TVC:USOIL"),
+    ("BTCUSD", "BTC", "BITSTAMP:BTCUSD"),
+    ("NAS100", "纳指", "FX:NAS100"),
+)
+SYMBOLS = ENTRY_SYMBOLS
+SYMBOL_META = ENTRY_SYMBOL_META
+
+# 旧扁平 lots_* 键 → 品种桶（读入时迁到该品种的 lots）
+_LEGACY_LOT_KEYS = {
+    "lots_xauusd": "XAUUSD",
+    "lots_xagusd": "XAGUSD",
+    "lots_usoil": "USOIL",
+    "lots_btcusd": "BTCUSD",
+    "lots_nas100": "NAS100",
 }
+
+# 支阻位：整份 cfg 按品种存；缺省走引擎（只写 periods/srTypes）
+SR_PRESETS_FILE = os.path.join(os.path.dirname(__file__), "web", "sr_presets.json")
+SR_DEFAULTS = {
+    "srTypes": ["cluster", "boll"],
+    "periods": ["D", "240", "60", "15", "3"],
+}
+# 运行时键不落盘（品种/时间窗由任务侧决定）
+_SR_RUNTIME_KEYS = frozenset((
+    "symbol", "symbols", "from", "from_ts", "to", "to_ts", "start_ts", "name", "saved_at",
+))
+
+
+def entry_symbol_id(symbol):
+    """解析品种桶 id。空/未传 → 黄金页（XAUUSD）；未列入五品种 → None（走代码默认）。"""
+    if not symbol:
+        return "XAUUSD"
+    suf = mark_entry.symbol_suffix(symbol)
+    return suf if suf in SYMBOLS else None
+
+
+symbol_id = entry_symbol_id  # 别名：全模块按品种取桶
 
 
 def lots_of(ep, symbol):
-    """按品种解析进场手数（2026-09-23）：品种键优先 → 全局 lots → DEFAULT_LOTS。
-    ep 为 effective_all()["entry"] 字典；symbol 形如 "OANDA:XAUUSD"。"""
-    key = SYMBOL_LOT_KEYS.get(mark_entry.symbol_suffix(symbol))
-    if key is not None and key in ep:
-        return ep[key]
+    """按品种取进场手数。ep 为 effective("entry", symbol) / effective_all(symbol)["entry"]。"""
     return ep.get("lots", mark_entry.DEFAULT_LOTS)
 
 
 def engine_module_params(pm):
-    """effective_all → BacktestEngine.module_params 映射（webapp 三模式 Worker 与
-    实盘 live_trader 共用；2026-09-23 自 webapp._engine_module_params 上移，避免复制漂移）。"""
+    """effective_all(symbol) → BacktestEngine.module_params 映射（webapp 三模式 Worker 与
+    实盘 live_trader 共用；2026-09-23 自 webapp._engine_module_params 上移，避免复制漂移）。
+    调用方须先按品种解析 pm（各模块已是该品种桶）。"""
     ep = pm["entry"]
     return {"plan": pm["plan"], "marks": pm["points"],
             "trendRes": pm["plan"]["trendRes"],
@@ -335,9 +368,123 @@ def _accept_override(defaults, k, v):
     return isinstance(v, type(dv))
 
 
+def _is_symbol_store(mod):
+    """是否已是/像品种桶：任一品种键值为 dict，或非空键集 ⊆ 五品种。"""
+    if not isinstance(mod, dict) or not mod:
+        return False
+    if any(k in SYMBOLS and isinstance(mod.get(k), dict) for k in SYMBOLS):
+        return True
+    return all(k in SYMBOLS for k in mod)
+
+
+def _clean_module_bucket(module, raw):
+    """清洗单个品种桶：只留 schema 内且类型匹配的键。"""
+    defaults = defaults_of(module)
+    return {k: v for k, v in (raw or {}).items() if _accept_override(defaults, k, v)}
+
+
+def _migrate_symbol_store(module, mod):
+    """chan/zs/points/plan：旧扁平 overrides → 五品种各一份；已是品种桶则按桶清洗。"""
+    if not isinstance(mod, dict):
+        return {}
+    if _is_symbol_store(mod):
+        out = {}
+        for sid in SYMBOLS:
+            raw = mod.get(sid) if isinstance(mod.get(sid), dict) else {}
+            bucket = _clean_module_bucket(module, raw)
+            if bucket:
+                out[sid] = bucket
+        return out
+    defaults = defaults_of(module)
+    shared = {k: v for k, v in mod.items() if _accept_override(defaults, k, v)}
+    if not shared:
+        return {}
+    return {sid: dict(shared) for sid in SYMBOLS}
+
+
+def _clean_entry_bucket(raw):
+    """清洗单个进出场品种桶。"""
+    return _clean_module_bucket("entry", raw)
+
+
+def _migrate_entry_store(mod):
+    """旧扁平 entry → {品种: overrides}；新格式按五品种清洗。
+    旧 lots_* 写入对应品种 lots；旧「默认手数 lots」不迁入五品种。
+    旧全局键（near/滑点/CHAN_CFG 等）复制到五个品种桶（原先全品种共用）。"""
+    if not isinstance(mod, dict):
+        return {}
+    if _is_symbol_store(mod):
+        out = {}
+        for sid in SYMBOLS:
+            bucket = _clean_entry_bucket(mod.get(sid) if isinstance(mod.get(sid), dict) else {})
+            if bucket:
+                out[sid] = bucket
+        return out
+    defaults = defaults_of("entry")
+    shared, lots_by = {}, {}
+    for k, v in mod.items():
+        if k in _LEGACY_LOT_KEYS:
+            if _accept_override(defaults, "lots", v):
+                lots_by[_LEGACY_LOT_KEYS[k]] = v
+        elif k == "lots":
+            continue
+        elif _accept_override(defaults, k, v):
+            shared[k] = v
+    out = {}
+    for sid in SYMBOLS:
+        bucket = dict(shared)
+        if sid in lots_by:
+            bucket["lots"] = lots_by[sid]
+        bucket = _clean_entry_bucket(bucket)
+        if bucket:
+            out[sid] = bucket
+    return out
+
+
+def _strip_sr_runtime(cfg):
+    """剔除品种/时间窗等运行时键，保留算法键。"""
+    return {k: v for k, v in (cfg or {}).items() if k not in _SR_RUNTIME_KEYS}
+
+
+def _seed_sr_from_presets():
+    """无 modules.sr 时：读 sr_presets.json 第一份预设 cfg，复制到五品种；损坏则用 SR_DEFAULTS。"""
+    try:
+        with open(SR_PRESETS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            cfg = data[0].get("cfg")
+            if isinstance(cfg, dict):
+                cleaned = _strip_sr_runtime(cfg)
+                if cleaned:
+                    return {sid: dict(cleaned) for sid in SYMBOLS}
+    except (OSError, ValueError, json.JSONDecodeError, TypeError):
+        pass
+    return {sid: dict(SR_DEFAULTS) for sid in SYMBOLS}
+
+
+def _migrate_sr_store(mod):
+    """modules.sr：已是品种桶则清洗；若是旧扁平整份 cfg 则复制到五品种。"""
+    if not isinstance(mod, dict):
+        return {}
+    if _is_symbol_store(mod):
+        out = {}
+        for sid in SYMBOLS:
+            raw = mod.get(sid)
+            if isinstance(raw, dict):
+                cleaned = _strip_sr_runtime(raw)
+                if cleaned:
+                    out[sid] = cleaned
+        return out
+    cleaned = _strip_sr_runtime(mod)
+    if not cleaned:
+        return {}
+    return {sid: dict(cleaned) for sid in SYMBOLS}
+
+
 def _load():
-    """读取持久化 overrides（结构/未知键损坏时静默降级为空，不阻塞启动）。
-    兼容旧文件：modules.chan 里已迁出的键归入 points/entry（目标模块已有同键时不覆盖）。
+    """读取持久化（结构/未知键损坏时静默降级为空，不阻塞启动）。
+    迁移：PARAM_MODULES 按品种分桶；旧 chan 已迁出键 → points/entry 各品种桶；
+    modules.sr 缺失时从 sr_presets.json 第一份预设播种。
     """
     try:
         with open(PARAMS_FILE, encoding="utf-8") as f:
@@ -352,33 +499,51 @@ def _load():
         mod = modules.get(name)
         if not isinstance(mod, dict):
             continue
-        defaults = defaults_of(name)
-        # 未知键/已从默认值漂移的旧键丢弃；类型异常静默忽略（文件可手改）
-        clean = {}
-        for k, v in mod.items():
-            if _accept_override(defaults, k, v):
-                clean[k] = v
-        out[name] = clean
-    # 旧 chan 桶：已迁出键 → points / entry（目标已有显式 override 时保留目标）
+        if name == "entry":
+            out[name] = _migrate_entry_store(mod)
+        else:
+            out[name] = _migrate_symbol_store(name, mod)
+    # 旧 chan 桶：已迁出键 → points / entry 各品种桶（目标已有显式 override 时保留目标）
     legacy = modules.get("chan")
     if isinstance(legacy, dict):
-        for dest, keys in (("points", _LEGACY_CHAN_TO_POINTS),
-                           ("entry", _LEGACY_CHAN_TO_ENTRY)):
-            defaults = defaults_of(dest)
-            bucket = out.setdefault(dest, {})
-            for k in keys:
+        defaults_p = defaults_of("points")
+        by_p = out.setdefault("points", {})
+        for sid in SYMBOLS:
+            bucket = by_p.setdefault(sid, {})
+            for k in _LEGACY_CHAN_TO_POINTS:
                 if k in bucket:
                     continue
                 v = legacy.get(k)
-                if _accept_override(defaults, k, v):
+                if _accept_override(defaults_p, k, v):
                     bucket[k] = v
+            if not bucket:
+                by_p.pop(sid, None)
+        defaults_e = defaults_of("entry")
+        by_e = out.setdefault("entry", {})
+        for sid in SYMBOLS:
+            bucket = by_e.setdefault(sid, {})
+            for k in _LEGACY_CHAN_TO_ENTRY:
+                if k in bucket:
+                    continue
+                v = legacy.get(k)
+                if _accept_override(defaults_e, k, v):
+                    bucket[k] = v
+            if not bucket:
+                by_e.pop(sid, None)
+    # 支阻位：缺失则从预设播种
+    raw_sr = modules.get("sr")
+    if not isinstance(raw_sr, dict):
+        out["sr"] = _seed_sr_from_presets()
+    else:
+        out["sr"] = _migrate_sr_store(raw_sr)
     return out
 
 
 def _save(overrides, saved_at):
-    payload = {"version": 1, "modules": {name: overrides.get(name, {})
-                                         for name in PARAM_MODULES},
-               "savedAt": saved_at}
+    """原子写盘：PARAM_MODULES 与 modules.sr 一并写出。"""
+    modules = {name: overrides.get(name, {}) for name in PARAM_MODULES}
+    modules["sr"] = overrides.get("sr", {})
+    payload = {"version": 1, "modules": modules, "savedAt": saved_at}
     os.makedirs(os.path.dirname(PARAMS_FILE), exist_ok=True)
     temp_path = None
     try:
@@ -393,97 +558,233 @@ def _save(overrides, saved_at):
             os.unlink(temp_path)
 
 
-def effective(module):
-    """默认值 ∪ overrides（键序稳定：按 schema 顺序）。"""
-    eff = dict(defaults_of(module))
-    eff.update(_load().get(module, {}))
-    return {k: eff[k] for k in PARAM_MODULES[module]["params"]}
+def _symbol_overrides(overrides, module, symbol):
+    """取出某模块某品种的 override 桶；未列品种返回空（走代码默认）。"""
+    sid = symbol_id(symbol)
+    if sid is None:
+        return {}
+    by = overrides.get(module) or {}
+    ov = by.get(sid)
+    return ov if isinstance(ov, dict) else {}
 
 
-def effective_all():
-    return {name: effective(name) for name in PARAM_MODULES}
+def effective(module, symbol=None):
+    """默认值 ∪ overrides（键序稳定：按 schema 顺序）。
+    全部 PARAM_MODULES 按品种取桶：symbol 空=黄金页；未列品种=纯默认。"""
+    defaults = defaults_of(module)
+    ov = _symbol_overrides(_load(), module, symbol)
+    return {k: ov.get(k, defaults[k]) for k in PARAM_MODULES[module]["params"]}
 
 
-def chan_cfg_effective():
-    """从画笔 / 标记买卖点 / 标记进出场拼出完整 CHAN_CFG（供 apply_cfg / --chan-cfg）。"""
+def effective_all(symbol=None):
+    """全模块有效值（同一 symbol）。"""
+    return {name: effective(name, symbol) for name in PARAM_MODULES}
+
+
+def chan_cfg_effective(symbol=None):
+    """从画笔 / 标记买卖点 / 标记进出场拼出完整 CHAN_CFG（供 apply_cfg / --chan-cfg）。
+    chan/points/entry 均取该品种桶（空=黄金页）。"""
     cfg = dict(chan_core.CHAN_CFG_DEFAULTS)
     overrides = _load()
-    for keys, mod in ((CHAN_BI_KEYS, "chan"),
-                      (POINTS_CHAN_KEYS, "points"),
+    for keys, mod in ((CHAN_BI_KEYS, "chan"), (POINTS_CHAN_KEYS, "points"),
                       (ENTRY_CHAN_KEYS, "entry")):
-        ov = overrides.get(mod) or {}
+        ov = _symbol_overrides(overrides, mod, symbol)
         for k in keys:
             if k in ov:
                 cfg[k] = ov[k]
     return cfg
 
 
+def effective_sr(symbol=None):
+    """支阻位有效 cfg：有存量返回整份；空 symbol=黄金页；未列品种 / 无存量 → SR_DEFAULTS。"""
+    sid = symbol_id(symbol)
+    if sid is None:
+        return dict(SR_DEFAULTS)
+    ov = (_load().get("sr") or {}).get(sid)
+    if isinstance(ov, dict) and ov:
+        return dict(ov)
+    return dict(SR_DEFAULTS)
+
+
+def _snapshot_module(name, spec, overrides, saved_at_all):
+    """单个 PARAM_MODULES 的 snapshot 块（含 bySymbol / symbols）。"""
+    defaults = defaults_of(name)
+    by = overrides.get(name) or {}
+    mod_at = saved_at_all.get(name)
+    if not isinstance(mod_at, dict):
+        mod_at = {}
+    by_symbol = {}
+    for sid, label, code in SYMBOL_META:
+        ov = by.get(sid) or {}
+        by_symbol[sid] = {
+            "label": label, "code": code, "overrides": ov,
+            "effective": {k: ov.get(k, defaults[k]) for k in spec["params"]},
+            "savedAt": mod_at.get(sid),
+        }
+    gold = by_symbol["XAUUSD"]
+    return {
+        "title": spec["title"], "schema": schema_of(name),
+        "defaults": defaults, "bySymbol": by_symbol,
+        "symbols": [{"id": s, "label": l, "code": c} for s, l, c in SYMBOL_META],
+        "overrides": gold["overrides"], "effective": gold["effective"],
+        "savedAt": gold["savedAt"],
+    }
+
+
+def _snapshot_sr(overrides, saved_at_all):
+    """modules.sr 的 snapshot：同形 bySymbol；effective=完整 cfg；schema=null。"""
+    by = overrides.get("sr") or {}
+    mod_at = saved_at_all.get("sr")
+    if not isinstance(mod_at, dict):
+        mod_at = {}
+    by_symbol = {}
+    for sid, label, code in SYMBOL_META:
+        ov = by.get(sid) if isinstance(by.get(sid), dict) else {}
+        eff = dict(ov) if ov else dict(SR_DEFAULTS)
+        by_symbol[sid] = {
+            "label": label, "code": code, "overrides": ov,
+            "effective": eff, "savedAt": mod_at.get(sid),
+        }
+    gold = by_symbol["XAUUSD"]
+    return {
+        "title": "支阻位", "schema": None,
+        "defaults": dict(SR_DEFAULTS), "bySymbol": by_symbol,
+        "symbols": [{"id": s, "label": l, "code": c} for s, l, c in SYMBOL_META],
+        "overrides": gold["overrides"], "effective": gold["effective"],
+        "savedAt": gold["savedAt"],
+    }
+
+
 def snapshot():
-    """GET /api/params 响应体：每模块 schema/defaults/overrides/effective/savedAt。"""
+    """GET /api/params 响应体：每 PARAM_MODULES + sr 均带 bySymbol / symbols。"""
     overrides = _load()
-    saved_at_all = {}
-    try:
-        with open(PARAMS_FILE, encoding="utf-8") as f:
-            saved_at_all = (json.load(f) or {}).get("savedAt") or {}
-    except (OSError, ValueError, json.JSONDecodeError):
-        pass
+    saved_at_all = _read_saved_at()
     out = {}
     for name, spec in PARAM_MODULES.items():
-        defaults = defaults_of(name)
-        ov = overrides.get(name, {})
-        out[name] = {
-            "title": spec["title"],
-            "schema": schema_of(name),
-            "defaults": defaults,
-            "overrides": ov,
-            "effective": {k: ov.get(k, defaults[k]) for k in spec["params"]},
-            "savedAt": saved_at_all.get(name),
-        }
+        out[name] = _snapshot_module(name, spec, overrides, saved_at_all)
+    out["sr"] = _snapshot_sr(overrides, saved_at_all)
     return out
 
 
-def update(module, cfg):
+def _read_saved_at():
+    try:
+        with open(PARAMS_FILE, encoding="utf-8") as f:
+            return (json.load(f) or {}).get("savedAt") or {}
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def _require_symbol(symbol):
+    """解析并校验品种；未知则 raise。"""
+    sid = symbol_id(symbol)
+    if sid is None:
+        raise ValueError("未知品种，参数仅支持黄金/白银/原油/BTC/纳指")
+    return sid
+
+
+def update(module, cfg, symbol=None):
     """保存模块参数：规范化 → 合并现有 overrides → 剔除等于默认值的键 → 原子写盘。
-    含 CHAN_CFG 键的模块写盘后立即 apply_cfg(chan_cfg_effective())。
-    @returns effective(module)
+    全部模块按品种写入对应桶（symbol 空=黄金页；未知品种 raise）。
+    含 CHAN_CFG 键的模块写盘后立即 apply_cfg(chan_cfg_effective(symbol))。
+    @returns effective(module, symbol)
     """
     clean = normalize(module, cfg)
     with _lock:
         overrides = _load()
         defaults = defaults_of(module)
-        merged = dict(overrides.get(module, {}))
+        saved_at = _read_saved_at()
+        sid = _require_symbol(symbol)
+        merged = dict((overrides.get(module) or {}).get(sid, {}))
         merged.update(clean)
         merged = {k: v for k, v in merged.items()
                   if k in defaults and v != defaults[k]}
-        saved_at = {}
-        try:
-            with open(PARAMS_FILE, encoding="utf-8") as f:
-                saved_at = (json.load(f) or {}).get("savedAt") or {}
-        except (OSError, ValueError, json.JSONDecodeError):
-            pass
-        overrides[module] = merged
-        saved_at[module] = time.time()
+        by = dict(overrides.get(module) or {})
+        if merged:
+            by[sid] = merged
+        else:
+            by.pop(sid, None)
+        overrides[module] = by
+        mod_at = saved_at.get(module)
+        if not isinstance(mod_at, dict):
+            mod_at = {}
+        mod_at[sid] = time.time()
+        saved_at[module] = mod_at
         _save(overrides, saved_at)
     if module in CHAN_CFG_MODULES:
-        chan_core.apply_cfg(chan_cfg_effective())
-    return effective(module)
+        chan_core.apply_cfg(chan_cfg_effective(symbol))
+    return effective(module, symbol)
 
 
-def reset(module):
-    """恢复模块默认：清空 overrides 并写盘；含 CHAN_CFG 键的模块重放拼合配置（不清全局）。"""
+def reset(module, symbol=None):
+    """恢复模块默认：含 CHAN_CFG 键的模块重放拼合配置。
+    有 symbol：只清该品种桶；无 symbol：清整模块全部品种。"""
     if module not in PARAM_MODULES:
         raise ValueError(f"未知参数模块：{module}")
     with _lock:
         overrides = _load()
-        overrides.pop(module, None)
-        saved_at = {}
-        try:
-            with open(PARAMS_FILE, encoding="utf-8") as f:
-                saved_at = (json.load(f) or {}).get("savedAt") or {}
-        except (OSError, ValueError, json.JSONDecodeError):
-            pass
-        saved_at.pop(module, None)
+        saved_at = _read_saved_at()
+        if symbol:
+            sid = _require_symbol(symbol)
+            by = dict(overrides.get(module) or {})
+            by.pop(sid, None)
+            overrides[module] = by
+            mod_at = saved_at.get(module)
+            if isinstance(mod_at, dict):
+                mod_at.pop(sid, None)
+                saved_at[module] = mod_at
+        else:
+            overrides.pop(module, None)
+            saved_at.pop(module, None)
         _save(overrides, saved_at)
     if module in CHAN_CFG_MODULES:
-        chan_core.apply_cfg(chan_cfg_effective())
-    return effective(module)
+        chan_core.apply_cfg(chan_cfg_effective(symbol))
+    return effective(module, symbol)
+
+
+def update_sr(symbol, cfg):
+    """保存某品种整份支阻 cfg（调用方已 normalize）；剔除运行时键后落盘。
+    @returns effective_sr(symbol)
+    """
+    sid = _require_symbol(symbol)
+    if not isinstance(cfg, dict):
+        raise ValueError("cfg 须为 dict")
+    clean = _strip_sr_runtime(cfg)
+    with _lock:
+        overrides = _load()
+        saved_at = _read_saved_at()
+        by = dict(overrides.get("sr") or {})
+        if clean:
+            by[sid] = clean
+        else:
+            by.pop(sid, None)
+        overrides["sr"] = by
+        mod_at = saved_at.get("sr")
+        if not isinstance(mod_at, dict):
+            mod_at = {}
+        mod_at[sid] = time.time()
+        saved_at["sr"] = mod_at
+        _save(overrides, saved_at)
+    return effective_sr(symbol)
+
+
+def reset_sr(symbol=None):
+    """恢复支阻默认：有 symbol 只清该品种；无 symbol 清整模块。
+    @returns effective_sr(symbol)
+    """
+    with _lock:
+        overrides = _load()
+        saved_at = _read_saved_at()
+        if symbol:
+            sid = _require_symbol(symbol)
+            by = dict(overrides.get("sr") or {})
+            by.pop(sid, None)
+            overrides["sr"] = by
+            mod_at = saved_at.get("sr")
+            if isinstance(mod_at, dict):
+                mod_at.pop(sid, None)
+                saved_at["sr"] = mod_at
+        else:
+            overrides.pop("sr", None)
+            saved_at.pop("sr", None)
+        _save(overrides, saved_at)
+    return effective_sr(symbol)
