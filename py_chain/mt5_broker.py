@@ -76,6 +76,16 @@ def clamp_sl(ref_price, sl, direction, spec):
     return max(sl, normalize_price(ref_price + min_d, spec))
 
 
+def fld(obj, name):
+    """MT5 返回元素的通用字段读取：兼容 np.void（下标式）与 namedtuple（属性式）。
+    2026-09-24 真机实测：copy_rates/history_deals 为 numpy 结构化元素（仅下标），
+    positions_get 为 namedtuple（仅属性），版本间还可能互变，故两者都试。"""
+    try:
+        return obj[name]
+    except (TypeError, KeyError, IndexError):
+        return getattr(obj, name)
+
+
 def filling_candidates(bitmask):
     """symbol_info.filling_mode 位掩码 → 请求 type_filling 候选序列（FOK→IOC）。"""
     out = []
@@ -214,8 +224,8 @@ class MT5Broker:
         if magic:
             args["magic"] = magic  # 部分版本支持按 magic 过滤；不支持时下面兜底
         ps = mt5.positions_get(**args) or []
-        # 字段一律下标访问：numpy≥2 的结构化元素不再支持属性式访问
-        return [p for p in ps if not magic or p["magic"] == magic]
+        # 字段访问走 fld()（np.void 下标式 / namedtuple 属性式，见注释）
+        return [p for p in ps if not magic or fld(p, "magic") == magic]
 
     def market_order(self, direction, volume, sl=None, comment=""):
         """市价单（带 SL；filling 旋转；成交以返回结果实际量价回填）。"""
@@ -254,7 +264,10 @@ class MT5Broker:
         if not ok:
             self.log(f"[broker] 市价单失败 retcode={res.retcode} {res.comment} req={req}")
         return OrderResult(ok, retcode=res.retcode, retcomment=res.comment,
-                           position_ticket=res.position or None,
+                           # 5.0.6180 的 OrderSendResult 无 position 字段：对冲账户
+                           # 首笔 position id = 开仓 order ticket，用 order 兜底
+                           position_ticket=(getattr(res, "position", None)
+                                            or getattr(res, "order", None)),
                            deal_price=(res.price or None) if ok else None,
                            deal_volume=(res.volume or None) if ok else None,
                            raw={"request": {k: v for k, v in req.items()},
@@ -331,15 +344,17 @@ class MT5Broker:
         deals = mt5.history_deals_get(d0, d1) or []
         out = []
         for d in deals:
-            if d["symbol"] != self.symbol:
+            if fld(d, "symbol") != self.symbol:
                 continue
-            if magic and d["magic"] != magic:
+            if magic and fld(d, "magic") != magic:
                 continue
-            out.append({"ticket": d["ticket"], "order": d["order"],
-                        "deal_time": int(d["time"]), "entry": d["entry"],
-                        "direction": "long" if d["type"] == _BUY else "short",
-                        "volume": d["volume"], "price": d["price"], "profit": d["profit"],
-                        "position_id": d["position_id"], "comment": d["comment"]})
+            out.append({"ticket": fld(d, "ticket"), "order": fld(d, "order"),
+                        "deal_time": int(fld(d, "time")), "entry": fld(d, "entry"),
+                        "direction": "long" if fld(d, "type") == _BUY else "short",
+                        "volume": fld(d, "volume"), "price": fld(d, "price"),
+                        "profit": fld(d, "profit"),
+                        "position_id": fld(d, "position_id"),
+                        "comment": fld(d, "comment")})
         return out
 
     # -- 内部 -----------------------------------------------------------------
@@ -349,9 +364,10 @@ class MT5Broker:
         if not ps:
             raise RuntimeError(f"持仓不存在：ticket={ticket}")
         p = ps[0]
-        return {"ticket": p["ticket"], "type": p["type"], "volume": p["volume"],
-                "sl": p["sl"], "price_open": p["price_open"], "magic": p["magic"],
-                "comment": p["comment"]}
+        return {"ticket": fld(p, "ticket"), "type": fld(p, "type"),
+                "volume": fld(p, "volume"), "sl": fld(p, "sl"),
+                "price_open": fld(p, "price_open"), "magic": fld(p, "magic"),
+                "comment": fld(p, "comment")}
 
 
 # ---------------------------------------------------------------------------
