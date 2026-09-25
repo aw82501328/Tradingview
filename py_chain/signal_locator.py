@@ -115,11 +115,14 @@ def _row_for_mark(row, bar_time, last_time=None):
 
 
 def _draw_after_locate(c, row, bar_time, colors=None, last_time=None):
-    """在已居中的目标K线上画单行标记（定位专用，不走批量 IV）。
+    """在已居中的目标K线上画单行标记（定位专用，带全开周期可见性）。
 
-    回放态下 intervalsVisibilities 常把图形藏掉（createShape 仍返回 id，图上却看不见）；
-    getPoints() 也常为空。这里用图表里该根 bar.value[0] 做锚点、不写周期可见性、
-    lock=true；秒/毫秒两种时间各试一次。出场若晚于当前窗口则跳过。
+    进/出场箭头与支阻横线写全开 intervalsVisibilities（六类周期全 true 且
+    From/To 铺满全范围），切到任意周期都显示——由代码保证，不靠 TV 沿用工具
+    默认模板（不写或只写布尔位时，模板残留的 From/To 会把 30m/240m 等周期
+    挡在外面，2026-09-25 真机读图实测）。
+    锚点用图表里该根 bar.value[0]、lock=true；秒/毫秒两种时间各试一次。
+    出场若晚于当前窗口则跳过。
     """
     colors = _colors(colors)
     if row.get('status') == '同向过滤':
@@ -164,6 +167,15 @@ def _draw_after_locate(c, row, bar_time, colors=None, last_time=None):
         'exits': exits,
         'idsKey': SINGLE_IDS_KEY,
         'exitDown': row['direction'] == 'long',
+        # 全开周期可见性：六类全 true 且 From/To 写满全范围——只写布尔位不够，
+        # TV 会沿用工具默认模板的 From/To（实测残留 minutesTo:15 / hoursTo:1，
+        # 把 30m/240m 挡在外面），必须显式铺满才真正做到任意周期都显示
+        'iv': {'seconds': True, 'secondsFrom': 1, 'secondsTo': 59,
+               'minutes': True, 'minutesFrom': 1, 'minutesTo': 59,
+               'hours': True, 'hoursFrom': 1, 'hoursTo': 24,
+               'days': True, 'daysFrom': 1, 'daysTo': 366,
+               'weeks': True, 'weeksFrom': 1, 'weeksTo': 52,
+               'months': True, 'monthsFrom': 1, 'monthsTo': 12},
     }
     expr = """(async()=>{
       const p=PAYLOAD;
@@ -192,7 +204,7 @@ def _draw_after_locate(c, row, bar_time, colors=None, last_time=None):
       }
       const arrow=p.long?'arrow_up':'arrow_down';
       const spec={shape:arrow,text:p.text,lock:true,color:p.color,textColor:p.color,
-                  overrides:{arrowColor:p.color}};
+                  overrides:{arrowColor:p.color,intervalsVisibilities:p.iv}};
       let ok=false;
       for(const t of times){ if(await put(t,price,spec)){ok=true;break;} }
       if(!ok){
@@ -202,14 +214,15 @@ def _draw_after_locate(c, row, bar_time, colors=None, last_time=None):
       const exitShape=p.exitDown?'arrow_down':'arrow_up';
       for(const ev of p.exits){
         const es={shape:exitShape,text:ev.text,lock:true,color:p.exitColor,textColor:p.exitColor,
-                  overrides:{arrowColor:p.exitColor}};
+                  overrides:{arrowColor:p.exitColor,intervalsVisibilities:p.iv}};
         for(const t of (ev.time>1e12?[ev.time/1000,ev.time]:[ev.time,ev.time*1000])){
           if(await put(t,ev.price,es))break;
         }
       }
       if(p.nearSr!=null){
         const hs={shape:'horizontal_line',lock:true,text:p.srText,
-                  overrides:{linecolor:p.sr,linewidth:1,linestyle:0,showPriceLabels:false}};
+                  overrides:{linecolor:p.sr,linewidth:1,linestyle:0,showPriceLabels:false,
+                             intervalsVisibilities:p.iv}};
         for(const t of times){ if(await put(t,p.nearSr,hs))break; }
       }
       try{

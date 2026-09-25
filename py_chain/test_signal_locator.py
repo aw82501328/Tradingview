@@ -201,7 +201,7 @@ class SignalLocatorTests(unittest.TestCase):
         self.assertEqual(locator._view_until(self.row, 100, '3', after_bars=10), 100 + 180 * 10)
         self.assertEqual(locator._view_until(self.row, 100, '3', after_bars=0), 100)
 
-    def test_draw_after_locate_uses_chart_bar_and_no_interval_visibility(self):
+    def test_draw_after_locate_uses_chart_bar_with_full_open_visibility(self):
         client = Mock()
         client.evaluate.side_effect = [1, {'drawn': 1, 'ids': ['x'], 'barTime': 100}]
         row = {**self.row, 'price': 2663.25, 'nearSr': 2650.0}
@@ -210,7 +210,13 @@ class SignalLocatorTests(unittest.TestCase):
         self.assertEqual(out['cleared'], 1)
         expr = client.evaluate.call_args.args[0]
         self.assertIn('createShape', expr)
-        self.assertNotIn('intervalsVisibilities', expr)
+        # 全开周期可见性：六类全 true 且 From/To 铺满全范围（切任意周期都显示；
+        # 只写布尔位会被 TV 模板残留的 From/To 挡住 30m/240m）
+        self.assertIn('intervalsVisibilities:p.iv', expr)
+        self.assertIn('"seconds": true', expr)
+        self.assertIn('"minutesFrom": 1', expr)
+        self.assertIn('"minutesTo": 59', expr)
+        self.assertIn('"hoursTo": 24', expr)
         self.assertIn('arrow_mark_up', expr)
 
     def test_api_validates_input_and_uses_server_record(self):
