@@ -64,7 +64,12 @@ class RestartManager:
 
 
 def process_handles(parent_pid):
-    """Snapshot only Python/Node task descendants; hold handles against PID reuse."""
+    """Snapshot only Python/Node task descendants; hold handles against PID reuse.
+
+    排除自身祖先链：venv 下本进程由 venv launcher（也是 python.exe）转起，
+    launcher 是旧服务的后代、夹在本进程与旧服务之间——杀它会经 job 对象
+    （KILL_ON_JOB_CLOSE）连带杀掉本进程，重启就此静默失败（2026-09-25 实测）。
+    """
     kernel = ctypes.WinDLL('kernel32', use_last_error=True)
     class Entry(ctypes.Structure):
         _fields_ = [('dwSize', wintypes.DWORD), ('cntUsage', wintypes.DWORD),
@@ -94,12 +99,21 @@ def process_handles(parent_pid):
         rows.append((entry.pid, entry.parent, entry.exe.lower()))
         ok = kernel.Process32NextW(snap, ctypes.byref(entry))
     kernel.CloseHandle(snap)
+    # 自身祖先链（本进程 → venv launcher → … → 旧服务）不得进入击杀名单
+    protected = {os.getpid()}
+    parent_of = {pid: ppid for pid, ppid, _ in rows}
+    cur = os.getpid()
+    while cur in parent_of and parent_of[cur] not in protected:
+        cur = parent_of[cur]
+        protected.add(cur)
+        if cur == parent_pid:
+            break
     descendants = {parent_pid}
     handles = []
     for _ in range(len(rows)):
         added = False
         for pid, ppid, name in rows:
-            if ppid in descendants and pid not in descendants and pid != os.getpid() and name in ('python.exe', 'pythonw.exe', 'node.exe'):
+            if ppid in descendants and pid not in descendants and pid not in protected and name in ('python.exe', 'pythonw.exe', 'node.exe'):
                 descendants.add(pid); added = True
                 handle = kernel.OpenProcess(0x100001, False, pid)
                 if handle:
@@ -117,8 +131,8 @@ def replace_service(parent_pid, command):
     # Normal shutdown gets ten seconds; handles refer to the original processes.
     kernel.WaitForSingleObject(parent, 10000)
     if kernel.WaitForSingleObject(parent, 0) == 258:
-        if not kernel.TerminateProcess(parent, 1):
-            raise ctypes.WinError(ctypes.get_last_error())
+        # 已自行退出时 TerminateProcess 报拒绝访问——由下面的等待结果裁决
+        kernel.TerminateProcess(parent, 1)
     if kernel.WaitForSingleObject(parent, 5000) != 0:
         raise RuntimeError('旧服务未退出，取消启动新服务')
     # Also capture tasks started between the initial snapshot and shutdown.
@@ -128,13 +142,16 @@ def replace_service(parent_pid, command):
     children.extend(extra_children)
     for handle in reversed(children):
         if kernel.WaitForSingleObject(handle, 0) == 258:
-            if not kernel.TerminateProcess(handle, 1):
-                raise ctypes.WinError(ctypes.get_last_error())
+            # 检查存活与终止之间可能自行退出（如先杀 sleeper 真身、其 venv launcher
+            # 随即自行退出）——TerminateProcess 会报拒绝访问，以等待结果为准
+            kernel.TerminateProcess(handle, 1)
             if kernel.WaitForSingleObject(handle, 5000) != 0:
                 raise RuntimeError('任务子进程未退出，取消启动新服务')
         kernel.CloseHandle(handle)
     kernel.CloseHandle(parent)
-    folder = Path.cwd() / '.cache'
+    # 日志锚定到模块位置：旧服务由任意 cwd 拉起时（如 WMI 默认 System32），
+    # Path.cwd()/.cache 会落到别处，失败无迹可查
+    folder = Path(__file__).resolve().parent.parent / '.cache'
     folder.mkdir(exist_ok=True)
     with (folder / 'service-restart.log').open('ab') as output:
         subprocess.Popen(command, cwd=os.getcwd(), stdin=subprocess.DEVNULL,
@@ -145,7 +162,7 @@ if __name__ == '__main__':
     try:
         replace_service(int(sys.argv[1]), json.loads(sys.argv[2]))
     except Exception:
-        folder = Path.cwd() / '.cache'
+        folder = Path(__file__).resolve().parent.parent / '.cache'
         folder.mkdir(exist_ok=True)
         with (folder / 'service-restart.log').open('a', encoding='utf-8') as output:
             traceback.print_exc(file=output)
