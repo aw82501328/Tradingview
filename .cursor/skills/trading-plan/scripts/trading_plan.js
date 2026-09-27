@@ -264,6 +264,16 @@ function classifySecond(bis, macdArr, p, cfg) {
   if (extreme.time === -1) return "其他";
   // 买卖点后第一笔同向笔（买点后上涨 / 卖点后下跌），起点在买卖点之后
   const after = bis.find(b => b.startTime >= p.time && b.type === (wantUp ? "up" : "down"));
+  // A 开关（anchorUndecidedSkip）：「还没跌/涨」≠「走弱」——after 不存在或形成中且
+  // 合并块数 < anchorUndecidedMinBars → 返回「未定型」，消费方不接管、回退前锚；
+  // 真弱（after 存在但未破左低）仍走「其他」→ 弱档语义不变（与 py_chain 对齐 2026-09-26）
+  if (core.CHAN_CFG.anchorUndecidedSkip) {
+    if (!after) return "未定型";
+    if (after._forming) {
+      const minBars = core.CHAN_CFG.anchorUndecidedMinBars || 2;
+      if (after.mergedCount != null && after.mergedCount < minBars) return "未定型";
+    }
+  }
   if (!after) return "其他";
   // 过左高 / 过左低
   const passed = wantUp ? after.endPrice > extreme.price : after.endPrice < extreme.price;
@@ -391,28 +401,36 @@ function predictPlan(opts) {
     return atEnd ? { point: atEnd, bi } : null;
   };
 
-  // 3. 先取最后一笔终点的买卖点
-  const lastMatch = matchAt(bis.length - 1);
-  if (DEBUG) console.log(`[计划] ${res} 最后一笔终点 ${fmtT(bis[bis.length - 1].endTime)}(${bis[bis.length - 1].endPrice.toFixed(2)}) -> ${lastMatch ? lastMatch.point.type : "无"}`);
-  if (lastMatch) {
-    const p = lastMatch.point;
-    const reason = `找到最近买卖点 ${p.type} @ ${fmtT(p.time)} ${p.price.toFixed(2)}（最后一笔端点）`;
-    const cls = /^(2买|类2买|3买|类3买|2卖|类2卖|3卖|类3卖)$/.test(p.type) ? classifySecond(bis, macdArr, p, RANGE_CFG) : "其他";
-    const out = strategyOf(res, p.type, reason, `趋势|${p.type}`, cls, RANGE_CFG);
+  // 3. 先取最后一笔终点的买卖点；4. 无 → 逐笔向前扫描。
+  //    A 开关（anchorUndecidedSkip）：分类「未定型」的端点视同无点——跳过继续向前扫描；
+  //    无可回退前锚时由未定型点本身接管（维持旧行为，保守；与 py_chain 对齐 2026-09-26）。
+  const clsOf = (p) => (/^(2买|类2买|3买|类3买|2卖|类2卖|3卖|类3卖)$/.test(p.type)
+    ? classifySecond(bis, macdArr, p, RANGE_CFG) : "其他");
+  const undecided = (m) => !!(m && core.CHAN_CFG.anchorUndecidedSkip && clsOf(m.point) === "未定型");
+  const outOf = (m, origin) => {
+    const p = m.point;
+    const reason = `找到最近买卖点 ${p.type} @ ${fmtT(p.time)} ${p.price.toFixed(2)}（${origin}）`;
+    const out = strategyOf(res, p.type, reason, `趋势|${p.type}`, clsOf(p), RANGE_CFG);
     out.strategyLabel = out.strategy;
     out.pointDesc = `${p.type}@${fmtT(p.time)}(${p.price.toFixed(2)})`;
     return out;
-  }
-
-  // 4. 最后一笔终点无买卖点（空）→ 再向前获取一笔（逐笔向前扫描最近的笔端点买卖点）
-  //    最近买卖点同样按类型精确映射（1卖→等待反弹后做2卖 等），不降级为只判断买卖方向。
+  };
+  const lastMatch = matchAt(bis.length - 1);
+  if (DEBUG) console.log(`[计划] ${res} 最后一笔终点 ${fmtT(bis[bis.length - 1].endTime)}(${bis[bis.length - 1].endPrice.toFixed(2)}) -> ${lastMatch ? lastMatch.point.type : "无"}`);
+  if (lastMatch && !undecided(lastMatch)) return outOf(lastMatch, "最后一笔端点");
+  let fallback = lastMatch || null;
   let prevMatch = null;
   for (let j = bis.length - 2; j >= 0; j--) {
-    prevMatch = matchAt(j);
-    if (prevMatch) break;
+    const m = matchAt(j);
+    if (!m) continue;
+    if (undecided(m)) { if (!fallback) fallback = m; continue; }
+    prevMatch = m;
+    break;
   }
   if (DEBUG) console.log(`[计划] ${res} 向前扫描最近买卖点 -> ${prevMatch ? prevMatch.point.type + "@" + fmtT(prevMatch.point.time) : "无"}`);
-  if (prevMatch) {
+  if (prevMatch) return outOf(prevMatch, "向前扫描最近笔端点");
+  if (fallback) return outOf(fallback, "最后一笔端点");
+  if (false) {
     const p = prevMatch.point;
     const reason = `找到最近买卖点 ${p.type} @ ${fmtT(p.time)} ${p.price.toFixed(2)}（向前扫描最近笔端点）`;
     const cls = /^(2买|类2买|3买|类3买|2卖|类2卖|3卖|类3卖)$/.test(p.type) ? classifySecond(bis, macdArr, p, RANGE_CFG) : "其他";

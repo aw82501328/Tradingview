@@ -6,8 +6,8 @@
 
 ## 1. 目标与边界
 
-- 把「画笔 → 标记买卖点 → 支阻位 → 交易计划 → 进出场」整条链路移植为纯 Python 包 `py_chain/`，不改动现有 `vnpy/` 与 `.cursor/skills/` 下 JS 实现（规则：不修改已完成功能）。
-- 数据源：TradingView 桌面端 CDP（用户已确认）；回测：全链路逐根 K 线点状重放（用户已确认），用 `mark-entry` 的 6 种进场策略。
+- 把「画笔 → 标记买卖点 → 支阻位 → 交易计划 → 进出场」整条链路移植为纯 Python 包 `py_chain/`，不改动现有 `vnpy/` 与 `.cursor/skills/` 下 JS 实现（规则：不修改已完成功能；例外：用户明确要求的规则变更须两侧同步，如 2026-09-25 进场键拆分同改 mark_entry.py 与 mark_entry.js）。
+- 数据源：TradingView 桌面端 CDP（用户已确认）；回测：全链路逐根 K 线点状重放（用户已确认），用 `mark-entry` 的 10 种进场策略（2026-09-25 起计划文案 1:1 拆分）。
 - **成交口径（`fill_mode`，默认 `anchor`，用户选定）**：信号在「背驰锚点时间之后的第 1 根
   fine 周期K线」开盘成交——消除背驰端点确认+检测周期条件确认的两层延迟（曾出现锚点
   19:46:30 → 确认成交 20:30:30 的 44 分钟差）。**警示**：锚点在其当拍不可知（需后续反向笔
@@ -49,7 +49,8 @@
     终点侧 3 根防反向吞没——曾致 15m 三段被吞成一笔、案例 A 的 15m 背驰永不成立）、
     `buildBi` 最小间隔脆弱笔例外（fragileMinimal）、`fixBiExtremes` 底端点含分型中心 +
     `_origLow` 恢复通道。引擎增量路径接入长影预处理（`_wick_process`：压平立即生效、
-    `_topCand` 延后一根回标——与图表批量版「末根无 next」同口径）并补 `nearDouble`（≥60m）。
+    `_topCand` 延后一根回标——与图表批量版「末根无 next」同口径）并补 `nearDouble`
+    （`nearDoubleOn(res)` 每周期开关，默认 60/240/D）。
   - **对拍工具**：`python -m py_chain.align_check`（JS 侧 `.cursor/skills/chan-core/scripts/rebuild_bis.js`
     复用图表算法源重建）——bars_all_tf.json 6 周期（含 30S）逐笔 diff **0 差异**。
   - **增量=batch 一致性**：`python -m py_chain.engine_consistency`——引擎逐根推进状态在
@@ -122,7 +123,7 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 
 #### 2.1.2.1 进场状态从哪来
 
-每个检测周期读取「交易计划」给出的策略，映射到 6 种进场策略；计划为震荡 / 数据不足 / 无匹配时，该周期不进场。
+每个检测周期读取「交易计划」给出的策略，映射到 10 个进场策略键（2026-09-25 起计划文案 1:1 拆分）；计划为震荡 / 数据不足 / 无匹配时，该周期不进场。
 
 | 计划策略 | 策略标识 | 方向 |
 |----------|----------|------|
@@ -132,14 +133,14 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 | 等待低点附近的一买 | `wait1Buy` | 做多 |
 | 等待回调后的新买点（3 类点强档，`thirdStrongTrend` 开） | `waitBuy` | 做多 |
 | 等待反弹后的新卖点（3 类点强档） | `waitSell` | 做空 |
-| 等待回调后的 3 买点（2买/类2买 强档） | `waitBuy` | 做多 |
-| 等待回调后的类 2 买点（2买 中间档） | `waitBuy` | 做多 |
-| 等待反弹后的 3 卖点（2卖/类2卖 强档） | `waitSell` | 做空 |
-| 等待反弹后的类 2 卖点（2卖 中间档） | `waitSell` | 做空 |
+| 等待回调后的 3 买点（2买/类2买 强档） | `wait3Buy` | 做多 |
+| 等待回调后的类 2 买点（2买 中间档） | `waitLike2Buy` | 做多 |
+| 等待反弹后的 3 卖点（2卖/类2卖 强档） | `wait3Sell` | 做空 |
+| 等待反弹后的类 2 卖点（2卖 中间档） | `waitLike2Sell` | 做空 |
 
-> 2026-09-24 交易计划三档化：新增 4 条文案与「新买点/新卖点」同走 `waitBuy`/`waitSell`（无专属条件），进场校验不变。
+> 2026-09-24 交易计划三档化新增 4 条文案；2026-09-25 键拆分：3买点/3卖点/类2买点/类2卖点 从 `waitBuy`/`waitSell` 拆为独立键（`wait3Buy`/`wait3Sell`/`waitLike2Buy`/`waitLike2Sell`）便于记录溯源，`waitBuy`/`waitSell` 从此仅指「新买点/新卖点」；4 个新键无专属条件，进场校验不变。历史方案旧行保留旧键不迁移。
 
-映射函数 `entryStrategyOf`（`mark_entry.py` L290 / `mark_entry.js` L360）；计划策略本身由 `trading_plan.strategyOf` 产出。
+映射函数 `entryStrategyOf`（`mark_entry.py` / `mark_entry.js`）；计划策略本身由 `trading_plan.strategyOf` 产出。
 
 **顺势参考周期过滤**（2026-09-15 起，默认开启；**2026-09-17 方向判定改相位树**）：`compute_entries`/`evaluateRealtimeEntries` 形参 `trend_res`（None→`trading_plan.TREND_RES="240"`；`""`=关闭，参数中心 plan 模块 `trendRes` / JS CLI `--trend-res` 可配 `240`/`D`/关闭）。①参考周期及以上**结构性剔除**出检测周期（只作方向锚；`D` 锚时 240 恢复检测）；②方向状态（`trading_plan.trend_state_of`→`trend_direction`：最近买卖点定方向——1类点须强分型、收盘破锚定价反向闩锁（**优先于相位**）、无点回退末笔方向；**锚点确立后、闩锁未触发期间按相位树走**（2026-09-17，参数 `trendRebound` 默认开、`reboundNearPts`/`reboundAngleRef` 控制近位容差与 45° 角度基准，1类与非1类锚点都适用：形成段方向→够笔→位置（近中枢 ZG/ZD、前低/前高，绝对点数容差）→当前笔角度强弱（平均每根点数 vs 基准），可返回**观望态** dir=None 带 reason 双向放行带注记；规则全文见 `spec/plans/SPEC_trend_rebound_phase.md` v2 与 WEB 参数页交易计划页签表2/2a/2b）非 None 且与策略方向相反时跳过该周期；③命中信号附 `trendDirection`/`trendReason`（观望态 dir=None 也附注记），回测信号列表方向列显示「多（4小时1卖转多预期）」式注记（`web/index.html` `signalDirectionName`，方向过滤按基名 多/空 匹配）。当下制 `trend_state` 由回测引擎在链路重算拍（每根 fine）算好传入复用（`evaluateRealtimeEntries` 无 bars 入参不自算）。
 
@@ -184,7 +185,7 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 | `wait2Sell` 等待反弹后做 2 卖 | 做空 | **创新低** `brokePrevLow`：最近完成的 down 笔终点跌破更早那笔 down 笔终点 | **DIF 未破 0 轴太多** `macdBelowZero`——`dif < +macdZeroTol`（对称，默认 5；2026-09-16 前为严格 `dif < 0`）：下过 0 轴后反弹没深破 0 轴，空头动能还在 |
 | `wait1Buy` 等待低点附近的一买 | 做多 | **创新低**（同上） | **离开中枢力度变弱** `zsExitWeak(...,"long")`：离开笔必须是 **down（向下离开）**，且比进入笔弱——与进入笔 `isBiDiverge`（绿柱面积 / DIF 低点 / 柱高任一更弱）**或** 幅度 `span` 小于进入笔。中枢取 `buildZSByUpper` 最后一个；**中枢尚未被离开 → 不成立** |
 | `wait1Sell` 等待高点附近的一卖 | 做空 | **创新高**（同上） | **离开中枢力度变弱** `zsExitWeak(...,"short")`：离开笔必须是 **up（向上离开）**，其余同上 |
-| `waitBuy` / `waitSell` 新买点 / 新卖点 | 多 / 空 | — | — **无额外要求**，只要三个公共条件满足 |
+| `waitBuy` / `waitSell` / `wait3Buy` / `wait3Sell` / `waitLike2Buy` / `waitLike2Sell` 新买点 / 新卖点 / 3买点 / 3卖点 / 类2买点 / 类2卖点 | 多 / 空 | — | — **无额外要求**，只要三个公共条件满足 |
 
 > 一句话记忆：**二买/二卖 = 创新高（低）+ MACD 还在正确一侧（未深破 0 轴，容差 5）**；**一买/一卖 = 创新低（高）+ 离开中枢时力气变小了**（后者就是背驰的教科书定义）。
 
@@ -240,7 +241,7 @@ run() 批量路径成交 bar 当拍未收盘，存在 ≤1 根 fine bar 的微�
 
 - **顺势** = 计划方向 ∈ {多头多, 空头空}（计划结构方向 = 操作方向，`TREND_PLAN_DIRS`）
 - **逆势** = {多头空, 空头多}
-- 计划方向缺失时按 `strategyKey` 兜底：`wait2Buy`/`waitBuy`/`wait2Sell`/`waitSell` → 顺势，`wait1Buy`/`wait1Sell` → 逆势（`trend_following_of`）
+- 计划方向缺失时按 `strategyKey` 兜底：`wait2Buy`/`waitBuy`/`wait3Buy`/`waitLike2Buy` 及卖侧对称 → 顺势，`wait1Buy`/`wait1Sell` → 逆势（`trend_following_of`）
 - 顺势：阶梯完整——保本 → 半平 → 破前高/前低全平
 - 逆势：**没有半平**——「形成段 ≥5 根 K」一到就**全平**快速离场
 
@@ -377,10 +378,14 @@ run() 批量路径成交 bar 当拍未收盘，存在 ≤1 根 fine bar 的微�
   顺势笔」生成预期位（等待2卖/2买 的预期形成区；卖向需形成笔现高点 < 前方下跌笔起点，
   买向对称；次高点结构被否定自动失效），带 `pending:True` 同样进 merged
   （实盘口径：预期位置 + 够笔/小级别背驰确认；增量重放中随结构演变消失/重生，无未来函数）；
-- **叠加层·BOLL 布林带（boll，默认开）**：每周期取**最后一根已收盘K线**的布林带上/中/下轨
-  （剔除取数末根形成中K线后，末 `bollLength`（默认 26）根收盘价的 SMA ± `bollMult`（默认 2）×
+- **叠加层·BOLL 布林带（boll，默认开）**：每周期取布林带上/中/下轨
+  （默认已收盘口径：剔除取数末根形成中K线后，末 `bollLength`（默认 26）根收盘价的 SMA ± `bollMult`（默认 2）×
   **总体标准差（÷N）**，与 TradingView 同口径）：上轨=阻力 `RES`、下轨=支撑 `SUP`、
   中轨按现价侧（现价 ≥ 中轨 → 支撑，否则阻力）；bars < 26 的周期无布林位（正常降级）。
+  **末根口径（2026-09-27）**：`bollIncludeLast`（默认 False=已收盘，回测历史锚点）；
+  SR 调参页经 `build_chain_result(engine_extra={"bollIncludeLast": True})` 传 True——含末根
+  （时点/当下 bar，与密集区触点/fib/现价及 TV 当前 bar 值同拍）；engine_kwargs_of 永不映射，
+  回测/分析/CLI 机制上拿不到该语义。
 
 叠加层独立于支阻位来源（`srTypes` 开关即叠加操作，Web ③「类型开关」= 叠加开关、cluster 恒开），
 人工周期照样叠加、仍进候选池（nearSr/止损参考可命中）。
@@ -391,9 +396,10 @@ run() 批量路径成交 bar 当拍未收盘，存在 ≤1 根 fine bar 的微�
   顺势笔」生成预期位（等待2卖/2买 的预期形成区；卖向需形成笔现高点 < 前方下跌笔起点，
   买向对称；次高点结构被否定自动失效），带 `pending:True` 同样进 merged
   （实盘口径：预期位置 + 够笔/小级别背驰确认；增量重放中随结构演变消失/重生，无未来函数）；
-- **BOLL 布林带（boll，默认开）**：每周期取**最后一根已收盘K线**的布林带上/中/下轨
-  （剔除取数末根形成中K线后，末 `bollLength`（默认 26）根收盘价的 SMA ± `bollMult`（默认 2）×
-  **总体标准差（÷N）**，与 TradingView 同口径）：上轨=阻力 `RES`、下轨=支撑 `SUP`、
+- **BOLL 布林带（boll，默认开）**：每周期取布林带上/中/下轨
+  （默认已收盘口径：剔除取数末根形成中K线后，末 `bollLength`（默认 26）根收盘价的 SMA ± `bollMult`（默认 2）×
+  **总体标准差（÷N）**，与 TradingView 同口径；`bollIncludeLast`（默认 False）=调参页专用
+  含末根口径，经 engine_extra 通道、不进 engine_kwargs_of——见「叠加层·BOLL」条）：上轨=阻力 `RES`、下轨=支撑 `SUP`、
   中轨按现价侧（现价 ≥ 中轨 → 支撑，否则阻力）；bars < 26 的周期无布林位（正常降级）。
 
 **全量候选池（2026-09-12 取消跨周期合并）**：全部候选（密集区截断后 + fib + boll + manual）逐条
@@ -582,13 +588,21 @@ python -m unittest py_chain.test_sr_flip -v                           # sr_flip 
 
 ## 一小时近等端点补充确认（2026-09-10）
 
-原阈值 max(0.3×ATR, 0.001×价格) 保持。仅60分钟价差超过原阈值但不超过1.5倍时，可由15分钟双动能确认：后段同色柱峰值与同侧DIF极值绝对值均不超过前段50%，两段柱峰值均非零，双底DIF均负、双顶均正。保留平台间隔、原阈值反向波动、锁定端点和单次替换保护；数据不足不走补充分支，不改变买卖点创新极值背驰定义。
+原阈值 max(0.3×ATR, 0.001×价格) 保持。仅60分钟价差超过原阈值但不超过1.5倍时，可由15分钟双动能确认：后段同色柱峰值与同侧DIF极值绝对值均不超过前段50%，两段柱峰值均非零，双底DIF均负、双顶均正。保留平台间隔、原阈值反向波动、锁定端点和单次替换保护；数据不足不走补充分支，不改变买卖点创新极值背驰定义。2026-09-25 起：阈值含固定容差并集项 `nearDoubleFixed`（品种报价单位绝对价差，默认 0 不启用，thr = max(三项) 只增不减）；本补充分支随 60m 周期开关 `nearDouble60` 可关（开启周期全部参数化：`nearDouble3/15/60/240/D`，默认关/关/开/开/开 = 参数化前 ≥1h 硬编码行为）。
 
 JS/Python的`buildBi`增加可选末参`lowerContext`；用`makeBiLowerContext(res,bars,cutoff,macd)`准备15分钟数据和MACD索引，缺省参数保持旧行为。新增配置`nearDoubleLowerRelax=1.5`、`nearDoubleLowerRatio=0.5`。
 
 画笔构建60分钟前需要完整15分钟历史（最近30天仅限显示）；回测、回放和监控仅使用当前决策时刻已收盘数据，先更新低周期。目标小时K线为8月7日08:00、4229.875，15分钟精确极值为08:45；固定样本仅目标相邻两笔变化，实际全量影响需回归检查。
 
 完整条件、接口、保护和测试见[现行补充规范](../spec/plans/SPEC_near_double_lower_confirmation.md)。早期章节中原阈值的说明描述基础分支，与本补充分支共同适用。
+
+## 近等后顶/后底（反弹不成笔）取后（2026-09-26）
+
+JS/Python 双端一致（`biStep` 阶段二「间隔不足→回溯替换」分支扩展，与近等平台取后顶互补：平台要求两顶间分型间隔全 <4，本规则处理中间已有合格反向分型、但 last→k 反弹腿 gap<4 的「回调够深、反弹太短」场景）。
+
+- 条件（k 与 prev=result[-2] 同类型、分支前提 last→k 间隔 <4）：近等 `0 ≤ prev−k ≤ thr`（thr 同平台规则三项并集；仅60m可 1.5×thr + 15m 双动能确认）；prev→last 反向幅度 ≥ thr；权限二选一 = k.locked（上级笔端点=区间套强制落地，任何周期、不受开关限制）或 nearDoubleOn(res) 周期 且 `nearDoubleRebound`（默认 True）；排除 prev.gapLocked/prev.locked/last.locked/prev.nearDouble（单跳封顶），回溯替换保护仍优先。
+- 效果：prev 让位、端点后移到 k（k 打 nearDouble 标记）；前顶/前底成为笔内极值。新配置 `nearDoubleRebound=True`（Python `near_double_rebound`）。
+- 固定样本：XAUUSD 60m 2026-09-18 顶 4399.67(15:00+8) → 底 4342.73(22:00+8，与23:00包含合并) → 9-19 01:00 顶 4397.045，反弹腿 3 根合并K；240 层平台规则已把 4h 顶后移到 9-19 01:00 → 60m 经 k.locked 复现：上涨笔 09-18 11:00 4334.295 → 09-19 01:00 4397.045，下跌笔至 09-21 22:00 4322.81。底对称。测试 py_chain/test_near_double.py（fixture near_double_rebound_xauusd_20260919.json.gz）。完整条件见 chan-core SPEC §2.4.2-2b。
 
 
 ## 预期笔统一口径（2026-09-17）
@@ -607,3 +621,30 @@ JS/Python的`buildBi`增加可选末参`lowerContext`；用`makeBiLowerContext(r
 新增模块：`mt5_feed.py`（行情+时区+重采样）、`mt5_broker.py`（可 mock 下单层）、`live_store.py`（bars.db 新表 live_state/live_events/live_orders/live_trades）、`live_trader.py`（编排主进程）、`mt5_align.py`（对拍锚点）。配置 `web/live_config.json`；实盘开闸双条件（require_mode=real + data/LIVE_ARMED）；密码只存终端凭据。
 
 分阶段 M0–M7（SPEC→环境 probe→数据对拍→执行层→编排+shadow→模拟盘实单→只读页签→VPS），各阶段验收锚点、风控默认值、多策略扩展（多进程+按实例 magic）与稳定/可靠/安全设计详见 [实盘接入规范](../spec/plans/SPEC_live_exness_mt5.md)。实施后本节随实际实现同步修订。
+
+## 三处规则修复 + 跨级下沉（2026-09-26；锚点案例 XAUUSD 07-07 06:30「1小时2卖+3分钟背驰」逐拍调查）
+
+四个 CHAN_CFG 开关（参数中心 chan/points/entry 模块，默认关=原行为逐位不变；JS 镜像同步）：
+
+- **A `anchorUndecidedSkip` + `anchorUndecidedMinBars`（默认 2）**：2/3类点分类「未定型」
+  （after 点后第一笔同向段不存在，或为形成中段且本级合并块数 < 阈值——「还没跌/涨」≠「走弱」）
+  时，predictPlan/trend_direction 不接管锚点、回退前一个定型点；无可回退时维持旧行为接管。
+  真弱（after 存在但未破左低）仍翻「等一买」（09-24 弱档语义不变）。定型阈值 2=右肩+1根确认
+  （1=分型即定型，5=与 expectBiMinBars 同参）。classifySecond 返回哨兵「未定型」。
+- **B `divergeReferByZs`**（用户规则：背驰=入中枢段 vs 出中枢段，中枢内部振荡段不参与比较）：
+  pickDivergeRefer（mark_entry.py，确认制/当下制共用）取 F 前紧邻最后一个中枢
+  （buildZS 的 enterEndTime 为准——startTime 含左外扩 5 根K非笔边界），跳过 endTime >
+  enterEndTime 的同向笔，参照回退到入中枢段；偶数笔中枢无同向入中枢段 → 无参照。
+- **C `synthIntrabarBars` + `pointEnoughForming`**：C-1 回测每拍用 fine 流合成 15/60/240
+  进行中K（O=bin 内首根开、H/L=运行极值、C=最新收、time=bin 内首根；D 不合成），尾接临时视图
+  注入链路（bars/macd/atr/merged/fractals，不落增量状态——注意 _mergeStep 会原地改末块 dict，
+  须浅拷列表+拷末块）；累加器 provisional() 试算与收盘 append 逐位一致。C-2 形成中段承载买卖点
+  的 enough 计数只到极值块（反向确认后的K不属于本段；本例 4h 下跌笔 4 块→3买@4128.51 不出现）。
+- **D `sinkSkipLevel`**：下沉链次级不可下沉（方向不符——15m 已确认顶翻 down 而 60m 容器仍 up
+  延伸 / 展开不足 3 笔 / 端点含糊落后容器极值）时跳过该级继续向下（60→3 直沉，markRes=3）；
+  同向延续（低级别极值越过容器端点价）时容器=整条容器段延伸到当下极值（规则 2 参照不被
+  端点粒度截断）。
+
+验证锚点（逐拍回放对拍）：全开产出 `short X=60 wait2Sell markRes=3 @07-07 06:33 4168.65，
+nearSr=4165.61（1h fib0.5），06:36 成交 4166.95`；默认关与基线逐位一致（07-03 信号/成交不变）。
+新增 test_rule_fixes.py（15 用例）；web/params.html entry 卡新增「规则修复」分组。

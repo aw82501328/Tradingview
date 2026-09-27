@@ -329,12 +329,21 @@ def _dedup_sorted(bars):
     return uniq
 
 
+def _from_for(from_ts, res):
+    """逐周期兼容取拉取起点：from_ts 为 int 用原值；为 {周期: int} 取该周期键（缺 0）。"""
+    if isinstance(from_ts, dict):
+        return int(from_ts.get(res, 0) or 0)
+    return int(from_ts or 0)
+
+
 def fetch_bars(cfg=None, from_ts=0, cache=True, cache_file=CACHE_FILE, symbol=None, log=None,
                verify_symbol=False):
     """通过 CDP 拉取多周期历史K线。
 
     @param cfg        CDPConfig（端口、周期列表、等待时长）
-    @param from_ts    UTC 时间戳，只保留 >= from_ts 的K线（过滤加载的更多历史）
+    @param from_ts    UTC 时间戳，只保留 >= from_ts 的K线（过滤加载的更多历史）；
+                      也支持 {周期: 时间戳} 逐周期各自起点（SR 控制台「时点+回溯」：
+                      各周期回溯 N 根的实际跨度差异巨大，不能共用单一起点）
     @param cache      为 True 时结果写入 cache_file（默认 bars_all_tf.json）
     @param symbol     可选：拉取前先切换图表品种（如 OANDA:XAUUSD）
     @param log        可选日志回调（默认 print），用于透传自动拉起 TradingView 的过程日志
@@ -352,6 +361,7 @@ def fetch_bars(cfg=None, from_ts=0, cache=True, cache_file=CACHE_FILE, symbol=No
             _set_resolution(c, res)
             time.sleep(cfg.res_wait)
             sec = intervalSecOf(res) or 0
+            ft = _from_for(from_ts, res)
             if 0 < sec < 60:
                 # 秒级周期（如 30S）：密度是分钟级的数十倍且 TV 历史深度有限，
                 # 不为覆盖起始日期全量滚动（数万根必超时），但默认缓冲只有几百根
@@ -384,7 +394,7 @@ def fetch_bars(cfg=None, from_ts=0, cache=True, cache_file=CACHE_FILE, symbol=No
                 bars_all = d["bars"]
                 latest = bars_all[-1]["time"]
                 first = bars_all[0]["time"]
-                cutoff = max(from_ts, latest - SEC_WINDOW_SEC)
+                cutoff = max(ft, latest - SEC_WINDOW_SEC)
                 bars = [b for b in bars_all if b["time"] >= cutoff]
                 data[res] = _dedup_sorted(bars)
                 span_days = (latest - bars_all[0]["time"]) / 86400.0
@@ -401,7 +411,7 @@ def fetch_bars(cfg=None, from_ts=0, cache=True, cache_file=CACHE_FILE, symbol=No
                 d = _read_bars(c)
                 if not d or not d.get("bars"):
                     break
-                if d["bars"][0]["time"] <= from_ts:
+                if d["bars"][0]["time"] <= ft:
                     break  # 已覆盖起始日期
                 _scroll_to_first_bar(c)
                 time.sleep(cfg.scroll_wait)
@@ -416,7 +426,7 @@ def fetch_bars(cfg=None, from_ts=0, cache=True, cache_file=CACHE_FILE, symbol=No
                                   or aliases.get(actual_res, actual_res) != aliases.get(requested_res, requested_res)):
                 raise CDPError(f"行情来源不匹配：请求 {symbol}/{res}，实际 "
                                f"{d.get('symbol')}/{d.get('res')}")
-            bars = [b for b in d["bars"] if b["time"] >= from_ts]
+            bars = [b for b in d["bars"] if b["time"] >= ft]
             # 去重 + 时间升序
             data[res] = _dedup_sorted(bars)
             log(f"已加载 {res}：共 {d['total']} 根，保留 {len(data[res])} 根"

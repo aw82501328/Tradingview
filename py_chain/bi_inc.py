@@ -84,7 +84,8 @@ class BiIncBuilder:
     def update(self, fractals, merged, macd, atr, nearDouble=False, lowerContext=None):
         """分型尾部变化后重建笔列表；返回笔列表（self._bis，同一对象）。
 
-        nearDouble/lowerContext 与 buildBi 同口径（≥60m 近等双顶底、60m 的 15m 补充分支）。
+        nearDouble/lowerContext 与 buildBi 同口径（按 nearDoubleOn(res) 每周期开关的
+        近等双顶/双底、60m 的 15m 补充分支）。
         """
         nearDouble = bool(nearDouble)
         lower_key = self._lower_fingerprint(lowerContext)

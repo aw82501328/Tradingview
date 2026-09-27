@@ -54,7 +54,7 @@ import time
 
 from .chan_core import (
     buildBi, makeBiLowerContext, fixBiExtremes, calcATR, calcMACD, intervalSecOf, fmtT,
-    CHAN_CFG,
+    nearDoubleOn, CHAN_CFG,
     MacdAccumulator, AtrAccumulator, extendLastBi, extendLastBiFrom,
 )
 from .mark_buy_sell import compute_all_marks
@@ -406,6 +406,8 @@ class BacktestEngine:
         self._entries = {}
         # 当下背驰去重：(periodX, strategyKey, markRes, 形成段起点时间)，每个形成段只发一次
         self._rt_fired = set()
+        # C-1 盘中合成K状态挂点（_rebuild_chain 每拍刷新，_collect_realtime 消费）
+        self._synth_state = None
         # 批量重同步水位（fine 周期 cut 达到 last+RESYNC_EVERY 时全周期重同步）
         self._last_resync = 0
 
@@ -475,6 +477,85 @@ class BacktestEngine:
         w["pending"] = b
         return b
 
+    def _synth_wick_view(self, res, bar):
+        """试算合成K的压平视图（C-1；不改 _wick 运行状态）。口径与 _wick_process
+        第 3 步一致：min_wick 含合成K自身 TR（与批量版「先含当前根再判」对齐）；
+        合成K即末根、无右邻，不做 _topCand 延迟回标（真实 bar 收盘时走正常通道）。"""
+        w = self._wick[res]
+        tr_sum, tr_cnt = w["trSum"], w["trCnt"]
+        if w["prevClose"] is not None:
+            tr = max(bar["high"] - bar["low"],
+                     abs(bar["high"] - w["prevClose"]),
+                     abs(bar["low"] - w["prevClose"]))
+            tr_sum += tr
+            tr_cnt += 1
+        min_wick = (tr_sum / tr_cnt) * CHAN_CFG["wickAtrK"] if tr_cnt else 0.0
+        b = dict(bar)
+        amp = b["high"] - b["low"]
+        if amp > 0:
+            body_top = max(b["open"], b["close"])
+            body_bottom = min(b["open"], b["close"])
+            upper = b["high"] - body_top
+            lower = body_bottom - b["low"]
+            if upper >= CHAN_CFG["wickRatio"] * amp and upper >= min_wick:
+                b["_origHigh"] = b["high"]
+                b["high"] = body_top
+            elif lower >= CHAN_CFG["wickRatio"] * amp and lower >= min_wick:
+                b["_origLow"] = b["low"]
+                b["_origLowTime"] = b["time"]
+                b["low"] = body_bottom
+        return b
+
+    # C-1 盘中合成K的注入周期（用户 2026-09-26 指定：15m/1h/4h；D 不合成）
+    SYNTH_PERIODS = ("15", "60", "240")
+
+    def _synth_views(self):
+        """C-1（synthIntrabarBars）盘中合成K：用 fine 已收K聚合出 15/60/240 当前 bin 的
+        进行中K（O=bin 内首根开、H/L=运行极值、C=最新收、time=bin 内首根时间），
+        生成 bars/macd/atr/merged/fractals 的尾接临时视图——不落任何增量状态、
+        不写 bars.db，bin 收盘后真实 bar 走正常通道并替换视图。
+        @returns {res: {bar, macd, atr, merged, fractals, macdTime}}（当前无进行中 bin 的周期不出现）"""
+        from .chan_core import _mergeStep, updateFractalsTail
+        out = {}
+        if str(self.fine_res) in self.SYNTH_PERIODS:
+            return out
+        fine_prefix = self._prefix_bars(self.fine_res)
+        fine_cut = self._cut.get(self.fine_res, 0)
+        if not fine_prefix:
+            return out
+        fine_times = self._times[self.fine_res]
+        for res in self.periods:
+            if str(res) not in self.SYNTH_PERIODS:
+                continue
+            cut = self._cut.get(res, 0)
+            if not cut:
+                continue  # 该周期尚无已收K（预热期），不合成
+            lastT = self._times[res][cut - 1]
+            # 当前 bin 起点 = 下一网格（lastT + barSec；周末断档时首个 fine K 即新 bin），
+            # 已收 bin 内部的 fine K（lastT < t < lastT+barSec）不得混入
+            i0 = bisect.bisect_left(fine_times, lastT + (intervalSecOf(res) or 0))
+            seg = fine_prefix[i0:fine_cut] if i0 <= fine_cut else []
+            if not seg:
+                continue  # 当前 bin 无 fine 已收K（跨 bin 边界前静默）
+            bar = {"time": seg[0]["time"], "open": seg[0]["open"],
+                   "high": max(b["high"] for b in seg),
+                   "low": min(b["low"] for b in seg),
+                   "close": seg[-1]["close"], "_synth": True}
+            flat = self._synth_wick_view(res, bar)
+            # 浅拷贝列表 + 拷贝末块 dict：_mergeStep 包含并入时会原地改末块
+            # （high/low/time/_topCand），共享对象会污染引擎增量状态（实测笔结构漂移）
+            m2 = list(self._merged[res])
+            if m2:
+                m2[-1] = dict(m2[-1])
+            _mergeStep(m2, self._merge_dir[res], flat)
+            f2 = updateFractalsTail(list(self._fractals[res]), m2)
+            out[res] = {"bar": bar,
+                        "macd": self._macd[res].provisional(bar),
+                        "atr": self._atr[res].provisional(bar),
+                        "merged": m2, "fractals": f2,
+                        "macdTime": bar["time"]}
+        return out
+
     def _append_bars(self, res, new_bars):
         """把 res 周期新增的K线逐根并入增量状态；返回该周期笔结构是否变化（新分型或延伸推进）。
 
@@ -511,7 +592,7 @@ class BacktestEngine:
         if len(new_f) != old_len or (new_f and old_last is not None and new_f[-1] != old_last):
             bis_changed = True
         if bis_changed:
-            near_double = (intervalSecOf(res) or 0) >= 3600
+            near_double = nearDoubleOn(res)
             lower = self._lower_context_for(res)
             self._bis[res] = self._bi_inc[res].update(
                 new_f, merged, macd.to_list(), atr.value,
@@ -630,14 +711,14 @@ class BacktestEngine:
 
     def _build_bis(self, res, merged, fractals, macd, atr):
         """从分型重建笔并做端点极值修正；返回按时间升序的笔列表。
-        近等双顶/双底平台取后顶/后底与 chan-bi/build_bis 一致：仅 ≥60m（60/240/D）开启。
+        近等双顶/双底平台取后顶/后底与 chan-bi/build_bis 一致：按 nearDoubleOn(res)
+        每周期开关开启（默认 60/240/D）。
         重同步路径走批量 buildBi；增量路径走 BiIncBuilder.update。"""
         from .chan_core import fixBiExtremes
         if len(fractals) < 2:
             return []
         lower = self._lower_context_for(res)
-        bis = buildBi(fractals, merged, atr, macd, None,
-                      (intervalSecOf(res) or 0) >= 3600, lower)
+        bis = buildBi(fractals, merged, atr, macd, None, nearDoubleOn(res), lower)
         bis = fixBiExtremes(bis, merged) or bis
         return bis
 
@@ -1054,15 +1135,29 @@ class BacktestEngine:
         slice_res = list(core)
         if include_entries:
             slice_res += [p for p in self.periods if str(p).upper() == "30S"]
+        # C-1（synthIntrabarBars）盘中合成K：尾接临时视图（bars/macd/atr/merged/fractals），
+        # 只影响本次链路重算的消费者（支阻/计划/结构上下文）与随后的当下背驰评估，
+        # 不落任何增量状态；结果挂 self._synth_state 供 _collect_realtime 复用
+        synthViews = self._synth_views() if CHAN_CFG.get("synthIntrabarBars") else None
+        self._synth_state = synthViews
         barsByPeriod = {}
         periodMacd = {res: self._macd[res].to_list() for res in self.periods}
         periodAtr = {res: self._atr[res].value for res in self.periods}
         for res in slice_res:
             # cut 增长时原地 extend，避免每次重算 O(n) 切片拷贝
             barsByPeriod[res] = self._prefix_bars(res)
+        mBy, fBy = self._merged, self._fractals
+        if synthViews:
+            mBy, fBy = dict(self._merged), dict(self._fractals)
+            for res, sv in synthViews.items():
+                barsByPeriod[res] = list(barsByPeriod[res]) + [sv["bar"]]
+                periodMacd[res] = list(periodMacd[res]) + [sv["macd"]]
+                periodAtr[res] = sv["atr"]
+                mBy[res] = sv["merged"]
+                fBy[res] = sv["fractals"]
         from .chan_core import structurePeriods
         periodBis = structurePeriods(self._bis, barsByPeriod, self._decision_time,
-                                     self._merged, self._fractals, self._chain_work_cache)
+                                     mBy, fBy, self._chain_work_cache)
         self._structure_bis = periodBis
         # 1. 买卖点（全链路完整性；默认关闭以提速，可由 --with-marks 开启）
         if self.with_marks:
@@ -1191,14 +1286,29 @@ class BacktestEngine:
         detectPeriods = filterDetectPeriods(self.periods)  # 与确认制一致：须有已加载更低级别
         if self._rt_fired_idx is None:
             self._rt_fired_idx = {(f[0], f[1], f[3]) for f in self._rt_fired}
+        # C-1 盘中合成K：当下背驰评估消费合成K尾接视图（macd/ATR/merged/macdTimes），
+        # 使背驰窗口/柱缩闸/够笔计数盘中即见当根 res K 的运行 OHLC
+        synth = getattr(self, "_synth_state", None)
+        macdViews = {res: self._macd[res].entries for res in self.periods}
+        atrViews = {res: self._atr[res].value for res in self.periods}
+        mergedViews = dict(self._merged)
+        macdTViews = dict(self._macd_times or {})
+        if synth:
+            for res, sv in synth.items():
+                macdViews[res] = list(macdViews[res]) + [sv["macd"]]
+                atrViews[res] = sv["atr"]
+                mergedViews[res] = sv["merged"]
+                mt = macdTViews.get(res)
+                macdTViews[res] = (list(mt) + [sv["macdTime"]]) if mt is not None else \
+                    [m["time"] for m in macdViews[res]]
         sigs = evaluateRealtimeEntries(
             getattr(self, "_structure_bis", self._bis),
-            {res: self._macd[res].entries for res in self.periods},
-            {res: self._atr[res].value for res in self.periods},
+            macdViews,
+            atrViews,
             self._plan, srLevels, detectPeriods,
             near=self.near, tCut=t, fired=self._rt_fired, firedIndex=self._rt_fired_idx,
-            periodTimes=self._times, periodMacdTimes=self._macd_times,
-            periodMerged=self._merged,
+            periodTimes=self._times, periodMacdTimes=macdTViews,
+            periodMerged=mergedViews,
             divergeConfirm=self.diverge_confirm,
             expectBiEnabled=self.expect_bi,
             entryMacdShrink=self.entry_macd_shrink,
@@ -1450,9 +1560,9 @@ def build_bis(bars_by_period, periods=None):
         fractals = findFractals(merged)
         atr = calcATR(bl, 14)
         macd = calcMACD(bl)
-        # 近等双顶/双底平台取后顶/后底：与 chan-bi 一致仅 ≥60m（60/240/D）开启
+        # 近等双顶/双底平台取后顶/后底：与 chan-bi 一致按 nearDoubleOn(res) 每周期开关（默认 60/240/D）
         lower = makeBiLowerContext(res, sorted(bars_by_period.get('15', []), key=lambda b: b['time']))
-        bis = buildBi(fractals, merged, atr, macd, None, intervalSecOf(res) >= 3600, lower)
+        bis = buildBi(fractals, merged, atr, macd, None, nearDoubleOn(res), lower)
         bis = fixBiExtremes(bis, merged) or bis
         bis = extendLastBi(bis, trimmed)
         if bis:

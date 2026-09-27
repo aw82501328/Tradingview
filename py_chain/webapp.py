@@ -40,7 +40,7 @@ from .chan_core import fmtT
 from .monitor import LiveMonitor, ReplayMonitor, clear_rt_markers
 from .marks import draw_signal_marks, draw_sr_marks, clear_signal_marks, clear_all_marks
 from . import chan_core
-from . import data_store, td_launcher, sr_service, sr_draw, sr_tune, sr_tune_api, sr_preset_excel, analysis_service, analysis_api, bt_runs, param_center, params_api, live_api
+from . import data_store, td_launcher, sr_service, sr_draw, sr_tune, sr_tune_api, sr_preset_excel, analysis_service, analysis_api, bt_runs, bt_errors, param_center, params_api, live_api
 from . import mark_entry
 
 # ============================================================
@@ -201,16 +201,30 @@ def run_sr_compute(app, cfg, mode):
     results = {}
     first_ok = None
     first_err = None
+    # 「时点+回溯」取数计划：锚 = as_of_ts（时点）或 now（空=当下），逐周期起点。
+    # 限窗/末段口径经 engine_kwargs_of 统一映射（cfg.lookbackBars → clusterLookbackBars、
+    # fibLastStroke 恒 True）——控制台/回测/分析同口径（2026-09-26 引擎同步）。
+    # BOLL 末根口径（2026-09-27）反之：控制台独有，经 engine_extra 传入（含末根，与
+    # TV 当前 bar 同拍）；回测/分析保持已收盘口径、信号基线不变
+    as_of_ts = cfg.get("as_of_ts")
+    lb = int(cfg.get("lookbackBars") or 0)
+    ft_map = sr_service.fetch_from_map(cfg["periods"], as_of_ts, lb)
     for i, sym in enumerate(symbols):
         try:
             log(f"—— 品种 {i + 1}/{n}：{sym} ——")
             prog("fetch", i + 1, n, symbol=sym)
-            bars = sr_service.ensure_data(cfg["periods"], cfg["from_ts"],
+            bars = sr_service.ensure_data(cfg["periods"], None,
                                           log=log, refresh=(mode == "refresh"),
-                                          symbol=sym)
+                                          symbol=sym, fetch_froms=ft_map, as_of_ts=as_of_ts)
+            skipped = [p for p in cfg["periods"] if p not in bars]
+            eff_cfg = dict(cfg, symbol=sym, fetch_froms=ft_map,
+                           skipped_periods=skipped)
+            if skipped:  # 时点前数据不可得的周期已跳过：后续各层只对可得周期计算
+                eff_cfg["periods"] = [p for p in cfg["periods"] if p in bars]
             prog("bis", i + 1, n, symbol=sym)
             result, meta = sr_service.build_chain_result(
-                bars, dict(cfg, symbol=sym), log=log)
+                bars, eff_cfg, log=log,
+                engine_extra={"bollIncludeLast": True})
             results[sym] = {"result": result, "meta": meta}
             if first_ok is None:
                 first_ok = (result, meta)
@@ -620,11 +634,11 @@ class BacktestWorker(ModeWorker):
     MODE = "backtest"
 
     @staticmethod
-    def _sr_preset_kwargs(cfg, periods):
-        """按 cfg.symbol 读参数中心该品种支阻桶 → normalize → engine_kwargs_of。
+    def _sr_preset_kwargs(cfg, periods, log=None):
+        """支阻参数优先级：cfg.sr_preset 名（全局预设模板）> 品种参数中心桶 > None（引擎默认）。
         以回测周期 ∩ 支阻级别过滤；30S 不属于支阻级别，不透传。
-        空/无效 → None（引擎默认：密集区+BOLL）。
-        历史快照若仍带 sr_preset 名：品种桶 normalize 失败时回退旧 _presets_load。"""
+        预设名不存在（已删/改名）→ 日志+回退品种桶（历史方案重放/批量回测不因过期名废任务）；
+        预设存在但参数非法 → 抛 ValueError（显式选择被静默换成桶参数比失败更危险）。"""
         from .sr_service import engine_kwargs_of
         sr_periods = ([p for p in periods
                        if str(p).strip().upper() in sr_service.CANONICAL_LEVELS]
@@ -638,29 +652,34 @@ class BacktestWorker(ModeWorker):
                         **{"from": cfg.get("from") or pcfg.get("from") or "2026-06-30"})
             return engine_kwargs_of(ControlApp.normalize_sr_cfg(pcfg))
 
+        # 1) 显式预设名优先（全局命名模板，不分品种；来源 /sr 调参页的预设列表）
+        name = str(cfg.get("sr_preset") or "").strip()
+        if name:
+            preset = next((p for p in _presets_load()
+                           if isinstance(p, dict) and p.get("name") == name), None)
+            if preset is not None and isinstance(preset.get("cfg"), dict):
+                try:
+                    kw = _to_kwargs(preset["cfg"])
+                except (ValueError, TypeError, KeyError) as e:
+                    raise ValueError(f"支阻预设「{name}」参数非法：{e}")
+                if log:
+                    log(f"支阻参数：使用预设「{name}」（优先于 {symbol or '默认'} 品种桶）")
+                return kw
+            if log:
+                log(f"支阻预设「{name}」不存在（已删除或改名），回退品种桶 {symbol or ''}")
+        # 2) 品种桶：按 cfg.symbol 读参数中心 → normalize；失败 → 引擎默认
         try:
             return _to_kwargs(param_center.effective_sr(symbol))
-        except (ValueError, TypeError, KeyError):
-            pass
-        # 历史兼容：旧预设名
-        name = str(cfg.get("sr_preset") or "").strip()
-        if not name:
-            return None
-        preset = next((p for p in _presets_load()
-                       if isinstance(p, dict) and p.get("name") == name), None)
-        if preset is None or not isinstance(preset.get("cfg"), dict):
-            return None
-        try:
-            return _to_kwargs(preset["cfg"])
         except (ValueError, TypeError, KeyError):
             return None
 
     @staticmethod
-    def _engine_kwargs_of(cfg, periods):
+    def _engine_kwargs_of(cfg, periods, log=None):
         """参数中心取参 + cfg 缺省回填 + BacktestEngine 构造 kwargs（单品种 _run 与
         多品种 _run_batch 共用，逐参等价）。会回写 cfg（lots/滑点等缺省值），保持
         bt_runs 历史方案快照/对比表显示实际生效参数的既有口径。
-        diverge_confirm/expect_bi 页面不再传入（None → 引擎读 CHAN_CFG）。"""
+        diverge_confirm/expect_bi 页面不再传入（None → 引擎读 CHAN_CFG）。
+        log 透传给 _sr_preset_kwargs：预设使用/回退说明进 SSE 日志面板。"""
         pm = param_center.effective_all(cfg.get("symbol"))
         chan_core.apply_cfg(param_center.chan_cfg_effective(cfg.get("symbol")))  # 幂等重放（启动已应用；防参数文件被手改）
         ep = pm["entry"]
@@ -688,7 +707,7 @@ class BacktestWorker(ModeWorker):
             slip_fallback_atr_k=cfg["slip_fallback_atr_k"],
             slip_be_atr_k=cfg["slip_be_atr_k"],
             near=cfg["near"],
-            sr_kwargs=BacktestWorker._sr_preset_kwargs(cfg, periods),
+            sr_kwargs=BacktestWorker._sr_preset_kwargs(cfg, periods, log=log),
             diverge_confirm=cfg.get("diverge_confirm"),
             expect_bi=cfg.get("expect_bi"),
             module_params=param_center.engine_module_params(pm),
@@ -737,7 +756,7 @@ class BacktestWorker(ModeWorker):
         # 参数中心（参数配置页统一管理）：API 显式值优先（历史方案复现/后端覆盖能力），
         # 缺省用参数中心当前值；回写 cfg 保证 bt_runs 历史方案快照/对比表显示实际生效参数。
         # 构造参数抽取为 _engine_kwargs_of（与多品种批量共用，逐参等价）
-        engine = BacktestEngine(bars, **self._engine_kwargs_of(cfg, periods))
+        engine = BacktestEngine(bars, **self._engine_kwargs_of(cfg, periods, log=self.log))
         self.log(f"回测开始（最小周期 {engine.fine_res}，成交口径 {engine.fill_mode}，"
                  f"信号模式 {'当下背驰' if engine.signal_mode == 'realtime' else '确认制'}，"
                  f"背驰进场 {'分型确认后下一根开盘' if engine.diverge_confirm else '当下'}，"
@@ -820,7 +839,7 @@ class BacktestWorker(ModeWorker):
                 # 进出场按品种取桶：清掉共享 cfg 可能带来的统一 near/滑点/手数
                 for k in ENTRY_FILL_KEYS:
                     scfg.pop(k, None)
-                kw = self._engine_kwargs_of(scfg, periods)
+                kw = self._engine_kwargs_of(scfg, periods, log=self.log)
                 # 记入 self.batch[sym] 供 _save_one 回写各自 cfg 快照
                 self.batch[sym]["lots"] = kw["lots"]
                 self.batch[sym]["contract_mult"] = kw["contract_mult"]
@@ -1111,6 +1130,8 @@ class ControlApp:
         self.sr = {"cfg": None, "computed_at": None, "result": None, "meta": None}
         # 全量回测历史方案存储（bt_runs/bt_signals 表，建在基础数据库 bars.db 里）
         self.bt_runs = bt_runs.BtRunStore()
+        # 全量回测典型案例存储（bt_errors 表，同 bars.db；右击「复制并加入典型案例」留档）
+        self.bt_errors = bt_errors.BtErrorStore()
         self.sr_tune = sr_tune.TuneManager(store=tune_store, emit=self.broadcaster.emit)
         self.td_launcher = td_launcher.TDLauncher(acquire_active, release_active,
                                                   compat=self._td_launch_compat)
@@ -1202,11 +1223,36 @@ class ControlApp:
                 raise ValueError("品种一次最多 10 个")
             cfg["symbols"] = syms
             cfg["symbol"] = syms[0]
-        from_s = str(cfg.get("from") or sr_service.DEFAULT_FROM)
-        try:
-            cfg["from_ts"] = parse_from(from_s)
-        except Exception:
-            raise ValueError(f"起始日期无法解析：{from_s}")
+        # 时点（原「起始日期」，语义重释）：空 = 当下最新（不截断）；非空 = 计算该时刻
+        # 「当下」的支阻位。纯日期与带时分都按上海时间：纯日期 = 当日 00:00~23:59:59
+        # （as_of_ts = 上海日切 +86399，页面锚点同为 UTC+8，避免 UTC 日切把次日凌晨
+        #  K 线算进「当天」）；带时分（YYYY-MM-DD HH:MM）= 上海时间精确截断
+        # （复用 sr_tune.parse_time），并向下对齐 3 分钟格（最小K线粒度）
+        from_s = str(cfg.get("from") or "").strip()
+        if from_s:
+            from .sr_tune import parse_time, SHANGHAI
+            if len(from_s) > 10 or "T" in from_s or ":" in from_s:
+                try:
+                    ts = parse_time(from_s)
+                except ValueError:
+                    raise ValueError(
+                        f"时点无法解析：{from_s}（须为 YYYY-MM-DD 或 YYYY-MM-DD HH:MM 上海时间）")
+                ts -= ts % 180  # 3 分钟对齐
+                cfg["as_of_ts"] = ts
+                cfg["from_ts"] = ts  # 兼容展示键
+            else:
+                try:
+                    y, m, d = (int(x) for x in from_s.split("-"))
+                    base = int(datetime(y, m, d, tzinfo=SHANGHAI).timestamp())
+                except Exception:
+                    raise ValueError(f"时点日期无法解析：{from_s}")
+                cfg["as_of_ts"] = base + 86400 - 1  # 上海时间当日 23:59:59
+                cfg["from_ts"] = base  # 兼容展示键（上海当日 00:00）
+            if cfg["as_of_ts"] > int(time.time()) + 86400:
+                raise ValueError(f"时点不能在未来：{from_s}")
+        else:
+            cfg.pop("as_of_ts", None)
+            cfg.pop("from_ts", None)
         # 类型开关
         sr_types = [s for s in (cfg.get("srTypes") or []) if s in ("cluster", "fib", "boll")]
         if not sr_types:
@@ -1232,6 +1278,17 @@ class ControlApp:
                 raise ValueError(f"{k} 须 >= {lo}")
         cfg.update(floats)
         cfg.update(ints)
+        # 时点回溯：向前K线根数（仅限密集区候选窗口，每周期各自计数；缺省 300，空/0=不限）
+        if cfg.get("lookbackBars") in (None, ""):
+            cfg["lookbackBars"] = 0 if "lookbackBars" in cfg else sr_service.LOOKBACK_BARS_DEFAULT
+        else:
+            try:
+                lb = int(cfg["lookbackBars"])
+            except (TypeError, ValueError):
+                raise ValueError("向前K线根数须为 0~5000 的整数")
+            if not (0 <= lb <= 5000):
+                raise ValueError("向前K线根数须为 0~5000 的整数")
+            cfg["lookbackBars"] = lb
         # minTouch 矩阵（级别键 → int >= 1）
         mt = {}
         for res, v in (cfg.get("minTouchs") or {}).items():
@@ -1464,6 +1521,8 @@ def make_handler(app):
                 return
             if bt_runs.handle(self, app, "GET"):
                 return
+            if bt_errors.handle(self, app, "GET"):
+                return
             if self._tune("GET"):
                 return
             if path in ("/sr-tune.js", "/sr-tune.css"):
@@ -1478,6 +1537,10 @@ def make_handler(app):
             if path in ("/analysis.js", "/service-restart.js", "/analysis-catalog.json", "/shell.css", "/theme.css", "/legacy-theme.css", "/mermaid.min.js"):
                 content_type = "text/javascript" if path.endswith(".js") else "application/json" if path.endswith(".json") else "text/css"
                 self._serve_file(path[1:], content_type + "; charset=utf-8")
+                return
+            if path == "/bt_common.js":
+                # 三模式控制台(index.html)与方案明细页(bt_detail.html)共享的渲染核心
+                self._serve_file("bt_common.js", "text/javascript; charset=utf-8")
                 return
             if path == "/sr" or path == "/sr.html":
                 self._serve_file("sr.html", "text/html; charset=utf-8")
@@ -1552,6 +1615,10 @@ def make_handler(app):
             if path == "/data" or path == "/data.html":
                 self._serve_file("data.html", "text/html; charset=utf-8")
                 return
+            if path == "/bt-detail" or path == "/bt_detail.html":
+                # 历史方案明细独立页：控制台「明细」按钮以 /bt-detail?id=<方案id> 另开标签
+                self._serve_file("bt_detail.html", "text/html; charset=utf-8")
+                return
             if path == "/api/data/list":
                 self._send_json({"ok": True, "stores": data_store.list_stores()})
                 return
@@ -1605,6 +1672,8 @@ def make_handler(app):
             if params_api.handle(self, app, "POST", lambda: _params_busy(app)):
                 return
             if bt_runs.handle(self, app, "POST"):
+                return
+            if bt_errors.handle(self, app, "POST"):
                 return
             if self._tune("POST"):
                 return
@@ -2119,6 +2188,8 @@ def make_handler(app):
         def do_DELETE(self):
             path = urlparse(self.path).path
             if bt_runs.handle(self, app, "DELETE"):
+                return
+            if bt_errors.handle(self, app, "DELETE"):
                 return
             if self._tune("DELETE"):
                 return

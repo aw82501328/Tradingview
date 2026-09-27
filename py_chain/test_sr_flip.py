@@ -391,6 +391,34 @@ class TestCalcBOLL(unittest.TestCase):
         self.assertIsNone(calcBOLL([bar(t, 100, 100, 100) for t in range(26)], 26, 2))  # 仅 25 根已收盘
         self.assertIsNone(calcBOLL([], 26, 2))
 
+    def test_include_last_uses_last_bar(self):
+        # includeLast（SR 调参页口径，2026-09-27）：含末根 → closes=[3,1,3,9]
+        # mid=4 σ=3 mult=2 → upper=10 lower=-2；默认对照见 test_manual_series
+        bars = [bar(1, 1, 1, 1), bar(2, 3, 3, 3), bar(3, 1, 1, 1), bar(4, 3, 3, 3), bar(5, 9, 9, 9)]
+        band = calcBOLL(bars, 4, 2, includeLast=True)
+        self.assertAlmostEqual(band["mid"], 4, places=9)
+        self.assertAlmostEqual(band["upper"], 10, places=9)
+        self.assertAlmostEqual(band["lower"], -2, places=9)
+
+    def test_include_last_boundary_exactly_length(self):
+        # 恰 length 根：includeLast 可算（含末根取末 length 根，比默认少要 1 根）；默认仍 None
+        bars = [bar(t, 100, 100, 100) for t in range(26)]
+        self.assertIsNotNone(calcBOLL(bars, 26, 2, includeLast=True))
+        self.assertIsNone(calcBOLL(bars, 26, 2))
+
+    def test_default_bit_identical_to_manual_slice(self):
+        # 默认路径 == 手工 closed=bars[:-1] 后取末 length 根（同求和序 → 逐位相等，
+        # 回测历史锚点安全的回归锚）
+        bars = [bar(t, 100 + (t % 5), 98, 100 + (t % 3)) for t in range(40)]
+        band = calcBOLL(bars, 26, 2)
+        closes = [b["close"] for b in bars[:-1][-26:]]
+        mid = sum(closes) / len(closes)
+        variance = sum((c - mid) ** 2 for c in closes) / len(closes)
+        sigma = variance ** 0.5
+        self.assertEqual(band["mid"], mid)
+        self.assertEqual(band["upper"], mid + 2 * sigma)
+        self.assertEqual(band["lower"], mid - 2 * sigma)
+
 
 class TestBuildBollCandidates(unittest.TestCase):
     """buildBollCandidates 三轨组装（上 RES / 下 SUP / 中按现价侧）。"""
@@ -421,6 +449,14 @@ class TestBuildBollCandidates(unittest.TestCase):
 
     def test_insufficient_bars_empty(self):
         self.assertEqual(buildBollCandidates([bar(t, 100, 100, 100) for t in range(10)], 26, 2, 100), [])
+
+    def test_anchor_follows_window(self):
+        # 锚点=轨道所用末根：默认=末根已收盘K线；includeLast=末根本身（时点/当下 bar）
+        bars = [bar(t, 100, 100, 100) for t in range(27)]
+        for c in buildBollCandidates(bars, 26, 2, 100, includeLast=True):
+            self.assertEqual(c["firstTouch"], bars[-1]["time"])
+        for c in buildBollCandidates(bars, 26, 2, 100):
+            self.assertEqual(c["firstTouch"], bars[-2]["time"])
 
 
 class TestFlattenCandidates(unittest.TestCase):

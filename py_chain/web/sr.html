@@ -76,6 +76,13 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
 .scrollbox{max-height:460px;overflow:auto;border:1px solid var(--border);border-radius:4px}
 .filterbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px;font-size:12px}
 .filterbar label{color:var(--muted)}
+.plist{border:1px solid var(--border);border-radius:4px;max-height:168px;overflow:auto;margin-top:6px;background:#0f1219}
+.plist-item{display:flex;align-items:center;gap:4px;padding:2px 6px;border-bottom:1px solid var(--border)}
+.plist-item:last-child{border-bottom:none}
+.plist-item.on{background:#1d2a44}
+.plist-item .nm{flex:1;min-width:35px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;background:transparent;border:none;color:var(--text);padding:3px 4px;cursor:pointer;font-size:12px}
+.plist-item .nm:hover{color:#fff}
+.plist-empty{color:var(--muted);padding:8px;font-size:11px}
 .src-sel{font-size:11px;padding:2px 4px}
 tr.edit-sub td{white-space:normal;background:#141926;padding:5px 9px 7px}
 tr.edit-sub:hover td{background:#1a2030}
@@ -105,7 +112,7 @@ tr.edit-sub:hover td{background:#1a2030}
 <h1>支阻位参数调试控制台 <span class="badge idle" id="badge-busy">idle</span>
   <a href="/" style="float:right;font-size:13px;">← 三模式控制台</a>
 </h1>
-<div class="statusline">支阻位（系统密集区/人工输入，逐周期二选一）+ 叠加层（黄金分割/BOLL，开关即叠加）· 不合并各周期独立 · 人工位全部画出 · 按品种独立存储 ·
+<div class="statusline">支阻位（系统密集区/人工输入，逐周期二选一）+ 叠加层（黄金分割/BOLL，开关即叠加）· 不合并各周期独立 · 人工位全部画出 · 按品种独立存储 · 时点+回溯（时点=该日当下，密集区与 fib 锚点向前 N 根）·
   <b id="occupy"></b></div>
 
 <!-- 独立打开时本页顶层品种 TAB；embed=1 时隐藏，听父页 postMessage -->
@@ -120,7 +127,10 @@ tr.edit-sub:hover td{background:#1a2030}
     <h2>数据</h2>
     <div class="row"><label>品种</label>
       <span id="cfg-symbol-label" class="mono">黄金 · OANDA:XAUUSD</span>
-      <label>起始</label><input type="text" id="cfg-from" value="2026-07-02"></div>
+      <label>时点</label><input type="text" id="cfg-from" value="" placeholder="YYYY-MM-DD 或 YYYY-MM-DD HH:MM，空=当下"
+        title="计算该时刻「当下」的支阻位。纯日期=上海时间当日 00:00~23:59:59；带时分=上海时间精确截断（自动对齐 3 分钟格）；空=最新不截断。fib=最后一根笔的分割、BOLL 取当下轨道（含时点末根，与 TV 该时刻当前 bar 同拍）、现价=该时刻收盘">
+      <label>向前K线根数</label><input type="number" data-k="lookbackBars" value="300" min="0" max="5000" step="1"
+        title="时点向前 N 根（每周期各自计数：D 的 300 根≈300天、3 的 300 根≈15小时）；0/空=不限。作用范围：密集区候选 + fib 锚点（fib 只当下——锚点须形成于 N 根内，窗外方向走预期位/不出线）。BOLL 天然当下不受限"></div>
     <div class="row">
       <button class="primary" id="btn-compute">计算（缓存优先）</button>
       <button class="danger" id="btn-refresh" title="从 TradingView 全量重拉所选周期并计算（W 首拉可能数分钟）">刷新数据并计算</button>
@@ -143,7 +153,18 @@ tr.edit-sub:hover td{background:#1a2030}
       <button class="primary" id="btn-draw">画图</button>
       <button class="danger" id="btn-clear">清除本模块线</button>
     </div>
-    <div class="merge-tip" id="raw-note" style="display:none;">叠加 RAW· 本周期原始候选线：每张图只显示 本图周期 的全部候选（密集区黄 / 黄金分割蓝 / BOLL 青），与灰线同框对照；只画距现价 ≤ 距离上限×本周期ATR 的候选。</div>
+    <div class="merge-tip" id="raw-note" style="display:none;">叠加 RAW· 本周期原始候选线：每张图只显示 本图周期 的全部候选（密集区黄 / 黄金分割蓝 / BOLL 青），与灰线同框对照；只画距时点价（时点空=现价）≤ 距离上限×本周期ATR 的候选。</div>
+    <div class="row" style="border-top:1px solid var(--border);margin-top:8px;padding-top:7px">
+      <span style="color:#fff;font-size:12px">预设</span>
+      <input type="text" id="preset-name" placeholder="新预设名称" maxlength="40">
+      <button class="sm primary" id="btn-preset-save">新建</button>
+    </div>
+    <div class="merge-tip">全局命名模板（不分品种）：点名称载入到当前品种编辑器 → 再「保存本模块」落桶 · 行内「保存」=用当前编辑器参数改写该项</div>
+    <input type="file" id="preset-excel-file" accept=".xlsx" hidden>
+    <div id="preset-excel-status" class="merge-tip" role="status"></div>
+    <button type="button" class="sm" id="preset-excel-new">导入 Excel 为新预设</button>
+    <div class="plist" id="preset-list"></div>
+    <div class="merge-tip" id="loaded-badge"></div>
   </div>
 
   <!-- 级别矩阵 -->
@@ -274,14 +295,14 @@ tr.edit-sub:hover td{background:#1a2030}
             <input type="number" data-k="bollLength" value="26" min="2" step="1">
             <label>σ 倍数</label>
             <input type="number" data-k="bollMult" value="2.0" min="0.5" step="0.1"></div>
-          <div class="merge-tip">每周期三轨全生成；上图条数由第 2 步裁</div>
+          <div class="merge-tip">含最后一根K线（当下/时点 bar，与 TV 当前 bar 值同拍）；每周期三轨全生成；上图条数由第 2 步裁</div>
         </fieldset>
       </div>
     </fieldset>
 
     <fieldset class="step">
       <legend><span class="stepn">2</span> 选取上图</legend>
-      <div class="merge-tip">生成/截断之后直接选取（不合并）。各周期独立：距现价最近上/下各 N 条，且 ≤ 距离上限×本周期ATR。纯就近，不再按评分。</div>
+      <div class="merge-tip">生成/截断之后直接选取（不合并）。各周期独立：距时点价（时点空=现价）最近上/下各 N 条，且 ≤ 距离上限×本周期ATR。纯就近，不再按评分。</div>
       <div class="row"><label style="width:158px">距离上限(×本周期ATR)</label>
         <input type="number" data-k="maxDistAtr" value="3.0" min="0.1" step="0.1"></div>
       <div class="row"><label style="width:158px">每侧条数 sideCount</label>
@@ -319,12 +340,13 @@ tr.edit-sub:hover td{background:#1a2030}
     <summary>语义速查（生成 / 截断 / 选取）</summary>
     <ul>
       <li>支阻位来源（「周期与参数」逐周期二选一）= <b>系统计算</b>（密集区：强互换 R2S/S2R 触及≥minTouch 且角色反转或突破 + 近期极值 RES/SUP）或 <b>人工输入</b>（手动价位，type 按现价侧）</li>
-      <li>叠加层（「通用计算设置」开关，独立于支阻位来源）= 黄金分割（每方向最新非一类买卖点参照笔×比率，无已形成点走 pending）+ BOLL（每周期最后 <b>一根已收盘K线</b>的 SMA±σ×倍数 三轨，中轨按现价侧）；人工周期照样叠加</li>
+      <li>叠加层（「通用计算设置」开关，独立于支阻位来源）= 黄金分割（每方向最新非一类买卖点参照笔×比率，无已形成点走 pending）+ BOLL（每周期<b>含末根K线</b>（当下/时点 bar，与 TV 当前 bar 值一致；回测仍为已收盘口径）的 SMA±σ×倍数 三轨，中轨按现价侧）；人工周期照样叠加</li>
       <li>截断（仅密集区）= 超 maxPerPeriod 按评分留 Top N；评分 = 触及权重×触及 + 经过K线权重×经K线（候选集内 min-max 归一）；fib/boll/manual 豁免</li>
       <li>不合并 = 全部候选逐条进全量候选池（价格=原始识别价，同价位不并条、不做加权平均；手动位与人工/系统支阻位同池）</li>
       <li>选取上图 = 系统周期：距现价最近上/下各 sideCount 条、≤距离上限×本周期ATR；<b>人工周期：输入几条画几条</b>（不受条数/距离限制），叠加层仍就近选取</li>
       <li>人工输入未填价位 = 该周期没有支阻位（不画线、不进候选池，叠加层照常）</li>
       <li>按品种独立（2026-09-24）：顶层品种 TAB / 父页品种决定当前桶；计算与画图仅针对当前单品种；「保存本模块」写入该品种参数中心桶，自动调参「应用最优」只回写表单</li>
+      <li>时点+回溯（2026-09-26）=「时点」当下的支阻位（纯日期=上海时间当日 23:59:59，与锚点展示同一时区；带时分=上海时间精确到分钟、自动对齐 3 分钟格；空=当下最新）；密集区候选只看时点向前 <b>N 根（每周期各自计数）</b>，强度统计同窗；<b>fib=末段分割</b>——形成中且合并K不足 5 根的段不算笔：这段已离开末根则参照最后一根已确认笔，这段还贴在末根上则参照再前面的推动笔（用该段真实高低点）。下跌笔→反弹阻力 RES（低位+r×波幅）、上涨笔→回撤支撑 SUP（高位−r×波幅），各 3 条，与白名单买卖点无关；BOLL 轨道/时点价天然当下不受 N 限制，轨道含时点末根。旧「起始日期=窗口起点」语义已移除</li>
     </ul>
   </details>
   </div>
@@ -379,7 +401,8 @@ const state = { busy: null, active: null, hasResult: false, computedAt: null,
                 cfg: null, meta: null, periods: {}, merged: [], drawn: {}, current: null,
                 tab: 'periods', watchdogs: {},
                 sessionComputed: false,   // 本页面会话内是否真实计算成功（画图解锁的唯一依据）
-                results: {}, viewSymbol: null };
+                results: {}, viewSymbol: null,
+                loadedPreset: null };   // 当前编辑器内容来自哪份预设（切品种/恢复默认即清除）
 let logs = [];
 let clusterParamsByPeriod = {};
 const defaultMinTouchs = {W:4,D:4,'240':4,'60':3,'15':3,'3':8};
@@ -544,7 +567,7 @@ function collectCfg() {
 // 改动不应触发画图按钮变灰（否则换个颜色还得重算一遍）
 function cfgSnapshot() {
   const c = collectCfg();
-  return JSON.stringify({ symbol: c.symbol, from: c.from, periods: c.periods,
+  return JSON.stringify({ symbol: c.symbol, from: c.from, lookbackBars: c.lookbackBars, periods: c.periods,
     minTouchs: c.minTouchs, clusterParamsByPeriod: c.clusterParamsByPeriod,
     srTypes: c.srTypes, clusterParts: c.clusterParts, manualLevels: c.manualLevels,
     clusterAtr: c.clusterAtr, recentClusterAtr: c.recentClusterAtr,
@@ -562,7 +585,7 @@ function applyCfgToUI(cfg) {
   if (sid) currentSid = sid;
   drawSymbolTabs();
   updateSymbolLabel();
-  if (cfg.from) el('cfg-from').value = cfg.from;
+  el('cfg-from').value = cfg.from || '';   // 时点：空=当下（清空防跨品种残留）
   const want = new Set(cfg.periods || []);
   qa('.chk-res').forEach(c => { c.checked = want.has(c.closest('tr').dataset.res); });
   minTouchsByPeriod = {...defaultMinTouchs, ...(cfg.minTouchs || {})};
@@ -628,6 +651,7 @@ async function loadSymbolCfg(sid) {
   const eff = bucket.effective || r.modules.sr.defaults || {};
   const fromKeep = el('cfg-from').value.trim();
   applyCfgToUI({ ...eff, symbol: metaOf(sid).code, from: fromKeep || eff.from });
+  markLoadedPreset(null);   // 编辑器内容换成品种桶参数，预设徽章清除
   const when = bucket.savedAt ? ' · 最近保存 ' + fmtTime(bucket.savedAt) : '';
   moduleStatus(metaOf(sid).label + ' 参数已载入' + when, true);
 }
@@ -665,8 +689,120 @@ async function resetModule() {
   const r = await api('/api/params/sr/reset', { symbol: currentSid });
   if (!r) return;
   applyCfgToUI({ ...(r.effective || {}), symbol: currentCode(), from: el('cfg-from').value.trim() });
+  markLoadedPreset(null);   // 编辑器内容换成默认参数，预设徽章清除
   moduleStatus(metaOf(currentSid).label + ' 已恢复默认', true);
   log('已恢复品种桶 ' + currentSid + ' 为默认');
+}
+
+// ---------- 预设（全局命名模板，不分品种；点名称载入 / 行内保存与删除 / Excel） ----------
+function markLoadedPreset(name) {
+  state.loadedPreset = name || null;
+  qa('#preset-list .plist-item').forEach(row => {
+    row.classList.toggle('on', row.dataset.name === name);
+  });
+  el('loaded-badge').textContent = name ? ('已载入: ' + name) : '';
+  el('loaded-badge').style.color = name ? 'var(--warn)' : '';
+}
+async function refreshPresetList() {
+  const r = await api('/api/sr/presets', undefined, 'GET');
+  const box = el('preset-list');
+  if (!r) return;
+  const presets = r.presets || [];
+  if (!presets.length) {
+    box.innerHTML = '<div class="plist-empty">暂无预设，输入名称后点新建，或导入 Excel</div>';
+    return;
+  }
+  box.innerHTML = presets.map(p => {
+    const n = esc(p.name);
+    return `<div class="plist-item" data-name="${n}">` +
+      `<button type="button" class="nm" data-act="load" title="载入">${n}</button>` +
+      `<button type="button" class="sm" data-act="save">保存</button>` +
+      `<button type="button" class="sm danger" data-act="del">删除</button>` +
+      `<button type="button" class="sm" data-act="import" title="从 Excel 更新此预设">导入</button>` +
+      `<button type="button" class="sm" data-act="export" title="导出此预设已保存的全部参数">导出</button></div>`;
+  }).join('');
+  markLoadedPreset(state.loadedPreset);
+}
+let excelTarget = '', excelBusy = false;
+function excelStatus(text, error=false) {
+  el('preset-excel-status').textContent=text;
+  el('preset-excel-status').style.color=error?'var(--warn)':'var(--ok)';
+}
+function choosePresetExcel(name) {
+  if(excelBusy)return;
+  excelTarget=name;el('preset-excel-file').value='';el('preset-excel-file').click();
+}
+async function exportPresetExcel(name) {
+  if(excelBusy)return;excelBusy=true;
+  try {
+    const r=await fetch('/api/sr/presets/excel/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    if(!r.ok)throw Error((await r.json()).error||'导出失败');
+    const url=URL.createObjectURL(await r.blob()),a=document.createElement('a');
+    a.href=url;a.download=name.replace(/[\\/:*?"<>|]/g,'_')+'.xlsx';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);
+    excelStatus('已导出 '+name+' 的全部已保存参数。');
+  } catch(e){excelStatus(e.message,true);} finally{excelBusy=false;}
+}
+/** 载入预设到当前品种编辑器：剥离 symbol/symbols（不切品种 TAB）与 from（保留当前时点，
+ *  与 loadSymbolCfg/resetModule 的 fromKeep 惯例一致——时点是运行时输入，不是方案内容） */
+function presetCfgForUI(cfg) {
+  const { symbol: _s, symbols: _ss, from: _f, ...rest } = cfg || {};
+  return rest;
+}
+async function importPresetExcel() {
+  const file=el('preset-excel-file').files[0];if(!file||excelBusy)return;
+  if(!/\.xlsx$/i.test(file.name)||file.size>2*1024*1024){excelStatus('请选择不超过 2 MB 的 .xlsx 文件。',true);return;}
+  excelBusy=true;excelStatus('正在校验并导入…');
+  try {
+    let target=excelTarget;
+    if(!target){
+      const existing=await api('/api/sr/presets',undefined,'GET');if(!existing)throw Error('无法读取预设列表');
+      const base=(el('preset-name').value.trim()||file.name.replace(/\.xlsx$/i,'')).slice(0,34)||'导入预设';target=base;let i=1;
+      while((existing.presets||[]).some(p=>p.name===target))target=base+' ('+(i++)+')';
+    }
+    const r=await fetch('/api/sr/presets/excel/import?name='+encodeURIComponent(target),{method:'POST',headers:{'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'},body:await file.arrayBuffer()});
+    const data=await r.json();if(!r.ok||!data.ok)throw Error(data.error||'导入失败');
+    applyCfgToUI(presetCfgForUI(data.cfg));el('preset-name').value=data.name;markLoadedPreset(data.name);await refreshPresetList();
+    excelStatus('已导入并载入 '+data.name+'，计算后生效。');
+  } catch(e){excelStatus(e.message,true);} finally{excelBusy=false;el('preset-excel-file').value='';}
+}
+async function savePreset(name) {
+  name = (name || el('preset-name').value).trim();
+  if (!name) { log('请输入预设名', true); return; }
+  const r = await api('/api/sr/presets', { name, cfg: collectCfg() });
+  if (r) {
+    log((r.overwritten ? '预设已保存：' : '预设已新建：') + name);
+    el('preset-name').value = '';
+    markLoadedPreset(name);
+    await refreshPresetList();
+  }
+}
+async function loadPreset(name) {
+  if (!name) return;
+  if (busyNow() || anyModeRunning()) { log('计算进行中不能载入预设（会改写表单参数）', true); return; }
+  const r = await api('/api/sr/presets', undefined, 'GET');
+  if (!r) return;
+  const p = (r.presets || []).find(x => x.name === name);
+  if (!p) { log('预设不存在：' + name, true); await refreshPresetList(); return; }
+  try {
+    applyCfgToUI(presetCfgForUI(p.cfg));
+  } catch (e) {
+    // 回填失败必须可见（异步未捕获会变成「点了没反应」），并保留原始报错便于定位
+    log('载入预设失败：' + (e && e.message || e), true);
+    console.error(e);
+    return;
+  }
+  markLoadedPreset(name);
+  el('preset-name').value = name;
+  log(`已载入预设：${name}（当前品种编辑器；「保存本模块」可落到 ${currentCode()} 品种桶）`);
+}
+async function delPreset(name) {
+  if (!name) return;
+  const r = await api('/api/sr/presets?name=' + encodeURIComponent(name), undefined, 'DELETE');
+  if (r) {
+    log(`已删除预设：${name}`);
+    if (state.loadedPreset === name) markLoadedPreset(null);
+    await refreshPresetList();
+  }
 }
 
 // ---------- 结果渲染 ----------
@@ -683,11 +819,12 @@ function famName(f) {
 function typeText(f) { return f.type || (f.boll || (f.pending ? '预期' : '—')); }
 
 function buildCols(tab) {
+  const distCol = el('cfg-from').value.trim() ? '距时点价' : '距现价';
   if (tab === 'drawn')
-    return [['L', 'level'], ['来源', 'fam'], ['类型', 'type'], ['价', 'price'], ['距现价', 'dist'],
+    return [['L', 'level'], ['来源', 'fam'], ['类型', 'type'], ['价', 'price'], [distCol, 'dist'],
             ['ATR倍', 'atrX'], ['触及', 'tc'], ['经K线', 'bp'], ['锚点', 'bt'], ['标注', 'label']];
   if (tab === 'merged')
-    return [['级别', 'level'], ['来源', 'fam'], ['类型', 'type'], ['价', 'price'], ['距现价', 'dist'],
+    return [['级别', 'level'], ['来源', 'fam'], ['类型', 'type'], ['价', 'price'], [distCol, 'dist'],
             ['触及', 'tc'], ['与上行价差', 'gap'], ['锚点', 'bt'], ['标注', 'label']];
   return [['周期', 'res'], ['来源', 'fam'], ['类型', 'type'], ['价', 'price'], ['触及', 'tc'], ['经K线', 'bp'], ['锚点', 'bt']];
 }
@@ -844,10 +981,13 @@ function applyResultView(sym) {
   });
   const cov = (state.meta || {}).coverage || {};
   const partial = LEVELS.filter(l => cov[l] === 'partial');
-  el('cache-note').textContent = partial.length
-    ? `⚠ 数据源深度有限，${partial.join('/')} 早于所填起始日期的历史不可得（按可得全量计算）`
-    : '缓存已覆盖所选起始日期';
-  el('cache-note').style.color = partial.length ? 'var(--warn)' : 'var(--ok)';
+  const skipped = (state.meta || {}).skipped_periods || [];
+  el('cache-note').textContent = skipped.length
+    ? `⚠ 已跳过 ${skipped.join('/')}：时点之前的K线不可得（本地存储与数据源深度均不足），其余周期照算`
+    : partial.length
+      ? `⚠ 数据源深度有限，${partial.join('/')} 早于回溯窗口起点的历史不可得（按可得全量计算）`
+      : '缓存已覆盖回溯窗口';
+  el('cache-note').style.color = (skipped.length || partial.length) ? 'var(--warn)' : 'var(--ok)';
   checkStale();
   renderTable();
 }
@@ -937,7 +1077,8 @@ function connectSSE() {
     const busyName = state.busy;
     setBusy(null);
     if (d.error) {
-      el('prog-label').textContent = '';
+      el('prog-bar').style.width = '0%';
+      el('prog-label').textContent = '❌ ' + d.error;
       log(`操作失败：${d.error}`, true); return;
     }
     if (d.op === 'compute') {
@@ -973,6 +1114,21 @@ function bindEvents() {
   el('btn-clear').onclick = doClear;
   el('btn-save-module').onclick = () => saveModule();
   el('btn-reset-module').onclick = () => resetModule();
+  el('btn-preset-save').onclick = () => savePreset();
+  el('preset-excel-new').onclick = () => choosePresetExcel('');
+  el('preset-excel-file').onchange = importPresetExcel;
+  el('preset-list').onclick = (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    const row = btn.closest('.plist-item');
+    if (!row) return;
+    const name = row.dataset.name;
+    if (btn.dataset.act === 'load') loadPreset(name);
+    else if (btn.dataset.act === 'save') savePreset(name);
+    else if (btn.dataset.act === 'del') delPreset(name);
+    else if (btn.dataset.act === 'import') choosePresetExcel(name);
+    else if (btn.dataset.act === 'export') exportPresetExcel(name);
+  };
   el('d-raw').onchange = noteRawToggle;
   el('d-text').onchange = () => {};
   // 支阻来源（系统计算/人工输入）与人工价位输入；子行内容随来源切换
@@ -1031,6 +1187,7 @@ function init() {
   loadSymbolCfg(currentSid).then(() => {
     log('支阻位调试页就绪。当前品种 ' + currentCode() + '：调参 → 计算 → 看明细/画图 →「保存本模块」落盘。');
   });
+  refreshPresetList();
 }
 init();
 </script>

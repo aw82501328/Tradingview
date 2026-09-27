@@ -49,15 +49,19 @@ ZS_DEFAULTS = {
 # CHAN_CFG 键按工作台步骤归属（算法默认值仍在 chan_core.CHAN_CFG_DEFAULTS）
 CHAN_BI_KEYS = (
     "gapFilter", "wickRatio", "wickAtrK",
-    "nearDoubleAtrK", "nearDoublePct", "nearDoubleLowerRelax", "nearDoubleLowerRatio",
+    "nearDoubleAtrK", "nearDoublePct", "nearDoubleFixed",
+    "nearDoubleLowerRelax", "nearDoubleLowerRatio",
+    "nearDouble3", "nearDouble15", "nearDouble60", "nearDouble240", "nearDoubleD",
+    "synthIntrabarBars", "pointEnoughForming",
     "debug",
 )
-POINTS_CHAN_KEYS = ("divergeDurRatio",)
+POINTS_CHAN_KEYS = ("divergeDurRatio", "anchorUndecidedSkip", "anchorUndecidedMinBars")
 ENTRY_CHAN_KEYS = (
     "sinkFallback", "sinkFallbackRearm",
     "nearEqualAtrK", "nearEqualPct",
     "expectBiEnough", "expectBiMinBars", "divergeConfirm", "macdZeroTol",
     "entryMacdShrink", "stopEntryBarFloor",
+    "divergeReferByZs", "sinkSkipLevel",
 )
 # 旧 module_params.json 把上述键都写在 modules.chan 下；读入时迁到 points/entry
 _LEGACY_CHAN_TO_POINTS = set(POINTS_CHAN_KEYS)
@@ -77,8 +81,29 @@ PARAM_MODULES = {
             "wickAtrK": ("长影线长度下限", "影线绝对长度下限 = 该值×TR均值（窄幅小K线免疫）", 0.0, 5.0),
             "nearDoubleAtrK": ("近等双顶容差ATR", "近等双顶/双底平台价差容差（×ATR）", 0.0, 5.0),
             "nearDoublePct": ("近等双顶价差比例", "近等双顶/双底价差下限（价格比例）", 0.0, 0.05),
+            "nearDoubleFixed": ("近等双顶固定容差",
+                                "固定价差容差（品种报价单位绝对价差，如黄金 0.1=0.1 美元）；"
+                                "总容差 = max(ATR×容差ATR, 价格×价差比例, 该值)——并集取最大、"
+                                "只增不减；0=不启用（默认，与原行为一致）", 0.0, None),
             "nearDoubleLowerRelax": ("60m双动能容差倍数", "仅60m：15m双动能确认时近等容差放宽倍数", 1.0, 10.0),
             "nearDoubleLowerRatio": ("15m动能衰减比例", "15m柱峰值与DIF幅度须衰减至前段该比例以内", 0.0, 1.0),
+            "nearDouble3": ("近等双顶·3分钟",
+                            "3分钟笔是否启用「近等双顶/双底平台取后顶/后底」（默认关）", None, None),
+            "nearDouble15": ("近等双顶·15分钟",
+                             "15分钟笔是否启用（默认关；全周期开启曾实测 61 次触发、"
+                             "微观结构大面积重排）", None, None),
+            "nearDouble60": ("近等双顶·1小时",
+                             "1小时笔是否启用（默认开；价差超阈值时可由15m双动能补充确认）", None, None),
+            "nearDouble240": ("近等双顶·4小时", "4小时笔是否启用（默认开）", None, None),
+            "nearDoubleD": ("近等双顶·日线", "日线笔是否启用（默认开）", None, None),
+            "synthIntrabarBars": ("盘中合成K（15m/1h/4h）",
+                                  "回测每拍用3分钟已收K聚合15m/1h/4h进行中K（O=bin首开、"
+                                  "H/L=运行极值、C=最新收）临时注入链路——高周期结构盘中"
+                                  "即见当根K变化（默认关=只认已收K，原行为）", None, None),
+            "pointEnoughForming": ("够笔只计成笔可能",
+                                   "形成中段承载买卖点的够笔计数只数到极值块——反向确认"
+                                   "（首根抬低点/抬高点K）后的K不属于本段不计入（默认关="
+                                   "数到当下，原行为）", None, None),
             "debug": ("调试打印", "buildBi/买卖点识别过程打印", None, None),
         },
     },
@@ -105,6 +130,11 @@ PARAM_MODULES = {
             "class2ZsTol": ("类2破中枢容差(点)", "类2买/类2卖允许越过中枢边界的绝对点数（0=严格）", 0.0, 1000.0),
             "thirdZsTol": ("3类进中枢容差(点)", "3买/类3买/3卖/类3卖允许进入中枢的绝对点数（0=严格）", 0.0, 1000.0),
             "divergeDurRatio": ("背驰时长可比上限", "两段时长比超过该值时面积项不计入背驰判据", 1, 100),
+            "anchorUndecidedSkip": ("未定型点不接管",
+                                    "2/3类点分类「未定型」（点后反向段不存在/未达根数）时不接管"
+                                    "计划/顺势锚点、回退前一个定型点（默认关=出生即接管，原行为）", None, None),
+            "anchorUndecidedMinBars": ("定型阈值(合并块)", "点后反向段的本级合并块数达到该值才算定型"
+                                       "（1=分型即定型；2=右肩+1根确认，默认；5=与够笔同参）", 1, 100),
         },
     },
     "entry": {
@@ -131,6 +161,13 @@ PARAM_MODULES = {
             "entryMacdShrink": ("进场MACD柱缩闸", "开启=背驰级别上一根已收K线柱状体(|MACD|)较前一根缩小才出信号（确认背驰且柱缩，下一根开盘进场）", None, None),
             "stopEntryBarFloor": ("进场K线止损下限", "开启=止损至少在进场背驰周期K线极值外侧加滑点处（运行中外推、收盘冻结，与支阻位止损取更宽者）", None, None),
             "macdZeroTol": ("2买卖0轴容差", "2买 DIF > -该值 / 2卖 DIF < +该值 视为动能还在（0=严格 0 轴）", 0.0, 100.0),
+            "divergeReferByZs": ("背驰参照按中枢",
+                                 "参照笔=入中枢段——跳过当前段之前紧邻中枢内部/之后的同向笔"
+                                 "（背驰=入中枢段vs出中枢段，中枢内部振荡段不参与比较；"
+                                 "默认关=紧邻前一同向笔，原行为）", None, None),
+            "sinkSkipLevel": ("跨级下沉",
+                              "下沉链次级展开<3笔时跳过该级继续向下找有展开的级别判背驰"
+                              "（如60→3直沉，markRes=3；默认关=在本级判定，原行为）", None, None),
         },
     },
     "plan": {
@@ -238,9 +275,12 @@ SR_DEFAULTS = {
     "srTypes": ["cluster", "boll"],
     "periods": ["D", "240", "60", "15", "3"],
 }
-# 运行时键不落盘（品种/时间窗由任务侧决定）
+# 运行时键不落盘（品种/时间窗由任务侧决定；as_of_ts=时点截断界，同属查看态）
+# lookbackBars（向前K线根数，密集区限窗）不在此列：随品种桶落盘，但引擎路径经
+# engine_kwargs_of 显式枚举映射，永不进 compute_srflip → 回测/live 语义不变
 _SR_RUNTIME_KEYS = frozenset((
-    "symbol", "symbols", "from", "from_ts", "to", "to_ts", "start_ts", "name", "saved_at",
+    "symbol", "symbols", "from", "from_ts", "as_of_ts", "to", "to_ts", "start_ts",
+    "name", "saved_at",
 ))
 
 

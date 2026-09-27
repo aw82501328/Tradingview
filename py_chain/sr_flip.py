@@ -15,8 +15,10 @@
     findSellPoints），取其回调笔紧邻前方的顺势笔为参照笔，画经典回撤分割位；该方向
     无已形成点时走「预期回退」（pending）：形成中回调笔 + 其前方顺势笔生成预期位
     （等待2卖/2买 的预期形成区，次高点结构破坏自动失效）
-  - BOLL 布林带（boll，默认开）：每周期最后一根已收盘K线的布林带上/中/下轨
-    （26 周期 SMA ± 2σ，总体标准差 ÷N），上轨=阻力 RES、下轨=支撑 SUP、中轨按现价侧
+  - BOLL 布林带（boll，默认开）：布林带上/中/下轨（26 周期 SMA ± 2σ，总体标准差 ÷N），
+    上轨=阻力 RES、下轨=支撑 SUP、中轨按现价侧。末根口径（bollIncludeLast，2026-09-27）：
+    默认 False=已收盘口径（剔除末根形成中K线——回测历史锚点口径）；True=含末根
+    （SR 调参页口径，与密集区触点/fib/现价及 TV 当前 bar 值同拍，仅经 engine_extra 传入）
 
 不合并（2026-09-12 起取消跨周期合并）：候选逐条展平为全量候选池（merged），
 价格=原始识别价（不做任何加权平均），每项附 level（自身周期）与 srcType
@@ -342,12 +344,118 @@ def fibLevelsOf(refer, side, fibLevels):
             for r in fibLevels]
 
 
-def buildFibCandidates(fullBis, buyPts, sellPts, fibLevels, bars, tol, barArrays=None):
-    """组装黄金分割支阻位候选：每方向优先取「最新非一类点」× 全部比率（不回退更早点）；
-    该方向无已形成点时走**预期回退**（pendingReferOf），生成 pending 预期位补位。
-    @param fullBis 本周期全量笔（供参照笔定位，见 referBiOfPoint）
-    @returns fib 候选列表（买点组在前；预期位带 pending: True）
+def impulseExtremes(refer, bars):
+    """推动笔的真实高低点，供黄金分割使用。
+
+    笔端点会被包含合并、近等后顶挪开。参照段取这段行情里的最低价和最高价；
+    起点前一根若比笔起点更极端（极值被包含处理留在前一根），算进这段。
+    例：4小时上涨笔端点是 9-17 05:00 的 4257.6 → 9-19 01:00 的 4397.045，
+    真实低点在前一根 9-17 01:00 的 4235.16，真实高点在 9-18 13:00 的 4399.67。
     """
+    if not bars:
+        return refer
+    start, end = refer["startTime"], refer["endTime"]
+    idxs = [i for i, b in enumerate(bars) if start <= b["time"] <= end]
+    if not idxs:
+        return refer
+    i0 = idxs[0]
+    if i0 > 0:
+        prev = bars[i0 - 1]
+        if refer["type"] == "up" and prev["low"] < refer["startPrice"]:
+            idxs.insert(0, i0 - 1)
+        elif refer["type"] == "down" and prev["high"] > refer["startPrice"]:
+            idxs.insert(0, i0 - 1)
+    seg = [bars[i] for i in idxs]
+    if refer["type"] == "up":
+        lo = min(seg, key=lambda b: (b["low"], -b["time"]))
+        hi = max(seg, key=lambda b: (b["high"], b["time"]))
+        start_b, end_b = lo, hi
+        start_px, end_px = lo["low"], hi["high"]
+    else:
+        hi = max(seg, key=lambda b: (b["high"], -b["time"]))
+        lo = min(seg, key=lambda b: (b["low"], b["time"]))
+        start_b, end_b = hi, lo
+        start_px, end_px = hi["high"], lo["low"]
+    out = dict(refer)
+    out["startTime"] = start_b["time"]
+    out["startPrice"] = start_px
+    out["endTime"] = end_b["time"]
+    out["endPrice"] = end_px
+    return out
+
+
+def buildFibCandidates(fullBis, buyPts, sellPts, fibLevels, bars, tol, barArrays=None,
+                       minPointTime=None, lastStrokeOnly=False):
+    """组装黄金分割支阻位候选（两种口径）：
+    - 默认（引擎/JS）：每方向优先取「最新非一类点」× 全部比率（不回退更早点）；该方向
+      无已形成点时走**预期回退**（pendingReferOf），生成 pending 预期位补位。
+    - lastStrokeOnly（SR 控制台，2026-09-26 定稿）：**末段口径**——refer = 最后一根
+      已成笔（形成中且 enough=False 的段不够笔，退回上一根已确认笔）：down 笔 →
+      RES 反弹位（L+r×(H−L)）、up 笔 → SUP 回撤位（H−r×(H−L)）×全部比率；
+      与白名单买卖点/pending 预期无关。
+    @param fullBis 本周期全量笔（供参照笔定位，见 referBiOfPoint；**不按窗切**——
+                   参照笔可横跨窗口起点，切了会定位不到回调笔）
+    @param minPointTime 可选：锚点（买卖点时间）下限——fib 只取窗口内形成的点作锚
+                   （fib 只当下）；窗外该方向视为无已形成点，走 pending 预期回退。
+                   None=不限（引擎现状）。lastStrokeOnly 模式下忽略（末笔天然最近）。
+    @returns fib 候选列表（预期位带 pending: True）
+    """
+    if lastStrokeOnly:
+        if not fullBis:
+            return []
+        refer = fullBis[-1]
+        # 形成中且合并K不足 5 根：还没成笔，不能当参照段。
+        # - 这段极值已经离开末根超过一根（反弹/回调自己回头了）→ 参照最后一根已确认笔
+        #   （例：下跌笔 4397→4244.27 之后的反弹不够笔，且价格已离开反弹高点）。
+        # - 这段极值还在末根上（反弹刚起来、贴着最后一根K线）→ 最后一根已确认笔只是
+        #   回调，参照再前面那根推动笔，并用这段的真实高低点
+        #   （例：时点 9-22，4291 之后只反弹到当日 21:00，参照上涨段
+        #   9-17 01:00 → 9-18 13:00）。
+        picked_impulse = False
+        if refer.get("_forming") and not refer.get("enough") and len(fullBis) >= 2:
+            spacing = 0
+            if len(bars) >= 2:
+                spacing = bars[-1]["time"] - bars[-2]["time"]
+            turned = spacing > 0 and bars[-1]["time"] - refer["endTime"] > spacing
+            if turned or len(fullBis) < 3:
+                refer = fullBis[-2]
+            else:
+                refer = impulseExtremes(fullBis[-3], bars)
+                picked_impulse = True
+        # 趋势侧优先：末笔极值K线距末根K线 > 一根间距 = 价格在回撤末笔 → 参照段 =
+        # 倒数第二笔（与回撤同向的推进笔，画其回撤/反弹分割）；极值就是末根（延伸中）
+        # = 末笔本身（正在走的大行情）。趋势反转由笔结构演化自然切换（反向突破成新笔
+        # 后参照随之换向）；笔交替破坏（脏数据）回退末笔。
+        # 上面已按「不够笔」选定推动笔时不再改写。
+        if not picked_impulse and len(fullBis) >= 2 and len(bars) >= 2:
+            spacing = bars[-1]["time"] - bars[-2]["time"]
+            if (spacing > 0 and bars[-1]["time"] - refer["endTime"] > spacing
+                    and fullBis[-2]["type"] != refer["type"]):
+                refer = fullBis[-2]
+        side = "sell" if refer["type"] == "down" else "buy"
+        srcPoint = {"type": "最近段", "time": refer["endTime"], "price": refer["endPrice"]}
+        out = []
+        for lv in fibLevelsOf(refer, side, fibLevels):
+            out.append({
+                "price": lv["price"],
+                "type": "RES" if side == "sell" else "SUP",
+                "fib": True,
+                "ratio": lv["ratio"],
+                "fromPoint": srcPoint,
+                "referBi": {
+                    "startTime": refer["startTime"], "endTime": refer["endTime"],
+                    "startPrice": refer["startPrice"], "endPrice": refer["endPrice"],
+                },
+                "touchCount": 1,
+                "firstTouch": refer["startTime"],
+                "lastTouch": refer["endTime"],
+                "breakTime": refer["endTime"],  # 末笔终点 = fib 位生效/绘线锚点时间
+                "barsPassed": countBarsPassing(lv["price"], bars, tol, barArrays),
+            })
+        return out
+    if minPointTime is not None:
+        buyPts = [p for p in buyPts if p["time"] >= minPointTime]
+        sellPts = [p for p in sellPts if p["time"] >= minPointTime]
     out = []
     sides = [
         {"side": "buy", "points": buyPts, "types": FIB_BUY_TYPES, "pullbackType": "down", "type": "SUP"},
@@ -399,22 +507,28 @@ def buildFibCandidates(fullBis, buyPts, sellPts, fibLevels, bars, tol, barArrays
 
 # ============================================================
 # BOLL 布林带支阻位（boll，与 JS 逐行对齐）
-# 每周期取「最后一根已收盘K线」的布林带上/中/下轨（BOLL_LENGTH 周期 SMA ± BOLL_MULT×σ，
-# 总体标准差 ÷N，与 TradingView 同口径），上轨=阻力 RES、下轨=支撑 SUP、中轨按现价侧。
+# 布林带上/中/下轨（BOLL_LENGTH 周期 SMA ± BOLL_MULT×σ，总体标准差 ÷N，与 TradingView
+# 同口径），上轨=阻力 RES、下轨=支撑 SUP、中轨按现价侧。末根口径（bollIncludeLast）：
+# 默认 False=已收盘口径（剔除末根形成中K线，回测历史锚点）；True=含末根（SR 调参页，
+# 与 TV 当前 bar 值同拍）。
 # boll 同 fib 一样豁免截断与评分（评分语义不适用）；直接进全量候选池（不合并）。
 # ============================================================
 
 
-def calcBOLL(bars, length, mult):
-    """计算布林带（已收盘口径）：剔除末根形成中K线，取末 length 根收盘价的 SMA 与总体标准差。
+def calcBOLL(bars, length, mult, includeLast=False):
+    """计算布林带。末根口径（bollIncludeLast，2026-09-27）：
+    - 默认 False=已收盘口径：剔除末根形成中K线，取末 length 根收盘价（回测历史锚点，
+      浮点逐位不变）；includeLast=True=含末根（SR 调参页口径——末根=时点/当下 bar，
+      与密集区触点/fib/现价及 TV 当前 bar 值同拍）。
     @returns {upper, mid, lower} 或 None（已收盘不足 length 根）
     """
     if not bars:
         return None
     if length >= 1:
-        # 尾切片恰取末 length 根已收盘K线（等价 closed=bars[:-1] 后 closed[-length:]，
-        # 免 O(n) 整表拷贝）；同元素同序求和，浮点结果逐位不变
-        tail = bars[-(length + 1):-1]
+        # includeLast：含末根取末 length 根（恰 length 根即可算，比默认少要 1 根）；
+        # 默认尾切片恰取末 length 根已收盘K线（等价 closed=bars[:-1] 后 closed[-length:]，
+        # 免 O(n) 整表拷贝），表达式原样保留——同元素同序求和，浮点结果逐位不变（回测锚点安全）
+        tail = bars[-length:] if includeLast else bars[-(length + 1):-1]
         if len(tail) < length:
             return None
         closes = [b["close"] for b in tail]
@@ -430,15 +544,18 @@ def calcBOLL(bars, length, mult):
     return {"upper": mid + mult * sigma, "mid": mid, "lower": mid - mult * sigma}
 
 
-def buildBollCandidates(bars, length, mult, currentPrice):
+def buildBollCandidates(bars, length, mult, currentPrice, includeLast=False):
     """组装 BOLL 候选：三轨各一条。上轨 RES、下轨 SUP、中轨按现价侧（现价 >= 中轨 → 支撑）。
+    @param includeLast 见 calcBOLL（True=含末根，SR 调参页口径）
     @returns 3 个候选（无布林位时为空列表）
     """
-    band = calcBOLL(bars, length, mult)
+    band = calcBOLL(bars, length, mult, includeLast=includeLast)
     if band is None:
         return []
-    # 锚点 = 末根已收盘K线时间（= bars[:-1] 的末元素，免 O(n) 整表拷贝）
-    anchorTime = bars[-2]["time"] if len(bars) >= 2 else bars[-1]["time"]
+    # 锚点 = 轨道所用末根时间：默认=末根已收盘K线（= bars[:-1] 的末元素，免 O(n) 整表拷贝）；
+    # includeLast=末根本身（时点/当下 bar）
+    anchorTime = bars[-1]["time"] if includeLast else \
+        (bars[-2]["time"] if len(bars) >= 2 else bars[-1]["time"])
     midType = "SUP" if (currentPrice is not None and currentPrice >= band["mid"]) else "RES"
 
     def make(price, type_, tag):
@@ -690,12 +807,28 @@ def compute_srflip(periodBis, barsByPeriod, periods,
                    touchWeight=TOUCH_WEIGHT, barsWeight=BARS_WEIGHT,
                    sideCount=SIDE_COUNT,
                    clusterParamsByPeriod=None, manualLevels=None, periodBarTimesIn=None,
-                   periodBarArraysIn=None, work_cache=None):
+                   periodBarArraysIn=None, work_cache=None, clusterLookbackBars=None,
+                   fibLookbackBars=None, fibLastStroke=False, bollIncludeLast=False):
     """逐周期识别支阻位（密集区 + 黄金分割 + BOLL + 人工输入），展平为全量候选池、各周期独立选取。
 
     @param work_cache 可选：跨次调用复用的 dict。未变周期（cut/ATR/笔指纹相同）直接复用
                       该周期的 cluster+fib 结果；BOLL/展平/选取仍每拍重算（依赖现价）。
                       输出与无缓存路径逐位一致。
+    @param clusterLookbackBars 可选：密集区限窗根数（SR 控制台「时点+回溯」口径）——只看
+                      时点向前最近 N 根（每周期各自计数），强度统计同步限窗。
+    @param fibLookbackBars 可选：fib 锚点限窗根数——锚点（买卖点）必须形成于最近 N 根内
+                      （fib 只当下，引用数月前的老点不是当下）；窗外该方向走 pending 预期
+                      回退。BOLL 天然当下（锚=末根已收盘K线）无需此参。
+    @param fibLastStroke 可选：fib 末段口径——refer = 最后一根笔（down→RES 反弹位 /
+                      up→SUP 回撤位 ×比率），与白名单点无关（SR 控制台「最近参照段」）。
+                      三者默认值 = 引擎口径逐位不变；与 cfg 键 lookbackBars 刻意不同名：
+                      cfg 侧经 engine_kwargs_of 显式枚举映射，防止整份 cfg 展开误入引擎
+                      改变回测语义（控制台经 engine_extra 显式传入）。
+    @param bollIncludeLast 可选（2026-09-27）：BOLL 末根口径——True 含末根K线（时点/当下
+                      bar，与 TV 当前 bar 值同拍，与密集区触点/fib/现价的含末根口径对齐）；
+                      默认 False=已收盘口径（回测历史锚点：切片已无形成中K，语义=再旧一根，
+                      既有信号数不得改变）。仅 SR 调参页经 build_chain_result(engine_extra=...)
+                      显式传入，engine_kwargs_of 永不映射（回测/分析/CLI 机制上拿不到）。
     """
     # 可选加速输入：时间索引与 bars 同序；价格数组仅含当前可见前缀。
     periodAtrsIn = periodAtrsIn or {}
@@ -736,8 +869,9 @@ def compute_srflip(periodBis, barsByPeriod, periods,
             tuple(srTypes) if not isinstance(srTypes, tuple) else srTypes,
             clusterAtr, recentClusterAtr, recentBiCount, maxPerPeriod,
             tuple(clusterParts) if clusterParts is not None else None,
-            minTouchOverride, bollLength, bollMult,
+            minTouchOverride, bollLength, bollMult, bollIncludeLast,
             tuple(fibLevels) if fibLevels is not None else None,
+            clusterLookbackBars, fibLookbackBars, fibLastStroke,
         )
         if work_cache is not None:
             ent = work_cache.get(("sr_cf", res))
@@ -755,22 +889,40 @@ def compute_srflip(periodBis, barsByPeriod, periods,
             pcfg = (clusterParamsByPeriod or {}).get(str(res).upper(), {})
             localCluster = pcfg.get("clusterAtr", clusterAtr)
             minTouch = (minTouchsIn or {}).get(str(res).upper()) or minTouchFor(res, minTouchOverride)
+            # 密集区限窗（时点回溯）：bars/时间索引/价格数组/笔 同步切到最近 N 根——
+            # 笔按 endTime 过滤（保留横跨窗口边界的笔，其终点是窗口内转折）；
+            # fib/BOLL/现价不受限（下方继续用全量 bars/bis）
+            wN = int(clusterLookbackBars or 0)
+            cBars, cBis = bars, bis
+            cTimes = periodBarTimesIn.get(res)
+            cArrays = periodBarArraysIn.get(res)
+            if wN > 0 and len(bars) > wN:
+                cBars = bars[-wN:]
+                cBis = [b for b in bis if b["endTime"] >= cBars[0]["time"]]
+                if cTimes is not None:
+                    cTimes = cTimes[-wN:]
+                if cArrays is not None:
+                    cArrays = (cArrays[0][-wN:], cArrays[1][-wN:])
             flips = cluster_candidates(
-                bis, bars, atr, clusterAtr=localCluster,
+                cBis, cBars, atr, clusterAtr=localCluster,
                 recentClusterAtr=pcfg.get("recentClusterAtr", recentClusterAtr),
                 recentBiCount=pcfg.get("recentBiCount", recentBiCount),
                 minTouch=minTouch, clusterParts=clusterParts,
-                barTimes=periodBarTimesIn.get(res),
-                barArrays=periodBarArraysIn.get(res)) if "cluster" in srTypes else []
+                barTimes=cTimes,
+                barArrays=cArrays) if "cluster" in srTypes else []
             allFlips[res] = flips
 
-        # 黄金分割叠加层：独立于支阻位来源，人工周期照常生成（需笔：bis≥3）
+        # 黄金分割叠加层：独立于支阻位来源，人工周期照常生成（需笔：bis≥3）。
+        # 锚点限窗（fib 只当下）：锚点须形成于最近 N 根内；bis 传全量供参照笔定位
         if "fib" in srTypes and bis and len(bis) >= 3:
             macd = periodMacdIn.get(res) or calcMACD(bars)
             buyPts = findBuyPoints(bis, upperBis, macd, intervalSecOf(res), cache=work_cache)
             sellPts = findSellPoints(bis, upperBis, macd, intervalSecOf(res), cache=work_cache)
+            fN = int(fibLookbackBars or 0)
+            minPt = bars[-fN:][0]["time"] if fN > 0 and len(bars) > fN else None
             fibs = buildFibCandidates(bis, buyPts, sellPts, fibLevels, bars, clusterAtr * atr,
-                                      periodBarArraysIn.get(res))
+                                      periodBarArraysIn.get(res), minPointTime=minPt,
+                                      lastStrokeOnly=bool(fibLastStroke))
             allFibs[res] = fibs
 
         if work_cache is not None:
@@ -794,7 +946,8 @@ def compute_srflip(periodBis, barsByPeriod, periods,
                 continue
             bars = barsByPeriod.get(res, []) or []
             if bars:
-                allBolls[res] = buildBollCandidates(bars, bollLength, bollMult, currentPrice)
+                allBolls[res] = buildBollCandidates(bars, bollLength, bollMult, currentPrice,
+                                                   includeLast=bollIncludeLast)
 
     # 人工支阻位候选：type 按现价侧推导，需 currentPrice 已知后生成（键存在即完全替换该周期系统计算）
     for res in periods:

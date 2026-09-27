@@ -36,6 +36,11 @@ class ParamCenterTests(unittest.TestCase):
             param_center.normalize("plan", {"rangeBarN": 5.5})       # 整数传小数
         with self.assertRaises(ValueError):
             param_center.normalize("nope", {})                       # 未知模块
+        # 近等双顶新键：周期开关 bool 严格、固定容差无上限
+        with self.assertRaises(ValueError):
+            param_center.normalize("chan", {"nearDouble60": "yes"})  # 布尔传字符串
+        self.assertEqual(param_center.normalize("chan", {"nearDoubleFixed": 99999}),
+                         {"nearDoubleFixed": 99999.0})
         # 合法值类型规范化
         self.assertEqual(param_center.normalize("chan", {"gapFilter": "0.8"}),
                          {"gapFilter": 0.8})

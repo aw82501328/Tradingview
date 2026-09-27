@@ -9,7 +9,7 @@
 |----|------|
 | 笔对象字段 | `type`(up/down)、`startIdx/endIdx`(合并K线索引)、`startTime/endTime`(校准后端点时间)、`startPrice/endPrice`、`rawCount`(覆盖原始K线数)、`span`(幅度)、`gapLocked`(跳空成笔)、`macdCross`(MACD变色成笔) |
 | 时间 | 全部 Unix 秒（UTC），与 TradingView K线时间一致 |
-| 配置 | `CHAN_CFG.gapFilter`（跳空独立成笔阈值，默认 1.0）、`CHAN_CFG.wickRatio`（长影压平影线占比阈值，默认 0.70）、`CHAN_CFG.wickAtrK`（影线绝对长度下限系数，默认 0.5）、`CHAN_CFG.divergeDurRatio`（背驰面积判据时长可比上限，默认 3）、`CHAN_CFG.nearDoubleAtrK/nearDoublePct`（近等双顶平台取后顶阈值，默认 0.3/0.001）、`CHAN_CFG.debug`（调试打印） |
+| 配置 | `CHAN_CFG.gapFilter`（跳空独立成笔阈值，默认 1.0）、`CHAN_CFG.wickRatio`（长影压平影线占比阈值，默认 0.70）、`CHAN_CFG.wickAtrK`（影线绝对长度下限系数，默认 0.5）、`CHAN_CFG.divergeDurRatio`（背驰面积判据时长可比上限，默认 3）、`CHAN_CFG.nearDoubleAtrK/nearDoublePct/nearDoubleFixed`（近等双顶平台取后顶容差三项：ATR 系数/价格比例/固定价差，默认 0.3/0.001/0.0，取 max 并集）、`CHAN_CFG.nearDouble3/15/60/240/D`（近等双顶每周期开关，默认关/关/开/开/开，gating 统一走 `nearDoubleOn(res)`）、`CHAN_CFG.nearDoubleRebound`（近等后顶/后底反弹不成笔取后总开关，默认 true，规则 #6b）、`CHAN_CFG.debug`（调试打印） |
 | 合并K线字段 | 含 `_rawCount`(覆盖原始K线数)、`highTime/lowTime`(极值原始K线时间)、`rawHigh/rawLow/rawHighTime/rawLowTime`(覆盖原始K线真实极值及时间)、`_topCand/_topCandTime`(覆盖范围内「可成顶分型的长影 bar」的影线端点价及所在原始K线时间)、`_origLow/_origLowTime`(覆盖范围内 markWickBars 压平的长下影真低及所在原始K线时间，供 `fixBiExtremes` 端点恢复) |
 
 ## 2. 导出函数清单
@@ -74,7 +74,8 @@
 | 3 | 分型识别（`findFractals`）§2.2 | 中K高于/低于左右（价 + 反向区间双侧条件） | 顶/底分型；`_topCand` 影线价可作端点价 | 全部 | 核心 |
 | 4 | 阶段一 严格交替序列 §2.4.1 | 连续同类型分型 | 顶取最高、底取最低；`lockedPivots` 命中标记 `locked` | 全部 | 核心 |
 | 5 | 同类型更极端替换 §2.4.2-1 | 后顶 ≥ 前顶 / 后底 ≤ 前底 | 端点更新为突破极值（`locked`/`gapLocked` 除外） | 全部 | 核心 |
-| 6 | **近等双顶/双底平台取后顶/后底** §2.4.2-2 | 后点略不极端且差 ≤ max(0.3×ATR, 0.1%×价)；last→k 间**所有相邻分型间隔 <4**（拆不出笔的平台/直拉）；中间含 ≥阈值回调；非 locked/gapLocked/已 nearDouble（单跳封顶）；**macdCross 不豁免** | 笔端点取更晚的后顶/后底，前顶/前底视为插针性极值（走势终完美） | **仅 ≥1h（60/240/D）**，由调用方传 `nearDouble` 开启 | 核心 |
+| 6 | **近等双顶/双底平台取后顶/后底** §2.4.2-2 | 后点略不极端且差 ≤ max(0.3×ATR, 0.1%×价, nearDoubleFixed 固定项)；last→k 间**已有两段首尾相接的成笔则禁止后移**（单独一段成笔不挡）；中间含 ≥阈值回调；非 locked/gapLocked/已 nearDouble（单跳封顶）；**macdCross 不豁免** | 笔端点取更晚的后顶/后底，前顶/前底视为插针性极值（走势终完美） | **按周期开关 nearDouble3/15/60/240/D（默认 60/240/D 开）**，调用方经 `nearDoubleOn(res)` 判定后传 `nearDouble` | 核心 |
+| 6b | **近等后顶/后底（反弹不成笔）取后** §2.4.2-2b | 回溯分支：last→k 反弹/回撤腿 gap<4 本身拆不出笔；k 与 prev（result[-2]）同类型近等（差 ≤ #6 同容差，仅60m可 1.5×thr+15m双动能）；prev→last 为 ≥thr 真实回调；k.locked 或（nearDoubleOn 周期 且 `nearDoubleRebound`） | 端点后移到后顶/后底（「回调够深、反弹太短」的走势终完美）；k.locked=区间套落地——上级已后移的端点在本级复现 | k.locked 全周期；否则同 #6 周期开关 × `nearDoubleRebound`（默认开） | 核心 |
 | 7 | MACD 端点让位 §2.4.2-3 | 原笔起点存在，`result[-2]` 为 MACD 变色端点且 k 更极端，整笔双向极值合法且被移除端点未锁定 | k 顶替 `result[-2]` 移除中间分型 | 全部 | 核心 |
 | 8 | 跳空独立成笔 §2.4.2-4 | 相邻合并K线缺口 ≥ `gapFilter`×ATR | 强制成笔并锁定端点；后续严格突破锁定价才解锁 | 全部（`--gap` 可调） | 核心 |
 | 9 | 最小间隔 §2.4.2-6/§2.4.4 | 合并K线间隔 ≥4（覆盖原始K线 ≥5） | 不足不成笔（进入回溯/MACD/作废分支） | 全部 | 核心 |
@@ -92,7 +93,7 @@
 | 21 | 小周期绘制窗口 §2.4.7 | 只保留窗口内结束的笔 | 避免图上过密 | 仅 15m（30 天）/ 3m（15 天） | 画笔层（chan_bi.js） |
 | 22 | 背驰面积时长可比门（`divergeDurRatio`）§2.8 | 两段时长比 >3（或某段 0/负） | 面积 Σ 不计入背驰，仅用 DIF/柱高判据 | 全部（`isBiDiverge`，买卖点/计划层） | 核心（买卖点层用） |
 
-**`buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lowerContext) → bis[]`**（`nearDouble` 默认 falsy：关闭规则 #6）
+**`buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lowerContext) → bis[]`**（`nearDouble` 默认 falsy：关闭规则 #6；生产调用方按 `nearDoubleOn(res)` 每周期开关取值）
 
 #### 2.4.1 阶段一：严格交替序列 + 区间套锁定
 
@@ -111,9 +112,22 @@
 现行规则由以下基础分支及文末“一小时近等端点补充确认（2026-09-10）”共同组成。补充分支仅60分钟放宽至1.5T，并要求15分钟柱峰值和DIF幅度同时降至50%以内；其他保护条件及反向波动阈值T不变。
 
 - 一句话：平台里两个几乎同价的高点，取更晚的那个，前面的视为插针（走势终完美）。
-- 仅当 `nearDouble=true`（chan-bi 对 ≥60m 开启）：k 与 last 同类型、k 略不极端（差 ≤ max(`nearDoubleAtrK`×ATR, `nearDoublePct`×价)）、last→k 间所有相邻分型间隔 <4（整段为拆不出笔的平台/直拉，段内无任何可确认回调 → 走势未完美）、且中间存在 ≥ 同阈值的真实回调分型，且 last 非 `locked`/`gapLocked` 且未被本规则替换过（单跳封顶）→ 用后顶/后底 k 替换 last，前顶/前底视为插针性极值不终止本段。
+- 仅当 `nearDouble=true`（生产调用方按 `nearDoubleOn(res)` 每周期开关判定，默认 60/240/D 开、3m/15m 关）：k 与 last 同类型、k 略不极端（差 ≤ max(`nearDoubleAtrK`×ATR, `nearDoublePct`×价, `nearDoubleFixed` 固定项)——三项并集取最大、只增不减；固定项为品种报价单位绝对价差，0=不启用）、last→k 分型链上没有两段首尾相接的成笔（成笔口径同阶段二：间隔≥4 且无更极值且分型范围脱离，或间隔恰为 3 且方向性 MACD 变色且无更极值；单独一段成笔不挡后移）、且中间存在 ≥ 同阈值的真实回调分型，且 last 非 `locked`/`gapLocked` 且未被本规则替换过（单跳封顶）→ 用后顶/后底 k 替换 last，前顶/前底视为插针性极值不终止本段。
 - `macdCross` 端点不豁免（该端点本就是间隔不足靠 MACD 变色凑出的脆弱顶/底，如 1h 8-31 顶 4464.23，与近等平台取后顶语义一致）。
-- 例：1h 8-31 19:00 顶 4464.23 → 9-1 08:00 顶 4461.7（差 2.53 ≤ 8.05），12h 平台（4415.75~4464）全程分型间隔 <4。单跳封顶防平台内连续近等端点累积漂移（实测 3 跳累计可超 1×ATR）；15m/3m 平台尾噪声多（实测 61 次触发/半数端点重排）不启用。
+- 例：1h 8-31 19:00 顶 4464.23 → 9-1 08:00 顶 4461.7（差 2.53 ≤ 8.05），12h 平台（4415.75~4464）全程分型间隔 <4。单跳封顶防平台内连续近等端点累积漂移（实测 3 跳累计可超 1×ATR）；15m/3m 默认不启用（平台尾噪声多，实测 61 次触发/半数端点重排；2026-09-25 起参数中心可按周期打开）。
+
+**2.4.2-2b 近等后顶/后底（反弹不成笔）取后（速查表 #6b，2026-09-26）**
+
+- 一句话：深回调后反弹到与前顶几乎同价、但反弹腿太短不成笔时，端点后移到后顶——「回调够深、反弹太短」的走势终完美，与 #6 平台场景互补。
+- 与 #6 的区别：#6 在同类型近等端点上后移，仅当两顶/两底之间已有两段首尾相接的成笔时禁止；本规则在「间隔不足→回溯替换」分支内触发（k 与 prev=result[-2] 同类型、last→k gap<4 本身拆不出反弹笔），处理中间**已有合格反向分型**（prev→last 甚至已成有效笔）的情形。
+- 条件：
+  - 近等：`0 ≤ prev−k ≤ thr`，thr 与 #6 同公式 max(0.3×ATR, 0.1%×价, nearDoubleFixed)；仅 60m 可经 15m 双动能确认放宽至 1.5×thr（`lowerEndpointWeaker(prev, k, …)`，同 #6 补充分支）；
+  - 真实回调：prev→last 反向幅度 ≥ thr（镜像 #6 的 pull 条件）；
+  - 权限二选一：**k.locked**（上级笔端点，区间套强制落地——任何周期生效，不受 `nearDoubleRebound` 开关限制；上级已后移的端点必须在本级复现）或 nearDouble（`nearDoubleOn(res)`，60/240/D）且 `CHAN_CFG.nearDoubleRebound`（默认 true）；
+  - 排除：prev.gapLocked（跳空锁定只被严格突破替换）、prev.locked（锁定前顶不让位）、last.locked（不吞锁定中间分型）、prev.nearDouble（单跳封顶，同 #6）；「回溯替换保护」（#12，lastIsDeeper）仍优先于替换。
+- 效果：prev 让位、`result[-2] = k` 并 pop last，笔端点后移到 k（k 打 nearDouble 标记）。前顶/前底成为笔内极值（#6 同类先例，如 240 层 9-16 顶 4361.15→4357.64）。
+- 例：60m 2026-09-18 15:00 顶 4399.67 → 22:00 底 4342.73（22:00 与 23:00 包含合并成一根）→ 9-19 01:00 顶 4397.045：反弹腿仅 3 根合并K（gap=2<4；MACD 例外要求 gap=3 也不满足），近等差 2.625 ≤ thr，回调 56.94 ≥ thr。240 层 #6 已把 4h 顶后移到 9-19 01:00（4h 层两顶间隔全 <4）→ 60m 经 k.locked 路径复现：上涨笔 09-18 11:00 4334.295 → 09-19 01:00 4397.045，随后下跌笔至 09-21 22:00 4322.81；若 240 未后移，60m 亦可经 nearDouble60 路径自行后移。底对称（近等双底取后底）。
+- 测试：`py_chain/test_near_double.cjs/.py`（fixture `near_double_rebound_xauusd_20260919.json.gz`；断言开关关=端点停 4399.67、k.locked 路径不受开关限制、镜像双底案例）。
 
 **2.4.2-3 MACD 端点让位（速查表 #7）**
 
@@ -241,6 +255,8 @@
 
 **`intervalSecOf(res) → number`**：周期→单根K线时长秒（3→180, 5→300, 15→900, 30→1800, 60/1H→3600, 240/4H→14400, D/1D→86400, W/1W→604800）。
 
+**`nearDoubleOn(res) → bool`**：该周期是否开启「近等双顶/双底平台取后顶/后底」——读 `CHAN_CFG.nearDouble3/15/60/240/D` 每周期开关。res 接受周期码（含 1H/4H/1D 别名）或 barSec 秒数 int（`buildStructureContext` 只有秒数）。五周期之外（'30S'/'5'/'30'/'W'/未知秒数/bool）一律 false——沿用旧口径 `intervalSecOf(res) >= 3600` 的失败安全语义；注意旧口径对 W(604800) 会开启、此处收窄为 false（全链路无 W 调用点，零实际影响）。
+
 ### 2.8 MACD 背驰
 
 **`biMacdMetrics(bi, macdArr) → {redArea, greenArea, difHigh, difLow, redMax, greenMax} | null`**
@@ -297,7 +313,11 @@
 | `CHAN_CFG.divergeDurRatio` | 3 | 背驰面积判据的时长可比上限（两段时长比 > 该值则面积项不计入，见 §2.8） |
 | `CHAN_CFG.nearDoubleAtrK` | 0.3 | 近等双顶/双底平台取后顶/后底的价差与回调深度 ATR 系数（规则 #6，§2.4） |
 | `CHAN_CFG.nearDoublePct` | 0.001 | 近等双顶/双底平台取后顶/后底的价格比例下限（与 ATR 项取 max） |
+| `CHAN_CFG.nearDoubleFixed` | 0.0 | 近等双顶/双底固定容差项（品种报价单位绝对价差，如黄金 0.1=0.1 美元）；thr = max(ATR项, 比例项, 该项) 并集取最大、只增不减，0=不启用（2026-09-25） |
+| `CHAN_CFG.nearDouble3/15` | false/false | 3m/15m 近等双顶开关（默认关：平台尾噪声多，实测 61 次触发/半数端点重排；2026-09-25 参数化可开） |
+| `CHAN_CFG.nearDouble60/240/D` | true/true/true | 60m/240m/D 近等双顶开关（默认开=2026-09-25 参数化前的 ≥1h 硬编码行为）；gating 统一走 `nearDoubleOn(res)` |
 | `CHAN_CFG.nearDoubleLowerRelax` | 1.5 | 仅60m，15m双动能确认补充分支的最大价差倍数 |
+| `CHAN_CFG.nearDoubleRebound` | true | 近等后顶/后底（反弹不成笔）取后总开关（规则 #6b，§2.4.2-2b，2026-09-26）。关闭后仅 k.locked（上级笔端点，区间套强制落地）路径仍生效；周期门控沿用 nearDoubleOn(res) |
 | `CHAN_CFG.nearDoubleLowerRatio` | 0.5 | 后段同色柱峰值和同侧DIF幅度相对前段的上限，两项均须通过 |
 | `CHAN_CFG.debug` | false | 调试打印（buildBi / 买卖点识别过程） |
 
@@ -327,7 +347,7 @@
 
 ## 一小时近等端点补充确认（2026-09-10）
 
-原阈值 max(0.3×ATR, 0.001×价格) 保持。仅60分钟价差超过原阈值但不超过1.5倍时，可由15分钟双动能确认：后段同色柱峰值与同侧DIF极值绝对值均不超过前段50%，两段柱峰值均非零，双底DIF均负、双顶均正。保留平台间隔、原阈值反向波动、锁定端点和单次替换保护；数据不足不走补充分支，不改变买卖点创新极值背驰定义。
+原阈值 max(0.3×ATR, 0.001×价格) 保持。仅60分钟价差超过原阈值但不超过1.5倍时，可由15分钟双动能确认：后段同色柱峰值与同侧DIF极值绝对值均不超过前段50%，两段柱峰值均非零，双底DIF均负、双顶均正。保留平台间隔、原阈值反向波动、锁定端点和单次替换保护；数据不足不走补充分支，不改变买卖点创新极值背驰定义。2026-09-25 起：阈值含固定容差并集项 `nearDoubleFixed`（默认 0 不启用，放宽窗口随 thr 同步变宽属预期并集语义）；本补充分支随 60m 周期开关 `nearDouble60` 可关。
 
 JS/Python的`buildBi`增加可选末参`lowerContext`；用`makeBiLowerContext(res,bars,cutoff,macd)`准备15分钟数据和MACD索引，缺省参数保持旧行为。新增配置`nearDoubleLowerRelax=1.5`、`nearDoubleLowerRatio=0.5`。
 

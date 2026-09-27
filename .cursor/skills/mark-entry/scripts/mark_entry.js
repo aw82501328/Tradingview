@@ -1,7 +1,8 @@
 /**
  * 进出场标记脚本（独立 SKILL：mark-entry）
  * 依赖「交易计划」（trading-plan）落盘的 plan_<品种>.json 判定各周期当前进场状态，
- * 映射到 6 种进场策略，校验该策略的进场条件后，在「背驰级别」（更低周期）标记进场箭头：
+ * 映射到 10 种进场策略（2026-09-25 起计划文案 1:1 拆分，见 entryStrategyOf），
+ * 校验该策略的进场条件后，在「背驰级别」（更低周期）标记进场箭头：
  *   - 买点（多头）= 向上红色箭头（arrow_up）
  *   - 卖点（空头）= 向下绿色箭头（arrow_down）
  *
@@ -97,7 +98,8 @@ if (CHAN_CFG_JSON) {
 }
 // 顺势（计划方向=多头多/空头空）判定集合；planDirection 缺失时按 strategyKey 兜底
 const TREND_PLAN_DIRS = new Set(["多头多", "空头空"]);
-const TREND_STRATEGY_KEYS = new Set(["wait2Buy", "waitBuy", "wait2Sell", "waitSell"]);
+const TREND_STRATEGY_KEYS = new Set(["wait2Buy", "waitBuy", "wait3Buy", "waitLike2Buy",
+  "wait2Sell", "waitSell", "wait3Sell", "waitLike2Sell"]);
 const FROM_DATE = getStrArg("from", "");
 let FROM_TS = null;
 {
@@ -174,6 +176,35 @@ function onlyThisInterval(res) {
  * @param {Array} macdArr 该周期 MACD 数组
  * @returns {Array} [{ time, price, direction, referStart }] direction='long'（做多）|'short'（做空）
  */
+// B 开关（divergeReferByZs，2026-09-26 用户规则——背驰=入中枢段 vs 出中枢段）：
+// 中枢内部振荡段不参与比较。取 cur 之前紧邻的最后一个中枢（进入笔终点 enterEndTime
+// 早于段起点——buildZS 的 startTime 含左外扩不可用），跳过 endTime > enterEndTime 的
+// 同向笔，参照回退到结束于进入笔终点处的入中枢段（与 py_chain pickDivergeRefer 对齐）。
+function zsBeforeSeg(bis, segStart, barSec) {
+  const zss = core.buildZS ? core.buildZS(bis, barSec) : [];
+  let best = null;
+  for (const z of (zss || [])) {
+    const enter = (z.enterEndTime != null) ? z.enterEndTime : z.startTime;
+    if (enter != null && enter < segStart) best = z;
+  }
+  return best;
+}
+
+function pickDivergeRefer(bis, cur, barSec, parentBi) {
+  const zs = core.CHAN_CFG.divergeReferByZs ? zsBeforeSeg(bis, cur.startTime, barSec) : null;
+  const zsEnter = zs ? ((zs.enterEndTime != null) ? zs.enterEndTime : zs.startTime) : null;
+  const start = bis.indexOf(cur) - 1;
+  for (let j = start; j >= 0; j--) {
+    const cand = bis[j];
+    if (cand.type !== cur.type) continue;
+    if (cand.span < cur.span * 0.5) continue; // 跳过幅度不足的次级别回调
+    if (zsEnter != null && cand.endTime > zsEnter) continue; // 中枢内部/之后的段不参与比较
+    if (parentBi && cand.startTime < parentBi.startTime - (barSec || 0)) break; // 参照跨出所属上级笔
+    return cand;
+  }
+  return null;
+}
+
 function findDivergePoints(bis, macdArr) {
   bis = core.pointEligibleBis(bis);
   if (!bis || bis.length < 3) return [];
@@ -184,13 +215,7 @@ function findDivergePoints(bis, macdArr) {
   bis.forEach((b, i) => { if (b.type === "down") downIdx.push(i); });
   for (let k = 1; k < downIdx.length; k++) {
     const cur = bis[downIdx[k]];
-    let refer = null;
-    for (let j = k - 1; j >= 0; j--) {
-      const cand = bis[downIdx[j]];
-      if (cand.span < cur.span * 0.5) continue; // 跳过幅度不足的次级别回调
-      refer = cand;
-      break;
-    }
+    const refer = pickDivergeRefer(bis, cur, null);
     if (refer && cur.endPrice < refer.endPrice && isBiDiverge(cur, refer, macdArr)) {
       points.push({ time: cur.endTime, price: cur.endPrice, direction: "long", referStart: refer.startTime });
     }
@@ -201,13 +226,7 @@ function findDivergePoints(bis, macdArr) {
   bis.forEach((b, i) => { if (b.type === "up") upIdx.push(i); });
   for (let k = 1; k < upIdx.length; k++) {
     const cur = bis[upIdx[k]];
-    let refer = null;
-    for (let j = k - 1; j >= 0; j--) {
-      const cand = bis[upIdx[j]];
-      if (cand.span < cur.span * 0.5) continue;
-      refer = cand;
-      break;
-    }
+    const refer = pickDivergeRefer(bis, cur, null);
     if (refer && cur.endPrice > refer.endPrice && isBiDiverge(cur, refer, macdArr)) {
       points.push({ time: cur.endTime, price: cur.endPrice, direction: "short", referStart: refer.startTime });
     }
@@ -377,12 +396,12 @@ function sinkChainConfirm(periodData, X, pTime, pDir) {
 // ============================================================
 
 /**
- * 交易计划策略 → 进场策略映射（用户规则，2026-09-24 三档文案扩展）。
+ * 交易计划策略 → 进场策略映射（用户规则，2026-09-25 起 10 文案 1:1 拆分为独立键，
+ * 便于记录溯源是哪一档触发；此前 3买点/3卖点/类2买点/类2卖点 并入 waitBuy/waitSell）。
  * plan.strategy 来自 trading-plan 的 strategyOf 输出；震荡/数据不足/趋势中无匹配
  * （方向=观望）等不产生进场策略，返回 null。
- * 新增文案（2买/2卖 强档「等3买点/3卖点」、中间档「等类2买点/类2卖点」）与
- * 「等待回调后的新买点/新卖点」（3类点强档，thirdStrongTrend 开）同走 waitBuy/waitSell
- * 校验（够笔+以下级别背驰+支阻位附近，无专属条件）。
+ * waitBuy/waitSell 仅指「新买点/新卖点」（3类点强档，thirdStrongTrend 开）；
+ * 4 个新键与 waitBuy/waitSell 同校验（够笔+以下级别背驰+支阻位附近，无专属条件）。
  * @param {string} planStrategy 交易计划 strategy 文本
  * @returns {null|{key:string, direction:string, label:string}} key 策略标识、direction long/short
  */
@@ -401,20 +420,20 @@ function entryStrategyOf(planStrategy) {
     case "等待反弹后的新卖点": // 状态=3卖/类3卖+过左低不背驰（thirdStrongTrend 开）
       return { key: "waitSell", direction: "short", label: "等待反弹后卖点" };
     case "等待回调后的3买点": // 状态=2买/类2买+过左高不背驰（强档）
-      return { key: "waitBuy", direction: "long", label: "等待回调后买点" };
+      return { key: "wait3Buy", direction: "long", label: "等待回调后3买点" };
     case "等待回调后的类2买点": // 状态=2买+前高附近/回到2买点（中间档）
-      return { key: "waitBuy", direction: "long", label: "等待回调后买点" };
+      return { key: "waitLike2Buy", direction: "long", label: "等待回调后类2买点" };
     case "等待反弹后的3卖点": // 状态=2卖/类2卖+过左低不背驰（强档）
-      return { key: "waitSell", direction: "short", label: "等待反弹后卖点" };
+      return { key: "wait3Sell", direction: "short", label: "等待反弹后3卖点" };
     case "等待反弹后的类2卖点": // 状态=2卖+前低附近/回到2卖点（中间档）
-      return { key: "waitSell", direction: "short", label: "等待反弹后卖点" };
+      return { key: "waitLike2Sell", direction: "short", label: "等待反弹后类2卖点" };
     default:
       return null;
   }
 }
 
 // ============================================================
-// 6 种进场策略的条件判定（纯函数，可单测）
+// 进场策略的条件判定（纯函数，可单测；2026-09-25 起 10 键，专属条件仅 wait1/wait2 系有）
 // ============================================================
 
 /**
@@ -619,7 +638,11 @@ function evaluateEntry(ctx, strategy) {
       break;
     case "waitBuy":
     case "waitSell":
-      break; // 仅需够笔 + 以下级别背驰 + 支阻位附近
+    case "wait3Buy":
+    case "wait3Sell":
+    case "waitLike2Buy":
+    case "waitLike2Sell":
+      break; // 仅需够笔 + 以下级别背驰 + 支阻位附近（无专属条件）
   }
 
   // 3+4. 以下级别背驰候选（按时间降序）依次做支阻位校验，失败回退次新点：
@@ -718,7 +741,7 @@ function findBiEvent(bis, fromT, type, requirePostStart, breakPrev) {
 /**
  * 顺势/逆势判定（TP2 平一半 / TP3 分支门槛）：计划 direction ∈ {多头多, 空头空} 为顺势
  * （计划结构方向=操作方向）；{多头空, 空头多} 为逆势。planDirection 缺失时按 strategyKey
- * 兜底（wait2Buy/waitBuy/wait2Sell/waitSell → 顺势；wait1Buy/wait1Sell → 逆势）。
+ * 兜底（wait2Buy/waitBuy/wait3Buy/waitLike2Buy 及卖侧对称 → 顺势；wait1Buy/wait1Sell → 逆势）。
  * 与 py_chain.mark_entry.trend_following_of 对齐。
  */
 function trendFollowingOf(planDirection, strategyKey) {

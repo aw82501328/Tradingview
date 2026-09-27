@@ -1,12 +1,12 @@
 ---
 name: mark-entry
-description: Mark entry signals (进出场) on the TradingView Desktop chart via CDP. Reads the trading-plan result (plan_<symbol>.json) to determine each timeframe's current entry state, maps it to one of 6 entry strategies, validates that strategy's entry conditions (enough strokes / breaking previous low-high / MACD zero axis / weaker momentum leaving ZhongShu / lower-timeframe divergence / near S/R level), and marks buy/sell arrows on the divergence timeframe. Long = up red arrow, short = down green arrow. Also simulates exits per position (stop = intrabar break of the direction-aware S/R reference; TP1 breakeven after divergence-TF stroke completes; TP2 half-close after detection-TF stroke completes; TP3 full close on detection-TF breaking prior low/high) with same-direction mutual exclusion (no new same-direction entry while one is open; long/short independent), marking exits as yellow arrows (down = close long, up = close short, title EXIT_<divergence TF>).
+description: Mark entry signals (进出场) on the TradingView Desktop chart via CDP. Reads the trading-plan result (plan_<symbol>.json) to determine each timeframe's current entry state, maps it to one of 10 entry strategies (1:1 with the 2026-09-25 plan-strategy texts: wait2Sell/wait2Buy/wait1Sell/wait1Buy/waitBuy/waitSell/wait3Buy/wait3Sell/waitLike2Buy/waitLike2Sell), validates that strategy's entry conditions (enough strokes / breaking previous low-high / MACD zero axis / weaker momentum leaving ZhongShu / lower-timeframe divergence / near S/R level), and marks buy/sell arrows on the divergence timeframe. Long = up red arrow, short = down green arrow. Also simulates exits per position (stop = intrabar break of the direction-aware S/R reference; TP1 breakeven after divergence-TF stroke completes; TP2 half-close after detection-TF stroke completes; TP3 full close on detection-TF breaking prior low/high) with same-direction mutual exclusion (no new same-direction entry while one is open; long/short independent), marking exits as yellow arrows (down = close long, up = close short, title EXIT_<divergence TF>).
 disable-model-invocation: true
 ---
 
 # 进出场标记
 
-通过 CDP 连接 TradingView Desktop，**读取「交易计划」（trading-plan）落盘的结果文件**判定各周期当前进场状态，映射到 **6 种进场策略**，校验该策略的进场条件后，在「背驰级别」（更低周期）标记进场箭头：
+通过 CDP 连接 TradingView Desktop，**读取「交易计划」（trading-plan）落盘的结果文件**判定各周期当前进场状态，映射到 **10 种进场策略**（2026-09-25 起计划文案 1:1 拆分），校验该策略的进场条件后，在「背驰级别」（更低周期）标记进场箭头：
 
 - **买点（多头）** → 向上**红色**箭头（`arrow_up`）
 - **卖点（空头）** → 向下**绿色**箭头（`arrow_down`）
@@ -91,27 +91,27 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 ③ 用户未给出明确日期 → 再次询问，直到获得日期后才执行
 ```
 
-## 进场状态 → 6 种策略映射
+## 进场状态 → 10 种策略映射
 
 对每个检测周期 X（240/60/15/3），从交易计划结果 `plan_<品种>.json` 取该周期 `strategy`，映射到进场策略：
 
-| trading-plan strategy（plan 结果） | 进场策略 | 方向 | 箭头 |
+| trading-plan strategy（plan 结果） | 进场策略（key） | 方向 | 箭头 |
 |------|------|------|------|
-| 等待反弹后做2卖（状态=1卖） | 等待反弹后做2卖 | 空头 | 向下绿箭头 |
-| 等待回调后做2买（状态=1买） | 等待回调后做2买 | 多头 | 向上红箭头 |
-| 等待高点附近的一卖（状态=2/3买+其他） | 等待一卖 | 空头 | 向下绿箭头 |
-| 等待低点附近的一买（状态=2/3卖+其他） | 等待一买 | 多头 | 向上红箭头 |
-| 等待回调后的新买点（状态=3买/类3买+过左高不背驰，开关开） | 等待回调后买点 | 多头 | 向上红箭头 |
-| 等待反弹后的新卖点（状态=3卖/类3卖+过左低不背驰，开关开） | 等待反弹后卖点 | 空头 | 向下绿箭头 |
-| 等待回调后的3买点（状态=2买/类2买+过左高不背驰） | 等待回调后买点 | 多头 | 向上红箭头 |
-| 等待回调后的类2买点（状态=2买+前高附近/回到2买点） | 等待回调后买点 | 多头 | 向上红箭头 |
-| 等待反弹后的3卖点（状态=2卖/类2卖+过左低不背驰） | 等待反弹后卖点 | 空头 | 向下绿箭头 |
-| 等待反弹后的类2卖点（状态=2卖+前低附近/回到2卖点） | 等待反弹后卖点 | 空头 | 向下绿箭头 |
+| 等待反弹后做2卖（状态=1卖） | 等待反弹后做2卖（wait2Sell） | 空头 | 向下绿箭头 |
+| 等待回调后做2买（状态=1买） | 等待回调后做2买（wait2Buy） | 多头 | 向上红箭头 |
+| 等待高点附近的一卖（状态=2/3买+其他） | 等待一卖（wait1Sell） | 空头 | 向下绿箭头 |
+| 等待低点附近的一买（状态=2/3卖+其他） | 等待一买（wait1Buy） | 多头 | 向上红箭头 |
+| 等待回调后的新买点（状态=3买/类3买+过左高不背驰，开关开） | 等待回调后买点（waitBuy） | 多头 | 向上红箭头 |
+| 等待反弹后的新卖点（状态=3卖/类3卖+过左低不背驰，开关开） | 等待反弹后卖点（waitSell） | 空头 | 向下绿箭头 |
+| 等待回调后的3买点（状态=2买/类2买+过左高不背驰） | 等待回调后3买点（wait3Buy） | 多头 | 向上红箭头 |
+| 等待回调后的类2买点（状态=2买+前高附近/回到2买点） | 等待回调后类2买点（waitLike2Buy） | 多头 | 向上红箭头 |
+| 等待反弹后的3卖点（状态=2卖/类2卖+过左低不背驰） | 等待反弹后3卖点（wait3Sell） | 空头 | 向下绿箭头 |
+| 等待反弹后的类2卖点（状态=2卖+前低附近/回到2卖点） | 等待反弹后类2卖点（waitLike2Sell） | 空头 | 向下绿箭头 |
 | 震荡/数据不足/趋势中无匹配买卖点（方向=观望） | 不触发 | — | — |
 
-> 2026-09-24 交易计划三档化：新增 4 条文案与「新买点/新卖点」同走 `waitBuy`/`waitSell`（无专属条件），进场校验不变。
+> 2026-09-25 拆分：此前 3买点/3卖点/类2买点/类2卖点 4 条文案并入 `waitBuy`/`waitSell`，现 1:1 拆为独立键（`wait3Buy`/`wait3Sell`/`waitLike2Buy`/`waitLike2Sell`），便于记录溯源；4 个新键与 `waitBuy`/`waitSell` 同校验（无专属条件），`waitBuy`/`waitSell` 从此仅指「新买点/新卖点」（3类点强档）。进场校验逻辑不变。
 
-## 6 种进场策略的条件（全部需同时满足）
+## 10 种进场策略的条件（全部需同时满足）
 
 **公共条件**（所有策略）：
 
@@ -127,8 +127,7 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 | 等待回调后做2买 | MACD 上0轴后回调不破0轴（当前 DIF>0）+ 上涨段过前高 |
 | 等待一卖 | 够笔且过高点（最后一笔 up 且突破前高）+ 出中枢的力度变弱 |
 | 等待一买 | 够笔且过低点（最后一笔 down 且跌破前低）+ 出中枢的力度变弱 |
-| 等待回调后买点 | （仅公共条件） |
-| 等待反弹后卖点 | （仅公共条件） |
+| 等待回调后买点 / 等待反弹后卖点 / 等待回调后3买点 / 等待反弹后3卖点 / 等待回调后类2买点 / 等待反弹后类2卖点 | （仅公共条件） |
 
 **关键量定义**：
 

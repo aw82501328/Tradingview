@@ -3,7 +3,8 @@
 进出场逻辑（Python 移植版，与 .cursor/skills/mark-entry/scripts/mark_entry.js 对齐）
 
 纯函数模块：依赖「交易计划」（trading_plan）结果判定各周期当前进场状态，
-映射到 6 种进场策略，校验该策略的进场条件后生成进场信号：
+映射到 10 种进场策略（2026-09-25 起计划文案 1:1 拆分，见 entryStrategyOf），
+校验该策略的进场条件后生成进场信号：
   - 买点（多头）= 红色向上箭头（arrow_up）
   - 卖点（空头）= 向下绿色箭头（arrow_down）
 
@@ -20,7 +21,7 @@ backtest.BacktestEngine 增量推进；本模块提供出场构件（与 mark_en
 import bisect
 
 from .chan_core import (
-    calcATR, calcMACD, isBiDiverge, lowerResOf, buildZSByUpper, intervalSecOf,
+    calcATR, calcMACD, isBiDiverge, lowerResOf, buildZSByUpper, buildZS, intervalSecOf,
     CHAN_CFG, biMacdMetrics, _areaDurComparable,
     mergeBars, markWickBars, mergedSegmentCount, structurePeriods, pointEligibleBis,
 )
@@ -78,7 +79,8 @@ EXIT_MIN_MERGED = 5
 ZS_EXIT_WEAK_RATIO = 1.0
 # 顺势（计划方向=多头多/空头空）判定集合；plan_direction 缺失时按 strategyKey 兜底
 TREND_PLAN_DIRS = {"多头多", "空头空"}
-TREND_STRATEGY_KEYS = {"wait2Buy", "waitBuy", "wait2Sell", "waitSell"}
+TREND_STRATEGY_KEYS = {"wait2Buy", "waitBuy", "wait3Buy", "waitLike2Buy",
+                       "wait2Sell", "waitSell", "wait3Sell", "waitLike2Sell"}
 
 
 # ============================================================
@@ -86,12 +88,55 @@ TREND_STRATEGY_KEYS = {"wait2Buy", "waitBuy", "wait2Sell", "waitSell"}
 # ============================================================
 
 
-def findDivergePoints(bis, macdArr):
+def _zsBeforeSeg(bis, segStart, barSec):
+    """segStart 之前紧邻的最后一个中枢（该级 bis 自身构成，buildZS；
+    进入笔终点（enterEndTime）早于段起点才算「段之前」——startTime 含左外扩不可用）。"""
+    try:
+        zss = buildZS(bis, barSec)
+    except Exception:
+        return None
+    best = None
+    for z in (zss or []):
+        enter = z.get("enterEndTime", z.get("startTime"))
+        if enter is not None and enter < segStart:
+            best = z  # zss 升序——取最后一个进入笔早于段起点的
+    return best
+
+
+def pickDivergeRefer(bis, cur, barSec, parentBi=None):
+    """背驰参照笔选择（确认制 findDivergePoints / 当下制 _evalRealtimeNode 共用）。
+    现状口径：向前最近同向已完成笔，跳过幅度 < 当前段 50% 的次级别回调。
+    B 开关（CHAN_CFG.divergeReferByZs，2026-09-26 用户规则——背驰=入中枢段 vs 出中枢段，
+    中枢内部振荡段不参与比较）：取 cur 之前紧邻的最后一个中枢，跳过中枢内部/之后的
+    同向笔（cand.endTime > zs.enterEndTime），参照回退到结束于进入笔终点处的入中枢段
+    （buildZS 的 startTime 已左外扩 5 根K、非笔边界，进入笔终点以 enterEndTime 为准）。
+    parentBi（当下制规则 2）：参照跨出所属上级笔 → 停止（不回退更早）。
+    @returns 参照笔 dict 或 None"""
+    zs = _zsBeforeSeg(bis, cur["startTime"], barSec) if CHAN_CFG.get("divergeReferByZs") else None
+    zsEnter = (zs.get("enterEndTime") if zs is not None else None)
+    if zsEnter is None and zs is not None:
+        zsEnter = zs["startTime"]
+    for j in range(bis.index(cur) - 1, -1, -1):
+        cand = bis[j]
+        if cand["type"] != cur["type"]:
+            continue
+        if cand["span"] < cur["span"] * 0.5:
+            continue  # 跳过幅度不足的次级别回调
+        if zsEnter is not None and cand["endTime"] > zsEnter:
+            continue  # 中枢内部/之后的段不参与比较 → 回退到入中枢段
+        if parentBi is not None and cand["startTime"] < parentBi["startTime"] - (barSec or 0):
+            break  # 参照跨出候选段所属上级笔 → 候选无效（规则 2，不回退更早）
+        return cand
+    return None
+
+
+def findDivergePoints(bis, macdArr, barSec=None):
     """识别某周期的背驰点（做多=底背驰，做空=顶背驰）。
     参考 chan_core.findBuyPoints/findSellPoints 的候选逻辑，但不做区间套/锚定：
       - 底背驰：下跌笔创新低 + MACD 背驰（绿柱面积变小 或 DIF低点抬高）
       - 顶背驰：上涨笔创新高 + MACD 背驰（红柱面积变小 或 DIF高点变低）
-    参照笔 = 向前最近同向笔（跳过幅度 < 当前 50% 的次级别回调）。
+    参照笔 = 向前最近同向笔（跳过幅度 < 当前 50% 的次级别回调；B 开关下按
+    中枢回退到入中枢段，见 pickDivergeRefer——barSec 为 None 时 B 规则不可用）。
     @returns [{ time, price, direction }] direction='long'（做多）|'short'（做空）
     """
     bis = pointEligibleBis(bis)
@@ -103,13 +148,7 @@ def findDivergePoints(bis, macdArr):
     downIdx = [i for i, b in enumerate(bis) if b["type"] == "down"]
     for k in range(1, len(downIdx)):
         cur = bis[downIdx[k]]
-        refer = None
-        for j in range(k - 1, -1, -1):
-            cand = bis[downIdx[j]]
-            if cand["span"] < cur["span"] * 0.5:
-                continue  # 跳过幅度不足的次级别回调
-            refer = cand
-            break
+        refer = pickDivergeRefer(bis, cur, barSec)
         if refer is not None and cur["endPrice"] < refer["endPrice"] and isBiDiverge(cur, refer, macdArr):
             points.append({"time": cur["endTime"], "price": cur["endPrice"],
                            "direction": "long", "referStart": refer["startTime"]})
@@ -118,13 +157,7 @@ def findDivergePoints(bis, macdArr):
     upIdx = [i for i, b in enumerate(bis) if b["type"] == "up"]
     for k in range(1, len(upIdx)):
         cur = bis[upIdx[k]]
-        refer = None
-        for j in range(k - 1, -1, -1):
-            cand = bis[upIdx[j]]
-            if cand["span"] < cur["span"] * 0.5:
-                continue
-            refer = cand
-            break
+        refer = pickDivergeRefer(bis, cur, barSec)
         if refer is not None and cur["endPrice"] > refer["endPrice"] and isBiDiverge(cur, refer, macdArr):
             points.append({"time": cur["endTime"], "price": cur["endPrice"],
                            "direction": "short", "referStart": refer["startTime"]})
@@ -328,6 +361,10 @@ def _sinkChainRealtimeNodes(periodData, X, wantDir, tCut=None, periodTimes=None,
         bisL = periodData[L]["bis"]
         F_L = bisL[-1]  # L 的形成中段（已延伸到当下极值）
         if F_L["type"] != wantType or F_L["endTime"] <= B_C["startTime"]:
+            if CHAN_CFG.get("sinkSkipLevel"):
+                # D 跨级下沉：本级末段非候选（方向不符——如 15m 已确认顶、形成段翻 down，
+                # 而 60m 容器仍是 up 延伸——或早于容器起点）→ 跳过该级继续向下
+                continue
             break  # L 末段非候选段（方向不符/早于容器起点）
         if expectMode:
             if F_L["endTime"] <= B_C["endTime"]:
@@ -336,7 +373,23 @@ def _sinkChainRealtimeNodes(periodData, X, wantDir, tCut=None, periodTimes=None,
         elif abs(F_L["endTime"] - B_C["endTime"]) <= secC:
             container = B_C                       # ① 两级共享当下极值
         elif F_L["endTime"] > B_C["endTime"] + secC:
-            container = _virtualBi(B_C, F_L["endTime"])  # ② X 端点已过 → 虚拟开放段
+            if (CHAN_CFG.get("sinkSkipLevel")
+                    and ((B_C["type"] == "up" and F_L["endPrice"] is not None
+                          and F_L["endPrice"] > B_C["endPrice"])
+                         or (B_C["type"] == "down" and F_L["endPrice"] is not None
+                             and F_L["endPrice"] < B_C["endPrice"]))):
+                # D 同向延续：低级别极值已越过容器端点价（60m 端点 02:00 只是粒度滞后，
+                # 4168.65>4167.59 是同一条上涨的延续）→ 容器 = 整条容器段延伸到当下极值，
+                # 保留段内历史（否则规则2 会把 00:15→02:36 的入中枢段截在容器外）
+                container = {"startTime": B_C["startTime"], "endTime": F_L["endTime"],
+                             "type": B_C["type"], "startPrice": B_C["startPrice"],
+                             "endPrice": F_L["endPrice"]}
+            else:
+                container = _virtualBi(B_C, F_L["endTime"])  # ② X 端点已过 → 虚拟开放段
+        elif CHAN_CFG.get("sinkSkipLevel"):
+            # D 跨级下沉：本级末段端点落后容器极值（含糊区，如合成K盘中视图里 15m 末段
+            # 停在 02:30 而容器极值已到 06:03）→ 跳过该级继续向下找端点新鲜的级别
+            continue
         else:
             break
         cnt = _expansionCount(bisL, container, F_L["endTime"], secC, secL)
@@ -344,6 +397,11 @@ def _sinkChainRealtimeNodes(periodData, X, wantDir, tCut=None, periodTimes=None,
             nodes.append({"res": L, "F": F_L, "parentBi": container})
             C, B_C = L, F_L
             expectMode = False  # 预期承载笔只用于首个下沉层，其后恢复正常容器判定
+        elif CHAN_CFG.get("sinkSkipLevel"):
+            # D 跨级下沉（2026-09-26 用户确认）：本级展开不足 3 笔（如 15m 上整个反弹
+            # 是一笔、微观回踩被合并包含吞掉）→ 跳过该级，以当前容器继续向下找有展开
+            # 的级别判背驰（60→3 直沉；markRes=3、参照 containment 仍用容器笔）
+            continue
         else:
             break
     # 从未下沉（停止级 = X）：参照 containment 用 X 的上级包含笔（开放末笔）
@@ -409,11 +467,11 @@ def sinkChainConfirm(periodData, X, pTime, pDir):
 
 
 def entryStrategyOf(planStrategy):
-    """交易计划策略 → 进场策略映射（用户规则，2026-09-24 三档文案扩展）。
+    """交易计划策略 → 进场策略映射（用户规则，2026-09-25 起 10 文案 1:1 拆分为独立键，
+    便于记录溯源是哪一档触发；此前 3买点/3卖点/类2买点/类2卖点 并入 waitBuy/waitSell）。
     震荡/数据不足/趋势中无匹配（方向=观望）等不产生进场策略，返回 None。
-    新增文案（2买/2卖 强档「等3买点/3卖点」、中间档「等类2买点/类2卖点」）与
-    「等待回调后的新买点/新卖点」（3类点强档，thirdStrongTrend 开）同走 waitBuy/waitSell
-    校验（够笔+以下级别背驰+支阻位附近，无专属条件）。
+    waitBuy/waitSell 仅指「新买点/新卖点」（3类点强档，thirdStrongTrend 开）；
+    4 个新键与 waitBuy/waitSell 同校验（够笔+以下级别背驰+支阻位附近，无专属条件）。
     @returns None 或 { key, direction, label }
     """
     mapping = {
@@ -423,16 +481,16 @@ def entryStrategyOf(planStrategy):
         "等待低点附近的一买": {"key": "wait1Buy", "direction": "long", "label": "等待一买"},
         "等待回调后的新买点": {"key": "waitBuy", "direction": "long", "label": "等待回调后买点"},
         "等待反弹后的新卖点": {"key": "waitSell", "direction": "short", "label": "等待反弹后卖点"},
-        "等待回调后的3买点": {"key": "waitBuy", "direction": "long", "label": "等待回调后买点"},
-        "等待回调后的类2买点": {"key": "waitBuy", "direction": "long", "label": "等待回调后买点"},
-        "等待反弹后的3卖点": {"key": "waitSell", "direction": "short", "label": "等待反弹后卖点"},
-        "等待反弹后的类2卖点": {"key": "waitSell", "direction": "short", "label": "等待反弹后卖点"},
+        "等待回调后的3买点": {"key": "wait3Buy", "direction": "long", "label": "等待回调后3买点"},
+        "等待回调后的类2买点": {"key": "waitLike2Buy", "direction": "long", "label": "等待回调后类2买点"},
+        "等待反弹后的3卖点": {"key": "wait3Sell", "direction": "short", "label": "等待反弹后3卖点"},
+        "等待反弹后的类2卖点": {"key": "waitLike2Sell", "direction": "short", "label": "等待反弹后类2卖点"},
     }
     return mapping.get(planStrategy)
 
 
 # ============================================================
-# 6 种进场策略的条件判定（纯函数）
+# 进场策略的条件判定（纯函数；2026-09-25 起 10 键，专属条件仅 wait1/wait2 系有）
 # ============================================================
 
 
@@ -590,7 +648,7 @@ def lowerDiverge(periodData, X, wantDir):
         if not pd or not pd.get("bis") or len(pd["bis"]) < 3:
             continue
         try:
-            pts = findDivergePoints(pd["bis"], pd.get("macdArr"))
+            pts = findDivergePoints(pd["bis"], pd.get("macdArr"), barSec=sec or None)
         except Exception:
             continue
         for p in pts:
@@ -649,7 +707,8 @@ def strategyExtraOk(key, bis, upperBis, macdArr, barSec, zs_exit_weak_ratio=ZS_E
             return "未够笔且过低点"
         if not zsExitWeak(bis, upperBis, macdArr, barSec, zs_exit_weak_ratio, "long"):
             return "出中枢力度未变弱"
-    # waitBuy / waitSell：仅需够笔 + 以下级别背驰 + 支阻位附近
+    # waitBuy / waitSell / wait3Buy / wait3Sell / waitLike2Buy / waitLike2Sell：
+    # 仅需够笔 + 以下级别背驰 + 支阻位附近（无专属条件）
     return None
 
 
@@ -761,19 +820,9 @@ def _evalRealtimeNode(periodData, node, wantDir, tCut, periodTimes, minBars):
     if mergedSegmentCount(_mergedFor(pd, res, tCut), F["startTime"], intervalSecOf(res)) < minBars:
         return None  # 段太短（微回调/微反弹），不算够笔
     # 参照笔：向前最近同向已完成笔（不含形成中段），跳过幅度不足的次级别回调；
-    # 规则 2：参照须与 F 同处上级笔内部（更早的参照只会更靠外，直接无效）
-    refer = None
-    secS = intervalSecOf(res) or 0
-    for j in range(len(bis) - 2, -1, -1):
-        cand = bis[j]
-        if cand["type"] != F["type"]:
-            continue
-        if cand["span"] < F["span"] * 0.5:
-            continue
-        if parentBi is not None and cand["startTime"] < parentBi["startTime"] - secS:
-            break  # 参照跨出所属上级笔 → 候选无效（不回退更早）
-        refer = cand
-        break
+    # 规则 2：参照须与 F 同处上级笔内部（更早的参照只会更靠外，直接无效）；
+    # B 开关（divergeReferByZs）：中枢内部段不参与比较，参照回退到入中枢段
+    refer = pickDivergeRefer(bis, F, intervalSecOf(res), parentBi=parentBi)
     if refer is None:
         return None
     strictNew = F["endPrice"] < refer["endPrice"] if wantDir == "long" \
@@ -1250,7 +1299,8 @@ def trend_following_of(plan_direction, strategy_key=None):
     """顺势/逆势判定（TP2 平一半 / TP3 分支门槛）：
     交易计划 direction ∈ {多头多, 空头空} 为顺势（计划结构方向=操作方向）；
     {多头空, 空头多} 为逆势。plan_direction 缺失时按 strategyKey 兜底
-    （wait2Buy/waitBuy/wait2Sell/waitSell → 顺势；wait1Buy/wait1Sell → 逆势）。
+    （wait2Buy/waitBuy/wait3Buy/waitLike2Buy 及卖侧对称 → 顺势；
+    wait1Buy/wait1Sell → 逆势）。
     """
     if plan_direction:
         return plan_direction in TREND_PLAN_DIRS

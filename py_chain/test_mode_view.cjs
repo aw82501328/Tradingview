@@ -1,9 +1,11 @@
 const fs=require('fs'),vm=require('vm'),assert=require('node:assert/strict');
 const html=fs.readFileSync('py_chain/web/index.html','utf8');
 let script=[...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].find(m=>m[1].includes('const MODES'))[1].replace(/init\(\);\s*$/, '');
-const nodes=new Map();const node=id=>{if(!nodes.has(id))nodes.set(id,{value:'',textContent:'',innerHTML:'',style:{},hidden:false,setAttribute(){},getAttribute:()=>null,querySelector:()=>({textContent:''}),querySelectorAll:()=>[]});return nodes.get(id)};
+// 共享渲染核心（el/esc/signalRowsHtml 等）已拆到 bt_common.js，先于页面脚本加载
+const common=fs.readFileSync('py_chain/web/bt_common.js','utf8');
+const nodes=new Map();const node=id=>{if(!nodes.has(id))nodes.set(id,{value:'',textContent:'',innerHTML:'',style:{},hidden:false,setAttribute(){},getAttribute:()=>null,addEventListener(){},removeEventListener(){},querySelector:()=>({textContent:''}),querySelectorAll:()=>[]});return nodes.get(id)};
 const ctx={console,URLSearchParams,setTimeout:()=>1,clearTimeout(){},location:{search:'?mode=bad',origin:'http://localhost'},window:{addEventListener(){}},document:{getElementById:node,querySelector:()=>({firstChild:{textContent:''}})}};
-vm.createContext(ctx);vm.runInContext(script,ctx);
+vm.createContext(ctx);vm.runInContext(common,ctx);vm.runInContext(script,ctx);
 vm.runInContext(`
 if(selectedMode!=='backtest')throw Error('invalid mode default');
 sigRows=[{id:1,mode:'backtest',status:'已平仓',pnl:10},{id:2,mode:'live',status:'已平仓',pnl:999},{id:3,mode:'backtest',status:'信号'}];

@@ -24,7 +24,7 @@ const core = require("../../chan-core/scripts/chan_core.js");
 const {
   markWickBars, mergeBars, findFractals, countRaw, hasGapBetween, buildBi, fixBiExtremes, lockedPivotsOf, alignBiToUpper,
   calcATR, calcMACD, hasMacdCrossBetween, makeBiLowerContext,
-  extendLastBi, lowerResOf, calibrateBiTimes, intervalSecOf,
+  extendLastBi, lowerResOf, calibrateBiTimes, intervalSecOf, nearDoubleOn,
 } = core;
 
 // 笔数据落盘目录（mark-buy-sell SKILL 强制从此读取，实现「画笔 → 标记」数据依赖）
@@ -665,9 +665,9 @@ function intervalVisibility(res) {
         currentRes = res;
       }
 
-      // 近等双顶/双底平台取后顶/后底：仅 ≥1h（60/240/D）周期开启（15m/3m 平台尾噪声多，
-      // 全周期实施曾实测 61 次触发致微观结构大面积重排——影响评估后用户决策限 ≥1h）
-      let bis = buildBi(fractals, merged, atr, macdArr, lockedPivots, intervalSecOf(res) >= 3600, res === '60' ? lowerContext60 : null);
+      // 近等双顶/双底平台取后顶/后底：按 nearDoubleOn(res) 每周期开关（默认 60/240/D 开、
+      // 15m/3m 关——平台尾噪声多，全周期实施曾实测 61 次触发致微观结构大面积重排）
+      let bis = buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDoubleOn(res), res === '60' ? lowerContext60 : null);
 
       // 端点极值修正：包含合并可能吞掉更极端的插针低点/高点（如 60分钟 7-29 09:00 的 4010.41 被
       // 08:00/09:00 的向上合并吞掉），把笔终点平移到区间内被掩盖的真实极值，使笔终点落在真实极值K线上

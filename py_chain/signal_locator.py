@@ -241,6 +241,7 @@ def _draw_after_locate(c, row, bar_time, colors=None, last_time=None):
 
 
 def locate_signal(row, cfg=None, timeout=360, colors=None, after_bars=DEFAULT_AFTER_BARS):
+    from .monitor import replay_started
     symbol, res, stamp = validate_signal(row)
     after_bars = parse_after_bars(after_bars)
     view_until = _view_until(row, stamp, res, after_bars)
@@ -273,6 +274,9 @@ def locate_signal(row, cfg=None, timeout=360, colors=None, after_bars=DEFAULT_AF
         last_scroll = -float('inf')
         jumped = False
         jump_at = None
+        # 回放态二次定位：上次光标封死的窗口不够本次 after_bars 时已按新 until 扩窗
+        # （只扩一次——last 总比 until 早开盘若干秒，不设防会反复重跳）
+        extended = False
         while time.monotonic() < deadline:
             remaining = max(0.001, deadline - time.monotonic())
             data = c.evaluate(read, timeout=min(30000, max(1, int(remaining * 1000))), read_timeout=remaining)
@@ -282,6 +286,21 @@ def locate_signal(row, cfg=None, timeout=360, colors=None, after_bars=DEFAULT_AF
                     # not match stale bars. 晚于最后一根则回放跳转（含信号开盘根），
                     # 不能在已跳到历史时刻后因 stamp>=barEnd 放弃画标记。
                     if stamp < data['barEnd']:
+                        # 回放态下上次定位的光标封死了已加载窗口：保留根数调大时
+                        # 目标K线虽已覆盖，仍须按本次 until 重跳扩窗，否则视口右缘不动
+                        # （实时图 until 在未来时不进回放，维持钳到最新一根的预期行为）。
+                        if (not extended and data['last'] is not None
+                                and data['last'] < view_until
+                                and replay_started(c)):
+                            try:
+                                _replay_to_signal(c, stamp, deadline, res, until=view_until)
+                            except CDPError:
+                                raise
+                            except Exception as exc:
+                                raise CDPError(f'按保留根数扩窗失败：{exc}') from exc
+                            extended = True
+                            last_scroll = -float('inf')
+                            continue
                         break
                     if data.get('next') is not None:
                         raise CDPError('目标时间超出图表数据范围，历史数据不可用')

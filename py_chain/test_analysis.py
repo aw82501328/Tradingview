@@ -208,7 +208,7 @@ class GateTests(unittest.TestCase):
 
 
 class TestSrFromParamCenter(unittest.TestCase):
-    """回测支阻：按品种读参数中心；30S 不属支阻级别，应被过滤。"""
+    """回测支阻：cfg.sr_preset 名（全局预设）优先 > 品种参数中心桶；30S 不属支阻级别，应被过滤。"""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -219,10 +219,18 @@ class TestSrFromParamCenter(unittest.TestCase):
             "srTypes": ["cluster", "boll"],
             "from": "2026-06-30",
         })
+        # 预设文件一并指到临时目录（测试与真实 web/sr_presets.json 隔离）
+        self._orig_presets = webapp.SR_PRESETS_FILE
+        webapp.SR_PRESETS_FILE = str(Path(self.tmp.name) / "sr_presets.json")
 
     def tearDown(self):
         param_center.PARAMS_FILE = self._orig
+        webapp.SR_PRESETS_FILE = self._orig_presets
         self.tmp.cleanup()
+
+    def _write_presets(self, presets):
+        Path(webapp.SR_PRESETS_FILE).write_text(
+            json.dumps(presets, ensure_ascii=False), encoding="utf-8")
 
     def test_30s_filtered_out(self):
         kwargs = webapp.BacktestWorker._sr_preset_kwargs(
@@ -236,14 +244,32 @@ class TestSrFromParamCenter(unittest.TestCase):
             {"symbol": "OANDA:XAUUSD"}, ["30S"])
         self.assertIsInstance(kwargs, dict)
 
-    def test_legacy_preset_name_fallback(self):
-        """品种桶 normalize 失败时，历史 sr_preset 名可回退旧文件。"""
-        # 空符号桶外品种 → effective_sr 返回 SR_DEFAULTS，仍可 normalize；
-        # 此处用 mock 强制 effective 抛错路径较重，改测：有 sr_preset 时仍优先桶成功
+    def test_preset_name_wins_over_bucket(self):
+        """显式 sr_preset 名（全局预设模板）优先于该品种参数中心桶。"""
+        self._write_presets([{"name": "P1", "saved_at": 1, "cfg": {
+            "periods": ["D", "15"], "srTypes": ["cluster"], "bollLength": 55}}])
+        kwargs = webapp.BacktestWorker._sr_preset_kwargs(
+            {"sr_preset": "P1", "symbol": "OANDA:XAUUSD", "from": "2026-07-26"},
+            ["D", "15"])
+        self.assertIsInstance(kwargs, dict)
+        self.assertEqual(kwargs["bollLength"], 55)   # 预设值，非桶/默认值
+
+    def test_preset_missing_name_falls_back_to_bucket(self):
+        """sr_preset 名不存在（已删/改名）→ 回退品种桶，任务不废。"""
         kwargs = webapp.BacktestWorker._sr_preset_kwargs(
             {"sr_preset": "no-such", "symbol": "OANDA:XAUUSD", "from": "2026-07-26"},
             ["D", "15"])
         self.assertIsInstance(kwargs, dict)
+
+    def test_preset_bad_cfg_raises(self):
+        """预设存在但参数非法 → 抛错（显式选择不被静默换成桶参数）。"""
+        self._write_presets([{"name": "BAD", "saved_at": 1, "cfg": {
+            "periods": ["D", "15"], "srTypes": ["cluster"], "bollLength": "abc"}}])
+        with self.assertRaises(ValueError) as cm:
+            webapp.BacktestWorker._sr_preset_kwargs(
+                {"sr_preset": "BAD", "symbol": "OANDA:XAUUSD", "from": "2026-07-26"},
+                ["D", "15"])
+        self.assertIn("支阻预设", str(cm.exception))
 
 
 if __name__ == "__main__":

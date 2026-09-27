@@ -58,7 +58,7 @@ let bis = core.buildBi(fractals, merged, atr, macdArr); // ③ 笔构建
 | `findFractals(merged)` | 顶/底分型识别，`time` 取极值所在原始K线时间 |
 | `countRaw(merged, aIdx, bIdx)` | 统计 (aIdx, bIdx] 覆盖的原始K线数 |
 | `hasGapBetween(merged, aIdx, bIdx, atr, gapFilter)` | 区间内是否存在跳空缺口 |
-| `buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lowerContext)` | 笔构建（交替分型 + 回溯 + 跳空/MACD成笔 + 前顶前底作废 + 分型范围脱离 + 极值规则） |
+| `buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lowerContext)` | 笔构建（交替分型 + 回溯 + 跳空/MACD成笔 + 前顶前底作废 + 分型范围脱离 + 极值规则）；`nearDouble` 由调用方按 `nearDoubleOn(res)` 每周期开关取值 |
 | `calcATR(rawBars, period=14)` | ATR（平均真实波幅） |
 | `calcMACD(rawBars)` | MACD（返回 `{time, macd, dif, dea}`，macd>0 红柱 / <0 绿柱） |
 | `hasMacdCrossBetween(macdArr, merged, aIdx, bIdx, aTime, bTime)` | 区间内 MACD 红绿转换检测（用分型极值时间作边界） |
@@ -116,10 +116,25 @@ let bis = core.buildBi(fractals, merged, atr, macdArr); // ③ 笔构建
 
 ## 一小时近等端点补充确认（2026-09-10）
 
-原阈值 max(0.3×ATR, 0.001×价格) 保持。仅60分钟价差超过原阈值但不超过1.5倍时，可由15分钟双动能确认：后段同色柱峰值与同侧DIF极值绝对值均不超过前段50%，两段柱峰值均非零，双底DIF均负、双顶均正。保留平台间隔、原阈值反向波动、锁定端点和单次替换保护；数据不足不走补充分支，不改变买卖点创新极值背驰定义。
+原阈值 max(0.3×ATR, 0.001×价格) 保持。仅60分钟价差超过原阈值但不超过1.5倍时，可由15分钟双动能确认：后段同色柱峰值与同侧DIF极值绝对值均不超过前段50%，两段柱峰值均非零，双底DIF均负、双顶均正。保留平台间隔、原阈值反向波动、锁定端点和单次替换保护；数据不足不走补充分支，不改变买卖点创新极值背驰定义。2026-09-25 起：阈值含固定容差并集项 `nearDoubleFixed`（默认 0 不启用）；本补充分支随 60m 周期开关 `nearDouble60` 可关。
 
 JS/Python的`buildBi`增加可选末参`lowerContext`；用`makeBiLowerContext(res,bars,cutoff,macd)`准备15分钟数据和MACD索引，缺省参数保持旧行为。新增配置`nearDoubleLowerRelax=1.5`、`nearDoubleLowerRatio=0.5`。
 
 画笔构建60分钟前需要完整15分钟历史（最近30天仅限显示）；回测、回放和监控仅使用当前决策时刻已收盘数据，先更新低周期。目标小时K线为8月7日08:00、4229.875，15分钟精确极值为08:45；固定样本仅目标相邻两笔变化，实际全量影响需回归检查。
 
 完整条件、接口、保护和测试见[现行补充规范](../../../spec/plans/SPEC_near_double_lower_confirmation.md)。早期章节中原阈值的说明描述基础分支，与本补充分支共同适用。
+
+
+## 近等后顶/后底（反弹不成笔）取后（2026-09-26）
+
+「间隔不足→回溯替换」分支扩展，与近等平台取后顶（2026-09-25 参数化那组）互补：平台规则仅在两顶间已有两段首尾相接的成笔时禁止后移（单独一段成笔不挡）；本规则处理中间**已有合格反向分型**（回调甚至已成有效笔）、但 last→k 反弹/回撤腿 gap<4 拆不出反弹笔的「**回调够深、反弹太短**」场景。
+
+- 条件（k 与 prev=result[-2] 同类型、分支前提 last→k 间隔 <4）：
+  - 近等：`0 ≤ prev−k ≤ thr`（thr 同平台规则 max(nearDoubleAtrK×ATR, nearDoublePct×价, nearDoubleFixed)；仅60m可 1.5×thr + 15m 双动能确认）；
+  - 真实回调：prev→last 反向幅度 ≥ thr；
+  - 权限二选一：**k.locked**（上级笔端点=区间套强制落地，任何周期生效、不受 nearDoubleRebound 开关限制——上级已后移的端点必须在本级复现）或 nearDoubleOn(res) 开启周期（60/240/D）且 `nearDoubleRebound`（默认 true）；
+  - 排除：prev.gapLocked / prev.locked / last.locked / prev.nearDouble（单跳封顶）；回溯替换保护（lastIsDeeper）仍优先。
+- 效果：prev 让位、笔端点后移到 k（k 打 nearDouble 标记）；前顶/前底成为笔内极值（平台规则同类先例）。
+- 例：60m 2026-09-18 15:00 顶 4399.67 → 22:00 底 4342.73（22:00/23:00 包含合并）→ 9-19 01:00 顶 4397.045，反弹腿仅 3 根合并K、近等差 2.625 ≤ thr；240 层平台规则已把 4h 顶后移到 9-19 01:00 → 60m 经 k.locked 复现：上涨笔 09-18 11:00 4334.295 → 09-19 01:00 4397.045，下跌笔至 09-21 22:00 4322.81。底对称。
+- 测试：py_chain/test_near_double.cjs / test_near_double.py（fixture near_double_rebound_xauusd_20260919.json.gz：开关关=端点停 4399.67；k.locked 路径不受开关限制；镜像双底案例）。完整条件见 chan-core SPEC §2.4.2-2b（速查表 #6b）。
+

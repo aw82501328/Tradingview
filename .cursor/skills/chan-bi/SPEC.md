@@ -82,7 +82,7 @@
 
 1. `markWickBars`（长影压平）→ `mergeBars`（包含合并）→ `findFractals`（分型）；
 2. `calcATR(rawBars, 14)`（供跳空判定）→ `calcMACD(rawBars)`（供 MACD 变色成笔）；
-3. `lockedPivotsOf(prevBis)` 取上级笔端点作为锁定端点 → `buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lowerContext)`（区间套强制对齐）；
+3. `lockedPivotsOf(prevBis)` 取上级笔端点作为锁定端点 → `buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDoubleOn(res), lowerContext)`（区间套强制对齐；nearDouble 按每周期开关，默认 60/240/D 开）；
 4. `fixBiExtremes(bis, merged)`（端点极值修正）；
 5. **ATR 过滤**：`span < 稳定ATR×ATR_FILTER` 的笔剔除（`ATR_FILTER` 默认 0.5）。**阈值基准用全窗口 TR 均值（稳定ATR），不用 `calcATR` 的尾部 14 根**——9-4 行情急涨使 15m 尾部 ATR 从 ~17.4 涨到 21+，把 9-3 06:06→07:36 的结构性下跌笔（幅度 10.59）误判为噪音剔除、06:06 顶 4391.835 随之消失（连续同向坏笔的源头）。笔结构与行情无关，阈值不应随局部行情漂移；与 chan-core `markWickBars` 的稳定基准同理（见 chan-core SPEC §2.0）。
 6. `extendLastBi`（未完成笔延伸）；
@@ -154,7 +154,7 @@
 
 ## 一小时近等端点补充确认（2026-09-10）
 
-原阈值 max(0.3×ATR, 0.001×价格) 保持。仅60分钟价差超过原阈值但不超过1.5倍时，可由15分钟双动能确认：后段同色柱峰值与同侧DIF极值绝对值均不超过前段50%，两段柱峰值均非零，双底DIF均负、双顶均正。保留平台间隔、原阈值反向波动、锁定端点和单次替换保护；数据不足不走补充分支，不改变买卖点创新极值背驰定义。
+原阈值 max(0.3×ATR, 0.001×价格) 保持。仅60分钟价差超过原阈值但不超过1.5倍时，可由15分钟双动能确认：后段同色柱峰值与同侧DIF极值绝对值均不超过前段50%，两段柱峰值均非零，双底DIF均负、双顶均正。保留平台间隔、原阈值反向波动、锁定端点和单次替换保护；数据不足不走补充分支，不改变买卖点创新极值背驰定义。2026-09-25 起：阈值含固定容差并集项 `nearDoubleFixed`（默认 0 不启用）；本补充分支随 60m 周期开关 `nearDouble60` 可关。
 
 JS/Python的`buildBi`增加可选末参`lowerContext`；用`makeBiLowerContext(res,bars,cutoff,macd)`准备15分钟数据和MACD索引，缺省参数保持旧行为。新增配置`nearDoubleLowerRelax=1.5`、`nearDoubleLowerRatio=0.5`。
 

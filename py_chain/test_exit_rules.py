@@ -141,6 +141,11 @@ class TestTrendFollowingOf(unittest.TestCase):
     def test_strategy_key_fallback(self):
         self.assertTrue(trend_following_of(None, "wait2Buy"))
         self.assertTrue(trend_following_of(None, "waitSell"))
+        # 2026-09-25 键拆分：3买点/类2买点/3卖点/类2卖点 独立键，均为顺势
+        self.assertTrue(trend_following_of(None, "wait3Buy"))
+        self.assertTrue(trend_following_of(None, "waitLike2Buy"))
+        self.assertTrue(trend_following_of(None, "wait3Sell"))
+        self.assertTrue(trend_following_of(None, "waitLike2Sell"))
         self.assertFalse(trend_following_of(None, "wait1Buy"))
         self.assertFalse(trend_following_of(None, "wait1Sell"))
 

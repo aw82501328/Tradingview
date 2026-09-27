@@ -206,19 +206,20 @@ const LOGIC_BODY = `
 <p class="lnote" id="trendNote"></p>
 <h4>表3 · 买卖点 → 方向和策略（2026-09-24 三档）</h4>
 <table class="ltable" id="t3">
-<tr><th>最近买卖点</th><th>附带条件</th><th>方向</th><th>计划买卖点</th></tr>
-<tr><td>非一类卖点</td><td>没破前低，或力度变弱</td><td>空头多（跌势做多）</td><td>等低点附近的一买</td></tr>
-<tr><td>非一类买点</td><td>没冲过前高，或力度变弱</td><td>多头空（涨势做空）</td><td>等高点附近的一卖</td></tr>
-<tr><td>1买</td><td>—</td><td>多头多（涨势做多）</td><td>等回调后做2买</td></tr>
-<tr><td>1卖</td><td>—</td><td>空头空（跌势做空）</td><td>等反弹后做2卖</td></tr>
-<tr><td>2买</td><td>上涨在前高附近（参数化），或者未过前高，回调又回到2买点附近（参数化）</td><td>多头多</td><td>等回调后的类2买点</td></tr>
-<tr><td>2卖</td><td>下跌在前低附近（参数化），或者未过前低，反弹又回到2卖点附近（参数化）</td><td>空头空</td><td>等反弹后的类2卖点</td></tr>
-<tr><td>2买/类2买</td><td>冲过前高且力度没变弱</td><td>多头多</td><td>等回调后的3买点</td></tr>
-<tr><td>2卖/类2卖</td><td>跌破前低且力度没变弱</td><td>空头空</td><td>等反弹后的3卖点</td></tr>
-<tr><td>3买/类3买</td><td>冲过前高且力度没变弱（开关③3类点强档顺势 开，默认开）</td><td>多头多</td><td>等回调后的新买点</td></tr>
-<tr><td>3卖/类3卖</td><td>跌破前低且力度没变弱（开关③开）</td><td>空头空</td><td>等反弹后的新卖点</td></tr>
+<tr><th>最近买卖点</th><th>附带条件</th><th>方向</th><th>计划买卖点</th><th>策略</th></tr>
+<tr><td>非一类卖点</td><td>没破前低，或力度变弱</td><td>空头多（跌势做多）</td><td>等低点附近的一买</td><td>wait1Buy</td></tr>
+<tr><td>非一类买点</td><td>没冲过前高，或力度变弱</td><td>多头空（涨势做空）</td><td>等高点附近的一卖</td><td>wait1Sell</td></tr>
+<tr><td>1买</td><td>—</td><td>多头多（涨势做多）</td><td>等回调后做2买</td><td>wait2Buy</td></tr>
+<tr><td>1卖</td><td>—</td><td>空头空（跌势做空）</td><td>等反弹后做2卖</td><td>wait2Sell</td></tr>
+<tr><td>2买</td><td>上涨在前高附近（参数化），或者未过前高，回调又回到2买点附近（参数化）</td><td>多头多</td><td>等回调后的类2买点</td><td>waitLike2Buy</td></tr>
+<tr><td>2卖</td><td>下跌在前低附近（参数化），或者未过前低，反弹又回到2卖点附近（参数化）</td><td>空头空</td><td>等反弹后的类2卖点</td><td>waitLike2Sell</td></tr>
+<tr><td>2买/类2买</td><td>冲过前高且力度没变弱</td><td>多头多</td><td>等回调后的3买点</td><td>wait3Buy</td></tr>
+<tr><td>2卖/类2卖</td><td>跌破前低且力度没变弱</td><td>空头空</td><td>等反弹后的3卖点</td><td>wait3Sell</td></tr>
+<tr><td>3买/类3买</td><td>冲过前高且力度没变弱（开关③3类点强档顺势 开，默认开）</td><td>多头多</td><td>等回调后的新买点</td><td>waitBuy</td></tr>
+<tr><td>3卖/类3卖</td><td>跌破前低且力度没变弱（开关③开）</td><td>空头空</td><td>等反弹后的新卖点</td><td>waitSell</td></tr>
 </table>
 <p class="lnote">方向命名：前两个字＝现在的结构是涨是跌，后一个字＝做多还是做空。三档按序判定：强档（过前高不背驰）→ 中间档（仅 2买/2卖）→ 弱档。</p>
+<p class="lnote"><b>策略列</b>＝进场策略键（「计划买卖点」文案 → 键，1:1，2026-09-25 起）：wait3Buy/wait3Sell/waitLike2Buy/waitLike2Sell 是当天拆分出的独立键，waitBuy/waitSell 从此仅指「新买点/新卖点」；回测/监控记录里的「策略」显示的就是这一列的键。</p>
 <p class="lnote"><b>附带条件怎么判</b>（只对 2类/3类点——卖点全程对称）：</p>
 <p class="lnote">① 找参照：买点之前时间最近的高点（卖点：之前的低点）；买点后第一波上涨记为 after。</p>
 <p class="lnote">② 强档：after 终点 &gt; 前高（卖点：&lt; 前低），且和前一波同向比 MACD 没变弱（柱子总面积、DIF 峰、最高柱任一变弱＝背驰）。</p>
@@ -427,6 +428,7 @@ const ENTRY_GROUPS = [
   ['进场扩展（M1/M2/M4、0轴容差）', ['sinkFallback', 'sinkFallbackRearm', 'nearEqualAtrK', 'nearEqualPct',
                                      'expectBiEnough', 'expectBiMinBars', 'divergeConfirm', 'macdZeroTol']],
   ['进场闸门', ['entryMacdShrink', 'stopEntryBarFloor']],
+  ['规则修复（07-07 06:30 案例锚点）', ['divergeReferByZs', 'sinkSkipLevel']],
 ];
 
 function rowHtml(key, spec, value, isMod, embed) {

@@ -90,12 +90,12 @@ class RunSrComputeIsolationTest(unittest.TestCase):
         results = {"OANDA:XAUUSD": _engine_result(current=2450.0),
                    "FX:NAS100": _engine_result(current=18000.0)}
 
-        def fake_ensure(periods, from_ts, log=None, refresh=False, symbol=None):
+        def fake_ensure(periods, from_ts, log=None, refresh=False, symbol=None, **kw):
             if symbol == "OANDA:XAUUSD":
                 raise RuntimeError("拉取失败")
             return {"D": [{"time": 1}]}
 
-        def fake_build(bars, cfg, log=None):
+        def fake_build(bars, cfg, log=None, **kw):
             return results[cfg["symbol"]], {"per_level_atr": {}}
 
         with patch("py_chain.sr_service.ensure_data", side_effect=fake_ensure), \

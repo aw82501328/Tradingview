@@ -201,6 +201,18 @@ def classifySecond(bis, macdArr, p, cfg=None):
         return "其他"
     # 买卖点后第一笔同向笔（买点后上涨 / 卖点后下跌），起点在买卖点之后
     after = next((b for b in bis if b["startTime"] >= p["time"] and b["type"] == ("up" if wantUp else "down")), None)
+    # A 开关（anchorUndecidedSkip，2026-09-26）：「还没跌/涨」≠「走弱」——after 不存在，
+    # 或 after 为形成中段且点后反向段合并块数 < anchorUndecidedMinBars（默认 2=右肩+1根确认）
+    # 时返回「未定型」哨兵，消费方（predictPlan/trend_direction）据此不接管、回退前锚；
+    # 真弱（after 存在但未破左低）仍走下方既有「其他」→ 弱档语义不变。
+    if CHAN_CFG.get("anchorUndecidedSkip"):
+        if after is None:
+            return "未定型"
+        if after.get("_forming"):
+            mc = after.get("mergedCount")
+            min_bars = int(CHAN_CFG.get("anchorUndecidedMinBars", 2) or 2)
+            if mc is not None and mc < min_bars:
+                return "未定型"
     if after is None:
         return "其他"
     # 过左高 / 过左低
@@ -358,31 +370,48 @@ def predictPlan(res, bis, upperBis, macdArr, lastPrice, bars, atr=0, barSec=None
                 return {"point": p, "bi": bi}
         return None
 
-    # 3. 先取最后一笔终点的买卖点
-    lastMatch = matchAt(len(bis) - 1)
-    if lastMatch:
-        p = lastMatch["point"]
-        reason = f"找到最近买卖点 {p['type']} @ {fmtT(p['time'])} {p['price']:.2f}（最后一笔端点）"
-        cls = classifySecond(bis, macdArr, p, range_cfg) if p["type"] in ("2买", "类2买", "3买", "类3买", "2卖", "类2卖", "3卖", "类3卖") else "其他"
-        out = strategyOf(res, p["type"], reason, f"趋势|{p['type']}", cls, range_cfg)
+    # 3. 先取最后一笔终点的买卖点；4. 无 → 逐笔向前扫描最近笔端点。
+    #    A 开关（anchorUndecidedSkip，2026-09-26）：分类「未定型」的端点视同无点——
+    #    跳过它继续向前扫描（回退前锚，本义：1卖后的「2卖交易预期」不被刚出生的点打断）；
+    #    无可回退前锚时由未定型点本身接管（维持旧行为，保守）。
+    def cls_of(p):
+        if p["type"] in ("2买", "类2买", "3买", "类3买", "2卖", "类2卖", "3卖", "类3卖"):
+            return classifySecond(bis, macdArr, p, range_cfg)
+        return "其他"
+
+    def undecided(m):
+        return (m is not None and CHAN_CFG.get("anchorUndecidedSkip")
+                and cls_of(m["point"]) == "未定型")
+
+    def out_of(m, origin):
+        p = m["point"]
+        reason = f"找到最近买卖点 {p['type']} @ {fmtT(p['time'])} {p['price']:.2f}（{origin}）"
+        out = strategyOf(res, p["type"], reason, f"趋势|{p['type']}", cls_of(p), range_cfg)
         out["strategyLabel"] = out["strategy"]
         out["pointDesc"] = f"{p['type']}@{fmtT(p['time'])}({p['price']:.2f})"
         return out
 
-    # 4. 最后一笔终点无买卖点 → 逐笔向前扫描最近笔端点
+    lastMatch = matchAt(len(bis) - 1)
+    fallback = None   # 最近的未定型匹配（无前锚可回退时按旧行为接管）
+    if lastMatch is not None and not undecided(lastMatch):
+        return out_of(lastMatch, "最后一笔端点")
+    if lastMatch is not None:
+        fallback = lastMatch
     prevMatch = None
     for j in range(len(bis) - 2, -1, -1):
-        prevMatch = matchAt(j)
-        if prevMatch:
-            break
-    if prevMatch:
-        p = prevMatch["point"]
-        reason = f"找到最近买卖点 {p['type']} @ {fmtT(p['time'])} {p['price']:.2f}（向前扫描最近笔端点）"
-        cls = classifySecond(bis, macdArr, p, range_cfg) if p["type"] in ("2买", "类2买", "3买", "类3买", "2卖", "类2卖", "3卖", "类3卖") else "其他"
-        out = strategyOf(res, p["type"], reason, f"趋势|{p['type']}", cls, range_cfg)
-        out["strategyLabel"] = out["strategy"]
-        out["pointDesc"] = f"{p['type']}@{fmtT(p['time'])}({p['price']:.2f})"
-        return out
+        m = matchAt(j)
+        if m is None:
+            continue
+        if undecided(m):
+            if fallback is None:
+                fallback = m
+            continue
+        prevMatch = m
+        break
+    if prevMatch is not None:
+        return out_of(prevMatch, "向前扫描最近笔端点")
+    if fallback is not None:
+        return out_of(fallback, "最后一笔端点")
 
     # 5. 趋势但未匹配到买卖点
     reason = "趋势（非震荡），但最近笔端点均无已确认买卖点"
@@ -738,6 +767,15 @@ def trend_direction(res, bis, bars, upperBis, macdArr, tCut=None, rebound=None):
     if not pts:
         return fallback
     p = pts[-1]
+    # A 开关（anchorUndecidedSkip，2026-09-26）：最近点「未定型」（after 不存在/未达根数）
+    # 时与 predictPlan 同口径跳过、锚定前一个定型点；全部未定型 → 维持旧行为取最近点。
+    if CHAN_CFG.get("anchorUndecidedSkip"):
+        for cand in reversed(pts):
+            if (cand["type"] in ("2买", "类2买", "3买", "类3买", "2卖", "类2卖", "3卖", "类3卖")
+                    and classifySecond(bis, macdArr, cand) == "未定型"):
+                continue
+            p = cand
+            break
     t_ = p["type"]
     is_buy = t_ in ("1买", "2买", "类2买", "3买", "类3买")
     if t_ in ("1买", "1卖"):

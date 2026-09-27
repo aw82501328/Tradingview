@@ -3,7 +3,7 @@
 
 同一份K线数据双侧重建笔序列，逐周期逐笔 diff，目标 0 差异：
   - py 侧：与 backtest.build_bis 同口径（markWickBars→mergeBars→findFractals→
-    buildBi(…,None,sec>=3600,lowerContext)→fixBiExtremes→extendLastBi(trimmed)）
+    buildBi(…,None,nearDoubleOn(res),lowerContext)→fixBiExtremes→extendLastBi(trimmed)）
   - JS 侧：.cursor/skills/chan-core/scripts/rebuild_bis.js（复用图表算法源 chan_core.js）
 
 用法：
@@ -31,14 +31,14 @@ def py_rebuild(bl, res, lower_bars=None):
     """py 侧重建（与 backtest.build_bis 完全同口径）。"""
     from .chan_core import (
         mergeBars, findFractals, markWickBars, buildBi, fixBiExtremes,
-        extendLastBi, calcATR, calcMACD, intervalSecOf, makeBiLowerContext,
+        extendLastBi, calcATR, calcMACD, intervalSecOf, makeBiLowerContext, nearDoubleOn,
     )
     trimmed = markWickBars(bl)
     merged = mergeBars(trimmed)
     fractals = findFractals(merged)
     atr = calcATR(bl, 14)
     macd = calcMACD(bl)
-    bis = buildBi(fractals, merged, atr, macd, None, intervalSecOf(res) >= 3600, makeBiLowerContext(res, lower_bars))
+    bis = buildBi(fractals, merged, atr, macd, None, nearDoubleOn(res), makeBiLowerContext(res, lower_bars))
     bis = fixBiExtremes(bis, merged) or bis
     bis = extendLastBi(bis, trimmed)
     return bis

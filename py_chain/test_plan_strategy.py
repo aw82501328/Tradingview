@@ -167,12 +167,12 @@ class EntryStrategyMappingTests(unittest.TestCase):
             "等待回调后做2买": ("wait2Buy", "long"),
             "等待高点附近的一卖": ("wait1Sell", "short"),
             "等待低点附近的一买": ("wait1Buy", "long"),
-            "等待回调后的新买点": ("waitBuy", "long"),      # 3类点强档（thirdStrongTrend 开）
+            "等待回调后的新买点": ("waitBuy", "long"),        # 3类点强档（thirdStrongTrend 开）
             "等待反弹后的新卖点": ("waitSell", "short"),
-            "等待回调后的3买点": ("waitBuy", "long"),        # 2买/类2买 强档
-            "等待回调后的类2买点": ("waitBuy", "long"),      # 2买 中间档
-            "等待反弹后的3卖点": ("waitSell", "short"),      # 2卖/类2卖 强档
-            "等待反弹后的类2卖点": ("waitSell", "short"),    # 2卖 中间档
+            "等待回调后的3买点": ("wait3Buy", "long"),        # 2买/类2买 强档
+            "等待回调后的类2买点": ("waitLike2Buy", "long"),  # 2买 中间档
+            "等待反弹后的3卖点": ("wait3Sell", "short"),      # 2卖/类2卖 强档
+            "等待反弹后的类2卖点": ("waitLike2Sell", "short"),  # 2卖 中间档
         }
         for text, (key, direction) in cases.items():
             s = mark_entry.entryStrategyOf(text)

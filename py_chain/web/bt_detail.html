@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>方案明细 · 缠论回测</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    display: flex; flex-direction: column;
+    background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-size: 14px; overflow: hidden;
+  }
+  button {
+    background: var(--card-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 6px 14px; font-size: 13px; cursor: pointer;
+    transition: background .15s;
+  }
+  button:hover:not(:disabled) { background: #2b313d; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  input {
+    background: var(--card-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 5px 8px; font-size: 13px;
+  }
+  input:focus { outline: none; border-color: var(--accent); }
+  input[type="color"] {
+    border-radius: 4px; padding: 1px; width: 32px; height: 26px; cursor: pointer;
+  }
+  /* ---------- 页头：方案名 + 元信息 + 关闭 ---------- */
+  #bt-detail-head { display: flex; justify-content: space-between; align-items: flex-start;
+    gap: 12px; padding: 18px 24px; border-bottom: 1px solid var(--border); flex: none; flex-wrap: wrap; }
+  #bt-detail-head .bt-heading { min-width: 0; }
+  #bt-detail-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
+    overflow: hidden; font-size: 20px; line-height: 1.4; overflow-wrap: anywhere; }
+  #bt-detail-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px;
+    color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+  #bt-detail-head .bt-modal-actions { display: flex; gap: 8px; flex-shrink: 0; }
+  /* ---------- 页签 ---------- */
+  #bt-detail-tabs { display: flex; gap: 24px; padding: 0 24px; flex: none; border-bottom: 1px solid var(--border); }
+  #bt-detail-tabs button { border: 0; border-radius: 0; border-bottom: 2px solid transparent;
+    background: transparent; color: var(--muted); padding: 10px 2px; }
+  #bt-detail-tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+  /* ---------- 定位配置条（仅交易记录页签）：颜色 + 保留K线 ---------- */
+  #bt-detail-locatebar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 8px 24px; border-bottom: 1px solid var(--border); background: var(--card-2);
+    font-size: 12px; color: var(--muted); flex: none; }
+  #bt-detail-locatebar[hidden] { display: none; }
+  #bt-detail-locatebar input[type="number"] { width: 64px; padding: 4px 6px; }
+  /* ---------- 主体：概览 / 交易记录 ---------- */
+  #bt-detail-body { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+  #bt-detail-overview { overflow: auto; min-height: 0; padding: 20px 24px; }
+  #bt-detail-records { display: flex; flex-direction: column; flex: 1; min-height: 0; padding: 16px 24px 20px; }
+  /* 指标卡 */
+  .bt-kpis { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap: 12px; }
+  .bt-kpi { min-width: 0; background: var(--card-2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+  .bt-kpi:first-child { background: color-mix(in srgb,var(--accent) 8%,var(--card-2)); border-color: var(--control-border); }
+  .bt-kpi strong { font-size: clamp(18px,1.65vw,26px); line-height: 1.3; overflow-wrap: anywhere; }
+  .bt-kpi:first-child strong { font-weight: 750; }
+  .bt-kpi small { font-size: 11px; color: var(--muted); }
+  .bt-kpi-label { color: var(--muted); font-size: 12px; }
+  .bt-kpi strong, table, .bt-distribution { font-variant-numeric: tabular-nums; }
+  .pnl-pos { color: var(--buy); }
+  .pnl-neg { color: var(--sell); }
+  .bt-note { color: var(--muted); font-size: 12px; margin-top: 12px; }
+  /* 面板（资金曲线 / 出场分布 / 亏损归因） */
+  .bt-panel { border: 1px solid var(--border); border-radius: 10px; background: var(--card-2);
+    padding: 18px; min-width: 0; margin-top: 16px; }
+  .bt-panel h3 { font-size: 14px; margin: 0 0 14px; }
+  .bt-chart-panel { padding: 6px; }
+  .bt-insights { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
+  .bt-distribution { display: flex; align-items: center; gap: 20px; }
+  .bt-distribution > svg { flex: none; width: 96px; height: 96px; }
+  .bt-exit-legend { flex: 1; min-width: 0; display: grid; gap: 9px; }
+  .bt-exit-row { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 16px; font-size: 12px; }
+  .bt-exit-row > :last-child { color: var(--muted); min-width: 40px; text-align: right; }
+  /* 亏损归因图形化 */
+  .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; }
+  .pnl-cell { display: inline-flex; align-items: center; gap: 8px; justify-content: flex-end; }
+  .pnl-bar-track { position: relative; width: 64px; height: 6px; flex: none;
+    border-radius: 3px; background: var(--input); }
+  .pnl-bar-track::before { content: ''; position: absolute; left: 50%; top: -2px; bottom: -2px;
+    width: 1px; background: var(--border); }
+  .pnl-bar { position: absolute; top: 0; bottom: 0; min-width: 1px; }
+  .pnl-bar.pos { left: 50%; border-radius: 0 3px 3px 0; background: var(--buy); }
+  .pnl-bar.neg { right: 50%; border-radius: 3px 0 0 3px; background: var(--sell); }
+  .bt-loss-summary { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+  .bt-loss-summary b { color: var(--text); font-weight: 600; }
+  .bt-loss-graphic { display: flex; flex-direction: column; gap: 8px; background: transparent; padding: 0; border: 0; }
+  .loss-main { display: flex; align-items: flex-start; gap: 14px; flex-wrap: nowrap; min-width: 0; }
+  .loss-main svg { display: block; flex: none; }
+  .loss-side { display: flex; flex-direction: column; gap: 5px; min-width: 0; flex: 1; }
+  .loss-cats { display: flex; gap: 16px; flex-direction: column; gap: 8px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+  .loss-cat { display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
+  .loss-cat b { color: var(--text); }
+  .loss-cat .pnl-bar-track { width: 72px; }
+  .bt-analyze-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    font-size: 12px; color: var(--muted); margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .bt-analyze-bar input[type="number"] { width: 52px; padding: 4px 6px; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; }
+  /* 参数折叠 */
+  .bt-params-wrap { margin-top: 16px; border: 1px solid var(--border); border-radius: 10px;
+    border-bottom: 1px solid var(--border); background: var(--card-2); }
+  .bt-params-wrap > summary { padding: 14px 18px; font-size: 12px; color: var(--muted);
+    cursor: pointer; user-select: none; list-style: none; }
+  .bt-params-wrap > summary::-webkit-details-marker { display: none; }
+  .bt-params-wrap > summary::before { content: '▸'; margin-right: 6px; display: inline-block;
+    transition: transform .15s ease; }
+  .bt-params-wrap[open] > summary::before { transform: rotate(90deg); }
+  .bt-params-wrap[open] > summary { border-bottom: 1px dashed var(--border); }
+  .bt-params { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    gap: 12px 20px; padding: 16px 18px; font-size: 12px; }
+  .bt-params > div { overflow-wrap: anywhere; }
+  .bt-params .k { color: var(--muted); margin-right: 4px; }
+  /* 资金曲线（自绘 SVG） */
+  .equity-chart { background: transparent; border: 0; position: relative; padding: 10px 14px 12px; }
+  .equity-chart[hidden] { display: none; }
+  .equity-chart .eq-head { display: flex; justify-content: space-between; align-items: baseline;
+    gap: 10px; margin-bottom: 6px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+  .equity-chart .eq-head strong { color: var(--text); font-size: 13px; }
+  .equity-chart .eq-legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px;
+    color: var(--muted); align-items: center; overflow-wrap: anywhere; }
+  .equity-chart .eq-legend i { display: inline-block; width: 10px; height: 3px; border-radius: 1px;
+    margin-right: 4px; vertical-align: middle; }
+  .equity-chart svg { display: block; width: 100%; height: auto; touch-action: none; }
+  .equity-chart .eq-tip { position: absolute; pointer-events: none; z-index: 5;
+    background: #1a2030; border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 8px; font-size: 11px; color: var(--text); white-space: nowrap;
+    box-shadow: 0 6px 18px rgba(0,0,0,.4); display: none; }
+  .equity-chart .eq-tip.on { display: block; }
+  /* 交易记录表 */
+  .bt-record-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px;
+    margin-bottom: 10px; font-size: 12px; }
+  .bt-record-head span { color: var(--muted); }
+  .bt-detail-locate { padding: 0 0 12px; border: 0; background: transparent;
+    color: var(--muted); font-size: 12px; }
+  #bt-detail-records .scroll { flex: 1; min-height: 0; overflow: auto;
+    border: 1px solid var(--border); border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 8px 10px; text-align: left; border-top: 1px solid var(--border); white-space: nowrap; }
+  th { background: var(--card-2); color: var(--muted); font-weight: 600; position: sticky; top: 0; z-index: 2; }
+  th .sort-button { padding: 0 4px; border: 0; background: transparent; color: inherit; font: inherit; }
+  td.long { color: var(--buy); }
+  td.short { color: var(--sell); }
+  td.pnl-pos { color: var(--buy); }
+  td.pnl-neg { color: var(--sell); }
+  .status-tag { font-size: 11px; padding: 1px 7px; border-radius: 8px; }
+  .status-tag.sig { background: #123; color: #7cb0ff; }
+  .status-tag.filled { background: #0d3b31; color: var(--ok); }
+  .status-tag.open { background: #3d3208; color: var(--warn); }
+  .status-tag.closed { background: #0d3b31; color: var(--ok); }
+  .status-tag.filtered { background: #2a2f3a; color: var(--muted); }
+  .mini-badge { font-size: 10px; padding: 0 4px; margin-left: 3px; border-radius: 6px;
+    background: #2a2340; color: #b39ddb; border: 1px solid #4a3b6b; cursor: help; }
+  #bt-detail-sig-body tr[data-signal-id] { cursor: pointer; }
+  #bt-detail-sig-body tr[data-signal-id]:hover td { background: var(--card-2); }
+  #bt-detail-sig-body tr.selected td { background: color-mix(in srgb, var(--accent) 18%, var(--card)); }
+  #bt-detail-sig-body tr.selected:not(.exit-continuation) td:first-child { box-shadow: inset 3px 0 var(--accent); }
+  #bt-detail-sig-body td[rowspan] { vertical-align: middle; }
+  #bt-detail-sig-body tr.exit-continuation td { border-top-style: dashed; }
+  #bt-detail-sig-body tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  table th:first-child, #bt-detail-sig-body tr[data-signal-id]:not(.exit-continuation) td:first-child {
+    position: sticky; left: 0; background: var(--card); z-index: 1; min-width: 48px; border-right: 1px solid var(--border); }
+  table th:first-child { z-index: 3; }
+  #bt-detail-sig-body tr.selected:not(.exit-continuation) td:first-child { background: color-mix(in srgb,var(--accent) 18%,var(--card)); }
+  td.bt-number, th.bt-number { text-align: right; }
+  /* 空态 / 错误 / 复制反馈 */
+  .bt-empty { padding: 40px 20px; text-align: center; color: var(--muted); font-size: 13px; }
+  #bt-detail-sig-body .bt-empty { text-align: left; max-width: 280px; white-space: normal; }
+  .bt-error { color: var(--buy); }
+  #copy-tip { position: fixed; left: 50%; bottom: 48px; transform: translateX(-50%) translateY(8px);
+    z-index: 60; padding: 6px 14px; border-radius: 6px;
+    background: var(--card); border: 1px solid var(--border); color: var(--text);
+    box-shadow: 0 6px 18px rgba(0,0,0,.4); font-size: 12px;
+    opacity: 0; pointer-events: none; transition: opacity .15s ease, transform .15s ease; }
+  #copy-tip.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  @media(max-width:1100px) { .bt-kpis { grid-template-columns: repeat(3,minmax(0,1fr)); } }
+  @media(max-width:800px) {
+    .bt-kpis { grid-template-columns: repeat(2,minmax(0,1fr)); }
+    .bt-insights { grid-template-columns: minmax(0,1fr); gap: 0; }
+    #bt-detail-head { padding: 14px 16px; }
+    #bt-detail-tabs { padding: 0 16px; }
+    #bt-detail-locatebar { padding: 8px 16px; }
+    #bt-detail-overview, #bt-detail-records { padding: 16px; }
+  }
+  @media(max-width:480px) {
+    #bt-detail-head { flex-wrap: wrap; gap: 10px; }
+    #bt-detail-head .bt-modal-actions { width: 100%; }
+    .bt-kpis { grid-template-columns: minmax(0,1fr); }
+    .bt-kpi strong { font-size: 24px; }
+    #bt-detail-title { font-size: 17px; }
+    .bt-panel { padding: 12px; }
+    .bt-distribution { gap: 12px; }
+  }
+</style>
+<link rel="stylesheet" href="/theme.css">
+<link rel="stylesheet" href="/legacy-theme.css">
+</head>
+<body>
+
+<!-- 方案明细独立页：控制台「历史回测方案」列表点「明细」以 /bt-detail?id=<方案id> 打开。
+     页面不阻挡控制台——两个标签各操作各的；定位/分析请求与控制台走同一套服务端互斥。 -->
+<header id="bt-detail-head">
+  <div class="bt-heading"><strong id="bt-detail-title">方案明细</strong><div id="bt-detail-meta"></div></div>
+  <div class="bt-modal-actions">
+    <button id="bt-detail-close" type="button" title="关闭此标签页（也可 Ctrl+W）">关闭</button>
+  </div>
+</header>
+<nav id="bt-detail-tabs" role="tablist" aria-label="方案明细">
+  <button id="bt-detail-tab-overview" type="button" role="tab" data-detail-tab="overview" aria-controls="bt-detail-overview" aria-selected="true">概览</button>
+  <button id="bt-detail-tab-records" type="button" role="tab" data-detail-tab="records" aria-controls="bt-detail-records" aria-selected="false" tabindex="-1">交易记录</button>
+</nav>
+<!-- 定位配置（仅交易记录页签显示）：与控制台标记工具条同默认色 -->
+<div id="bt-detail-locatebar" hidden>
+  <span>定位标记颜色：</span>
+  <span>做多</span><input type="color" id="mark-color-buy" value="#F23645" title="做多箭头颜色">
+  <span>做空</span><input type="color" id="mark-color-sell" value="#089981" title="做空箭头颜色">
+  <span>出场</span><input type="color" id="mark-color-exit" value="#FFEB3B" title="出场箭头颜色（黄：平多 ↓ / 平空 ↑，可调）">
+  <span>支阻</span><input type="color" id="mark-color-sr" value="#787B86" title="支阻横线颜色（灰：近支阻价位全宽横线，可调）">
+  <label for="locate-after-bars" title="点击信号行在图上定位时，出场（无出场则进场）之后再显示的K线根数；设置会记住并与控制台共用，出场后实际K线不足N根时显示到最新一根">定位后保留K线</label>
+  <input type="number" id="locate-after-bars" class="locate-after-bars" value="60" min="0" step="1">
+</div>
+<main id="bt-detail-body"><div class="bt-empty" role="status">正在加载方案…</div></main>
+
+<script src="/bt_common.js"></script>
+<script>
+const DETAIL_PAGE = true;   // 回归测试（test_bt_detail.cjs）凭此串识别本页脚本
+
+// ---------- 会话状态（单页单方案；换方案 = 列表页再点「明细」以新 id 导航本标签） ----------
+let btDetailSignals = [];
+let btDetailSelectedId = null;
+let btDetailLocateMsg = '';
+let btDetailRunId = null;
+let btDetailSummary = null;
+let btDetailName = '';
+let btAnalyzeBusy = false;
+let btDetailPnlSort = 'none';    // 交易记录盈亏：none / descending / ascending
+let btDetailTab = 'overview';
+let btDetailScroll = { overview: 0, top: 0, left: 0 };
+let loadToken = 0;               // 每次加载递增，丢弃旧加载的迟到响应（如点了「重新加载」）
+let locatePending = null;
+let locatePoll = null;
+
+// 信号表列：明细在盈亏后追加亏损原因列
+const SIG_TABLE_HEADERS = `<th>#</th><th>信号时间</th><th>方向</th><th>检测周期</th>
+  <th>策略</th><th>背驰级别</th><th>价格</th><th>近支阻</th><th>状态</th><th>成交时间</th><th>成交价</th>
+  <th>出场时间</th><th>出场价</th><th>出场类型</th><th title="分批出场时分别显示本次出场或剩余持仓手数；1手=0.01标准手（盈亏=价差×方向×手数×合约乘数）">手数</th>
+  <th id="bt-detail-pnl-header" aria-sort="none"><button type="button" id="sort-bt-detail-pnl" class="sort-button" title="点击按整笔交易盈亏从高到低排序">盈亏 ↕</button></th>
+  <th title="已平仓亏损单：信号后 N 根检测周期收盘 vs 信号价">亏损原因</th>`;
+
+// ---------- 页签与滚动记忆 ----------
+function rememberBtDetailScroll() {
+  const overview = el('bt-detail-overview'), records = el('bt-detail-records');
+  const scroll = el('bt-detail-table-scroll');
+  if (overview && !overview.hidden) btDetailScroll.overview = overview.scrollTop;
+  if (records && !records.hidden && scroll) {
+    btDetailScroll.top = scroll.scrollTop;
+    btDetailScroll.left = scroll.scrollLeft;
+  }
+}
+
+function selectBtDetailTab(tab, focus = false, remember = true) {
+  if (remember) rememberBtDetailScroll();
+  btDetailTab = tab === 'records' ? 'records' : 'overview';
+  for (const name of ['overview', 'records']) {
+    const active = name === btDetailTab;
+    const button = el('bt-detail-tab-' + name);
+    button.setAttribute('aria-selected', String(active));
+    button.tabIndex = active ? 0 : -1;
+    const panel = el('bt-detail-' + name);
+    if (panel) panel.hidden = !active;
+    if (active && focus) button.focus();
+  }
+  el('bt-detail-locatebar').hidden = btDetailTab !== 'records';
+  restoreBtDetailScroll();
+  if (btDetailTab === 'overview') requestAnimationFrame(redrawBtDetailEquity);
+}
+
+function restoreBtDetailScroll() {
+  const activeScroll = el(btDetailTab === 'overview' ? 'bt-detail-overview' : 'bt-detail-table-scroll');
+  if (activeScroll) {
+    activeScroll.scrollTop = btDetailTab === 'overview' ? btDetailScroll.overview : btDetailScroll.top;
+    if (btDetailTab === 'records') activeScroll.scrollLeft = btDetailScroll.left;
+  }
+}
+
+// ---------- 概览渲染 ----------
+function btDetailMetricsHtml(s) {
+  const realized = Number(s.realized || 0), floating = Number(s.floating || 0);
+  const payoff = s.payoff_ratio != null ? Number(s.payoff_ratio).toFixed(2) : (s.win ? '∞' : '—');
+  const tile = (label, value, note, color = '') => `<div class="bt-kpi"><span class="bt-kpi-label">${label}</span>
+    <strong class="${color}">${value}</strong><small>${note}</small></div>`;
+  return tile('合计盈亏', fmtPnlText(realized + floating), '已平仓盈亏 + 浮盈', pnlClass(realized + floating)) +
+    tile('已平仓盈亏', fmtPnlText(realized), '已实现收益', pnlClass(realized)) +
+    tile('浮盈', fmtPnlText(floating), '剩余持仓浮动盈亏', pnlClass(floating)) +
+    tile('胜率', s.win_rate != null ? esc(s.win_rate) + '%' : '—', `盈利 ${s.win || 0} / 亏损 ${s.lose || 0}`) +
+    tile('盈亏比', payoff, `均盈 ${Number(s.avg_win || 0).toFixed(2)} / 均亏 ${Number(s.avg_loss || 0).toFixed(2)}`) +
+    tile('已平仓笔数', s.closed || 0, `保本 ${Math.max(0, (s.closed || 0) - (s.win || 0) - (s.lose || 0))} 笔`);
+}
+
+function btDetailExitsHtml(s) {
+  const ex = s.exits || {};
+  const cats = [
+    { label: '保损', n: Number(ex.stopBe || 0), color: '#5a8de6' },
+    { label: '止损', n: Number(ex.stopSr || 0), color: '#c8742a' },
+    { label: '全平', n: Number(ex.close || 0), color: '#8f6ce8' },
+  ];
+  const total = cats.reduce((n, c) => n + c.n, 0);
+  return `<div class="bt-distribution">${donutHtml(cats, String(total), '次出场')}
+    <div class="bt-exit-legend">${cats.map(c => `<div class="bt-exit-row"><span><i class="sw" style="background:${c.color}"></i>${c.label}</span><b>${c.n} 次</b><span>${total ? Math.round(c.n / total * 100) + '%' : '—'}</span></div>`).join('')}</div></div>
+    <p class="bt-note">半平 ${Number(ex.half || 0)} 次，单独计数，不纳入上方占比。${total ? '' : '暂无完整出场样本。'}</p>`;
+}
+
+// 亏损归因条（占比堆叠条 + 分类明细（计数、占比、双向盈亏条），数字口径与旧文本版一致
+function lossAnalysisHtml(la) {
+  if (!la) {
+    return `<div class="bt-loss-summary" id="bt-detail-loss-summary">
+      <span style="color:var(--muted)">尚未分析亏损原因；可在下方设置回看根数后点「分析方案」</span>
+    </div>`;
+  }
+  const lose = la.lose ?? 0;
+  const d = la.direction || { count: 0, pnl: 0 };
+  const e = la.entry_exit || { count: 0, pnl: 0 };
+  const ins = la.insufficient || { count: 0 };
+  const pct = (n) => lose ? Math.round(100 * n / lose) : 0;
+  const fmtV = v => (v > 0 ? '+' : '') + Number(v || 0).toFixed(2);
+  const head = `<div>亏损归因（信号后 <b>${la.lookahead ?? '?'}</b> 根） · 亏损 <b>${lose}</b> 笔</div>`;
+  if (!lose) {
+    return `<div class="bt-loss-summary bt-loss-graphic" id="bt-detail-loss-summary">${head}<span>无亏损样本</span></div>`;
+  }
+  // 占比堆叠条：分类色与出场分布一致（蓝/橙），数据不足为中性灰
+  const cats = [
+    { name: '方向问题', n: d.count ?? 0, pnl: d.pnl, color: '#5a8de6', hasBar: true },
+    { name: '进出场问题', n: e.count ?? 0, pnl: e.pnl, color: '#c8742a', hasBar: true },
+    { name: '数据不足', n: ins.count || 0, pnl: null, color: 'var(--muted)', hasBar: false },
+  ];
+  const maxLossPnl = Math.max(Math.abs(Number(d.pnl) || 0), Math.abs(Number(e.pnl) || 0), 0);
+  const donut = donutHtml(cats.map(c => ({ n: c.n, color: c.color, label: c.name })), String(lose), '笔亏损');
+  const rows = cats.filter(c => c.n > 0).map(c => `
+    <span class="loss-cat"><i class="sw" style="background:${c.color}"></i>${c.name}
+      <b>${c.n}</b>（${pct(c.n)}%）${c.hasBar
+        ? `${pnlBarHtml(Number(c.pnl) || 0, maxLossPnl)}<span class="pnl-neg">${fmtV(c.pnl)}</span>`
+        : ''}</span>`).join('');
+  return `<div class="bt-loss-summary bt-loss-graphic" id="bt-detail-loss-summary">
+    ${head}
+    <div class="loss-main">${donut}<div class="loss-side"><div class="loss-cats">${rows}</div></div></div>
+  </div>`;
+}
+
+// ---------- 填充：固化看板与可定位的交易快照 ----------
+function fillBtDetail(run, preserve = false) {
+  if (preserve) rememberBtDetailScroll();
+  else btDetailScroll = { overview: 0, top: 0, left: 0 };
+  const view = preserve ? {
+    paramsOpen: el('bt-detail-params')?.open, focusId: document.activeElement?.id,
+    lookahead: el('bt-detail-lookahead')?.value,
+  } : null;
+  const cfg = run.cfg || {};
+  btDetailRunId = run.id;
+  btDetailName = run.name || '';
+  btDetailSummary = run.summary || {};
+  // 快照行缺 symbol 时用方案 cfg 补全，定位需要品种
+  btDetailSignals = (run.signals || []).map(r => ({
+    ...r,
+    symbol: r.symbol || cfg.symbol,
+    mode: r.mode || 'backtest',
+  }));
+  if (!preserve) {
+    btDetailSelectedId = null;
+    btDetailTab = 'overview';
+    btDetailPnlSort = 'none';
+    btDetailLocateMsg = '点击记录，定位到 TradingView 的信号K线并标记该行进出场与支阻位';
+  }
+  const paramKeys = BT_CFG_KEYS.filter(k => k in cfg);
+  const paramsHtml = paramKeys.map(k =>
+    `<div><span class="k">${BT_CFG_LABELS[k] || k}</span>${esc(btCfgVal(k, cfg[k]))}</div>`).join('');
+  document.title = (run.name || '方案明细') + ' · 缠论回测';
+  el('bt-detail-title').textContent = run.name || '未命名方案';
+  el('bt-detail-title').title = run.name || '未命名方案';
+  el('bt-detail-meta').innerHTML = [cfg.symbol || '—', (cfg.periods || []).join(' / ') || '—',
+    `${cfg.from || '最早数据'} → ${cfg.to || '最新数据'}`, `保存于 ${fmtTime(run.saved_at)}`, btRunStateLabel(run)
+  ].map(v => `<span>${esc(v)}</span>`).join('');
+  const la = run.summary?.loss_analysis;
+  el('bt-detail-body').innerHTML = `
+    <section id="bt-detail-overview" role="tabpanel" aria-labelledby="bt-detail-tab-overview" tabindex="0">
+      <div class="bt-kpis">${btDetailMetricsHtml(btDetailSummary)}</div>
+      <p class="bt-note">手数口径（2026-09-23）：1 手 = 0.01 标准手（MT4/MT5 经纪商口径）；盈亏 = 价差 × 方向 × 手数 × 合约乘数（黄金 ×1.0、原油 ×10、白银 ×50、BTC/纳指 ×0.01、其他品种 ×1.0）。</p>
+      <section class="bt-panel bt-chart-panel"><div class="equity-chart" id="bt-detail-equity"></div>
+        <div id="bt-detail-equity-empty" class="bt-empty" hidden>暂无已实现盈亏记录，产生出场记录后可展示资金曲线。</div></section>
+      <div class="bt-insights">
+        <section class="bt-panel"><h3>出场分布</h3>${btDetailExitsHtml(btDetailSummary)}</section>
+        <section class="bt-panel"><h3>亏损归因</h3>${lossAnalysisHtml(la)}
+          <div class="bt-analyze-bar" title="用检测周期信号后 N 根收盘对比信号价，判定亏损是方向问题还是进出场问题">
+            <label for="bt-detail-lookahead">信号后</label><input id="bt-detail-lookahead" type="number" min="1" step="1" value="20" aria-label="归因回看K线根数">
+            <span>根</span><button id="bt-detail-analyze" type="button">分析方案</button>
+          </div><div id="bt-detail-analysis-status" class="bt-note" role="status"></div>
+        </section>
+      </div>
+      <details id="bt-detail-params" class="bt-params-wrap"><summary>回测参数 · ${paramKeys.length} 项</summary><div class="bt-params">${paramsHtml || '暂无参数快照'}</div></details>
+    </section>
+    <section id="bt-detail-records" role="tabpanel" aria-labelledby="bt-detail-tab-records" hidden>
+      <div class="bt-record-head"><strong>交易记录 · ${btDetailSignals.length} 条信号</strong><span>分批出场分行展示 · 点击定位 · 右键复制/加入典型案例</span></div>
+      <div id="bt-detail-locate" class="bt-detail-locate" role="status">${esc(btDetailLocateMsg)}</div>
+      <div class="scroll" id="bt-detail-table-scroll" tabindex="0" aria-label="交易记录表，可横向滚动"><table>
+        <thead><tr>${SIG_TABLE_HEADERS}</tr></thead>
+        <tbody id="bt-detail-sig-body">${btDetailRowsHtml()}</tbody>
+      </table></div>
+    </section>`;
+  el('bt-detail-lookahead').value = view?.lookahead ?? la?.lookahead ?? 20;
+  if (view) el('bt-detail-params').open = !!view.paramsOpen;
+  selectBtDetailTab(btDetailTab, false, false);
+  const eq = (Array.isArray(run.summary?.equity) && run.summary.equity.length)
+    ? run.summary.equity
+    : equityPoints(btDetailSignals);
+  drawEquityChart(el('bt-detail-equity'), eq.length ? [{ name: run.name, points: eq }] : [], {
+    height: 280, title: '资金曲线', note: '出场盈亏累加（含半平）；终点含浮盈',
+  });
+  el('bt-detail-equity-empty').hidden = !!eq.length;
+  restoreBtDetailScroll();
+  if (view) {
+    if (view.focusId) el(view.focusId)?.focus({ preventScroll: true });
+  }
+  styleBtDetailTable();
+  syncBtDetailPnlSortButton();
+}
+
+// ---------- 加载入口（URL ?id=；失败可重试；迟到响应按 token 丢弃） ----------
+async function loadDetail(id) {
+  const token = ++loadToken;
+  btAnalyzeBusy = false;
+  btDetailRunId = null;
+  btDetailSignals = [];
+  btDetailSelectedId = null;
+  btDetailSummary = null;
+  btDetailPnlSort = 'none';
+  btDetailName = '';
+  el('bt-detail-title').textContent = '方案明细';
+  el('bt-detail-title').title = '';
+  el('bt-detail-meta').textContent = '';
+  el('bt-detail-body').innerHTML = '<div class="bt-empty" role="status">正在加载方案…</div>';
+  selectBtDetailTab('overview');
+  let run;
+  try {
+    const resp = await fetch(`/api/bt/runs/detail?id=${encodeURIComponent(id)}`);
+    const d = await resp.json();
+    if (!resp.ok || !d.ok) throw Error(d.error || `请求失败 ${resp.status}`);
+    run = d.run;
+  } catch (e) {
+    if (token !== loadToken) return;
+    el('bt-detail-body').innerHTML = `<div class="bt-empty" role="status"><p class="bt-error">明细加载失败：${esc(e.message)}</p><button id="bt-detail-retry" type="button">重新加载</button></div>`;
+    el('bt-detail-retry').onclick = () => loadDetail(id);
+    return;
+  }
+  if (token !== loadToken) return;
+  fillBtDetail(run);
+  // 未做过亏损归因的方案自动分析一次；失败在卡片内提示，已分析的直接展示快照。
+  if (!(run.summary?.loss_analysis?.lookahead != null)) await analyzeBtDetail();
+}
+
+// ---------- 亏损归因 ----------
+async function analyzeBtDetail() {
+  if (!btDetailRunId || btAnalyzeBusy) return;
+  const raw = el('bt-detail-lookahead').value;
+  const lookahead = Number(raw);
+  if (!Number.isSafeInteger(lookahead) || lookahead < 1) {
+    setBtAnalysisStatus('回看根数须为正整数', true);
+    return;
+  }
+  const runId = btDetailRunId;
+  btAnalyzeBusy = true;
+  const btn = el('bt-detail-analyze');
+  if (btn) { btn.disabled = true; btn.textContent = '分析中…'; }
+  setBtAnalysisStatus('正在分析亏损原因…');
+  try {
+    const response = await fetch('/api/bt/runs/analyze', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: runId, lookahead }),
+    });
+    const r = await response.json();
+    if (runId !== btDetailRunId) return;   // 加载了新方案：丢弃旧会话结果
+    if (!response.ok || !r.ok || !r.run) throw Error(r.error || `请求失败 ${response.status}`);
+    fillBtDetail(r.run, true);
+    setBtAnalysisStatus('分析完成 · 信号后 ' + lookahead + ' 根');
+  } catch (e) {
+    if (runId === btDetailRunId) setBtAnalysisStatus('分析失败：' + e.message + '。可点击“分析方案”重试。', true);
+  } finally {
+    // 旧会话的收尾不得复位新会话的 busy/按钮状态
+    if (runId === btDetailRunId) {
+      btAnalyzeBusy = false;
+      const current = el('bt-detail-analyze');
+      if (current) { current.disabled = false; current.textContent = '分析方案'; }
+    }
+  }
+}
+
+function setBtAnalysisStatus(message, error = false) {
+  const status = el('bt-detail-analysis-status');
+  if (!status) return;
+  status.textContent = message;
+  status.classList.toggle('bt-error', error);
+}
+
+// ---------- 交易记录表 ----------
+function styleBtDetailTable() {
+  // 以逻辑列定位，分批出场的后续行仅有第 12–16 列，不能直接用 nth-child。
+  el('bt-detail-table-scroll')?.querySelectorAll('tr').forEach(row => {
+    const offset = row.classList.contains('exit-continuation') ? 11 : 0;
+    [...row.cells].forEach((cell, i) => cell.classList.toggle('bt-number', [6, 7, 10, 12, 14, 15].includes(i + offset)));
+  });
+}
+
+function btDetailLabelOf(id) {
+  const i = btDetailSignals.findIndex(r => r.id === id);
+  return i >= 0 ? i + 1 : id;
+}
+
+function btDetailLabelById() {
+  const m = {};
+  btDetailSignals.forEach((r, i) => { m[r.id] = i + 1; });
+  return m;
+}
+
+function syncBtDetailPnlSortButton() {
+  const header = el('bt-detail-pnl-header');
+  const btn = el('sort-bt-detail-pnl');
+  if (!header || !btn) return;
+  const sort = btDetailPnlSort;
+  header.ariaSort = sort;
+  btn.textContent = '盈亏 ' + ({none:'↕',descending:'↓',ascending:'↑'}[sort]);
+  btn.title = {none:'点击按整笔交易盈亏从高到低排序',descending:'点击按整笔交易盈亏从低到高排序',ascending:'点击恢复默认顺序'}[sort];
+}
+
+function toggleBtDetailPnlSort() {
+  btDetailPnlSort = {none:'descending',descending:'ascending',ascending:'none'}[btDetailPnlSort];
+  syncBtDetailPnlSortButton();
+  renderBtDetailRows();
+}
+
+// 条形比例尺 = 全部展示盈亏（含半平行）的 |pnl| 最大值；取出场级而非交易级，
+// 因半平部分与剩余腿之和可能超过任何单笔 |pnl|；无有效样本返回 null（表格回退纯文本）
+function pnlScaleMax(rows) {
+  let m = 0;
+  for (const r of rows) for (const x of exitDisplayRows(r)) {
+    const v = x.pnl == null ? NaN : Number(x.pnl);
+    if (Number.isFinite(v) && Math.abs(v) > m) m = Math.abs(v);
+  }
+  return m > 0 ? m : null;
+}
+function btDetailRowsHtml() {
+  if (!btDetailSignals.length) return '<tr><td colspan="17"><div class="bt-empty">本方案暂无信号记录</div></td></tr>';
+  // 仅排列展示副本；序号仍按方案原始顺序；无盈亏的记录始终置后
+  const rows = btDetailSignals.slice();
+  const sort = btDetailPnlSort;
+  if (sort !== 'none') {
+    rows.sort((a, b) => {
+      const aValue = a.pnl == null ? NaN : Number(a.pnl);
+      const bValue = b.pnl == null ? NaN : Number(b.pnl);
+      const aValid = Number.isFinite(aValue), bValid = Number.isFinite(bValue);
+      if (!aValid || !bValid) return aValid ? -1 : bValid ? 1 : 0;
+      return sort === 'ascending' ? aValue - bValue : bValue - aValue;
+    });
+  }
+  return signalRowsHtml(rows, {
+    interactive: true,
+    selectedId: btDetailSelectedId,
+    labelById: btDetailLabelById(),
+    showLossReason: true,
+    pnlBars: pnlScaleMax(rows),
+  });
+}
+
+function renderBtDetailRows() {
+  const body = el('bt-detail-sig-body');
+  if (body) body.innerHTML = btDetailRowsHtml();
+  styleBtDetailTable();
+}
+
+function setBtDetailLocateMsg(msg, isError) {
+  btDetailLocateMsg = msg || '';
+  const s = el('bt-detail-locate');
+  if (!s) return;
+  s.textContent = btDetailLocateMsg;
+  s.style.color = isError ? 'var(--buy)' : 'var(--muted)';
+}
+
+// ---------- 点行定位（快照行直接 POST；图表占用由服务端 409 返回并在此提示） ----------
+// locateAfterBars/applyStoredAfterBars/bindLocateAfterBars：共享层（bt_common.js）
+
+async function locateDetailRow(id) {
+  if (locatePending) return;
+  const row = btDetailSignals.find(r => r.id === id);
+  if (!row) return;
+  btDetailSelectedId = id;
+  const mode = row.mode === 'replay' || row.mode === 'live' ? row.mode : 'backtest';
+  const pending = { mode, id, runId: btDetailRunId };
+  locatePending = pending;
+  setBtDetailLocateMsg(`#${btDetailLabelOf(id)} 定位并标记中…（实时历史不够时会用K线回放跳转，最多等待360秒）`);
+  renderBtDetailRows();
+  try {
+    const response = await fetch('/api/signals/locate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mode, id, row, after_bars: locateAfterBars(),
+        colors: {
+          buy: el('mark-color-buy').value, sell: el('mark-color-sell').value,
+          exit: el('mark-color-exit').value, sr: el('mark-color-sr').value,
+        },
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw Error(data.error || '定位请求失败');
+    pending.jobId = data.job.jobId;
+    pollLocate();   // 立即查一次：快速完成事件可能先于 POST 响应
+  } catch (e) {
+    if (pending === locatePending) setBtDetailLocateMsg(`#${btDetailLabelOf(id)} 定位失败：${e.message}`, true);
+    locatePending = null;
+    renderBtDetailRows();
+  }
+}
+
+function finishLocate(job) {
+  if (!locatePending || job?.jobId !== locatePending.jobId || job.state === 'running') return;
+  const pending = locatePending;
+  const id = pending.id;
+  if (pending.runId !== btDetailRunId) {   // 已加载新方案：丢弃旧会话结果
+    locatePending = null;
+    clearTimeout(locatePoll);
+    return;
+  }
+  if (job.state === 'done') {
+    // 单行标记结果：定位成功后同一任务内已画该行进出场箭头+支阻横线
+    const mk = job.result.mark;
+    const markTxt = mk?.error ? `（标记未画：${mk.error}）`
+      : mk?.skipped ? `（${mk.skipped}，不画标记）`
+      : mk ? `并标记 ${mk.drawn} 个` : '';
+    const replayTxt = job.result.replay ? '（K线回放）' : '';
+    setBtDetailLocateMsg(`#${btDetailLabelOf(id)} 已定位${replayTxt}${markTxt} · ${job.result.symbol} · ${job.result.markRes} · ${fmtTime(job.result.time)}`);
+  } else {
+    setBtDetailLocateMsg(`#${btDetailLabelOf(id)} 定位失败：${job.error || '未知错误'}`, true);
+  }
+  locatePending = null;
+  clearTimeout(locatePoll);
+  renderBtDetailRows();
+}
+
+async function pollLocate() {
+  if (!locatePending?.jobId) return;
+  const pending = locatePending;
+  try {
+    const response = await fetch('/api/signals/locate');
+    if (!response.ok) throw Error('状态查询失败');
+    const data = await response.json();
+    if (locatePending !== pending) return;
+    if (!data.job || data.job.jobId !== pending.jobId) {
+      finishLocate({...pending, state:'error', error:'定位状态已失效，服务可能已重启，请重试'});
+    } else finishLocate(data.job);
+  } catch (e) {
+    if (locatePending === pending && pending.runId === btDetailRunId) {
+      setBtDetailLocateMsg(`#${btDetailLabelOf(pending.id)} 定位状态连接中断，正在重新查询…`);
+    }
+  }
+  if (locatePending === pending) locatePoll = setTimeout(pollLocate, 2000);
+}
+
+function onBtDetailSigActivate(event) {
+  if (event.type === 'keydown' && !['Enter', ' '].includes(event.key)) return;
+  const tr = event.target.closest('#bt-detail-sig-body tr[data-signal-id]');
+  if (!tr) return;
+  if (event.type === 'keydown') event.preventDefault();
+  locateDetailRow(Number(tr.dataset.signalId));
+}
+
+// 右击菜单（共享组件 bt_common.js）：仅复制 / 复制并加入典型案例；
+// # 用方案内序号，行取自快照数组；来源标记 run（去重键 run_id + 行内 id）
+
+// ---------- 资金曲线重画（窗口尺寸变化 / 页签切回概览） ----------
+function redrawBtDetailEquity() {
+  if (btDetailTab !== 'overview') return;
+  const host = el('bt-detail-equity');
+  if (!host || !host._eqSeries?.length) return;
+  drawEquityChart(host, host._eqSeries, host._eqOpts || {
+    height: 280, title: '资金曲线', note: '出场盈亏累加（含半平）；终点含浮盈',
+  });
+}
+
+// ---------- 绑定与启动 ----------
+function bindDetailPage() {
+  applyStoredAfterBars();   // 定位后保留K线：回填持久值并挂同步监听（与控制台三卡共用）
+  bindLocateAfterBars();
+  el('bt-detail-close').onclick = () => window.close();
+  el('bt-detail-tabs').onclick = e => {
+    const tab = e.target.closest('[data-detail-tab]');
+    if (tab) selectBtDetailTab(tab.dataset.detailTab);
+  };
+  el('bt-detail-tabs').onkeydown = e => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    e.preventDefault();
+    const tab = e.key === 'Home' ? 'overview' : e.key === 'End' ? 'records' : btDetailTab === 'overview' ? 'records' : 'overview';
+    selectBtDetailTab(tab, true);
+  };
+  el('bt-detail-body').onclick = e => {
+    if (e.target.closest('#bt-detail-analyze')) { analyzeBtDetail(); return; }
+    if (e.target.closest('#sort-bt-detail-pnl')) { toggleBtDetailPnlSort(); return; }
+    onBtDetailSigActivate(e);
+  };
+  el('bt-detail-body').onkeydown = onBtDetailSigActivate;
+  attachSignalContextMenu(el('bt-detail-body'), tr => {
+    if (!tr.closest('#bt-detail-sig-body')) return null;   // 仅交易记录表行上拦截
+    const row = btDetailSignals.find(r => r.id === Number(tr.dataset.signalId));
+    if (!row) return null;
+    return { row, no: btDetailLabelOf(row.id), sourceType: 'run', runId: btDetailRunId };
+  });
+  if (typeof ResizeObserver !== 'undefined') {
+    let width = 0;
+    const observer = new ResizeObserver(entries => {
+      const next = Math.round(entries[0].contentRect.width);
+      if (next > 0 && next !== width) { width = next; requestAnimationFrame(redrawBtDetailEquity); }
+    });
+    observer.observe(el('bt-detail-body'));
+  }
+}
+
+function boot() {
+  bindDetailPage();
+  const id = new URLSearchParams(location.search).get('id');
+  if (id) loadDetail(id);
+  else {
+    el('bt-detail-body').innerHTML =
+      '<div class="bt-empty bt-error" role="status">缺少方案 id 参数：请从控制台「历史回测方案」列表点「明细」打开本页</div>';
+  }
+}
+boot();
+</script>
+</body>
+</html>
