@@ -64,7 +64,7 @@ from .trading_plan import (compute_plan, trend_state_of,
                            TREND_RES as DEFAULT_TREND_RES, RANGE_RES as DEFAULT_RANGE_RES,
                            TREND_REBOUND, REBOUND_NEAR_PTS, REBOUND_ANGLE_REF)
 from .mark_entry import (
-    compute_entries, stop_ref_of, find_bi_event, filterDetectPeriods,
+    compute_entries, stop_ref_of, sr_of_detect, find_bi_event, filterDetectPeriods,
     trend_following_of, forming_seg_ready,
     DEFAULT_LOTS, DEFAULT_SLIP_STOP, DEFAULT_SLIP_FALLBACK, DEFAULT_SLIP_BE,
     DEFAULT_SLIP_STOP_ATR_K, DEFAULT_SLIP_FALLBACK_ATR_K, DEFAULT_SLIP_BE_ATR_K,
@@ -1347,7 +1347,7 @@ class BacktestEngine:
         """
         fine = self.bars[self.fine_res]["_list"]
         fineTimes = self._times[self.fine_res]
-        srLevels = (self._sr or {}).get("merged") or []
+        srAll = (self._sr or {}).get("merged") or []
         for s in sorted(pending, key=lambda x: -(intervalSecOf(x.get("periodX")) or 0)):
             d = s["direction"]
             if open_pos is not None and open_pos.get(d) is not None:
@@ -1379,6 +1379,8 @@ class BacktestEngine:
             # markRes 不在周期表内（异常兜底）→ atr=0 = 纯固定滑点
             atr_acc = self._atr.get(s.get("markRes"))
             mrAtr = atr_acc.value if atr_acc is not None else 0.0
+            # 止损重选也只看检测周期的支阻位（与近支阻同一口径）
+            srLevels = sr_of_detect(srAll, s.get("periodX"))
             stopRef = stop_ref_of(d, entryPrice, s.get("nearSr"), srLevels,
                                   slip_stop=self.slip_stop, slip_fallback=self.slip_fallback,
                                   atr=mrAtr, k_stop=self.slip_stop_atr_k,

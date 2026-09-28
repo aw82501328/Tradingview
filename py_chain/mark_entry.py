@@ -669,8 +669,22 @@ def lowerDiverge(periodData, X, wantDir):
     return filtered
 
 
+def sr_of_detect(srLevels, res):
+    """只留检测周期自己的支阻位。
+
+    3/15/60/240 同一条规则：检测周期是哪一级，近支阻和止损就只用那一级。
+    背驰级别、上一级、下一级的价位都不参与。无 level 的条目不参与。
+    """
+    if not srLevels or res is None:
+        return []
+    key = str(res)
+    return [sr for sr in srLevels
+            if isinstance(sr, dict) and str(sr.get("level")) == key]
+
+
 def nearSr(price, srLevels, nearTol):
     """在支阻位附近：背驰点价与任一 srLevels 支阻位价差 ≤ nearTol。
+    调用方须先用 sr_of_detect 收成检测周期。
     @returns None 或 { sr, dist } 最近命中的支阻位
     """
     if not srLevels or len(srLevels) == 0:
@@ -725,7 +739,7 @@ def evaluateEntry(ctx, strategy):
     atr = ctx.get("atr", 0)
     barSec = ctx.get("barSec", 0)
     near = ctx.get("near", NEAR)
-    srLevels = ctx.get("srLevels")
+    srLevels = sr_of_detect(ctx.get("srLevels"), res)
     periodData = ctx.get("periodData")
     key = strategy["key"]
     direction = strategy["direction"]
@@ -945,7 +959,7 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
          本级K线即视为回调/反弹中（信号带 expectBi=True，不等反向分型右邻收盘）；
       ② 当下背驰：realtimeLowerDiverge（区间套下沉到停止级，仅在该级的形成中段上
          判创新低/新高 + 当拍 MACD 对比，SPEC_divergence_chanset 规则 1/2/3）；
-      ③ 支阻位附近：形成中段当前极值价 vs srLevels（价差 ≤ near，绝对价差不乘 ATR）。
+      ③ 支阻位附近：形成中段当前极值价 vs 检测周期支阻位（价差 ≤ near，绝对价差不乘 ATR）。
     策略专属条件与确认制共用（strategyExtraOk）。
 
     去重：fired 集合按 (periodX, strategyKey, markRes, 段起点时间)——每个形成段只发一次，
@@ -1072,7 +1086,9 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
         # ② 当下背驰 + ③ 支阻位附近（候选级别从大到小，命中即出）
         # 注意循环变量用 hit：near 是本函数参数（绝对价差），曾用 near 接收返回 dict
         # 导致后续检测周期 nearTol 变 dict（float<=dict 崩溃，2026-09-13 修复）
+        # 支阻只取检测周期 X，背驰级别的价位不参与靠近判定
         nearTol = near  # 绝对价差（不乘 ATR，恒 > 0）
+        srX = sr_of_detect(srLevels, X)
         for c in realtimeLowerDiverge(periodData, X, direction, tCut,
                                       periodTimes=periodTimes or {},
                                       divergeConfirm=divergeConfirm,
@@ -1081,7 +1097,7 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
             fkey = (X, key, c["res"], c["segStart"])
             if fkey in fired:
                 continue  # 该形成段已发过，段延伸不重发
-            hit = nearSr(c["point"]["price"], srLevels, nearTol)
+            hit = nearSr(c["point"]["price"], srX, nearTol)
             if hit is None:
                 continue
             fired.add(fkey)
@@ -1130,7 +1146,8 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
     @param periodBis     各周期笔 { 周期: [bis] }
     @param barsByPeriod  各周期原始K线 { 周期: [bars] }
     @param planPeriods   交易计划结果 { 周期: {direction, strategy, ...} }
-    @param srLevels      支阻位列表（srflip.merged 全量候选池，每项含 price）
+    @param srLevels      支阻位列表（srflip.merged 全量候选池，每项含 price/level）；
+                         各检测周期只使用 level 等于该周期的条目
     @param detectPeriods 检测周期列表（从大到小，默认 240,60,15,3）
     @param near          靠近支阻位阈值（绝对价差，不乘 ATR）
     @param periodMacd    可选：各周期预计算 MACD { 周期: [macdArr] }

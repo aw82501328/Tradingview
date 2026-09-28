@@ -583,9 +583,23 @@ function lowerDiverge(periodData, X, wantDir) {
 }
 
 /**
+ * 只留检测周期自己的支阻位。3/15/60/240 各自只用本周期，不能拿背驰级别或其他周期的价位。
+ * 无 level 的条目不参与。
+ * @param {Array} srLevels 支阻位列表（每项含 level）
+ * @param {string} res     检测周期
+ * @returns {Array}
+ */
+function srOfDetect(srLevels, res) {
+  if (!srLevels || res == null) return [];
+  const key = String(res);
+  return srLevels.filter(sr => sr && String(sr.level) === key);
+}
+
+/**
  * 在支阻位附近：背驰点价与任一 srLevels 支阻位价差 ≤ nearTol。
+ * 调用方须先用 srOfDetect 收成检测周期。
  * @param {number} price     背驰点价格
- * @param {Array} srLevels   支阻位列表（srflip.merged 全量候选池，每项含 price）
+ * @param {Array} srLevels   支阻位列表（已按检测周期过滤，每项含 price）
  * @param {number} nearTol   靠近阈值
  * @returns {null|{sr:object, dist:number}} 最近命中的支阻位
  */
@@ -653,8 +667,9 @@ function evaluateEntry(ctx, strategy) {
   if (cands.length === 0) return { ok: false, reason: "以下级别无匹配方向背驰" };
 
   const nearTol = near; // 绝对价差（2026-09-13 起不乘 ATR）
+  const srX = srOfDetect(srLevels, res); // 只认检测周期，不跨周期
   for (const c of cands) {
-    const near = nearSr(c.point.price, srLevels, nearTol);
+    const near = nearSr(c.point.price, srX, nearTol);
     if (near) return { ok: true, markRes: c.res, point: c.point, nearSr: near.sr.price };
   }
   return { ok: false, reason: "以下级别背驰点均远离支阻位" };
@@ -1327,7 +1342,7 @@ async function main() {
       }
       // 止损参考位带 ATR 分量（2026-09-19）：ATR 取背驰周期 markRes 的 ATR(14)
       const mrAtr = (periodData[s.markRes] && periodData[s.markRes].atr) || 0;
-      s.stopRef = stopRefOf(s, srLevels, SLIP_STOP, SLIP_FALLBACK, mrAtr);
+      s.stopRef = stopRefOf(s, srOfDetect(srLevels, s.periodX), SLIP_STOP, SLIP_FALLBACK, mrAtr);
       const sim = simulatePosition(
         s, s.stopRef,
         periodData[s.markRes] || null,
@@ -1669,6 +1684,7 @@ module.exports = {
   macdBelowZero,
   macdAboveZero,
   zsExitWeak,
+  srOfDetect,
   nearSr,
   evaluateEntry,
   // 出场
