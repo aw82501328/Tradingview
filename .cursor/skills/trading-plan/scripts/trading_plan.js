@@ -511,8 +511,8 @@ const RES_NAME_CN = { "D": "日线", "240": "4小时", "60": "1小时", "30": "3
 const trendResName = (res) => RES_NAME_CN[String(res).toUpperCase()] || String(res);
 
 // t（含）之后是否出现强分型（kind="bottom"|"top"）。
-// 强分型定义（与用户确认）：底分型右肩（第3根合并K）收盘价 > 左肩（第1根合并K）最高价；
-// 顶分型镜像（右肩收盘 < 左肩最低）。合并K/分型与 buildBi 同源
+// 强分型只比实体、不含影线：右肩收盘与左肩开盘比较。
+// 底分型：右肩收盘 > 左肩开盘。顶分型：右肩收盘 < 左肩开盘。合并K/分型与 buildBi 同源
 // （markWickBars → mergeBars → findFractals）。
 function strongFractalAfter(merged, fractals, t, kind) {
   for (const f of fractals) {
@@ -520,8 +520,8 @@ function strongFractalAfter(merged, fractals, t, kind) {
     const i = f.mergedIdx;
     if (i - 1 < 0 || i + 1 >= merged.length) continue; // 左/右肩不完整（尾部形成中）
     const left = merged[i - 1], right = merged[i + 1];
-    if (kind === "bottom" && right.close > left.high) return true;
-    if (kind === "top" && right.close < left.low) return true;
+    if (kind === "bottom" && right.close > left.open) return true;
+    if (kind === "top" && right.close < left.open) return true;
   }
   return false;
 }

@@ -8,7 +8,7 @@
 - C pointEnoughForming：形成中段 enough 计数到极值块；synthIntrabarBars 的
   provisional 累加器与 append 一致性；
 - D sinkSkipLevel：下沉链方向不符/含糊区/展开不足时跳级。
-全部开关默认关=原行为（各用例先断言关侧行为再开侧）。
+A 未定型不接管默认开；其余开关默认关。关侧用例显式关掉再断言。
 """
 
 import unittest
@@ -61,7 +61,8 @@ class AnchorUndecidedTests(unittest.TestCase):
         self.p2sell = {"type": "2卖", "time": 100, "price": 12.0}
 
     def test_off_keeps_other(self):
-        self.assertEqual(TP.classifySecond(self.bis, [], self.p2sell), "其他")
+        with CfgSwitch(anchorUndecidedSkip=False):
+            self.assertEqual(TP.classifySecond(self.bis, [], self.p2sell), "其他")
 
     def test_on_after_missing_marks_undecided(self):
         with CfgSwitch(anchorUndecidedSkip=True):

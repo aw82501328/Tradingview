@@ -2,11 +2,11 @@
 """顺势参考周期方向判定（trading_plan.trend_direction）与进出场过滤单元测试。
 
 覆盖（2026-09-15 与用户确认的口径，规则见 WEB 参数页交易计划页签）：
-  - 强分型 strong_fractal_after：右肩收盘穿左肩最高/最低；t 之前的不算；肩不完整不算
-  - 2买出现即判多（结构底路径真实构造，无 monkeypatch）
-  - 破坏闩锁：点确立后收盘跌破买点端点价 → 下跌延续；价格收回不翻回（直到新点）
+  - 强分型 strong_fractal_after：只比实体。底分型右肩收盘高于左肩开盘；顶分型右肩收盘低于左肩开盘。t 之前的不算；肩不完整不算
+  - 未定型的 2买不接管（点后无上涨段 → 回退已定型的 2卖）
+  - 破坏闩锁：已定型卖点后收盘涨破卖点价 → 上涨延续
   - 1买须强分型：未出现 → 回退末笔方向；出现 → 确立（monkeypatch 点与强分型）
-  - 卖点镜像（2卖即判空、涨破 → 上涨延续）
+  - 卖点镜像（末笔上的 2卖未定型 → 回退已定型的 2买；跌破该买点 → 下跌延续）
   - trend_state_of：关闭 None / 参考周期无笔 dir=None / 上级周期自动选取
   - compute_entries / evaluateRealtimeEntries：参考周期及以上被剔出检测周期、
     逆参考周期方向信号被滤、信号附 trendDirection/trendReason（trend_state 由
@@ -57,13 +57,13 @@ def bottom_fixture_bis():
 
 class TestStrongFractalAfter(unittest.TestCase):
     def merged3(self, close_right=107.0):
-        """三根合并K：中心为底分型；右肩收盘可调（107 > 左肩最高 106 → 强）。"""
+        """三根合并K：中心为底分型；右肩收盘可调（107 > 左肩开盘 105 → 强）。"""
         return [
-            {"high": 106.0, "low": 96.0, "close": 100.0, "time": 0,
+            {"open": 105.0, "high": 106.0, "low": 96.0, "close": 100.0, "time": 0,
              "highTime": 0, "lowTime": 0},
-            {"high": 104.0, "low": 90.0, "close": 98.0, "time": 1,
+            {"open": 100.0, "high": 104.0, "low": 90.0, "close": 98.0, "time": 1,
              "highTime": 1, "lowTime": 1},
-            {"high": 108.0, "low": 92.0, "close": close_right, "time": 2,
+            {"open": 98.0, "high": 108.0, "low": 92.0, "close": close_right, "time": 2,
              "highTime": 2, "lowTime": 2},
         ]
 
@@ -73,7 +73,7 @@ class TestStrongFractalAfter(unittest.TestCase):
         self.assertEqual(len(frs), 1)
         self.assertEqual(frs[0]["type"], "bottom")
         self.assertTrue(tp.strong_fractal_after(merged, frs, 1, "bottom"))
-        # 右肩收盘 103 ≤ 左肩最高 106 → 非强分型
+        # 右肩收盘 103 ≤ 左肩开盘 105 → 非强分型
         merged2 = self.merged3(close_right=103.0)
         frs2 = tp.findFractals(merged2)
         self.assertFalse(tp.strong_fractal_after(merged2, frs2, 1, "bottom"))
@@ -90,13 +90,13 @@ class TestStrongFractalAfter(unittest.TestCase):
         self.assertFalse(tp.strong_fractal_after(merged, frs, 1, "bottom"))
 
     def test_top_mirror(self):
-        # 顶分型三根：左肩 low 95、中心 high 106、右肩收盘 93 < 95 → 强
+        # 顶分型三根：左肩开盘 99、中心 high 106、右肩收盘 93 < 99 → 强（不看左肩低点影线）
         merged = [
-            {"high": 104.0, "low": 95.0, "close": 100.0, "time": 0,
+            {"open": 99.0, "high": 104.0, "low": 95.0, "close": 100.0, "time": 0,
              "highTime": 0, "lowTime": 0},
-            {"high": 106.0, "low": 96.0, "close": 102.0, "time": 1,
+            {"open": 100.0, "high": 106.0, "low": 96.0, "close": 102.0, "time": 1,
              "highTime": 1, "lowTime": 1},
-            {"high": 103.0, "low": 91.0, "close": 93.0, "time": 2,
+            {"open": 102.0, "high": 103.0, "low": 91.0, "close": 93.0, "time": 2,
              "highTime": 2, "lowTime": 2},
         ]
         frs = tp.findFractals(merged)
@@ -111,17 +111,18 @@ class TestTrendDirection(unittest.TestCase):
                          (None, ""))
 
     def test_second_buy_immediate_long(self):
-        # 结构底路径真实构造：最近点 2买 → 即判多（无需强分型）
+        # 末笔 down 上的 2买点后还没有上涨段 → 未定型，不接管。
+        # 前一个已走出下跌段的 2卖接管 → 空。
         bars = [bar(t * S240, 100, 96) for t in range(5)]
         d, r = tp.trend_direction("240", bottom_fixture_bis(), bars, None, [])
-        self.assertEqual((d, r), ("long", "4小时2买"))
+        self.assertEqual((d, r), ("short", "4小时2卖"))
 
     def test_break_latch(self):
-        # b3 之后（t=4*S240 起）任一收盘 < 95 → 下跌延续；价格收回不翻回
+        # 锚是已定型的 2卖（108）。其后收盘涨破 108 → 上涨延续
         bis = bottom_fixture_bis()
-        bars = [bar(3 * S240, 100, 96), bar(4 * S240, 95, 94), bar(5 * S240, 94, 99)]
+        bars = [bar(4 * S240, 108, 109)]
         d, r = tp.trend_direction("240", bis, bars, None, [])
-        self.assertEqual((d, r), ("short", "4小时下跌延续"))
+        self.assertEqual((d, r), ("long", "4小时上涨延续"))
 
     def test_no_points_fallback_last_bi(self):
         # 无任何买卖点 → 回退末笔方向（末笔 down → 空）
@@ -164,21 +165,21 @@ class TestTrendDirection(unittest.TestCase):
             self.assertEqual((d, r), ("long", f"4小时{t_}"))
 
     def test_sell_mirror(self):
-        # 结构顶路径镜像：结构顶 111（b1 高点），其后更高的?——b3 高点 108 < 111 →
-        # 2卖锚定 b3.endTime 价格 108；末笔 up（b3）本身不构成确立条件外的干扰
+        # 末笔 up 上的 2卖点后还没有下跌段 → 未定型，不接管。
+        # 前一个已走出上涨段的 2买（105）接管 → 多。
         bis = [
             bi("down", 0, S240, 110, 100),
             bi("up", S240, 2 * S240, 100, 111),    # b1 结构顶 111
             bi("down", 2 * S240, 3 * S240, 111, 105),
             bi("up", 3 * S240, 4 * S240, 105, 108),  # 末笔 up，2卖 @ 4*S240 价格 108
         ]
-        bars_ok = [bar(t * S240, 107, 106) for t in range(5)]  # 收盘均 < 108
+        bars_ok = [bar(t * S240, 107, 106) for t in range(5)]
         d, r = tp.trend_direction("240", bis, bars_ok, None, [])
-        self.assertEqual((d, r), ("short", "4小时2卖"))
-        # 涨破卖点端点价（收盘 > 108）→ 上涨延续
-        bars_break = [bar(4 * S240, 108, 108.5), bar(5 * S240, 108.5, 110)]
+        self.assertEqual((d, r), ("long", "4小时2买"))
+        # 收盘跌破该 2买 105 → 下跌延续
+        bars_break = [bar(4 * S240, 105, 104)]
         d, r = tp.trend_direction("240", bis, bars_break, None, [])
-        self.assertEqual((d, r), ("long", "4小时上涨延续"))
+        self.assertEqual((d, r), ("short", "4小时下跌延续"))
 
 
 def rb_cfg(enabled=True, near=5.0, angle=5.0, min_bars=5):

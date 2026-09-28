@@ -49,6 +49,8 @@ from . import mark_entry
 _active_lock = threading.Lock()
 _active_mode = None          # 当前运行中的模式名（backtest/replay/live）或 None
 _active_owner = None
+# 当前占用者不碰 TradingView（本地存储/缓存全量回测）。图表定位可与之并行。
+_active_spares_chart = False
 _service_restarting = False
 
 
@@ -62,7 +64,9 @@ class ChartLock:
         with _active_lock:
             if _service_restarting:
                 return False
-            if _active_mode is not None and _active_owner != threading.get_ident():
+            # 本地回测不连 CDP，不把图表算作被占用；实时取数/回放/监控仍独占图表
+            if (_active_mode is not None and not _active_spares_chart
+                    and _active_owner != threading.get_ident()):
                 return False
             return self._lock.acquire(blocking=False)
 
@@ -117,9 +121,13 @@ def _make_data_callbacks(app):
     return log, progress
 
 
-def acquire_active(mode):
-    """尝试占用模式互斥；成功返回 True，失败返回当前占用者。"""
-    global _active_mode, _active_owner
+def acquire_active(mode, spares_chart=False):
+    """尝试占用模式互斥；成功返回 True，失败返回当前占用者。
+
+    spares_chart：本任务不使用 TradingView（本地存储/缓存回测），
+    运行期间允许图表点行定位与其它 CDP 操作。
+    """
+    global _active_mode, _active_owner, _active_spares_chart
     with _active_lock:
         if _service_restarting:
             return '服务重启中'
@@ -129,16 +137,18 @@ def acquire_active(mode):
             return "图表操作"
         _active_mode = mode
         _active_owner = threading.get_ident()
+        _active_spares_chart = bool(spares_chart)
         return True
 
 
 def release_active(mode):
     """释放模式互斥（仅当占用者是自己时）。"""
-    global _active_mode, _active_owner
+    global _active_mode, _active_owner, _active_spares_chart
     with _active_lock:
         if _active_mode == mode:
             _active_mode = None
             _active_owner = None
+            _active_spares_chart = False
 
 
 def active_mode():
@@ -566,7 +576,7 @@ class ModeWorker:
     def start(self, cfg):
         if self.thread and self.thread.is_alive():
             return {"ok": False, "error": f"{self.MODE} 已在运行"}
-        holder = acquire_active(self.MODE)
+        holder = acquire_active(self.MODE, spares_chart=self.spares_chart(cfg))
         if holder is not True:
             return {"ok": False, "error": f"当前有 {holder} 模式运行中，请先停止"}
         self.cfg = dict(cfg)
@@ -619,6 +629,10 @@ class ModeWorker:
             dur = f"，耗时 {self.duration_sec}s" if self.duration_sec is not None else ""
             self.log(f"已结束（state={self.state}{dur}）")
 
+    def spares_chart(self, cfg):
+        """运行期间是否不占用 TradingView。回放/实时要驱动图表，默认占用。"""
+        return False
+
     def _run(self):
         raise NotImplementedError
 
@@ -632,6 +646,12 @@ class BacktestWorker(ModeWorker):
     """全量回测（纯后台）：BacktestEngine.run() 逐根推进，进度/信号/成交实时推送。"""
 
     MODE = "backtest"
+
+    def spares_chart(self, cfg):
+        """本地存储/缓存回测只读库，不连 CDP，图表可同时点行定位。
+        实时取数要占图表拉 K 线，仍独占。口径与 _td_launch_compat 一致。"""
+        src = cfg.get("data_source") or ("cache" if cfg.get("use_cache") else "live")
+        return src in ("store", "cache")
 
     @staticmethod
     def _sr_preset_kwargs(cfg, periods, log=None):

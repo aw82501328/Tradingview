@@ -93,10 +93,10 @@ class ClassifySecondTests(unittest.TestCase):
                          "过左低不背驰")
 
     def test_no_prev_extreme_or_no_after(self):
-        # 无前顶（点前只有下跌笔起点=顶，其实有；构造点后无同向笔 → 其他）
+        # 点后无同向笔：未定型不接管默认开 → 未定型（不落「其他」）
         bis = [bi("up", 0, 10, 100, 120), bi("down", 10, 20, 120, 95)]
         self.assertEqual(trading_plan.classifySecond(bis, [], {"type": "2买", "time": 20, "price": 95}),
-                         "其他")
+                         "未定型")
 
 
 # ============================================================

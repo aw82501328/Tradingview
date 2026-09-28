@@ -157,7 +157,7 @@ const LOGIC_BODY = `
 <h4>表2 · 顺势方向怎么定<span class="lsub">只放行顺着参考周期方向的单</span></h4>
 <ol class="lrules">
 <li>取<b>参考周期（{TREND_REF}）最近一个买卖点</b>作方向锚；参考周期自身不再产生进场信号，更低周期（{LOWER}）只做锚方向的单。</li>
-<li><b>1买/1卖</b>：端点后出现<b>强分型</b>才确立方向——底分型右肩（第3根合并K）收盘价 &gt; 左肩（第1根合并K）最高价，顶分型镜像。</li>
+<li><b>1买/1卖</b>：端点后出现<b>强分型</b>才确立方向——只比实体、不含影线：底分型右肩收盘 &gt; 左肩开盘，顶分型右肩收盘 &lt; 左肩开盘。</li>
 <li><b>非一类买卖点</b>（2买/类2买/3买/类3买、2卖/类2卖/3卖/类3卖）：出现即确立方向（点锚定的笔本身已够笔成笔）。</li>
 <li><b>破坏闩锁（最优先）</b>：确立后参考周期<b>收盘价</b>跌破买点端点价 / 涨破卖点端点价 → 反向（下跌/上涨延续），闩锁至下一个买卖点事件（价格收回也不翻回）。</li>
 <li><b>相位判定</b>（「方向相位判定」参数，默认开）：锚点确立后、没被收盘破坏期间方向<b>不锁死</b>，按相位表走——先看<b>形成段</b>（延伸中的末笔）朝哪、<b>够不够笔</b>，再看<b>位置</b>（中枢上/下沿、前低/前高）和<b>当前笔角度</b>（平均每根点数 &gt; 45°基准＝强）。可能判出「<b>观望</b>」：多空都放行，信号仍带注记。关闭参数＝旧行为（确立方向锁到闩锁/新点）。</li>
@@ -197,7 +197,7 @@ const LOGIC_BODY = `
 <tr><td>其他位置 + 下跌够笔 + 下跌角度强</td><td>空（2/3卖进行中）</td></tr>
 <tr><td>形成段向上（反弹中、还没涨破卖点价）</td><td>观望（2/3卖反弹中）</td></tr>
 </table>
-<p class="lnote">强分型（1类点的反转确认）＝底部三根K，右边那根收盘冲过左边那根最高；1卖镜像（右边收盘跌破左边最低）。</p>
+<p class="lnote">强分型（1类点的反转确认）只比实体、不含影线：底分型右肩收盘高于左肩开盘；顶分型右肩收盘低于左肩开盘。</p>
 <p class="lnote">「破坏」＝买点后某根收盘跌破买点价 / 卖点后某根收盘涨破卖点价；掉头锁定后价格收回来也不翻回，直到下一个买卖点。</p>
 <p class="lnote">相位判据大白话：<b>形成段</b>＝当前结构段（含普通底/顶分型确认后的预期段）；<b>够笔</b>＝从形成段起点所在合并块起 ≥5 块（包含起点，「M4够笔K线数」参数）。</p>
 <p class="lnote"><b>角度/力度</b>＝同一口径：当前笔平均每根的点数 &gt;「相位角度45°基准(点/根)」参数（默认5）＝强（相当于与水平线夹角 &gt;45°），≤＝弱；下跌角度、反弹力度、回调力度都用它。</p>
@@ -504,6 +504,31 @@ function zsRowsHtml(m) {
   }).join('');
 }
 
+// 标记买卖点：「未定型点不接管」与「定型阈值」同一张卡片（阈值仅开关打开时生效）
+function anchorRowHtml(m) {
+  const sw = m.schema.anchorUndecidedSkip;
+  const th = m.schema.anchorUndecidedMinBars;
+  const isMod = m.overrides.anchorUndecidedSkip !== undefined
+    || m.overrides.anchorUndecidedMinBars !== undefined;
+  const defText = `开关默认${sw.default ? '开' : '关'} · 阈值默认 ${th.default}`;
+  return `<div class="prow ${isMod ? 'mod' : ''}" title="${sw.desc}；${th.desc}">
+    <span class="pname"><span class="plabel">${sw.label}<span class="badge">已修改</span></span>
+    <span class="pdef">${defText}</span></span>
+    <span class="zs-side">
+      <label class="zs-draw"><input type="checkbox" data-k="anchorUndecidedSkip" ${m.effective.anchorUndecidedSkip ? 'checked' : ''}>开启</label>
+      <span class="zs-keep" data-keep-for="anchorUndecidedSkip">${th.label}
+        <input type="number" step="1" min="${th.min}" max="${th.max}" data-k="anchorUndecidedMinBars" value="${m.effective.anchorUndecidedMinBars}">
+      </span>
+    </span></div>`;
+}
+
+function pointsRowsHtml(m) {
+  return Object.keys(m.schema)
+    .filter(k => k !== 'anchorUndecidedMinBars')
+    .map(key => key === 'anchorUndecidedSkip' ? anchorRowHtml(m) : paramRow(m, key))
+    .join('');
+}
+
 function renderModule(name) {
   const m = moduleView(name);
   if (!m || !m.schema) return;
@@ -511,6 +536,8 @@ function renderModule(name) {
     ? zsRowsHtml(m)
     : name === 'entry'
     ? entryRowsHtml(m)
+    : name === 'points'
+    ? pointsRowsHtml(m)
     : Object.entries(m.schema)
       // 滑点 ATR 系数不独立成行：内嵌进各自滑点行（badge 在固定值或系数任一被改时亮）
       .filter(([key]) => !Object.values(SLIP_ATR_K).includes(key))
@@ -536,6 +563,7 @@ function renderModule(name) {
   }
   $('logicBlock').hidden = name !== 'plan';
   if (name === 'zs') applyZsKeepDim();
+  if (name === 'points') applyAnchorDim();
   if (name === 'plan') {
     applyPlanRangeDim();
     if ($('logicDetails').open) {
@@ -547,6 +575,17 @@ function renderModule(name) {
 
 // 某周期关闭绘制时：仅「最近个数」变灰（同周期开关仍可点）
 const ZS_KEEP_PAIR = { drawD: 'keepD', draw240: 'keep240', draw60: 'keep60', draw15: 'keep15', draw3: 'keep3' };
+// 未定型点不接管关闭时：定型阈值变灰（数值仍随表单保存，只是不参与判定）
+function applyAnchorDim() {
+  const on = document.querySelector('#pgrid [data-k="anchorUndecidedSkip"]');
+  const wrap = document.querySelector('#pgrid .zs-keep[data-keep-for="anchorUndecidedSkip"]');
+  if (!on || !wrap) return;
+  const enabled = !!on.checked;
+  wrap.classList.toggle('dim', !enabled);
+  const inp = wrap.querySelector('input');
+  if (inp) inp.disabled = !enabled;
+}
+
 function applyZsKeepDim() {
   for (const drawKey of Object.keys(ZS_KEEP_PAIR)) {
     const on = document.querySelector(`#pgrid [data-k="${drawKey}"]`);
@@ -632,6 +671,7 @@ document.addEventListener('click', e => {
 document.addEventListener('change', e => {
   if (e.target && e.target.dataset && e.target.dataset.k === 'rangeBoundOn') applyPlanRangeDim();
   if (e.target && e.target.dataset && ZS_KEEP_PAIR[e.target.dataset.k]) applyZsKeepDim();
+  if (e.target && e.target.dataset && e.target.dataset.k === 'anchorUndecidedSkip') applyAnchorDim();
 });
 $('saveBtn').onclick = () => save(active).catch(err => toast(err.message, true));
 $('resetBtn').onclick = () => reset(active).catch(err => toast(err.message, true));

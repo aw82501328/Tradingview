@@ -415,11 +415,11 @@ describe("trendDirection 顺势方向状态机", () => {
                      ["long", "4小时末笔向上"]);
   });
 
-  test("强分型：右肩收盘穿左肩极值（底/顶镜像）", () => {
+  test("强分型：右肩收盘穿左肩开盘（底/顶，不含影线）", () => {
     const mBottom = [
-      { high: 106, low: 96, close: 100, time: 0, highTime: 0, lowTime: 0 },
-      { high: 104, low: 90, close: 98, time: 1, highTime: 1, lowTime: 1 },
-      { high: 108, low: 92, close: 107, time: 2, highTime: 2, lowTime: 2 },
+      { open: 105, high: 106, low: 96, close: 100, time: 0, highTime: 0, lowTime: 0 },
+      { open: 100, high: 104, low: 90, close: 98, time: 1, highTime: 1, lowTime: 1 },
+      { open: 98, high: 108, low: 92, close: 107, time: 2, highTime: 2, lowTime: 2 },
     ];
     const frs = findFractalsOf(mBottom);
     assert.equal(frs.length, 1);

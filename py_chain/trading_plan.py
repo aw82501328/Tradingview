@@ -570,9 +570,9 @@ def trend_res_name(res):
 def strong_fractal_after(merged, fractals, t, kind):
     """t（含）之后是否出现强分型（kind="bottom"|"top"）。
 
-    强分型定义（与用户确认，2026-09-15）：底分型右肩（第 3 根合并K）收盘价 >
-    左肩（第 1 根合并K）最高价；顶分型镜像（右肩收盘 < 左肩最低）。合并K/分型
-    用 chan_core 现有链（markWickBars → mergeBars → findFractals，与 buildBi 同源）。
+    强分型只比实体、不含影线：右肩收盘价与左肩开盘价比较。
+    底分型：右肩收盘 > 左肩开盘。顶分型：右肩收盘 < 左肩开盘。
+    合并K/分型用 chan_core 现有链（markWickBars → mergeBars → findFractals，与 buildBi 同源）。
     """
     for f in fractals:
         if f["type"] != kind or f["time"] < t:
@@ -581,9 +581,9 @@ def strong_fractal_after(merged, fractals, t, kind):
         if i - 1 < 0 or i + 1 >= len(merged):
             continue  # 左/右肩不完整（尾部形成中）
         left, right = merged[i - 1], merged[i + 1]
-        if kind == "bottom" and right["close"] > left["high"]:
+        if kind == "bottom" and right["close"] > left["open"]:
             return True
-        if kind == "top" and right["close"] < left["low"]:
+        if kind == "top" and right["close"] < left["open"]:
             return True
     return False
 

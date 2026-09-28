@@ -91,7 +91,7 @@ CHAN_CFG = {
                                   # 2卖 dif < +tol 视为「上/下过 0 轴后回调/反弹未破 0 轴太多」，
                                   # 动能还在（原严格口径 dif>0 / dif<0，tol=0 即回退）
     # ---- 三处规则修复（2026-09-26 用户逐条确认；详见 plan/三处规则修复）----
-    "anchorUndecidedSkip": False,  # A 未定型不接管：2/3类点 after（点后第一笔同向段）不存在、
+    "anchorUndecidedSkip": True,   # A 未定型不接管：2/3类点 after（点后第一笔同向段）不存在、
                                    # 或 after 为形成中段且合并块数 < anchorUndecidedMinBars 时，
                                    # 该点视同端点无点——计划/顺势锚点继续向前扫描（回退前锚）
     "anchorUndecidedMinBars": 2,   # A 定型阈值：点后反向段的本级合并块数（默认 2=右肩+1根确认；

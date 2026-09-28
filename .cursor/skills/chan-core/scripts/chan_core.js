@@ -51,7 +51,7 @@ const CHAN_CFG = {
   // 关闭后仅 k.locked（上级笔端点，区间套强制落地）路径仍生效。
   nearDoubleRebound: true,
   // ---- 三处规则修复 + 跨级下沉（2026-09-26；与 py_chain/chan_core.py 对齐，默认关=原行为）----
-  anchorUndecidedSkip: false,   // A 未定型不接管：2/3类点 after 不存在/未达根数时不接管锚点
+  anchorUndecidedSkip: true,    // A 未定型不接管：2/3类点 after 不存在/未达根数时不接管锚点（默认开）
   anchorUndecidedMinBars: 2,    // A 定型阈值（点后反向段本级合并块数；2=右肩+1根确认）
   divergeReferByZs: false,      // B 背驰中枢参照：中枢内部段不参与比较，参照=入中枢段
   sinkSkipLevel: false,         // D 跨级下沉：次级展开<3笔/方向不符/端点含糊时跳级继续向下
