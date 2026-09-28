@@ -43,6 +43,9 @@ CHAN_CFG = {
     "gapFilter": 1.0,  # 跳空独立成笔阈值：相邻K线缺口 >= gapFilter*ATR 时强制独立成笔
     "wickRatio": 0.70,  # 长影剔除：影线占整根K线振幅的比例阈值（>= 时视为冲高/探底插针）
     "wickAtrK": 0.5,    # 长影剔除：影线绝对长度下限 = wickAtrK * ATR（窄幅小K线免疫）
+    # 15分钟大振幅豁免：单根K线振幅（高-低）≥ 该点数时，不参与分型终点侧三根的反向贯穿检查。
+    # 只作用于 15 分钟（buildBi/BiBuildCtx 传入 res="15"）；其它周期保持原规则。0=不豁免。
+    "wideBarPoints": 30.0,
     "divergeDurRatio": 3,  # 背驰面积判据的时长可比上限：面积Σ=柱高×K线根数、与区间时长线性相关，
                            # 两段时长比 > 该值时不具可比性，面积项不计入背驰（只用 DIF/柱高判据）
     "nearDoubleAtrK": 0.3,  # 近等双顶/双底平台取后顶/后底：价差与回调深度的 ATR 系数
@@ -387,7 +390,8 @@ def buildStructureContext(bis, bars, barSec, tCut=None, merged=None, fractals=No
         raw = [b for b in raw if b.get("_synth") or b["time"] + barSec <= tCut]
         merged = mergeBars(markWickBars(raw))
         fractals = findFractals(merged)
-        known = buildBi(fractals, merged, calcATR(raw), calcMACD(raw), None, nearDoubleOn(barSec), lowerContext)
+        _res = {180: "3", 900: "15", 3600: "60", 14400: "240", 86400: "D"}.get(barSec)
+        known = buildBi(fractals, merged, calcATR(raw), calcMACD(raw), None, nearDoubleOn(barSec), lowerContext, _res)
         known = fixBiExtremes(known, merged) or known
         known = extendLastBi(known, markWickBars(raw))
     if merged is None:
@@ -640,7 +644,8 @@ class BiBuildCtx:
     时计算的相同）。rawCounter：可选的 (a,b)→原始K线数回调（前缀和 O(1) 查询）。"""
 
     def __init__(self, merged, atr, macdArr, lockedPivots=None, nearDouble=False,
-                 lowerContext=None, fractals=None, gapDiffs=None, rawCounter=None):
+                 lowerContext=None, fractals=None, gapDiffs=None, rawCounter=None,
+                 res=None):
         self.merged = merged
         self.atr = atr
         self.macdArr = macdArr
@@ -650,6 +655,7 @@ class BiBuildCtx:
         self.fractals = fractals
         self.gapDiffs = gapDiffs
         self.rawCounter = rawCounter
+        self.res = None if res is None else str(res)
         self.gapThreshold = atr * CHAN_CFG["gapFilter"] if atr else 0
         self._gapCounts = None
 
@@ -725,13 +731,34 @@ class BiBuildCtx:
         else:
             range_low = min(merged[i - 1]["low"], merged[i]["low"])
             range_high = max(merged[i - 1]["high"], merged[i]["high"])
-        end_low = min(merged[j - 1]["low"], merged[j]["low"], merged[j + 1]["low"])
-        end_high = max(merged[j - 1]["high"], merged[j]["high"], merged[j + 1]["high"])
+        # 终点侧三根。15分钟上振幅 ≥ wideBarPoints 的K线不参与（大振幅K不作为反向贯穿证据）。
+        end_low, end_high = self._endSideExtremes(j)
         if a["type"] == "top" and b["type"] == "bottom":
-            return b["low"] < range_low and end_high < a["high"]
+            end_ok = True if end_high is None else end_high < a["high"]
+            return b["low"] < range_low and end_ok
         if a["type"] == "bottom" and b["type"] == "top":
-            return b["high"] > range_high and end_low > a["low"]
+            end_ok = True if end_low is None else end_low > a["low"]
+            return b["high"] > range_high and end_ok
         return True
+
+    def _endSideExtremes(self, j):
+        """终点分型三根的最低/最高。15分钟且振幅 ≥ wideBarPoints 的K线跳过。
+
+        三根都被豁免时返回 (None, None)，调用方视为终点侧不构成反向贯穿。
+        """
+        merged = self.merged
+        thr = CHAN_CFG.get("wideBarPoints") or 0
+        skip = self.res == "15" and thr > 0
+        lows, highs = [], []
+        for idx in (j - 1, j, j + 1):
+            m = merged[idx]
+            if skip and (m["high"] - m["low"]) >= thr:
+                continue
+            lows.append(m["low"])
+            highs.append(m["high"])
+        if not lows:
+            return None, None
+        return min(lows), max(highs)
 
     def countRawBetween(self, a, b):
         if self.rawCounter is not None:
@@ -1021,13 +1048,15 @@ def biPair(a, b, merged, ctx=None):
     }
 
 
-def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False, lowerContext=None):
+def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False, lowerContext=None, res=None):
     """笔构建。与 JS 版 buildBi 对齐。lockedPivots 为上级笔端点（区间套强制对齐，优先级最高）；
     nearDouble=True 时启用「近等双顶/双底平台取后顶/后底」（≥60m 周期由调用方开启）。
     lowerContext 为可选15分钟上下文，仅60m补充分支使用；缺省时沿用原阈值。
+    res 为周期码（'15' 时启用大振幅K线豁免）；缺省不豁免，与旧调用一致。
     内部经 biSeqStep/biStep/biPair 单步组合（与 bi_inc 增量构建器共用规则源）。"""
     ctx = BiBuildCtx(merged, atr, macdArr, lockedPivots=lockedPivots,
-                     nearDouble=nearDouble, lowerContext=lowerContext, fractals=fractals)
+                     nearDouble=nearDouble, lowerContext=lowerContext, fractals=fractals,
+                     res=res)
 
     # 阶段一：严格交替分型序列
     seq = []

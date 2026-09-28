@@ -26,6 +26,9 @@ const CHAN_CFG = {
   gapFilter: 1.0, // 跳空独立成笔阈值：相邻K线缺口 >= gapFilter*ATR 时强制独立成笔
   wickRatio: 0.70, // 长影剔除：影线占整根K线振幅的比例阈值（>= 时视为冲高/探底插针）
   wickAtrK: 0.5,   // 长影剔除：影线绝对长度下限 = wickAtrK * ATR（窄幅小K线免疫）
+  // 15分钟大振幅豁免：单根K线振幅（高-低）≥ 该点数时，不参与分型终点侧三根的反向贯穿检查。
+  // 只作用于 buildBi 传入 res==="15"；其它周期保持原规则。0=不豁免。
+  wideBarPoints: 30,
   divergeDurRatio: 3, // 背驰面积判据的时长可比上限：面积Σ = 柱高×K线根数、与区间时长线性相关，
                       // 两段时长比 > 该值时不具可比性，面积项不计入背驰（只用 DIF/柱高判据）
   debug: false,   // 调试打印（buildBi / 买卖点识别过程）
@@ -341,7 +344,7 @@ function lowerEndpointWeaker(old, end, fractals, context) {
     && b[peak]<=a[peak]*ratio && Math.abs(b[dif])<=Math.abs(a[dif])*ratio;
 }
 
-function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lowerContext = null) {
+function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lowerContext = null, res = null) {
   const gapThreshold = atr ? atr * CHAN_CFG.gapFilter : 0;
   // 阶段一：严格交替分型序列
   const seq = [];
@@ -431,11 +434,25 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lower
     const rangeHigh = a.type === "top"
       ? Math.max(merged[i].high, merged[i + 1].high)
       : Math.max(merged[i - 1].high, merged[i].high);
-    // 终点侧：分型自身三根范围（防反向吞没；含终点外侧 bar 提供崩盘/暴涨证据）
-    const endLow = Math.min(merged[j - 1].low, merged[j].low, merged[j + 1].low);
-    const endHigh = Math.max(merged[j - 1].high, merged[j].high, merged[j + 1].high);
-    if (a.type === "top" && b.type === "bottom") return b.low < rangeLow && endHigh < a.high;
-    if (a.type === "bottom" && b.type === "top") return b.high > rangeHigh && endLow > a.low;
+    // 终点侧三根。15分钟上振幅 ≥ wideBarPoints 的K线不参与（大振幅K不作为反向贯穿证据）。
+    // 三根都被豁免时，终点侧不构成反向贯穿。
+    const thr = CHAN_CFG.wideBarPoints || 0;
+    const skipWide = String(res) === "15" && thr > 0;
+    let endLow = null, endHigh = null;
+    for (const idx of [j - 1, j, j + 1]) {
+      const m = merged[idx];
+      if (skipWide && (m.high - m.low) >= thr) continue;
+      endLow = endLow === null ? m.low : Math.min(endLow, m.low);
+      endHigh = endHigh === null ? m.high : Math.max(endHigh, m.high);
+    }
+    if (a.type === "top" && b.type === "bottom") {
+      const endOk = endHigh === null || endHigh < a.high;
+      return b.low < rangeLow && endOk;
+    }
+    if (a.type === "bottom" && b.type === "top") {
+      const endOk = endLow === null || endLow > a.low;
+      return b.high > rangeHigh && endOk;
+    }
     return true;
   };
 
@@ -1968,7 +1985,8 @@ function buildStructureContext(bis, bars, barSec, tCut = null, merged = null, fr
     raw = raw.filter(b => b.time + barSec <= tCut);
     merged = mergeBars(markWickBars(raw));
     fractals = findFractals(merged);
-    known = buildBi(fractals, merged, calcATR(raw), calcMACD(raw), null, nearDoubleOn(barSec), lowerContext);
+    const resOf = {180: "3", 900: "15", 3600: "60", 14400: "240", 86400: "D"}[barSec] || null;
+    known = buildBi(fractals, merged, calcATR(raw), calcMACD(raw), null, nearDoubleOn(barSec), lowerContext, resOf);
     known = fixBiExtremes(known, merged) || known;
     known = extendLastBi(known, markWickBars(raw));
   }

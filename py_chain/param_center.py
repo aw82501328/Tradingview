@@ -48,7 +48,7 @@ ZS_DEFAULTS = {
 
 # CHAN_CFG 键按工作台步骤归属（算法默认值仍在 chan_core.CHAN_CFG_DEFAULTS）
 CHAN_BI_KEYS = (
-    "gapFilter", "wickRatio", "wickAtrK",
+    "gapFilter", "wickRatio", "wickAtrK", "wideBarPoints",
     "nearDoubleAtrK", "nearDoublePct", "nearDoubleFixed",
     "nearDoubleLowerRelax", "nearDoubleLowerRatio",
     "nearDouble3", "nearDouble15", "nearDouble60", "nearDouble240", "nearDoubleD",
@@ -79,6 +79,9 @@ PARAM_MODULES = {
             "gapFilter": ("跳空成笔阈值", "相邻K线缺口 ≥ 该值×ATR 时强制独立成笔", 0.0, 5.0),
             "wickRatio": ("长影线比例阈值", "影线占整根K线振幅 ≥ 该比例视为插针（不参与区间竞争）", 0.0, 1.0),
             "wickAtrK": ("长影线长度下限", "影线绝对长度下限 = 该值×TR均值（窄幅小K线免疫）", 0.0, 5.0),
+            "wideBarPoints": ("15分钟大振幅豁免",
+                              "仅15分钟：单根K线振幅（最高-最低）≥ 该点数时，不参与分型终点侧三根的反向贯穿检查。"
+                              "0 表示不豁免", 0.0, 500.0),
             "nearDoubleAtrK": ("近等双顶容差ATR", "近等双顶/双底平台价差容差（×ATR）", 0.0, 5.0),
             "nearDoublePct": ("近等双顶价差比例", "近等双顶/双底价差下限（价格比例）", 0.0, 0.05),
             "nearDoubleFixed": ("近等双顶固定容差",

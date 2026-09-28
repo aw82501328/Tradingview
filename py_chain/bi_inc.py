@@ -135,7 +135,8 @@ class BiIncBuilder:
         head = self._heads[k - 1] if k > 0 else None
         ctx = BiBuildCtx(merged, atr, macd, nearDouble=nearDouble,
                          lowerContext=lowerContext, fractals=fractals,
-                         gapDiffs=self._gap_diffs, rawCounter=self.count_raw)
+                         gapDiffs=self._gap_diffs, rawCounter=self.count_raw,
+                         res=self.res)
         for kk in self._seq[k:]:
             head = biStep(ctx, head, kk)
             self._heads.append(head)
@@ -201,7 +202,8 @@ class BiIncBuilder:
                 self._seq_start.append(fi)
         ctx = BiBuildCtx(merged, atr, macd, nearDouble=self._near_double,
                          lowerContext=lowerContext, fractals=fractals,
-                         gapDiffs=self._gap_diffs, rawCounter=self.count_raw)
+                         gapDiffs=self._gap_diffs, rawCounter=self.count_raw,
+                         res=self.res)
         head = None
         for kk in self._seq:
             head = biStep(ctx, head, kk)

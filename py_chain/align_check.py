@@ -38,7 +38,7 @@ def py_rebuild(bl, res, lower_bars=None):
     fractals = findFractals(merged)
     atr = calcATR(bl, 14)
     macd = calcMACD(bl)
-    bis = buildBi(fractals, merged, atr, macd, None, nearDoubleOn(res), makeBiLowerContext(res, lower_bars))
+    bis = buildBi(fractals, merged, atr, macd, None, nearDoubleOn(res), makeBiLowerContext(res, lower_bars), res)
     bis = fixBiExtremes(bis, merged) or bis
     bis = extendLastBi(bis, trimmed)
     return bis

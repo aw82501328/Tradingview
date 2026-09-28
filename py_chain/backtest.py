@@ -718,7 +718,7 @@ class BacktestEngine:
         if len(fractals) < 2:
             return []
         lower = self._lower_context_for(res)
-        bis = buildBi(fractals, merged, atr, macd, None, nearDoubleOn(res), lower)
+        bis = buildBi(fractals, merged, atr, macd, None, nearDoubleOn(res), lower, res)
         bis = fixBiExtremes(bis, merged) or bis
         return bis
 
@@ -1562,7 +1562,7 @@ def build_bis(bars_by_period, periods=None):
         macd = calcMACD(bl)
         # 近等双顶/双底平台取后顶/后底：与 chan-bi 一致按 nearDoubleOn(res) 每周期开关（默认 60/240/D）
         lower = makeBiLowerContext(res, sorted(bars_by_period.get('15', []), key=lambda b: b['time']))
-        bis = buildBi(fractals, merged, atr, macd, None, nearDoubleOn(res), lower)
+        bis = buildBi(fractals, merged, atr, macd, None, nearDoubleOn(res), lower, res)
         bis = fixBiExtremes(bis, merged) or bis
         bis = extendLastBi(bis, trimmed)
         if bis:

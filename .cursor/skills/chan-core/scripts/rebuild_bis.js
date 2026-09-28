@@ -32,7 +32,7 @@ for (const res of Object.keys(data)) {
   const fractals = core.findFractals(merged);
   const atr = core.calcATR(bars, 14);
   const macd = core.calcMACD(bars);
-  let bis = core.buildBi(fractals, merged, atr, macd, null, core.nearDoubleOn(res), core.makeBiLowerContext(res, data['15']));
+  let bis = core.buildBi(fractals, merged, atr, macd, null, core.nearDoubleOn(res), core.makeBiLowerContext(res, data['15']), res);
   bis = core.fixBiExtremes(bis, merged) || bis;
   bis = core.extendLastBi(bis, trimmed);
   out[res] = bis;
