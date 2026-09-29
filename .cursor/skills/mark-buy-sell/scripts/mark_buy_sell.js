@@ -481,8 +481,38 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
       console.log("\n标记前清除旧买卖点:", clearedAll, "个");
     }
 
+    // 收笔要下一级笔：先按周期从小到大取K线并建结构，后面的大到小循环只消费结果
+    const barsHeld = {};
+    const structuredBis = {};
+    const nowCut = Math.floor(Date.now() / 1000);
+    let prepRes = originalRes;
+    const prepOrder = PERIODS.slice().sort((a, b) => (intervalSecOf(a) || 0) - (intervalSecOf(b) || 0));
+    for (const res of prepOrder) {
+      if (res !== prepRes) {
+        await ensureResolution(res);
+        prepRes = res;
+      }
+      let d = await fetchBars(intervalSecOf(res), FROM_TS, ANCHOR_BUFFER, DRAW_WINDOW_DAYS[res]);
+      if (!d || d.error || !d.bars || d.bars.length === 0) {
+        await sleep(3000);
+        await ensureResolution(res);
+        prepRes = res;
+        d = await fetchBars(intervalSecOf(res), FROM_TS, ANCHOR_BUFFER, DRAW_WINDOW_DAYS[res]);
+      }
+      if (!d || d.error || !d.bars || d.bars.length === 0) continue;
+      barsHeld[res] = d.bars;
+      const rawBis = (bisCache.periods[res] || []).filter(b => b.endTime >= FROM_TS);
+      const lower = core.lowerResOf(res);
+      const lowerStroke = (lower && structuredBis[lower] && barsHeld[lower] && barsHeld[lower].length)
+        ? { bis: structuredBis[lower], bars: barsHeld[lower], barSec: intervalSecOf(lower) }
+        : null;
+      structuredBis[res] = core.buildStructureContext(rawBis, d.bars, intervalSecOf(res), nowCut, null, null,
+        res === "60" ? core.makeBiLowerContext(res, (bisCache.bars || {})["15"] || [], nowCut) : null,
+        lowerStroke).bis;
+    }
+
     // 主循环：从大到小逐周期计算并标记
-    let currentRes = originalRes;
+    let currentRes = prepRes;
     let upperBis = null; // 上一级周期的笔（用于一买锚定）
     const periodMarks = {}; // 各周期已生成的标记（用于跨周期共振判定：上级买卖点 ↔ 本级别1类）
     for (let pi = 0; pi < PERIODS.length; pi++) {
@@ -492,33 +522,21 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
         currentRes = res;
       }
 
-      let d = await fetchBars(intervalSecOf(res), FROM_TS, ANCHOR_BUFFER, DRAW_WINDOW_DAYS[res]);
-      if (!d || d.error || !d.bars || d.bars.length === 0) {
-        // 数据未加载好（切换周期时序问题），等待后重试一次
-        console.log(`\n[周期 ${res}] 首次取数失败，等待重试...`);
-        await sleep(3000);
-        await ensureResolution(res);
-        currentRes = res;
-        d = await fetchBars(intervalSecOf(res), FROM_TS, ANCHOR_BUFFER, DRAW_WINDOW_DAYS[res]);
-      }
-      if (!d || d.error || !d.bars || d.bars.length === 0) {
+      const d = barsHeld[res] ? { bars: barsHeld[res] } : null;
+      if (!d || !d.bars || d.bars.length === 0) {
         console.log(`\n[周期 ${res}] 无K线数据或切换失败，跳过`);
         continue;
       }
 
-      // 本周期笔：强制从画笔 SKILL 落盘的笔数据读取（与图上所画笔完全一致）。
-      // 不再本地计算（mergeBars/findFractals/buildBi/ATR过滤/extendLastBi/校准 均由 chan-bi 完成并落盘）
-      let curBis = (bisCache.periods[res] || []);
+      // 本周期笔：画笔落盘 + 收笔结构（预计算，已带下一级出/入中枢背驰）
+      let curBis = structuredBis[res] || [];
       if (curBis.length === 0) {
         console.log(`\n[周期 ${res}] 笔数据为空（画笔未覆盖该周期），跳过`);
         continue;
       }
-      // 过滤到起始日期之后的笔（与画笔一致；画笔只绘制结束时间 >= 起始日期的笔）
-      curBis = curBis.filter(b => b.endTime >= FROM_TS);
 
       // 仍需要本周期K线：用于 ATR 偏移量、买卖点吸附到本周期bar边界、MACD 背驰判定
       const rawBars = d.bars.filter(b => b.time + intervalSecOf(res) <= Math.floor(Date.now()/1000));
-      curBis = core.buildStructureContext(curBis, d.bars, intervalSecOf(res), Math.floor(Date.now()/1000), null, null, res === "60" ? core.makeBiLowerContext(res, (bisCache.bars || {})["15"] || [], Math.floor(Date.now()/1000)) : null).bis;
       const atr = calcATR(rawBars, 14);
       const macdArr = calcMACD(rawBars);
 

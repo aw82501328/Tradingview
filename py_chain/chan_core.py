@@ -43,9 +43,14 @@ CHAN_CFG = {
     "gapFilter": 1.0,  # 跳空独立成笔阈值：相邻K线缺口 >= gapFilter*ATR 时强制独立成笔
     "wickRatio": 0.70,  # 长影剔除：影线占整根K线振幅的比例阈值（>= 时视为冲高/探底插针）
     "wickAtrK": 0.5,    # 长影剔除：影线绝对长度下限 = wickAtrK * ATR（窄幅小K线免疫）
-    # 15分钟大振幅豁免：单根K线振幅（高-低）≥ 该点数时，不参与分型终点侧三根的反向贯穿检查。
-    # 只作用于 15 分钟（buildBi/BiBuildCtx 传入 res="15"）；其它周期保持原规则。0=不豁免。
-    "wideBarPoints": 30.0,
+    # 顶底分形不能包含（单根长K豁免）：该周期单根K线振幅（高-低）≥ 对应点数时，
+    # 不参与分型终点侧三根的反向贯穿检查。按周期取值（wideBarPointsOf）；0=该周期不豁免。
+    # 日线/4小时/1小时/15分钟/3分钟默认均为 30 点。
+    "wideBarPointsD": 30.0,
+    "wideBarPoints240": 30.0,
+    "wideBarPoints60": 30.0,
+    "wideBarPoints15": 30.0,
+    "wideBarPoints3": 30.0,
     "divergeDurRatio": 3,  # 背驰面积判据的时长可比上限：面积Σ=柱高×K线根数、与区间时长线性相关，
                            # 两段时长比 > 该值时不具可比性，面积项不计入背驰（只用 DIF/柱高判据）
     "nearDoubleAtrK": 0.3,  # 近等双顶/双底平台取后顶/后底：价差与回调深度的 ATR 系数
@@ -56,10 +61,9 @@ CHAN_CFG = {
     "nearDoubleLowerRatio": 0.5,  # 柱峰值和DIF幅度均不超过前段50%
     # ---- 近等双顶每周期开关（2026-09-25 参数化；此前硬编码仅 ≥1h 开启，默认=现行行为）----
     # 开启该周期「近等双顶/双底平台取后顶/后底」；gating 统一走 nearDoubleOn(res)，
-    # 五周期之外（30S/5/30/W 等）一律不开启。15m/3m 默认关：平台尾噪声多，
-    # 全周期开启曾实测 61 次触发致微观结构大面积重排（影响评估后用户决策限 ≥1h）。
-    "nearDouble3": False,
-    "nearDouble15": False,
+    # 五周期之外（30S/5/30/W 等）一律不开启。3m/15m 默认开（2026-09-28 参数页已改值收成默认）。
+    "nearDouble3": True,
+    "nearDouble15": True,
     "nearDouble60": True,
     "nearDouble240": True,
     "nearDoubleD": True,
@@ -96,15 +100,15 @@ CHAN_CFG = {
                                    # 该点视同端点无点——计划/顺势锚点继续向前扫描（回退前锚）
     "anchorUndecidedMinBars": 2,   # A 定型阈值：点后反向段的本级合并块数（默认 2=右肩+1根确认；
                                    # 1=分型即定型；5=与 expectBiMinBars 同参的够笔口径）
-    "divergeReferByZs": False,     # B 背驰中枢参照：参照笔=入中枢段——跳过 F 之前紧邻中枢
+    "divergeReferByZs": True,      # B 背驰中枢参照：参照笔=入中枢段——跳过 F 之前紧邻中枢
                                    # 内部/之后的同向笔（用户规则：背驰=入中枢段 vs 出中枢段，
-                                   # 中枢内部振荡段不参与比较）
-    "sinkSkipLevel": False,        # D 跨级下沉：下沉链次级展开 <3 笔时跳过该级继续向下
-                                   # （如 60→3 直沉判 3m 背驰，markRes=3），不再「在本级判定」
-    "synthIntrabarBars": False,    # C-1 盘中合成K：回测每拍用 fine 流合成 15/60/240 进行中K
-                                   # （O=bin首开/H-L=运行极值/C=最新收）临时注入链路（不落盘）
-    "pointEnoughForming": False,   # C-2 成笔可能够笔：形成中段承载买卖点的 enough 计数只数
-                                   # 到极值块（反向确认后的K不属于本段；进行中K仅延伸时计入）
+                                   # 中枢内部振荡段不参与比较）。默认开（2026-09-28）
+    "sinkSkipLevel": True,         # D 跨级下沉：下沉链次级展开 <3 笔时跳过该级继续向下
+                                   # （如 60→3 直沉判 3m 背驰，markRes=3），不再「在本级判定」。默认开
+    "synthIntrabarBars": True,     # C-1 盘中合成K：回测每拍用 fine 流合成 15/60/240 进行中K
+                                   # （O=bin首开/H-L=运行极值/C=最新收）临时注入链路（不落盘）。默认开
+    "pointEnoughForming": True,    # C-2 成笔可能够笔：形成中段承载买卖点的 enough 计数只数
+                                   # 到极值块（反向确认后的K不属于本段；进行中K仅延伸时计入）。默认开
     "debug": False,    # 调试打印（buildBi / 买卖点识别过程）
 }
 
@@ -374,7 +378,91 @@ def pointEligibleBis(bis):
     return [b for b in (bis or []) if not b.get("_forming") or b.get("enough")]
 
 
-def buildStructureContext(bis, bars, barSec, tCut=None, merged=None, fractals=None, lowerContext=None):
+def _originMergedCount(merged, last, barSec):
+    """原笔合并块数：起点到端点（含端点块），不含端点之后的反向 K。"""
+    total = mergedSegmentCount(merged, last["startTime"], barSec)
+    tail = mergedSegmentCount(merged, last["endTime"], barSec)
+    if tail <= 0:
+        return total
+    return max(0, total - tail + 1)
+
+
+def lowerExitEnterDiverge(lower_stroke, upper_bi, cutoff):
+    """下一级最近中枢：出中枢笔相对入中枢笔是否背驰（只用 isBiDiverge，不含幅度变小）。
+
+    级别链末端没有更低周期、没有中枢、或中枢尚未离开，视为不背驰。
+    """
+    if not lower_stroke or not upper_bi:
+        return False
+    lb = lower_stroke.get("bis") or []
+    bars = lower_stroke.get("bars") or []
+    bar_sec = lower_stroke.get("barSec") or 0
+    if len(lb) < 3 or not bars:
+        return False
+    macd = calcMACD(bars)
+    seg = dict(upper_bi)
+    seg["endTime"] = max(upper_bi.get("endTime") or 0, cutoff or 0)
+    seg["coverageEnd"] = cutoff
+    zss = buildZSByUpper(lb, [seg], bar_sec, open_last=True)
+    if not zss:
+        return False
+    zs = zss[-1]
+    enter = next((b for b in lb if b.get("endTime") == zs.get("enterEndTime")), None)
+    if enter is None:
+        return False
+    # 中枢记录的 exitStartTime 是第一次离开。价格回到 [zd, zg] 之后，
+    # 当下出中枢笔是更晚的「起点在中枢内、终点突破边界」的同向笔
+    # （8-27 离开后 8-28 回到中枢，8-31 的下跌才是当下出中枢）。
+    zd, zg = zs.get("zd"), zs.get("zg")
+    eps = 1e-8
+    leaves = []
+    if zd is not None and zg is not None:
+        for b in lb:
+            if b.get("type") != enter.get("type"):
+                continue
+            if (b.get("endTime") or 0) <= (enter.get("endTime") or 0):
+                continue
+            if b["startTime"] > (cutoff or 0):
+                continue
+            start_in = zd - eps <= b["startPrice"] <= zg + eps
+            end_break = b["endPrice"] < zd - eps or b["endPrice"] > zg + eps
+            if start_in and end_break:
+                leaves.append(b)
+    exit_bi = leaves[-1] if leaves else None
+    if exit_bi is None and zs.get("exitTime") is not None:
+        exit_bi = next((b for b in lb if b.get("startTime") == zs.get("exitStartTime")), None)
+    if exit_bi is None:
+        return False
+    return bool(isBiDiverge(exit_bi, enter, macd))
+
+
+def _reverseStrokeCloses(last, merged, barSec, enough_count, lower_stroke, cutoff):
+    """是否收笔（结束上一笔，并挂上反向形成段）。
+
+    收笔：反向够笔，或下一级出中枢笔相对入中枢笔背驰。
+    不收笔：原方向已够笔、反向未够笔、且下一级不背驰。
+    原方向尚未够笔时维持原先的形成段。够笔门槛与本函数原口径一致，为 5。
+    """
+    if enough_count >= 5:
+        return True
+    if _originMergedCount(merged, last, barSec) < 5:
+        return True
+    return lowerExitEnterDiverge(lower_stroke, last, cutoff)
+
+
+def lowerStrokePack(res, periodBis, barsByPeriod):
+    """组装下一级笔与 K 线，供收笔背驰。没有下一级或数据为空则返回 None。"""
+    lower = lowerResOf(res)
+    if not lower:
+        return None
+    bis = (periodBis or {}).get(lower) or []
+    bars = (barsByPeriod or {}).get(lower) or []
+    if not bis or not bars:
+        return None
+    return {"bis": bis, "bars": bars, "barSec": intervalSecOf(lower)}
+
+
+def buildStructureContext(bis, bars, barSec, tCut=None, merged=None, fractals=None, lowerContext=None, lowerStroke=None):
     """Pure closed-prefix structure: confirmed strokes + at most one prospective leg.
 
     Passing tCut also accepts full raw history: rebuild strokes if future bars were
@@ -429,7 +517,7 @@ def buildStructureContext(bis, bars, barSec, tCut=None, merged=None, fractals=No
                 if CHAN_CFG.get("pointEnoughForming"):
                     i_ext = bisect.bisect_right([m["time"] for m in merged], extreme["time"]) - 1
                     enough_count = max(0, i_ext - idx + 1)
-                current = {"type": "up" if kind == "bottom" else "down",
+                forming = {"type": "up" if kind == "bottom" else "down",
                            "startTime": last["endTime"], "startPrice": last["endPrice"],
                            "endTime": extreme["time"], "endPrice": price,
                            "span": abs(price - last["endPrice"]), "_forming": True,
@@ -437,7 +525,10 @@ def buildStructureContext(bis, bars, barSec, tCut=None, merged=None, fractals=No
                            "enough": enough_count >= 5,
                            "phase": "running" if enough_count >= 5 else "expected",
                            "coverageEnd": cutoff}
-                result["bis"].append(current)
+                # 收笔才挂反向形成段；不收笔时 current 仍是原笔，覆盖延续到 cutoff
+                if _reverseStrokeCloses(last, merged, barSec, enough_count, lowerStroke, cutoff):
+                    current = forming
+                    result["bis"].append(current)
     if not current.get("_forming"):
         result["bis"][-1] = current
     result["current"] = current
@@ -453,16 +544,27 @@ def structurePeriods(periodBis, barsByPeriod, tCut=None, mergedByPeriod=None,
     """
     if tCut is None:
         tCut = max((v[-1]["time"] + intervalSecOf(r) for r, v in barsByPeriod.items() if v), default=0)
-    out = {}
-    for res, bis in periodBis.items():
+    # 从小周期到大周期：上一级收笔要看下一级已经建好的笔
+    computed = {}
+    for res in sorted(periodBis.keys(), key=lambda r: intervalSecOf(r) or 0):
+        bis = periodBis.get(res) or []
         if bis and bis[-1].get("_contextReady"):
-            out[res] = bis
+            computed[res] = bis
             continue
         raw = barsByPeriod.get(res) or []
         tail = raw[-1] if raw else {}
+        lower = lowerResOf(res)
+        lb = computed.get(lower) if lower else None
+        lbars = (barsByPeriod.get(lower) or []) if lower else []
+        ltail = lbars[-1] if lbars else {}
+        lower_fp = None
+        if lb:
+            lastb = lb[-1]
+            lower_fp = (len(lb), lastb.get("type"), lastb.get("endTime"), lastb.get("endPrice"),
+                        lastb.get("phase"), ltail.get("time"), ltail.get("close"))
         key = (len(raw), tuple(tail.get(k) for k in ("time", "open", "high", "low", "close")),
                tuple((b["type"], b["startTime"], b["endTime"], b["startPrice"], b["endPrice"]) for b in bis),
-               min(tCut, tail.get("time", 0) + intervalSecOf(res)))
+               min(tCut, tail.get("time", 0) + intervalSecOf(res)), lower_fp)
         slot = ("structure", res)
         ent = work_cache.get(slot) if work_cache is not None else None
         if ent is not None and ent[0] == key:
@@ -470,14 +572,15 @@ def structurePeriods(periodBis, barsByPeriod, tCut=None, mergedByPeriod=None,
         else:
             ctx = buildStructureContext(bis, raw, intervalSecOf(res), tCut,
                                         (mergedByPeriod or {}).get(res), (fractalsByPeriod or {}).get(res),
-                                        makeBiLowerContext(res, barsByPeriod.get("15") or [], tCut) if str(res) == "60" else None)
+                                        makeBiLowerContext(res, barsByPeriod.get("15") or [], tCut) if str(res) == "60" else None,
+                                        lowerStrokePack(res, computed, barsByPeriod))
             if work_cache is not None:
                 work_cache[slot] = (key, ctx)
         view = list(ctx["bis"])
         if view and ctx["current"] is not None:
             view[-1] = dict(view[-1], coverageEnd=tCut)
-        out[res] = view
-    return out
+        computed[res] = view
+    return {res: computed[res] for res in periodBis.keys() if res in computed}
 
 
 def findFractals(merged):
@@ -731,7 +834,7 @@ class BiBuildCtx:
         else:
             range_low = min(merged[i - 1]["low"], merged[i]["low"])
             range_high = max(merged[i - 1]["high"], merged[i]["high"])
-        # 终点侧三根。15分钟上振幅 ≥ wideBarPoints 的K线不参与（大振幅K不作为反向贯穿证据）。
+        # 终点侧三根。本周期振幅 ≥ 单根长K豁免点数的K线不参与（大振幅K不作为反向贯穿证据）。
         end_low, end_high = self._endSideExtremes(j)
         if a["type"] == "top" and b["type"] == "bottom":
             end_ok = True if end_high is None else end_high < a["high"]
@@ -742,13 +845,13 @@ class BiBuildCtx:
         return True
 
     def _endSideExtremes(self, j):
-        """终点分型三根的最低/最高。15分钟且振幅 ≥ wideBarPoints 的K线跳过。
+        """终点分型三根的最低/最高。振幅 ≥ 本周期单根长K豁免点数的K线跳过。
 
         三根都被豁免时返回 (None, None)，调用方视为终点侧不构成反向贯穿。
         """
         merged = self.merged
-        thr = CHAN_CFG.get("wideBarPoints") or 0
-        skip = self.res == "15" and thr > 0
+        thr = wideBarPointsOf(self.res)
+        skip = thr > 0
         lows, highs = [], []
         for idx in (j - 1, j, j + 1):
             m = merged[idx]
@@ -1052,7 +1155,7 @@ def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False,
     """笔构建。与 JS 版 buildBi 对齐。lockedPivots 为上级笔端点（区间套强制对齐，优先级最高）；
     nearDouble=True 时启用「近等双顶/双底平台取后顶/后底」（≥60m 周期由调用方开启）。
     lowerContext 为可选15分钟上下文，仅60m补充分支使用；缺省时沿用原阈值。
-    res 为周期码（'15' 时启用大振幅K线豁免）；缺省不豁免，与旧调用一致。
+    res 为周期码（按 wideBarPointsOf 取该周期单根长K豁免点数）；缺省不豁免，与旧调用一致。
     内部经 biSeqStep/biStep/biPair 单步组合（与 bi_inc 增量构建器共用规则源）。"""
     ctx = BiBuildCtx(merged, atr, macdArr, lockedPivots=lockedPivots,
                      nearDouble=nearDouble, lowerContext=lowerContext, fractals=fractals,
@@ -1788,6 +1891,22 @@ def intervalSecOf(res):
 
 _NEAR_DOUBLE_SWITCH_BY_SEC = {180: "nearDouble3", 900: "nearDouble15", 3600: "nearDouble60",
                               14400: "nearDouble240", 86400: "nearDoubleD"}
+_WIDE_BAR_POINTS_BY_SEC = {180: "wideBarPoints3", 900: "wideBarPoints15", 3600: "wideBarPoints60",
+                           14400: "wideBarPoints240", 86400: "wideBarPointsD"}
+
+
+def wideBarPointsOf(res):
+    """该周期「顶底分形不能包含」的单根长K豁免点数（读 CHAN_CFG）。
+    单根K线振幅 ≥ 返回值时，不参与分型终点侧三根的反向贯穿检查。
+    res 接受周期码（'3'/'15'/'60'/'240'/'D'，含 1H/4H/1D 别名）或 barSec 秒数 int。
+    未列周期、缺省、或配置为 0 时返回 0（不豁免）。"""
+    if res is None or isinstance(res, bool):
+        return 0.0
+    sec = res if isinstance(res, int) else intervalSecOf(res)
+    key = _WIDE_BAR_POINTS_BY_SEC.get(sec or 0)
+    if not key:
+        return 0.0
+    return float(CHAN_CFG.get(key) or 0)
 
 
 def nearDoubleOn(res):

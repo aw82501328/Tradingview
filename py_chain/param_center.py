@@ -48,7 +48,8 @@ ZS_DEFAULTS = {
 
 # CHAN_CFG 键按工作台步骤归属（算法默认值仍在 chan_core.CHAN_CFG_DEFAULTS）
 CHAN_BI_KEYS = (
-    "gapFilter", "wickRatio", "wickAtrK", "wideBarPoints",
+    "gapFilter", "wickRatio", "wickAtrK",
+    "wideBarPointsD", "wideBarPoints240", "wideBarPoints60", "wideBarPoints15", "wideBarPoints3",
     "nearDoubleAtrK", "nearDoublePct", "nearDoubleFixed",
     "nearDoubleLowerRelax", "nearDoubleLowerRatio",
     "nearDouble3", "nearDouble15", "nearDouble60", "nearDouble240", "nearDoubleD",
@@ -79,9 +80,21 @@ PARAM_MODULES = {
             "gapFilter": ("跳空成笔阈值", "相邻K线缺口 ≥ 该值×ATR 时强制独立成笔", 0.0, 5.0),
             "wickRatio": ("长影线比例阈值", "影线占整根K线振幅 ≥ 该比例视为插针（不参与区间竞争）", 0.0, 1.0),
             "wickAtrK": ("长影线长度下限", "影线绝对长度下限 = 该值×TR均值（窄幅小K线免疫）", 0.0, 5.0),
-            "wideBarPoints": ("15分钟大振幅豁免",
-                              "仅15分钟：单根K线振幅（最高-最低）≥ 该点数时，不参与分型终点侧三根的反向贯穿检查。"
-                              "0 表示不豁免", 0.0, 500.0),
+            "wideBarPointsD": ("日线",
+                               "日线：单根K线振幅（最高-最低）≥ 该点数时，不参与分型终点侧三根的反向贯穿检查。0 表示不豁免",
+                               0.0, 500.0),
+            "wideBarPoints240": ("4小时",
+                                 "4小时：单根K线振幅（最高-最低）≥ 该点数时，不参与分型终点侧三根的反向贯穿检查。0 表示不豁免",
+                                 0.0, 500.0),
+            "wideBarPoints60": ("1小时",
+                                "1小时：单根K线振幅（最高-最低）≥ 该点数时，不参与分型终点侧三根的反向贯穿检查。0 表示不豁免",
+                                0.0, 500.0),
+            "wideBarPoints15": ("15分钟",
+                                "15分钟：单根K线振幅（最高-最低）≥ 该点数时，不参与分型终点侧三根的反向贯穿检查。0 表示不豁免",
+                                0.0, 500.0),
+            "wideBarPoints3": ("3分钟",
+                               "3分钟：单根K线振幅（最高-最低）≥ 该点数时，不参与分型终点侧三根的反向贯穿检查。0 表示不豁免",
+                               0.0, 500.0),
             "nearDoubleAtrK": ("近等双顶容差ATR", "近等双顶/双底平台价差容差（×ATR）", 0.0, 5.0),
             "nearDoublePct": ("近等双顶价差比例", "近等双顶/双底价差下限（价格比例）", 0.0, 0.05),
             "nearDoubleFixed": ("近等双顶固定容差",
@@ -91,10 +104,9 @@ PARAM_MODULES = {
             "nearDoubleLowerRelax": ("60m双动能容差倍数", "仅60m：15m双动能确认时近等容差放宽倍数", 1.0, 10.0),
             "nearDoubleLowerRatio": ("15m动能衰减比例", "15m柱峰值与DIF幅度须衰减至前段该比例以内", 0.0, 1.0),
             "nearDouble3": ("近等双顶·3分钟",
-                            "3分钟笔是否启用「近等双顶/双底平台取后顶/后底」（默认关）", None, None),
+                            "3分钟笔是否启用「近等双顶/双底平台取后顶/后底」（默认开）", None, None),
             "nearDouble15": ("近等双顶·15分钟",
-                             "15分钟笔是否启用（默认关；全周期开启曾实测 61 次触发、"
-                             "微观结构大面积重排）", None, None),
+                             "15分钟笔是否启用（默认开）", None, None),
             "nearDouble60": ("近等双顶·1小时",
                              "1小时笔是否启用（默认开；价差超阈值时可由15m双动能补充确认）", None, None),
             "nearDouble240": ("近等双顶·4小时", "4小时笔是否启用（默认开）", None, None),
@@ -102,11 +114,11 @@ PARAM_MODULES = {
             "synthIntrabarBars": ("盘中合成K（15m/1h/4h）",
                                   "回测每拍用3分钟已收K聚合15m/1h/4h进行中K（O=bin首开、"
                                   "H/L=运行极值、C=最新收）临时注入链路——高周期结构盘中"
-                                  "即见当根K变化（默认关=只认已收K，原行为）", None, None),
+                                  "即见当根K变化（默认开；关掉则只认已收K）", None, None),
             "pointEnoughForming": ("够笔只计成笔可能",
                                    "形成中段承载买卖点的够笔计数只数到极值块——反向确认"
-                                   "（首根抬低点/抬高点K）后的K不属于本段不计入（默认关="
-                                   "数到当下，原行为）", None, None),
+                                   "（首根抬低点/抬高点K）后的K不属于本段不计入（默认开；"
+                                   "关掉则数到当下）", None, None),
             "debug": ("调试打印", "buildBi/买卖点识别过程打印", None, None),
         },
     },
@@ -167,10 +179,10 @@ PARAM_MODULES = {
             "divergeReferByZs": ("背驰参照按中枢",
                                  "参照笔=入中枢段——跳过当前段之前紧邻中枢内部/之后的同向笔"
                                  "（背驰=入中枢段vs出中枢段，中枢内部振荡段不参与比较；"
-                                 "默认关=紧邻前一同向笔，原行为）", None, None),
+                                 "默认开；关掉则取紧邻前一同向笔）", None, None),
             "sinkSkipLevel": ("跨级下沉",
                               "下沉链次级展开<3笔时跳过该级继续向下找有展开的级别判背驰"
-                              "（如60→3直沉，markRes=3；默认关=在本级判定，原行为）", None, None),
+                              "（如60→3直沉，markRes=3；默认开；关掉则在本级判定）", None, None),
         },
     },
     "plan": {
@@ -197,7 +209,7 @@ PARAM_MODULES = {
                          0.0, 1000.0),
             "secondNearPts": ("回踩2买/2卖点容差(点)", "未过前高（前低）时，最近一笔回调（反弹）终点距2买（2卖）点价 ≤ 该值 视为回踩到位 → 等回调后的类2买点/类2卖点",
                          0.0, 1000.0),
-            "thirdStrongTrend": ("③3类点强档顺势", "开=3买/类3买（3卖/类3卖）过前高不背驰时顺势「等待回调后的新买点/新卖点」（默认现状）；关=3类点一律弱档（多头空/空头多，等一卖/一买）",
+            "thirdStrongTrend": ("③3类点强档顺势", "开=3买/类3买（3卖/类3卖）过前高不背驰时顺势「等待回调后的新买点/新卖点」；关=3类点一律弱档（多头空/空头多，等一卖/一买）。默认关",
                          None, None),
         },
     },
@@ -210,22 +222,24 @@ def _chan_defaults_subset(keys):
     return {k: src[k] for k in keys}
 
 
-def defaults_of(module):
-    """模块默认值（活取各算法模块常量，保证与代码默认不漂移）。"""
+def defaults_of(module, symbol=None):
+    """模块默认值（活取各算法模块常量，保证与代码默认不漂移）。
+    symbol 传入时，进出场手数/最大止损改用该品种默认；未单列的品种仍用全局常量。
+    不传 symbol 时返回全局默认（schema 与未列品种用）。"""
     if module == "chan":
-        return _chan_defaults_subset(CHAN_BI_KEYS)
-    if module == "points":
-        return {
+        base = _chan_defaults_subset(CHAN_BI_KEYS)
+    elif module == "points":
+        base = {
             "nearAtrRatio": mark_buy_sell.NEAR_ATR_RATIO,
             "keep": mark_buy_sell.KEEP,
             "class2ZsTol": mark_buy_sell.CLASS2_ZS_TOL,
             "thirdZsTol": mark_buy_sell.THIRD_ZS_TOL,
             **_chan_defaults_subset(POINTS_CHAN_KEYS),
         }
-    if module == "zs":
-        return dict(ZS_DEFAULTS)
-    if module == "entry":
-        return {
+    elif module == "zs":
+        base = dict(ZS_DEFAULTS)
+    elif module == "entry":
+        base = {
             "near": mark_entry.NEAR,
             "lots": mark_entry.DEFAULT_LOTS,
             "slip_stop": mark_entry.DEFAULT_SLIP_STOP,
@@ -239,8 +253,17 @@ def defaults_of(module):
             "zs_exit_weak_ratio": mark_entry.ZS_EXIT_WEAK_RATIO,
             **_chan_defaults_subset(ENTRY_CHAN_KEYS),
         }
-    if module == "plan":
-        return {**trading_plan.RANGE_DEFAULTS, "trendRes": trading_plan.TREND_RES,
+        if symbol:
+            sid = symbol_id(symbol)
+            if sid:
+                lots = mark_entry.DEFAULT_LOTS_BY_SYMBOL.get(sid)
+                if lots is not None:
+                    base["lots"] = lots
+                slip = mark_entry.DEFAULT_SLIP_FALLBACK_BY_SYMBOL.get(sid)
+                if slip is not None:
+                    base["slip_fallback"] = slip
+    elif module == "plan":
+        base = {**trading_plan.RANGE_DEFAULTS, "trendRes": trading_plan.TREND_RES,
                 "rangeRes": trading_plan.RANGE_RES,
                 "trendRebound": trading_plan.TREND_REBOUND,
                 "reboundNearPts": trading_plan.REBOUND_NEAR_PTS,
@@ -248,7 +271,9 @@ def defaults_of(module):
                 "prevHighNearPts": trading_plan.PREV_HIGH_NEAR_PTS,
                 "secondNearPts": trading_plan.SECOND_NEAR_PTS,
                 "thirdStrongTrend": trading_plan.THIRD_STRONG_TREND}
-    raise ValueError(f"未知参数模块：{module}")
+    else:
+        raise ValueError(f"未知参数模块：{module}")
+    return base
 
 
 # 五品种分桶（2026-09-24）：与参数页子页签 / 回测多选品种一致；全 PARAM_MODULES + sr 共用
@@ -613,8 +638,9 @@ def _symbol_overrides(overrides, module, symbol):
 
 def effective(module, symbol=None):
     """默认值 ∪ overrides（键序稳定：按 schema 顺序）。
-    全部 PARAM_MODULES 按品种取桶：symbol 空=黄金页；未列品种=纯默认。"""
-    defaults = defaults_of(module)
+    全部 PARAM_MODULES 按品种取桶：symbol 空=黄金页；未列品种=纯默认。
+    进出场手数/最大止损的默认值按品种取。"""
+    defaults = defaults_of(module, symbol)
     ov = _symbol_overrides(_load(), module, symbol)
     return {k: ov.get(k, defaults[k]) for k in PARAM_MODULES[module]["params"]}
 
@@ -658,10 +684,12 @@ def _snapshot_module(name, spec, overrides, saved_at_all):
         mod_at = {}
     by_symbol = {}
     for sid, label, code in SYMBOL_META:
+        sid_defaults = defaults_of(name, sid)
         ov = by.get(sid) or {}
         by_symbol[sid] = {
             "label": label, "code": code, "overrides": ov,
-            "effective": {k: ov.get(k, defaults[k]) for k in spec["params"]},
+            "defaults": sid_defaults,
+            "effective": {k: ov.get(k, sid_defaults[k]) for k in spec["params"]},
             "savedAt": mod_at.get(sid),
         }
     gold = by_symbol["XAUUSD"]
@@ -734,9 +762,9 @@ def update(module, cfg, symbol=None):
     clean = normalize(module, cfg)
     with _lock:
         overrides = _load()
-        defaults = defaults_of(module)
         saved_at = _read_saved_at()
         sid = _require_symbol(symbol)
+        defaults = defaults_of(module, sid)
         merged = dict((overrides.get(module) or {}).get(sid, {}))
         merged.update(clean)
         merged = {k: v for k, v in merged.items()

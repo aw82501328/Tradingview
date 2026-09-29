@@ -61,7 +61,7 @@ const RANGE_CFG = {
   // 2买/2卖 中间档容差 + 3类点强档开关（默认值与 py_chain/trading_plan.py 常量一致）
   prevHighNearPts: numArg("prev-high-near-pts", 5.0),
   secondNearPts: numArg("second-near-pts", 5.0),
-  thirdStrongTrend: getStrArg("third-strong-trend", "1") !== "0",
+  thirdStrongTrend: getStrArg("third-strong-trend", "0") !== "0",
 };
 // 参数中心（WEB 参数配置页）整体覆盖；未知键在 JS 侧闲置无害
 const CHAN_CFG_JSON = getStrArg("chan-cfg", "");
@@ -174,8 +174,8 @@ function isRangeBound(bis, bars, atr, cfg) {
  *   2卖/类2卖 → 过左低不背驰：空头空，等待反弹后的3卖点；
  *               2卖 + 前低附近/回到2卖点：空头空，等待反弹后的类2卖点；
  *               其他：空头多（结构空、逆势等一买），等待低点附近的一买；
- *   3买/类3买 → 过左高不背驰 且 thirdStrongTrend 开（默认开，保持现状）：多头多，等待回调后的新买点；
- *               其他（含开关关）：多头空，等待高点附近的一卖；
+ *   3买/类3买 → 过左高不背驰 且 thirdStrongTrend 开：多头多，等待回调后的新买点；
+ *               其他（含默认关）：多头空，等待高点附近的一卖；
  *   3卖/类3卖 → 过左低不背驰 且 thirdStrongTrend 开：空头空，等待反弹后的新卖点；
  *               其他（含开关关）：空头多，等待低点附近的一买。
  * @param {string} res       周期名
@@ -186,7 +186,7 @@ function isRangeBound(bis, bars, atr, cfg) {
  * @param {object} cfg       可选参数覆盖（thirdStrongTrend；用于测试/参数中心透传）
  */
 function strategyOf(res, type, reason, label, cls, cfg) {
-  const thirdStrong = cfg && cfg.thirdStrongTrend != null ? cfg.thirdStrongTrend : true;
+  const thirdStrong = cfg && cfg.thirdStrongTrend != null ? cfg.thirdStrongTrend : false;
   const base = { res, reason, label };
   if (type === "1卖") return { ...base, direction: "空头空", strategy: "等待反弹后做2卖" };
   if (type === "1买") return { ...base, direction: "多头多", strategy: "等待回调后做2买" };
@@ -569,10 +569,10 @@ function phaseDirection(name, p, bis, bars, upperBis, barSec, rb, tCut = null) {
   return [null, `${name}${t}后方向不明`];
 }
 
-function trendDirection(res, bis, bars, upperBis, macdArr, tCut = null, rebound = null) {
+function trendDirection(res, bis, bars, upperBis, macdArr, tCut = null, rebound = null, lowerStroke = null) {
   const name = trendResName(res);
   if (bis && bis.length && !bis[bis.length-1]._contextReady) {
-    bis = core.buildStructureContext(bis, bars, intervalSecOf(res), tCut).bis;
+    bis = core.buildStructureContext(bis, bars, intervalSecOf(res), tCut, null, null, null, lowerStroke).bis;
     if (tCut != null) bars = (bars || []).filter(b => b.time + intervalSecOf(res) <= tCut);
   }
   if (!bis || bis.length < 2) return [null, ""];
@@ -640,7 +640,7 @@ function trendStateOf(periodBis, barsByPeriod, trendRes, periodMacd = null, cfg 
   let macdArr = (periodMacd || {})[tr];
   if (macdArr == null) macdArr = calcMACD(bars);
   const rebound = cfg && cfg.trendRebound === false ? null : {enabled:true, near_pts:cfg?.reboundNearPts ?? 5, angle_ref:cfg?.reboundAngleRef ?? 5, min_bars:core.CHAN_CFG.expectBiMinBars || 5};
-  const [dir, reason] = trendDirection(tr, bis, bars, upper, macdArr, tCut, rebound);
+  const [dir, reason] = trendDirection(tr, bis, bars, upper, macdArr, tCut, rebound, core.lowerStrokePack(tr, periodBis, barsByPeriod));
   return { dir, reason, res: tr };
 }
 
@@ -907,8 +907,35 @@ async function main() {
       console.log("\n标记前清除旧策略标记:", clearedAll, "个");
     }
 
+    // 收笔要下一级笔：先按周期从小到大取K线并建结构，后面的大到小循环只消费结果
+    const barsHeld = {};
+    const structuredBis = {};
+    const nowCut = Math.floor(Date.now() / 1000);
+    let prepRes = originalRes;
+    const prepOrder = PERIODS.slice().sort((a, b) => (intervalSecOf(a) || 0) - (intervalSecOf(b) || 0));
+    for (const res of prepOrder) {
+      if (res !== prepRes) { await ensureResolution(res); prepRes = res; }
+      let d = await fetchBars(intervalSecOf(res));
+      if (!d || d.error || !d.bars || d.bars.length === 0) {
+        await sleep(3000);
+        await ensureResolution(res);
+        prepRes = res;
+        d = await fetchBars(intervalSecOf(res));
+      }
+      if (!d || d.error || !d.bars || d.bars.length === 0) continue;
+      barsHeld[res] = d.bars;
+      const lower = core.lowerResOf(res);
+      const lowerStroke = (lower && structuredBis[lower] && barsHeld[lower] && barsHeld[lower].length)
+        ? { bis: structuredBis[lower], bars: barsHeld[lower], barSec: intervalSecOf(lower) }
+        : null;
+      structuredBis[res] = core.buildStructureContext(
+        bisCache.periods[res] || [], d.bars, intervalSecOf(res), nowCut, null, null,
+        res === "60" ? core.makeBiLowerContext(res, (bisCache.bars || {})["15"] || [], nowCut) : null,
+        lowerStroke).bis;
+    }
+
     // 逐周期：从大到小计算交易计划并收集报告行（表格形式统一输出）
-    let currentRes = originalRes;
+    let currentRes = prepRes;
     let upperBis = null;
     const reportRows = []; // [{symbol, res, direction, strategy}]
     const planRows = {}; // {res: {direction, strategy, reason, pointDesc}}，落盘供 mark-entry 读取
@@ -916,14 +943,8 @@ async function main() {
       const res = PERIODS[pi];
       if (res !== currentRes) { await ensureResolution(res); currentRes = res; }
 
-      let d = await fetchBars(intervalSecOf(res));
-      if (!d || d.error || !d.bars || d.bars.length === 0) {
-        await sleep(3000);
-        await ensureResolution(res);
-        currentRes = res;
-        d = await fetchBars(intervalSecOf(res));
-      }
-      if (!d || d.error || !d.bars || d.bars.length === 0) {
+      const d = barsHeld[res] ? { bars: barsHeld[res] } : null;
+      if (!d || !d.bars || d.bars.length === 0) {
         console.log(`\n[周期 ${res}] 无K线数据，跳过`);
         continue;
       }
@@ -935,7 +956,7 @@ async function main() {
       const lastPrice = lastBar ? lastBar.close : null;
       const lastBarTime = lastBar ? lastBar.time : null;
 
-      let curBis = core.buildStructureContext(bisCache.periods[res] || [], d.bars, intervalSecOf(res), Math.floor(Date.now()/1000), null, null, res === "60" ? core.makeBiLowerContext(res, (bisCache.bars || {})["15"] || [], Math.floor(Date.now()/1000)) : null).bis;
+      let curBis = structuredBis[res] || [];
       if (curBis.length === 0) {
         console.log(`\n[周期 ${res}] 笔数据为空（画笔未覆盖该周期），跳过`);
         continue;

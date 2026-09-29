@@ -14,10 +14,18 @@ OLD, NEW = 1786032000, 1786060800
 
 class NearDoubleTests(unittest.TestCase):
     def test_frozen_target_and_unchanged_other_periods(self):
+        # 本用例对照 60m 冻结目标；3m/15m 近等开关另测，这里关掉以免下级上下文改笔数
+        try:
+            c.apply_cfg({"nearDouble3": False, "nearDouble15": False})
+            self._frozen_target_body()
+        finally:
+            c.reset_cfg()
+
+    def _frozen_target_body(self):
         new = build_bis(DATA)
         for res, bars in DATA.items():
             merged = c.mergeBars(c.markWickBars(bars))
-            baseline = c.buildBi(c.findFractals(merged), merged, c.calcATR(bars, 14), c.calcMACD(bars), None, c.nearDoubleOn(res))
+            baseline = c.buildBi(c.findFractals(merged), merged, c.calcATR(bars, 14), c.calcMACD(bars), None, c.nearDoubleOn(res), None, res)
             baseline = c.extendLastBi(c.fixBiExtremes(baseline, merged), c.markWickBars(bars))
             self.assertEqual(len(baseline), len(new[res]))
             changed = [(a, b) for a, b in zip(baseline, new[res]) if a != b]
@@ -26,14 +34,15 @@ class NearDoubleTests(unittest.TestCase):
                 self.assertEqual((changed[0][1]['endTime'], changed[0][1]['endPrice']), (NEW, 4229.875))
 
     def test_near_double_on_helper(self):
-        # 默认（=原硬编码 ≥1h）：60/240/D 开、3/15 关
-        self.assertFalse(c.nearDoubleOn('3') or c.nearDoubleOn('15'))
+        # 默认：五周期都开（3m/15m 于 2026-09-28 收成默认）
+        self.assertTrue(c.nearDoubleOn('3') and c.nearDoubleOn('15'))
         self.assertTrue(c.nearDoubleOn('60') and c.nearDoubleOn('240') and c.nearDoubleOn('D'))
         # barSec 秒数形式（buildStructureContext 只有秒数）与别名
+        self.assertTrue(c.nearDoubleOn(180) and c.nearDoubleOn(900))
         self.assertTrue(c.nearDoubleOn(3600) and c.nearDoubleOn(14400) and c.nearDoubleOn(86400))
         self.assertTrue(c.nearDoubleOn('1H') and c.nearDoubleOn('4H') and c.nearDoubleOn('1D'))
         # 五周期之外失败安全：'30S'/'5'/'30'/'W'/未知秒数/bool 一律 False
-        for bad in ('30S', '5', '30', 'W', 180, 900, 30, 0, True, None):
+        for bad in ('30S', '5', '30', 'W', 30, 0, True, None):
             self.assertFalse(c.nearDoubleOn(bad), repr(bad))
         # 开关经 apply_cfg 翻转（CHAN_CFG 进程级全局，finally 复原）
         try:
@@ -56,11 +65,12 @@ class NearDoubleTests(unittest.TestCase):
             c.reset_cfg()
 
     def test_switch_on_15m_restructures(self):
-        # 开 nearDouble15 → 15m 结构重排（默认关时与无开关构建一致；不断言具体笔数，
+        # 开 nearDouble15 → 15m 结构重排（关掉时与无开关构建对照；不断言具体笔数，
         # 结构对开关语义敏感、对计数不承诺）
         merged = c.mergeBars(c.markWickBars(DATA['15']))
-        default = c.buildBi(c.findFractals(merged), merged, c.calcATR(DATA['15'], 14), c.calcMACD(DATA['15']), None, False)
         try:
+            c.apply_cfg({'nearDouble15': False})
+            default = c.buildBi(c.findFractals(merged), merged, c.calcATR(DATA['15'], 14), c.calcMACD(DATA['15']), None, False)
             c.apply_cfg({'nearDouble15': True})
             altered = c.buildBi(c.findFractals(merged), merged, c.calcATR(DATA['15'], 14), c.calcMACD(DATA['15']), None, True)
             self.assertNotEqual(altered, default)

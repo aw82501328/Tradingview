@@ -379,7 +379,7 @@ class AnalysisManager:
             # 2买/2卖 中间档容差 + 3类点强档开关（trading_plan.js RANGE_CFG 同名解析）
             command.append("--prev-high-near-pts=" + str(pm["plan"].get("prevHighNearPts", 5.0)))
             command.append("--second-near-pts=" + str(pm["plan"].get("secondNearPts", 5.0)))
-            command.append("--third-strong-trend=" + ("1" if pm["plan"].get("thirdStrongTrend", True) else "0"))
+            command.append("--third-strong-trend=" + ("1" if pm["plan"].get("thirdStrongTrend", False) else "0"))
         if stage == "entry":
             command.append("--near=" + str(cfg["near"]))
             command.append("--slip-stop=" + str(cfg.get("slip_stop", 3.0)))

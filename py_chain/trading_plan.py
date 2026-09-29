@@ -17,7 +17,7 @@ from .chan_core import (
     markWickBars, mergeBars, findFractals,
 )
 
-from .chan_core import structurePeriods, buildStructureContext, mergedSegmentCount
+from .chan_core import structurePeriods, buildStructureContext, mergedSegmentCount, lowerStrokePack
 
 # ============================================================
 # 纯函数：震荡判定（复制自 chan-status SKILL，保持原逻辑不变）
@@ -37,8 +37,8 @@ RANGE_DEFAULTS = {
 # 2买/2卖 中间档「附近」容差默认值（绝对点数；参数中心 plan 模块同名透传，cfg 逐键覆盖）
 PREV_HIGH_NEAR_PTS = 5.0  # 前高/前低附近：2买（2卖）后首段上涨（下跌）终点距前高（前低）≤ 该值 → 等回调后的类2买点（类2卖点）
 SECOND_NEAR_PTS = 5.0     # 回到2买/2卖点：未过前高（前低）时最近一笔回调（反弹）终点距点价 ≤ 该值 → 等回调后的类2买点（类2卖点）
-# ③3类点强档开关：开=3买/类3买（3卖/类3卖）过前高不背驰时顺势「等待回调后的新买点/新卖点」（现状）；关=3类点一律弱档
-THIRD_STRONG_TREND = True
+# ③3类点强档开关：开=3买/类3买（3卖/类3卖）过前高不背驰时顺势「等待回调后的新买点/新卖点」；关=3类点一律弱档。默认关（2026-09-28）
+THIRD_STRONG_TREND = False
 
 
 def isRangeBound(bis, bars, atr, cfg=None):
@@ -123,7 +123,7 @@ def strategyOf(res, type_, reason, label, cls, cfg=None):
     方向命名「X头Y」：X = 结构方向，Y = 操作方向。
     三档（按序判定）：强档（过左高/左低不背驰）→ 中间档（仅 2买/2卖：前高/前低附近、
     或未过前高/前低且回调回到点附近）→ 弱档（多头空/空头多）。
-    3类点强档受 thirdStrongTrend 开关控制（默认开=保持现状「等待回调后的新买点/新卖点」）。"""
+    3类点强档受 thirdStrongTrend 开关控制（默认关=3类点一律弱档「等一卖/一买」）。"""
     cfg = cfg or {}
     third_strong = cfg.get("thirdStrongTrend", THIRD_STRONG_TREND)
     base = {"res": res, "reason": reason, "label": label}
@@ -282,7 +282,7 @@ def _rangeVerdict(bis, bars, atr, upperBis, lastPrice, barSec, range_cfg):
     return None
 
 
-def _plan_gate_row(res, bis, bars, atr, upperBis, lastPrice, barSec, range_cfg):
+def _plan_gate_row(res, bis, bars, atr, upperBis, lastPrice, barSec, range_cfg, lower_stroke=None):
     """参考周期震荡 regime（compute_plan 在参考周期行上顺带计算，供更低周期 range_gate；
     2026-09-16 替换语义——更低周期不再看自身 A/B 震荡，参考周期笔不足也观望）。
     @returns {"range": True, "resName": "4小时", "reason": "4小时：…"} /
@@ -290,10 +290,8 @@ def _plan_gate_row(res, bis, bars, atr, upperBis, lastPrice, barSec, range_cfg):
              {"range": True, "insufficient": True, ...}——笔数 <2：更低周期直接观望（数据不足）。"""
     name = trend_res_name(res)
     if bis and not bis[-1].get("_contextReady"):
-        ctx = buildStructureContext(bis, bars, intervalSecOf(res), tCut)
+        ctx = buildStructureContext(bis, bars, intervalSecOf(res), None, lowerStroke=lower_stroke)
         bis = ctx["bis"]
-        if tCut is not None:
-            bars = [b for b in (bars or []) if b["time"] + intervalSecOf(res) <= tCut]
     if not bis or len(bis) < 2:
         return {"range": True, "insufficient": True, "resName": name,
                 "reason": f"{name}笔数据不足（少于2笔），无法判定震荡/趋势，观望"}
@@ -465,7 +463,8 @@ def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=No
         # 参考周期笔不足（含整行无数据被 continue 跳过的情况）——预置不足闸；
         # 行内 ≥2 笔时会被真闸覆盖
         range_gate = _plan_gate_row(ref_row, periodBis.get(ref_row) or [],
-                                    None, None, None, None, None, None)
+                                    None, None, None, None, None, None,
+                                    lower_stroke=lowerStrokePack(ref_row, periodBis, barsByPeriod))
     for res in periods:
         curBis = periodBis.get(res, []) or []
         if not curBis:
@@ -497,7 +496,8 @@ def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=No
                 range_gate = gate_ent[1]
             else:
                 range_gate = _plan_gate_row(res, curBis, plan_bars, atr, upperBis,
-                                            lastPrice, intervalSecOf(res), cfg)
+                                            lastPrice, intervalSecOf(res), cfg,
+                                            lower_stroke=lowerStrokePack(res, periodBis, barsByPeriod))
                 if work_cache is not None:
                     work_cache[("planGate", res)] = (gate_key, range_gate)
 
@@ -712,7 +712,7 @@ def _phase_direction(name, p, t_, bis, bars, upperBis, barSec, rb, tCut=None):
         else (None, f"{name}{t_}后方向不明")
 
 
-def trend_direction(res, bis, bars, upperBis, macdArr, tCut=None, rebound=None):
+def trend_direction(res, bis, bars, upperBis, macdArr, tCut=None, rebound=None, lower_stroke=None):
     """参考周期方向判定（顺势过滤的唯一口径；mark_entry 进场方向过滤消费）。
 
     规则（2026-09-15 与用户逐条确认；7 为 2026-09-17 相位树更新）：
@@ -740,7 +740,7 @@ def trend_direction(res, bis, bars, upperBis, macdArr, tCut=None, rebound=None):
     """
     name = trend_res_name(res)
     if bis and not bis[-1].get("_contextReady"):
-        ctx = buildStructureContext(bis, bars, intervalSecOf(res), tCut)
+        ctx = buildStructureContext(bis, bars, intervalSecOf(res), tCut, lowerStroke=lower_stroke)
         bis = ctx["bis"]
         if tCut is not None:
             bars = [b for b in (bars or []) if b["time"] + intervalSecOf(res) <= tCut]
@@ -863,7 +863,8 @@ def trend_state_of(periodBis, barsByPeriod, trend_res, periodMacd=None, work_cac
             return ent[1]
     if macdArr is None:
         macdArr = calcMACD(bars)
-    d, reason = trend_direction(tr, bis, bars, upper, macdArr, rebound=rebound)
+    d, reason = trend_direction(tr, bis, bars, upper, macdArr, rebound=rebound,
+                                lower_stroke=lowerStrokePack(tr, periodBis, barsByPeriod))
     row = {"dir": d, "reason": reason, "res": tr}
     if work_cache is not None:
         work_cache[("trend", tr)] = (key, row)

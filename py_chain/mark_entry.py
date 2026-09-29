@@ -39,6 +39,12 @@ NEAR = 10.0
 # 进场手数（盈亏 = 价格差 × 方向 × lots × 合约乘数；2026-09-23 起统一 MT4/MT5 口径：
 # 1 手 = 0.01 标准手，合约乘数见 SYMBOL_CONTRACTS）
 DEFAULT_LOTS = 4
+# 品种默认手数（参数中心未再覆盖时使用；2026-09-28 把当时已保存的手数收成默认）
+DEFAULT_LOTS_BY_SYMBOL = {
+    "XAGUSD": 2,
+    "BTCUSD": 20,
+    "NAS100": 40,
+}
 # 品种合约规模（每标准手；2026-09-23 统一 MT4/MT5 经纪商 Exness 型口径：1 回测手 = 0.01 标准手，
 # 盈亏 = 价差 × 方向 × lots × 乘数，乘数 = 每标准手规模 × 0.01；未知品种缺省乘数 1.0 保持旧行为）
 SYMBOL_CONTRACTS = {
@@ -67,6 +73,10 @@ def contract_mult_of(symbol):
 DEFAULT_SLIP_STOP = 3.0
 # 最大止损（绝对价格）：止损离进场价最远不超过该值；支阻位更远时收到进场价±该值（键名仍为 slip_fallback）
 DEFAULT_SLIP_FALLBACK = 10.0
+# 品种默认最大止损（未列入的品种用上面的全局值；2026-09-28 白银已保存的 0.2 收成默认）
+DEFAULT_SLIP_FALLBACK_BY_SYMBOL = {
+    "XAGUSD": 0.2,
+}
 # 保本滑点：保本止损位 beStop = 进场成交K线极值 ± slip_be（short: high+ / long: low−）
 DEFAULT_SLIP_BE = 3.0
 # 滑点 ATR 系数（2026-09-19）：有效滑点 = 固定滑点 + 系数 × ATR(14, 背驰周期 markRes)；0=关闭

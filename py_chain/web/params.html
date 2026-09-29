@@ -50,6 +50,11 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 .prow .zs-side .zs-keep{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px;white-space:nowrap}
 .prow .zs-side .zs-keep.dim{opacity:.45}
 .prow .zs-side .zs-keep.dim input{pointer-events:none}
+/* 画笔：顶底分形不能包含，一张卡片里放各周期单根长K豁免点数 */
+.prow.span-all{grid-column:1/-1;flex-direction:column;align-items:stretch;gap:8px}
+.prow .period-fields{display:flex;flex-wrap:wrap;gap:8px 14px}
+.prow .period-fields label{display:flex;align-items:center;gap:6px;color:var(--text);font-size:12.5px;white-space:nowrap}
+.prow .period-fields input{width:72px;text-align:right}
 /* 滑点行内嵌 ATR 系数小输入框（无独立参数行） */
 .prow .slip-k{display:flex;align-items:center;gap:4px;color:var(--muted);font-size:11.5px;white-space:nowrap;flex-shrink:0}
 .prow .slip-k input{width:64px;text-align:right}
@@ -384,8 +389,16 @@ function moduleView(name) {
   const m = modules[name];
   if (!m) return null;
   const bucket = (m.bySymbol && m.bySymbol[activeSymbol]) || {};
+  const defaults = bucket.defaults || m.defaults || {};
+  const schema = {};
+  Object.keys(m.schema || {}).forEach((k) => {
+    const spec = m.schema[k];
+    schema[k] = Object.assign({}, spec, {
+      default: Object.prototype.hasOwnProperty.call(defaults, k) ? defaults[k] : spec.default,
+    });
+  });
   return {
-    schema: m.schema, defaults: m.defaults,
+    schema, defaults,
     overrides: bucket.overrides || {},
     effective: bucket.effective || m.effective || {},
     savedAt: bucket.savedAt, label: bucket.label, code: bucket.code,
@@ -522,6 +535,46 @@ function anchorRowHtml(m) {
     </span></div>`;
 }
 
+// 画笔：「顶底分形不能包含（单根长K豁免）」一张卡片内放各周期点数（大→小，与画中枢周期序一致）
+const WIDE_BAR_PERIODS = [
+  ['wideBarPointsD', '日线'],
+  ['wideBarPoints240', '4小时'],
+  ['wideBarPoints60', '1小时'],
+  ['wideBarPoints15', '15分钟'],
+  ['wideBarPoints3', '3分钟'],
+];
+const WIDE_BAR_KEYS = new Set(WIDE_BAR_PERIODS.map(([k]) => k));
+
+function wideBarRowHtml(m) {
+  const isMod = WIDE_BAR_PERIODS.some(([k]) => m.overrides[k] !== undefined);
+  const desc = '各周期单根K线振幅（最高-最低）≥ 该点数时，不参与分型终点侧三根的反向贯穿检查。0 表示该周期不豁免';
+  const defText = WIDE_BAR_PERIODS.map(([k, name]) => `${name} ${m.schema[k].default}`).join(' · ');
+  const fields = WIDE_BAR_PERIODS.map(([k, name]) => {
+    const spec = m.schema[k];
+    return `<label>${name}<input type="number" step="any" min="${spec.min}" max="${spec.max}" data-k="${k}" value="${m.effective[k]}" title="${spec.desc}" aria-label="${name}单根长K豁免"></label>`;
+  }).join('');
+  return `<div class="prow span-all ${isMod ? 'mod' : ''}" title="${desc}">
+    <span class="pname"><span class="plabel">顶底分形不能包含（单根长K豁免）<span class="badge">已修改</span></span>
+    <span class="pdef">默认 ${defText} · ${desc}</span></span>
+    <span class="period-fields">${fields}</span></div>`;
+}
+
+function chanRowsHtml(m) {
+  let html = '';
+  let placed = false;
+  for (const key of Object.keys(m.schema)) {
+    if (WIDE_BAR_KEYS.has(key)) {
+      if (!placed) {
+        html += wideBarRowHtml(m);
+        placed = true;
+      }
+      continue;
+    }
+    html += paramRow(m, key);
+  }
+  return html;
+}
+
 function pointsRowsHtml(m) {
   return Object.keys(m.schema)
     .filter(k => k !== 'anchorUndecidedMinBars')
@@ -534,6 +587,8 @@ function renderModule(name) {
   if (!m || !m.schema) return;
   $('pgrid').innerHTML = name === 'zs'
     ? zsRowsHtml(m)
+    : name === 'chan'
+    ? chanRowsHtml(m)
     : name === 'entry'
     ? entryRowsHtml(m)
     : name === 'points'

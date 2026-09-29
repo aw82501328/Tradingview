@@ -37,8 +37,9 @@ class TestStructureContext(unittest.TestCase):
             if reflected:
                 bis, bars = mirror(bis, bars)
             original = copy.deepcopy(bis)
-            for n, phase, count in [(5, "confirmed", 5), (6, "expected", 2),
-                                     (8, "expected", 4), (9, "running", 5)]:
+            # 原方向已够笔、反向未到 5 块、且无更低周期：不收笔，相位保持 confirmed
+            for n, phase, count in [(5, "confirmed", 5), (6, "confirmed", 6),
+                                     (8, "confirmed", 8), (9, "running", 5)]:
                 ctx = core.buildStructureContext(bis, bars[:n], SEC, n*SEC)
                 self.assertEqual(ctx["current"]["phase"], phase)
                 self.assertEqual(ctx["current"]["mergedCount"], count)
@@ -74,8 +75,10 @@ class TestStructureContext(unittest.TestCase):
         bars.append(dict(time=9*SEC, high=18, low=16, open=16.4, close=17.6))
         confirmed = core.buildStructureContext(bis+[up], bars, SEC, 10*SEC)
         self.assertEqual(len([b for b in confirmed["bis"] if b["type"] == "up"]), 1)
-        self.assertEqual(confirmed["current"]["type"], "down")
-        self.assertEqual(confirmed["current"]["phase"], "expected")
+        # 确认后的上涨已够笔，反向一根不够笔且无更低周期：不收笔
+        self.assertEqual(confirmed["current"]["type"], "up")
+        self.assertEqual(confirmed["current"]["phase"], "confirmed")
+        self.assertFalse(confirmed["current"].get("_forming"))
 
     def test_forming_endpoint_cannot_anchor_first_class(self):
         bis, bars = sample()
@@ -123,7 +126,8 @@ console.log(JSON.stringify(cases.map(x=>c.buildStructureContext(x.bis,x.bars,x.s
         self.assertIn(('2买',3996.055),[(p['type'],p['price']) for p in pts])
         self.assertIn(('类2买',4019.24),[(p['type'],p['price']) for p in pts])
         state=plan.trend_state_of(views,bars,'240')
-        self.assertEqual(state,dict(dir=None,reason='4小时类2买回调中（预期段）',res='240'))
+        # 4小时上涨已够笔、反向未够笔、夹具未带下一级：不收笔，不再停在预期回调段
+        self.assertEqual(state,dict(dir='long',reason='4小时类2买后上涨',res='240'))
         code="""
 const fs=require('fs'), c=require('./.cursor/skills/chan-core/scripts/chan_core.js');
 const p=require('./.cursor/skills/trading-plan/scripts/trading_plan.js');

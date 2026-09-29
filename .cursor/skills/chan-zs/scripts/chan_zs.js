@@ -205,8 +205,12 @@ function onlyThisInterval(res) {
 
     /**
      * 绘制前确保图表数据覆盖到最早中枢的时间：
-     * 切换周期后图表可能只加载最近N根K线，较早的端点会被 TradingView 吸附到数据边缘，
-     * 形成无效矩形。因此绘制前检查第一根K线是否覆盖，未覆盖则 scrollToFirstBar 加载完整历史。
+     * 切换到低一级周期后图表可能只加载最近 N 根 K 线。较早中枢的左右缘都超出数据范围时，
+     * TradingView 会把两个角点吸到同一根已加载 K 线上，矩形宽度变成 0，图上就是一条竖线。
+     * 因此绘制前检查第一根 K 线是否早于最早中枢，未覆盖则 scrollToFirstBar 加载完整历史。
+     * 数据分批推进可能在批次之间停顿数秒，单轮「len+first 连续不变」会提前退出，
+     * 所以最多 3 轮「scrollToFirstBar + 等待」，每轮稳定后重触发滚动继续加载。
+     * 返回 { covered, first }：covered=false 时调用方必须跳过超范围中枢，不能创建 shape。
      */
     const ensureBarsCover = async (res, minTs) => {
       const readFirst = async () => {
@@ -222,10 +226,7 @@ function onlyThisInterval(res) {
         });
         return r.result.value || { first: null, len: 0 };
       };
-      const cur = await readFirst();
-      if (cur.first !== null && cur.first <= minTs) return;
-      if (DEBUG) console.log(`[数据覆盖] ${res} 首根K线 ${toT(cur.first)} 晚于最早中枢 ${toT(minTs)}，加载完整历史...`);
-      await client.Runtime.evaluate({
+      const scrollToFirstBar = () => client.Runtime.evaluate({
         expression: `(function() {
           const chart = TradingViewApi.activeChart();
           const widget = chart._chartWidget || (chart.chartModel && chart.chartModel()._chartWidget);
@@ -235,21 +236,30 @@ function onlyThisInterval(res) {
         })()`,
         returnByValue: true, awaitPromise: true, timeout: 10000,
       });
-      let prevLen = cur.len;
-      let prevFirst = cur.first;
-      let stableCnt = 0;
-      for (let i = 0; i < 200; i++) {
-        await sleep(1200);
-        const c = await readFirst();
-        if (c.first !== null && c.first <= minTs) break;
-        if (c.len === prevLen && c.len > 0 && i >= 3 && c.first === prevFirst) {
-          stableCnt++;
-          if (stableCnt >= 3) break;
-        } else {
-          stableCnt = 0;
+      let cur = await readFirst();
+      if (cur.first !== null && cur.first <= minTs) return { covered: true, first: cur.first };
+      if (DEBUG) console.log(`[数据覆盖] ${res} 首根K线 ${toT(cur.first)} 晚于最早中枢 ${toT(minTs)}，加载完整历史...`);
+      let covered = false;
+      for (let round = 0; round < 3 && !covered; round++) {
+        if (round > 0 && DEBUG) console.log(`[数据覆盖] ${res} 第 ${round + 1} 轮重试加载（当前首根 ${toT(cur.first)}）...`);
+        await scrollToFirstBar();
+        let prevLen = cur.len;
+        let prevFirst = cur.first;
+        let stableCnt = 0;
+        // 每轮最多 60×1.2s：覆盖即停；「len+first 连续 3 次不变」只结束本轮
+        for (let i = 0; i < 60; i++) {
+          await sleep(1200);
+          cur = await readFirst();
+          if (cur.first !== null && cur.first <= minTs) { covered = true; break; }
+          if (cur.len === prevLen && cur.len > 0 && i >= 3 && cur.first === prevFirst) {
+            stableCnt++;
+            if (stableCnt >= 3) break;
+          } else {
+            stableCnt = 0;
+          }
+          prevLen = cur.len;
+          prevFirst = cur.first;
         }
-        prevLen = c.len;
-        prevFirst = c.first;
       }
       // 恢复可视范围到实时
       await client.Runtime.evaluate({
@@ -261,6 +271,39 @@ function onlyThisInterval(res) {
           return 'ok';
         })()`,
         returnByValue: true, awaitPromise: true, timeout: 10000,
+      });
+      return { covered, first: cur.first };
+    };
+
+    // 按 id 读回已创建中枢矩形的两个角点（创建成功 ≠ 左右缘正确：超出数据范围会被吸到同一根 K 线）
+    const readRectsByIds = async (ids) => {
+      const r = await client.Runtime.evaluate({
+        expression: `(function() {
+          const chart = TradingViewApi.activeChart();
+          const IDS = ${JSON.stringify(ids)};
+          return IDS.map(id => {
+            try {
+              const sh = chart.getShapeById(id);
+              const pts = sh && sh._source && sh._source._points;
+              if (!pts || pts.length < 2) return null;
+              return [{ time: pts[0].time, price: pts[0].price }, { time: pts[1].time, price: pts[1].price }];
+            } catch (e) { return null; }
+          });
+        })()`,
+        returnByValue: true, awaitPromise: true, timeout: 20000,
+      });
+      return (r.result && r.result.value) || [];
+    };
+
+    const removeShapesByIds = async (ids) => {
+      if (!ids || ids.length === 0) return;
+      await client.Runtime.evaluate({
+        expression: `(function() {
+          const chart = TradingViewApi.activeChart();
+          for (const id of ${JSON.stringify(ids)}) { try { chart.removeEntity(id); } catch (e) {} }
+          return 'ok';
+        })()`,
+        returnByValue: true, awaitPromise: true, timeout: 20000,
       });
     };
 
@@ -469,12 +512,69 @@ function onlyThisInterval(res) {
         await ensureResolution(drawRes);
         currentRes = drawRes;
       }
-      // 绘制前确保图表数据覆盖最早中枢时间
+      // 绘制前确保图表数据覆盖最早中枢时间。未覆盖则只画左右缘都在已加载范围内的中枢：
+      // 更早的中枢两个角都会被吸到数据边缘的同一根 K 线，矩形退化成竖线。落盘数据仍保留完整列表。
+      let drawZss = zss;
       const minTs = zss.reduce((m, z) => Math.min(m, z.startTime, z.endTime), Infinity);
-      if (minTs !== Infinity) await ensureBarsCover(drawRes, minTs);
-      const createZSResult = await createZS(res, zss);
+      if (minTs !== Infinity) {
+        const cover = await ensureBarsCover(drawRes, minTs);
+        if (!cover.covered && cover.first !== null) {
+          const before = drawZss.length;
+          drawZss = drawZss.filter(z => z.startTime >= cover.first && z.endTime >= cover.first);
+          console.log(`[周期 ${res}] 警告: ${drawRes} 周期数据仅加载到 ${toT(cover.first)}，跳过 ${before - drawZss.length} 个更早的中枢（避免吸附成竖线；落盘数据完整）`);
+          if (drawZss.length === 0) {
+            console.log(`[周期 ${res}] 全部中枢超出已加载数据范围，本轮跳过绘制`);
+            continue;
+          }
+        }
+      }
+      const createZSResult = await createZS(res, drawZss);
+
+      // 回读校验：左右缘时间被吸到同一根 K 线（读回宽度不超过一根基准 K，而请求宽度更长）时删除重试。
+      // 只认「宽度塌掉」，不比较绝对时间——读回时间若整体平移，宽度仍在的矩形保持不动。
+      let finalResult = { ...createZSResult };
+      const createdIds = createZSResult.created_ids || [];
+      if (createdIds.length > 0 && drawZss.length > 0) {
+        const barSec = intervalSecOf(drawRes) || 1;
+        const verifyOnce = async (ids, list) => {
+          const ptsArr = await readRectsByIds(ids);
+          const bad = [];
+          for (let i = 0; i < ids.length; i++) {
+            const p = ptsArr[i];
+            if (!p || !p[0] || !p[1]) continue; // 角点读不到不误删
+            const z = list[i];
+            const want = Math.abs(z.endTime - z.startTime);
+            const got = Math.abs(p[1].time - p[0].time);
+            const collapsed = want > barSec && got <= barSec;
+            const hi = Math.max(p[0].price, p[1].price);
+            const lo = Math.min(p[0].price, p[1].price);
+            const priceBad = Math.abs(hi - z.zg) > 0.05 || Math.abs(lo - z.zd) > 0.05;
+            if (collapsed || priceBad) bad.push({ id: ids[i], z });
+          }
+          return bad;
+        };
+        const bad = await verifyOnce(createdIds, drawZss);
+        if (bad.length > 0) {
+          console.log(`[周期 ${res}] 回读校验: ${bad.length}/${createdIds.length} 个中枢被吸附成竖线，删除后重试...`);
+          await removeShapesByIds(bad.map(x => x.id));
+          const retryMin = bad.reduce((m, x) => Math.min(m, x.z.startTime, x.z.endTime), Infinity);
+          if (retryMin !== Infinity) await ensureBarsCover(drawRes, retryMin);
+          const retryZss = bad.map(x => x.z);
+          const retry = await createZS(res, retryZss);
+          const bad2 = await verifyOnce(retry.created_ids || [], retryZss);
+          if (bad2.length > 0) {
+            await removeShapesByIds(bad2.map(x => x.id));
+            console.log(`[周期 ${res}] 警告: 重试后仍有 ${bad2.length} 个中枢无法正确创建（数据未覆盖），已移除，可稍后重跑`);
+          }
+          finalResult = {
+            ...finalResult,
+            zs_ok: (createZSResult.zs_ok || 0) - bad.length + (retry.zs_ok || 0) - bad2.length,
+            zs_bad: bad2.length,
+          };
+        }
+      }
       console.log(`\n=== 中枢绘制结果 [周期 ${res}] ===`);
-      console.log(JSON.stringify(createZSResult, null, 2));
+      console.log(JSON.stringify(finalResult, null, 2));
     }
 
     // 最后切回原周期

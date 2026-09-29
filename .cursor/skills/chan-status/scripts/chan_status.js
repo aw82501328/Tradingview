@@ -806,8 +806,35 @@ async function main() {
       console.log("\n标记前清除旧状态标记:", clearedAll, "个");
     }
 
+    // 收笔要下一级笔：先按周期从小到大取K线并建结构，后面的大到小循环只消费结果
+    const barsHeld = {};
+    const structuredBis = {};
+    const nowCut = Math.floor(Date.now() / 1000);
+    let prepRes = originalRes;
+    const prepOrder = PERIODS.slice().sort((a, b) => (intervalSecOf(a) || 0) - (intervalSecOf(b) || 0));
+    for (const res of prepOrder) {
+      if (res !== prepRes) { await ensureResolution(res); prepRes = res; }
+      let d = await fetchBars(intervalSecOf(res));
+      if (!d || d.error || !d.bars || d.bars.length === 0) {
+        await sleep(3000);
+        await ensureResolution(res);
+        prepRes = res;
+        d = await fetchBars(intervalSecOf(res));
+      }
+      if (!d || d.error || !d.bars || d.bars.length === 0) continue;
+      barsHeld[res] = d.bars;
+      const lower = core.lowerResOf(res);
+      const lowerStroke = (lower && structuredBis[lower] && barsHeld[lower] && barsHeld[lower].length)
+        ? { bis: structuredBis[lower], bars: barsHeld[lower], barSec: intervalSecOf(lower) }
+        : null;
+      structuredBis[res] = core.buildStructureContext(
+        bisCache.periods[res] || [], d.bars, intervalSecOf(res), nowCut, null, null,
+        res === "60" ? core.makeBiLowerContext(res, (bisCache.bars || {})["15"] || [], nowCut) : null,
+        lowerStroke).bis;
+    }
+
     // 逐周期：从大到小计算状态并收集报告行（表格形式统一输出）
-    let currentRes = originalRes;
+    let currentRes = prepRes;
     let upperBis = null;
     let upperRes = null;
     const reportRows = []; // [{res, status, reason, pred}]
@@ -815,14 +842,8 @@ async function main() {
       const res = PERIODS[pi];
       if (res !== currentRes) { await ensureResolution(res); currentRes = res; }
 
-      let d = await fetchBars(intervalSecOf(res));
-      if (!d || d.error || !d.bars || d.bars.length === 0) {
-        await sleep(3000);
-        await ensureResolution(res);
-        currentRes = res;
-        d = await fetchBars(intervalSecOf(res));
-      }
-      if (!d || d.error || !d.bars || d.bars.length === 0) {
+      const d = barsHeld[res] ? { bars: barsHeld[res] } : null;
+      if (!d || !d.bars || d.bars.length === 0) {
         console.log(`\n[周期 ${res}] 无K线数据，跳过`);
         continue;
       }
@@ -834,7 +855,7 @@ async function main() {
       const lastPrice = lastBar ? lastBar.close : null;
       const lastBarTime = lastBar ? lastBar.time : null;
 
-      let curBis = core.buildStructureContext(bisCache.periods[res] || [], d.bars, intervalSecOf(res), Math.floor(Date.now()/1000), null, null, res === "60" ? core.makeBiLowerContext(res, (bisCache.bars || {})["15"] || [], Math.floor(Date.now()/1000)) : null).bis;
+      let curBis = structuredBis[res] || [];
       if (curBis.length === 0) {
         console.log(`\n[周期 ${res}] 笔数据为空（画笔未覆盖该周期），跳过`);
         continue;

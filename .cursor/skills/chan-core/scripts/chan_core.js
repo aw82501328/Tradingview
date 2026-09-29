@@ -26,9 +26,14 @@ const CHAN_CFG = {
   gapFilter: 1.0, // 跳空独立成笔阈值：相邻K线缺口 >= gapFilter*ATR 时强制独立成笔
   wickRatio: 0.70, // 长影剔除：影线占整根K线振幅的比例阈值（>= 时视为冲高/探底插针）
   wickAtrK: 0.5,   // 长影剔除：影线绝对长度下限 = wickAtrK * ATR（窄幅小K线免疫）
-  // 15分钟大振幅豁免：单根K线振幅（高-低）≥ 该点数时，不参与分型终点侧三根的反向贯穿检查。
-  // 只作用于 buildBi 传入 res==="15"；其它周期保持原规则。0=不豁免。
-  wideBarPoints: 30,
+  // 顶底分形不能包含（单根长K豁免）：该周期单根K线振幅（高-低）≥ 对应点数时，
+  // 不参与分型终点侧三根的反向贯穿检查。按周期取值（wideBarPointsOf）；0=该周期不豁免。
+  // 日线/4小时/1小时/15分钟/3分钟默认均为 30 点。
+  wideBarPointsD: 30,
+  wideBarPoints240: 30,
+  wideBarPoints60: 30,
+  wideBarPoints15: 30,
+  wideBarPoints3: 30,
   divergeDurRatio: 3, // 背驰面积判据的时长可比上限：面积Σ = 柱高×K线根数、与区间时长线性相关，
                       // 两段时长比 > 该值时不具可比性，面积项不计入背驰（只用 DIF/柱高判据）
   debug: false,   // 调试打印（buildBi / 买卖点识别过程）
@@ -40,23 +45,22 @@ const CHAN_CFG = {
   nearDoubleLowerRatio: 0.5, // 柱峰值和DIF幅度均须减弱至此前的50%以内
   // ---- 近等双顶每周期开关（2026-09-25 参数化；此前硬编码仅 ≥1h 开启，默认=现行行为）----
   // 开启该周期「近等双顶/双底平台取后顶/后底」；gating 统一走 nearDoubleOn(res)，
-  // 五周期之外（30S/5/30/W 等）一律不开启。15m/3m 默认关：平台尾噪声多，
-  // 全周期开启曾实测 61 次触发致微观结构大面积重排（影响评估后用户决策限 ≥1h）。
-  nearDouble3: false,
-  nearDouble15: false,
+  // 五周期之外（30S/5/30/W 等）一律不开启。3m/15m 默认开（2026-09-28 与参数页已改值对齐）。
+  nearDouble3: true,
+  nearDouble15: true,
   nearDouble60: true,
   nearDouble240: true,
   nearDoubleD: true,
   // 近等后顶/后底（反弹不成笔）取后：阶段二「间隔不足→回溯替换」分支的扩展，详见该分支注释。
   // 关闭后仅 k.locked（上级笔端点，区间套强制落地）路径仍生效。
   nearDoubleRebound: true,
-  // ---- 三处规则修复 + 跨级下沉（2026-09-26；与 py_chain/chan_core.py 对齐，默认关=原行为）----
+  // ---- 三处规则修复 + 跨级下沉（2026-09-26；与 py_chain/chan_core.py 对齐）----
   anchorUndecidedSkip: true,    // A 未定型不接管：2/3类点 after 不存在/未达根数时不接管锚点（默认开）
   anchorUndecidedMinBars: 2,    // A 定型阈值（点后反向段本级合并块数；2=右肩+1根确认）
-  divergeReferByZs: false,      // B 背驰中枢参照：中枢内部段不参与比较，参照=入中枢段
-  sinkSkipLevel: false,         // D 跨级下沉：次级展开<3笔/方向不符/端点含糊时跳级继续向下
-  pointEnoughForming: false,    // C-2 成笔可能够笔：形成段 enough 计数只到极值块
-  synthIntrabarBars: false,     // C-1 盘中合成K（回测引擎侧实现；JS 标记端仅透传）
+  divergeReferByZs: true,       // B 背驰中枢参照：中枢内部段不参与比较，参照=入中枢段（默认开）
+  sinkSkipLevel: true,          // D 跨级下沉：次级展开<3笔/方向不符/端点含糊时跳级继续向下（默认开）
+  pointEnoughForming: true,     // C-2 成笔可能够笔：形成段 enough 计数只到极值块（默认开）
+  synthIntrabarBars: true,      // C-1 盘中合成K（回测引擎侧实现；JS 标记端仅透传；默认开）
 };
 
 // ============================================================
@@ -434,10 +438,10 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lower
     const rangeHigh = a.type === "top"
       ? Math.max(merged[i].high, merged[i + 1].high)
       : Math.max(merged[i - 1].high, merged[i].high);
-    // 终点侧三根。15分钟上振幅 ≥ wideBarPoints 的K线不参与（大振幅K不作为反向贯穿证据）。
+    // 终点侧三根。本周期振幅 ≥ 单根长K豁免点数的K线不参与（大振幅K不作为反向贯穿证据）。
     // 三根都被豁免时，终点侧不构成反向贯穿。
-    const thr = CHAN_CFG.wideBarPoints || 0;
-    const skipWide = String(res) === "15" && thr > 0;
+    const thr = wideBarPointsOf(res);
+    const skipWide = thr > 0;
     let endLow = null, endHigh = null;
     for (const idx of [j - 1, j, j + 1]) {
       const m = merged[idx];
@@ -1263,6 +1267,16 @@ function intervalSecOf(res) {
 // 此处收窄为 false；全链路（画笔/回测/对拍）无 W 调用点，零实际影响。
 const NEAR_DOUBLE_SWITCH_BY_SEC = { 180: "nearDouble3", 900: "nearDouble15", 3600: "nearDouble60",
                                    14400: "nearDouble240", 86400: "nearDoubleD" };
+const WIDE_BAR_POINTS_BY_SEC = { 180: "wideBarPoints3", 900: "wideBarPoints15", 3600: "wideBarPoints60",
+                                 14400: "wideBarPoints240", 86400: "wideBarPointsD" };
+function wideBarPointsOf(res) {
+  // 该周期「顶底分形不能包含」的单根长K豁免点数。未列周期、缺省、或配置为 0 时返回 0（不豁免）。
+  if (typeof res !== "number" && typeof res !== "string") return 0;
+  const sec = typeof res === "number" ? res : intervalSecOf(res);
+  const key = WIDE_BAR_POINTS_BY_SEC[sec];
+  const v = key ? Number(CHAN_CFG[key]) : 0;
+  return v > 0 ? v : 0;
+}
 function nearDoubleOn(res) {
   if (typeof res !== "number" && typeof res !== "string") return false;
   const sec = typeof res === "number" ? res : intervalSecOf(res);
@@ -1979,7 +1993,58 @@ function mergedSegmentCount(merged, startTime, barSec = 0) {
 }
 function confirmedStructureBis(bis) { return (bis || []).filter(b => !b._forming); }
 function pointEligibleBis(bis) { return (bis || []).filter(b => !b._forming || b.enough); }
-function buildStructureContext(bis, bars, barSec, tCut = null, merged = null, fractals = null, lowerContext = null) {
+// 原笔合并块数：起点到端点（含端点块），不含端点之后的反向K
+function originMergedCount(merged, last, barSec) {
+  const total = mergedSegmentCount(merged, last.startTime, barSec);
+  const tail = mergedSegmentCount(merged, last.endTime, barSec);
+  if (tail <= 0) return total;
+  return Math.max(0, total - tail + 1);
+}
+// 下一级最近中枢：出中枢笔相对入中枢笔是否背驰（只用 isBiDiverge）。无下一级、无中枢或尚未离开 → 不背驰
+function lowerExitEnterDiverge(lowerStroke, upperBi, cutoff) {
+  if (!lowerStroke || !upperBi) return false;
+  const lb = lowerStroke.bis || [], bars = lowerStroke.bars || [], barSec = lowerStroke.barSec || 0;
+  if (lb.length < 3 || !bars.length) return false;
+  const macd = calcMACD(bars);
+  const seg = {...upperBi, endTime: Math.max(upperBi.endTime || 0, cutoff || 0), coverageEnd: cutoff};
+  const zss = buildZSByUpper(lb, [seg], barSec, true);
+  if (!zss.length) return false;
+  const zs = zss[zss.length - 1];
+  const enter = lb.find(b => b.endTime === zs.enterEndTime);
+  if (!enter) return false;
+  // 第一次离开之后若价格回到中枢，当下出中枢笔取更晚的同向离开
+  const zd = zs.zd, zg = zs.zg, eps = 1e-8;
+  const leaves = [];
+  if (zd != null && zg != null) {
+    for (const b of lb) {
+      if (b.type !== enter.type) continue;
+      if ((b.endTime || 0) <= (enter.endTime || 0)) continue;
+      if (b.startTime > (cutoff || 0)) continue;
+      const startIn = b.startPrice >= zd - eps && b.startPrice <= zg + eps;
+      const endBreak = b.endPrice < zd - eps || b.endPrice > zg + eps;
+      if (startIn && endBreak) leaves.push(b);
+    }
+  }
+  let exitBi = leaves.length ? leaves[leaves.length - 1] : null;
+  if (!exitBi && zs.exitTime != null) exitBi = lb.find(b => b.startTime === zs.exitStartTime) || null;
+  if (!exitBi) return false;
+  return !!isBiDiverge(exitBi, enter, macd);
+}
+// 收笔：反向够笔，或下一级出/入中枢背驰。不收笔：原方向已够笔、反向未够笔、且下一级不背驰。原方向未够笔则照常挂形成段。门槛 5。
+function reverseStrokeCloses(last, merged, barSec, enoughCount, lowerStroke, cutoff) {
+  if (enoughCount >= 5) return true;
+  if (originMergedCount(merged, last, barSec) < 5) return true;
+  return lowerExitEnterDiverge(lowerStroke, last, cutoff);
+}
+function lowerStrokePack(res, periodBis, barsByPeriod) {
+  const lower = lowerResOf(res);
+  if (!lower) return null;
+  const bis = periodBis && periodBis[lower];
+  const bars = barsByPeriod && barsByPeriod[lower];
+  if (!bis || !bis.length || !bars || !bars.length) return null;
+  return {bis, bars, barSec: intervalSecOf(lower)};
+}
+function buildStructureContext(bis, bars, barSec, tCut = null, merged = null, fractals = null, lowerContext = null, lowerStroke = null) {
   let raw = bars || [], known = confirmedStructureBis(bis);
   if (tCut != null && raw.length && raw[raw.length - 1].time + barSec > tCut) {
     raw = raw.filter(b => b.time + barSec <= tCut);
@@ -2016,11 +2081,15 @@ function buildStructureContext(bis, bars, barSec, tCut = null, merged = null, fr
           for (let i = 0; i < merged.length; i++) if (merged[i].time <= extreme.time) iExt = i;
           enoughCount = Math.max(0, iExt - idx + 1);
         }
-        current = {type: kind === "bottom" ? "up" : "down", startTime: last.endTime,
+        const forming = {type: kind === "bottom" ? "up" : "down", startTime: last.endTime,
           startPrice: last.endPrice, endTime: extreme.time, endPrice: price, span: Math.abs(price-last.endPrice),
           _forming: true, _contextReady: true, mergedCount: count, enough: enoughCount >= 5,
           phase: enoughCount >= 5 ? "running" : "expected", coverageEnd: cutoff};
-        result.bis.push(current);
+        // 收笔才挂反向形成段；不收笔时 current 仍是原笔，覆盖延续到 cutoff
+        if (reverseStrokeCloses(last, merged, barSec, enoughCount, lowerStroke, cutoff)) {
+          current = forming;
+          result.bis.push(current);
+        }
       }
     }
   }
@@ -2030,16 +2099,27 @@ function buildStructureContext(bis, bars, barSec, tCut = null, merged = null, fr
 }
 function structurePeriods(periodBis, barsByPeriod, tCut = null) {
   if (tCut == null) tCut = Math.max(0, ...Object.entries(barsByPeriod).filter(([,v])=>v.length).map(([r,v])=>v[v.length-1].time+intervalSecOf(r)));
-  const out = {};
-  for (const [r,bis] of Object.entries(periodBis)) {
-    if (bis.length && bis[bis.length-1]._contextReady) { out[r] = bis; continue; }
-    out[r] = buildStructureContext(bis, barsByPeriod[r] || [], intervalSecOf(r), tCut, null, null, r === "60" ? makeBiLowerContext(r,barsByPeriod["15"] || [],tCut) : null).bis;
+  // 从小周期到大周期：上一级收笔要看下一级已经建好的笔。返回键顺序与输入一致。
+  const computed = {};
+  const order = Object.keys(periodBis).sort((a, b) => (intervalSecOf(a) || 0) - (intervalSecOf(b) || 0));
+  for (const r of order) {
+    const bis = periodBis[r] || [];
+    if (bis.length && bis[bis.length - 1]._contextReady) { computed[r] = bis; continue; }
+    const ctx = buildStructureContext(bis, barsByPeriod[r] || [], intervalSecOf(r), tCut, null, null,
+      r === "60" ? makeBiLowerContext(r, barsByPeriod["15"] || [], tCut) : null,
+      lowerStrokePack(r, computed, barsByPeriod));
+    const view = ctx.bis.slice();
+    if (view.length && ctx.current) view[view.length - 1] = {...view[view.length - 1], coverageEnd: tCut};
+    computed[r] = view;
   }
+  const out = {};
+  for (const r of Object.keys(periodBis)) if (computed[r]) out[r] = computed[r];
   return out;
 }
 
 module.exports = {
   mergedSegmentCount, confirmedStructureBis, pointEligibleBis, buildStructureContext, structurePeriods,
+  lowerStrokePack, lowerExitEnterDiverge,
   CHAN_CFG,
   // K线/分型/笔
   markWickBars,

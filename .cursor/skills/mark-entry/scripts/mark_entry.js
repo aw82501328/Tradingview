@@ -1194,6 +1194,7 @@ async function main() {
     // 不加窗口会把 3m 历史往回加载到 --from（数月、数万根），TV 加载不到该深度导致周期被跳过。
     const DRAW_WINDOW_DAYS = { "3": 15, "15": 30, "30S": 3 };
     const periodData = {};
+    const fetched = {};
     let loadRes = originalRes;
     for (const res of ALL_RES) {
       if (res !== loadRes) {
@@ -1205,8 +1206,22 @@ async function main() {
         console.log(`\n[周期 ${res}] 读取K线失败，跳过该周期数据`);
         continue;
       }
-      const cutoff = Math.floor(Date.now()/1000);
-      const structure = core.buildStructureContext(periodBis[res], d.bars, intervalSecOf(res), cutoff, null, null, res === "60" ? core.makeBiLowerContext(res, (bisData.bars || {})["15"] || [], cutoff) : null);
+      fetched[res] = d;
+    }
+    // 收笔要下一级笔：K线取齐后按周期从小到大建结构
+    const cutoff = Math.floor(Date.now()/1000);
+    const barsByPeriod = {};
+    for (const res of Object.keys(fetched)) barsByPeriod[res] = fetched[res].bars;
+    const structOrder = Object.keys(fetched).sort((a, b) => (intervalSecOf(a) || 0) - (intervalSecOf(b) || 0));
+    const structuredBis = {};
+    for (const res of structOrder) {
+      const d = fetched[res];
+      const lower = core.lowerResOf(res);
+      const lowerStroke = (lower && structuredBis[lower] && (barsByPeriod[lower] || []).length)
+        ? { bis: structuredBis[lower], bars: barsByPeriod[lower], barSec: intervalSecOf(lower) }
+        : null;
+      const structure = core.buildStructureContext(periodBis[res], d.bars, intervalSecOf(res), cutoff, null, null, res === "60" ? core.makeBiLowerContext(res, (bisData.bars || {})["15"] || [], cutoff) : null, lowerStroke);
+      structuredBis[res] = structure.bis;
       const closedBars = d.bars.filter(b => b.time + intervalSecOf(res) <= cutoff);
       periodData[res] = {
         bis: structure.bis, bars: closedBars, merged: structure.merged,

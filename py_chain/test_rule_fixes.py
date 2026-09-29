@@ -124,7 +124,8 @@ class DivergeReferZsTests(unittest.TestCase):
         self.barSec = 180
 
     def test_off_takes_nearest(self):
-        ref = ME.pickDivergeRefer(self.bis, self.F, self.barSec)
+        with CfgSwitch(divergeReferByZs=False):
+            ref = ME.pickDivergeRefer(self.bis, self.F, self.barSec)
         self.assertEqual(ref["startTime"], 50)  # 紧邻前一同向笔（中枢内部 50→70）
 
     def test_on_takes_entering_stroke(self):
@@ -165,7 +166,8 @@ class PointEnoughFormingTests(unittest.TestCase):
         return buildStructureContext(known, self.BARS, 60, tCut=420)
 
     def test_off_counts_to_now(self):
-        ctx = self._ctx()
+        with CfgSwitch(pointEnoughForming=False):
+            ctx = self._ctx()
         cur = ctx["bis"][-1]
         self.assertEqual(cur.get("type"), "down")     # 预期下跌段已生成
         self.assertEqual(cur.get("mergedCount"), 6)   # 端点块(60)→当下共 6 块（含抬低点后 2 块）
@@ -243,7 +245,8 @@ class SinkSkipLevelTests(unittest.TestCase):
                 "15": {"bis": bis15}, "3": {"bis": bis3}}
 
     def test_off_breaks_at_mismatch(self):
-        nodes = ME._sinkChainRealtimeNodes(self._pd(), "60", "short")
+        with CfgSwitch(sinkSkipLevel=False):
+            nodes = ME._sinkChainRealtimeNodes(self._pd(), "60", "short")
         self.assertEqual([n["res"] for n in nodes], ["60"])
 
     def test_on_skips_to_3(self):
