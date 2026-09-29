@@ -7,6 +7,8 @@ description: Mark support/resistance flip levels (支阻互换位) on the Tradin
 
 通过 CDP 连接 TradingView Desktop，读取 **`chan-bi`（画笔）SKILL 落盘的笔数据**，识别各周期重要的**支阻互换位**（支撑↔阻力角色互换的关键价位），并在图上标记。
 
+> **模块分类**：交易策略 · **缠论V1**（支阻位参数按策略经方案列表单选生效，2026-09-29 起归入策略组；分层见 `.cursor/skills/README.md`）。
+>
 > **算法来源**：支阻互换位是独立技术分析概念（非缠论算法），识别逻辑在本脚本 `scripts/mark_sr_flip.js` 内实现；仅复用 `chan-core` 的 `calcATR` 等工具函数。
 >
 > **强制依赖画笔数据**：本 SKILL **不计算笔**，**强制读取 `chan-bi` 画笔 SKILL 落盘的笔数据文件**（`.cursor/cache/bis_<品种>.json`）。如果文件不存在、或文件品种与当前图表品种不一致，脚本会**报错退出**，必须先对当前品种运行「画笔」（chan-bi）后再标记。

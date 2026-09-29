@@ -143,11 +143,11 @@ def strategyOf(res, type_, reason, label, cls, cfg=None):
         if type_ == "2卖" and cls in ("前低附近", "回到2卖点"):
             return dict(base, direction="空头空", strategy="等待反弹后的类2卖点")
         return dict(base, direction="空头多", strategy="等待低点附近的一买")
-    if type_ in ("3买", "类3买"):
+    if type_ in ("3买", "类3买", "4买", "类4买"):
         if third_strong and cls == "过左高不背驰":
             return dict(base, direction="多头多", strategy="等待回调后的新买点")
         return dict(base, direction="多头空", strategy="等待高点附近的一卖")
-    if type_ in ("3卖", "类3卖"):
+    if type_ in ("3卖", "类3卖", "4卖", "类4卖"):
         if third_strong and cls == "过左低不背驰":
             return dict(base, direction="空头空", strategy="等待反弹后的新卖点")
         return dict(base, direction="空头多", strategy="等待低点附近的一买")
@@ -375,7 +375,7 @@ def predictPlan(res, bis, upperBis, macdArr, lastPrice, bars, atr=0, barSec=None
     #    跳过它继续向前扫描（回退前锚，本义：1卖后的「2卖交易预期」不被刚出生的点打断）；
     #    无可回退前锚时由未定型点本身接管（维持旧行为，保守）。
     def cls_of(p):
-        if p["type"] in ("2买", "类2买", "3买", "类3买", "2卖", "类2卖", "3卖", "类3卖"):
+        if p["type"] in ("2买", "类2买", "3买", "类3买", "4买", "类4买", "2卖", "类2卖", "3卖", "类3卖", "4卖", "类4卖"):
             return classifySecond(bis, macdArr, p, range_cfg)
         return "其他"
 
@@ -771,13 +771,13 @@ def trend_direction(res, bis, bars, upperBis, macdArr, tCut=None, rebound=None):
     # 时与 predictPlan 同口径跳过、锚定前一个定型点；全部未定型 → 维持旧行为取最近点。
     if CHAN_CFG.get("anchorUndecidedSkip"):
         for cand in reversed(pts):
-            if (cand["type"] in ("2买", "类2买", "3买", "类3买", "2卖", "类2卖", "3卖", "类3卖")
+            if (cand["type"] in ("2买", "类2买", "3买", "类3买", "4买", "类4买", "2卖", "类2卖", "3卖", "类3卖", "4卖", "类4卖")
                     and classifySecond(bis, macdArr, cand) == "未定型"):
                 continue
             p = cand
             break
     t_ = p["type"]
-    is_buy = t_ in ("1买", "2买", "类2买", "3买", "类3买")
+    is_buy = t_ in ("1买", "2买", "类2买", "3买", "类3买", "4买", "类4买")
     if t_ in ("1买", "1卖"):
         # 1类点须先出现强分型（合并K链与 buildBi 同源；懒计算——仅 1类点需要）
         merged = mergeBars(markWickBars(bars or []))

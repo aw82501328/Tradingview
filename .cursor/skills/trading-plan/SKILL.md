@@ -8,6 +8,8 @@ disable-model-invocation: true
 
 通过 CDP 连接 TradingView Desktop，读取 **`chan-bi`（画笔）SKILL 落盘的笔数据**，逐周期（日线/4小时/1小时/15分钟/3分钟）判定该品种当前是**震荡**还是**趋势**；趋势时依据「最近笔端点的买卖点类型」生成对应**交易策略**。输出**文本计划表（品种、周期、方向、策略）**，并把策略用**蓝色文字**标记显示在各周期图上。
 
+> **模块分类**：交易策略 · **缠论V1**（计划→进出场为同一策略的两步；分层与新增策略接入见 `.cursor/skills/README.md`）。
+>
 > **算法来源**：缠论算法（买卖点识别、中枢）由 **`chan-core`**（`.cursor/skills/chan-core/scripts/chan_core.js`）提供（唯一算法源）；震荡判定 `isRangeBound` 复制自 **`chan-status`**（`.cursor/skills/chan-status/scripts/chan_status.js`，保持 chan-status 不被改动，复制并标注来源）。交易策略映射为用户自定义规则，实现在本脚本 `predictPlan` 纯函数内（可单测）。
 >
 > **强制依赖画笔数据**：本 SKILL **不计算笔**，**强制读取 `chan-bi` 画笔 SKILL 落盘的笔数据文件**（`.cursor/cache/bis_<品种>.json`）。如果文件不存在、或文件品种与当前图表品种不一致，脚本会**报错退出**，必须先对当前品种运行「画笔」（chan-bi）后再生成交易计划。

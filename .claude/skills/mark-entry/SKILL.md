@@ -10,6 +10,8 @@ description: Mark entry signals (进出场) on the TradingView Desktop chart via
 - **买点（多头）** → 向上**红色**箭头（`arrow_up`）
 - **卖点（空头）** → 向下**绿色**箭头（`arrow_down`）
 
+> **模块分类**：交易策略 · **缠论V1**（计划→进出场为同一策略的两步；分层与新增策略接入见 `.cursor/skills/README.md`）。
+>
 > **算法来源**：背驰判定复用 `chan-core` 的 `isBiDiverge`，中枢复用 `buildZSByUpper`（唯一算法源）；**进场状态判定不自行实现**，直接读取 `trading-plan` 落盘的 `.cursor/cache/plan_<品种>.json`（各周期 `direction/strategy`）。
 >
 > **强制依赖三个前置数据**：

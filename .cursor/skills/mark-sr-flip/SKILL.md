@@ -8,6 +8,8 @@ disable-model-invocation: true
 
 通过 CDP 连接 TradingView Desktop，读取 **`chan-bi`（画笔）SKILL 落盘的笔数据**，识别各周期重要的**支阻位**，并在图上标记。支阻位来源按周期二选一：**系统计算**（密集区）或**人工输入**（`--manual`，2026-09-13 新增）；黄金分割与 BOLL 为独立**叠加层**（`--sr-types` 开关即叠加，默认 `cluster,boll`），人工周期照样叠加。
 
+> **模块分类**：交易策略 · **缠论V1**（支阻位参数按策略经方案列表单选生效，2026-09-29 起归入策略组；分层见 `.cursor/skills/README.md`）。
+>
 > **算法来源**：密集区（强支阻互换位/近期极值位）是独立技术分析概念（非缠论算法），识别逻辑在本脚本 `scripts/mark_sr_flip.js` 内实现；黄金分割位基于**非一类买卖点**的参照笔回撤，需现算买卖点（复用 `chan-core` 的 `findBuyPoints`/`findSellPoints`/`calcMACD`）；BOLL 布林带取每周期最后一根已收盘K线的 26 周期 SMA ± 2σ；另复用 `calcATR` 等工具函数。
 >
 > **强制依赖画笔数据**：本 SKILL **不计算笔**，**强制读取 `chan-bi` 画笔 SKILL 落盘的笔数据文件**（`.cursor/cache/bis_<品种>.json`）。如果文件不存在、或文件品种与当前图表品种不一致，脚本会**报错退出**，必须先对当前品种运行「画笔」（chan-bi）后再标记。

@@ -42,6 +42,7 @@ from .marks import draw_signal_marks, draw_sr_marks, clear_signal_marks, clear_a
 from . import chan_core
 from . import data_store, td_launcher, sr_service, sr_draw, sr_tune, sr_tune_api, sr_preset_excel, analysis_service, analysis_api, bt_runs, bt_errors, param_center, params_api, live_api
 from . import mark_entry
+from . import module_registry
 
 # ============================================================
 # 全局互斥：三种模式同一时间最多运行一种
@@ -1395,6 +1396,10 @@ class ControlApp:
             out["use_cache"] = v in (True, "true", "True", "1", 1)
         if out.get("data_source") not in ("live", "cache", "store"):
             out["data_source"] = "live"
+        # 交易策略（模块注册表校验；空 = 默认策略 缠论V1，未知拒绝启动）。
+        # 引擎当前唯一实现，入口层只校验不分发；第二策略到来时按注册表
+        # STRATEGIES[engine] 在各 Worker 构建处分发。
+        out["strategy"] = module_registry.normalize_strategy(out.get("strategy"))
         # 品种多选（回测批量并行，2026-09-23）：列表或逗号串 → 去重保序；
         # 恰 1 个 → 折叠回单品种 symbol 走原路径（行为不变）；>1 个仅支持本地数据存储
         # （cache 是单品种 JSON、live 共享 CDP 图表均不可并行）。replay/live 不发此键。
@@ -1688,6 +1693,8 @@ def make_handler(app):
                 self._send_json({'ok': False, 'error': '服务重启中，请稍候'}, 503)
                 return
             if analysis_api.handle(self, app, "POST"):
+                return
+            if live_api.handle(self, app, "POST"):
                 return
             if params_api.handle(self, app, "POST", lambda: _params_busy(app)):
                 return

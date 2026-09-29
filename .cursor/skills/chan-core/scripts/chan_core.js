@@ -850,7 +850,8 @@ function fixBiExtremes(bis, merged) {
  * 中枢形成后支持延伸：后续笔与 [ZD, ZG] 有重叠则纳入中枢（GG/DD 扩展），
  * 出现离开中枢的笔时中枢结束：
  *   - 笔与中枢区间完全无重叠 → 离开；
- *   - 笔的起点在中枢区间内、终点突破中枢边界（从中枢内向边界外突破）→ 也视为离开。
+ *   - 笔的起点在中枢区间内、终点突破中枢边界，且下一笔没有回到已纳入笔的重叠区 → 离开。
+ *     下一笔重新相交则本笔只是回抽，中枢继续延伸（二卖与后面类2卖的公共重叠留在同一中枢）。
  * biCount 包含离开笔。
  * 中枢区间 [zd, zg] 取「构成中枢的全部笔（含离开笔）的重叠部分」：
  *   ZG = min(全部笔高点)，ZD = max(全部笔低点)。
@@ -864,6 +865,20 @@ function fixBiExtremes(bis, merged) {
  * @param {number} barSec 本周期单根K线时长（秒），用于左右各外扩 5 根K线；默认 0 表示不外扩
  * @returns {Array} 中枢列表 [{ startTime, endTime, zd, zg, dd, gg, biCount, extended, exitTime, enterEndTime, exitStartTime }]
  */
+/** 候选离开笔的下一笔是否仍与已纳入笔的重叠区相交（回抽未离开则中枢继续）。 */
+function nextBiReturns(bis, i, j, hi, lo) {
+  if (j + 1 >= bis.length) return false;
+  let runZd = -Infinity, runZg = Infinity;
+  for (let k = i; k <= j; k++) {
+    runZd = Math.max(runZd, lo(bis[k]));
+    runZg = Math.min(runZg, hi(bis[k]));
+  }
+  if (runZg <= runZd) return false;
+  const nlo = lo(bis[j + 1]), nhi = hi(bis[j + 1]);
+  if (nlo > runZg || nhi < runZd) return false;
+  return Math.min(runZg, nhi) > Math.max(runZd, nlo);
+}
+
 function buildZS(bis, barSec) {
   if (!bis || bis.length < 3) return [];
   const n = bis.length;
@@ -890,13 +905,14 @@ function buildZS(bis, barSec) {
         const bj = bis[j];
         const Hj = hi(bj), Lj = lo(bj);
         if (Lj <= zg && Hj >= zd) { // 与中枢区间有重叠 → 判断延伸还是离开
-          // 离开判定：笔的起点在中枢区间内、终点突破中枢边界（如从中枢内向下跌破下沿的下跌笔、
-          // 或从内部向上突破上沿的上涨笔），视为「离开中枢的笔」——它虽然起点还在中枢内，
-          // 但整笔朝区间外突破，中枢震荡在此笔起点处已结束。
-          // 起点在中枢区间外（另一侧）的穿越笔仍算延伸（如从下穿越到上）。
+          // 离开判定：起点在中枢内且终点突破边界。若下一笔回到已纳入笔的重叠区，
+          // 本笔只是回抽，继续延伸；否则中枢在本笔起点结束。
+          // 起点在中枢外的穿越笔仍算延伸。
           const startIn = bj.startPrice >= zd - eps && bj.startPrice <= zg + eps;
           const endBreak = bj.endPrice < zd - eps || bj.endPrice > zg + eps;
-          if (startIn && endBreak) {
+          // 下一笔又回到当前重叠区（回抽未离开）则本笔仍算延伸，
+          // 使二卖与其后类2卖的公共重叠留在同一个中枢里。
+          if (startIn && endBreak && !nextBiReturns(bis, i, j, hi, lo)) {
             exitTime = bj.startTime; // 离开笔起点
             break;
           }
@@ -914,8 +930,8 @@ function buildZS(bis, barSec) {
       if (biCount < 3) { i = j; continue; }
       // 中枢区间 = 构成中枢的全部笔（i..i+biCount-1，含离开笔）的重叠部分：
       //   ZG = min(全部笔高点)，ZD = max(全部笔低点)。
-      // 这样中枢上沿会收敛到离开笔/次高笔的高点，如 8-25~8-27 中枢的 5 笔
-      // （4697.105→4605.29→4673.765→4583.065→4643.21→4564.27）重叠上沿 = 4643.21。
+      // 中枢上沿收敛到全部构成笔（含回抽后仍重叠的类2卖笔、以及最终离开笔）的最低高点。
+      // 1小时 8-25 起：二卖 4670.83、类2卖 4643.21、类2卖 4631.98 的公共重叠上沿 = 4631.98。
       let zsZd = -Infinity, zsZg = Infinity;
       for (let k = i; k < i + biCount; k++) {
         const bk = bis[k];
@@ -1401,9 +1417,22 @@ function pickZsForTwo(zss, segStart, segEnd, twoTime) {
   return pool.reduce((a, b) => (t0(a) >= t0(b) ? a : b));
 }
 
-function appendThirdPoints(points, thirdList, mainType, classType, class2Type) {
+/** 同段离枢回踩/反弹的序号。第1个=3，第2个=类3，第3个=4，其后都是类4。 */
+function leavePointType(index, isSell) {
+  const side = isSell ? "卖" : "买";
+  if (index <= 0) return "3" + side;
+  if (index === 1) return "类3" + side;
+  if (index === 2) return "4" + side;
+  return "类4" + side;
+}
+
+const LEAVE_BUY = ["3买", "类3买", "4买", "类4买"];
+const LEAVE_SELL = ["3卖", "类3卖", "4卖", "类4卖"];
+
+function appendThirdPoints(points, thirdList, familyTypes, class2Type) {
+  const family = new Set(familyTypes);
   for (const t of thirdList) {
-    if (points.some(p => (p.type === mainType || p.type === classType) && p.time === t.time)) continue;
+    if (points.some(p => family.has(p.type) && p.time === t.time)) continue;
     const dup = points.findIndex(p => p.type === class2Type && p.time === t.time);
     if (dup >= 0) points.splice(dup, 1);
     points.push(t);
@@ -1494,11 +1523,17 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) 
         time: firstLow.time, price: firstLow.price,
         zg, segStart: up.startTime, segEnd: up.coverageEnd ?? up.endTime,
       });
-      const later = lows.find(l =>
-        l.time > firstLow.time && l.price > firstLow.price &&
-        l.price >= (zd - c2tol) && l.price <= zg
-      );
-      if (later) points.push({ type: "类2买", time: later.time, price: later.price });
+      // 同一中枢内每一个更高抬低都标类2买（低点可低于收敛后的 zd）
+      let prevPx = firstLow.price;
+      for (const l of lows) {
+        if (l.time <= firstLow.time || !(l.price > prevPx)) continue;
+        const b = bis[l.biIdx];
+        const bhi = Math.max(b.startPrice, b.endPrice);
+        if (l.price <= zg && bhi >= (zd - c2tol)) {
+          points.push({ type: "类2买", time: l.time, price: l.price });
+          prevPx = l.price;
+        }
+      }
     }
   } else {
     let structBottomIdx = null;
@@ -1537,16 +1572,16 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) 
             time: secondBuy.time, price: secondBuy.price,
             zg, segStart: t0, segEnd: t1,
           });
-          let classSecond = null;
+          let prevPx = secondBuy.price;
           for (let i = secondBuy.biIdx + 1; i < bis.length; i++) {
             if (bis[i].type !== "down") continue;
             const p = bis[i].endPrice;
-            if (p > secondBuy.price && p >= (zd - c2tol) && p <= zg) {
-              classSecond = { time: bis[i].endTime, price: p };
-              break;
+            const bhi = Math.max(bis[i].startPrice, bis[i].endPrice);
+            if (p > prevPx && p <= zg && bhi >= (zd - c2tol)) {
+              points.push({ type: "类2买", time: bis[i].endTime, price: p });
+              prevPx = p;
             }
           }
-          if (classSecond) points.push({ type: "类2买", time: classSecond.time, price: classSecond.price });
         }
       }
     }
@@ -1584,11 +1619,12 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) 
       }
     }
     if (valids.length > 0) {
-      thirdOut.push({ type: "3买", time: valids[0].time, price: valids[0].price });
-      if (valids.length >= 2) thirdOut.push({ type: "类3买", time: valids[1].time, price: valids[1].price });
+      valids.forEach((v, k) => {
+        thirdOut.push({ type: leavePointType(k, false), time: v.time, price: v.price });
+      });
     }
   }
-  appendThirdPoints(points, thirdOut, "3买", "类3买", "类2买");
+  appendThirdPoints(points, thirdOut, LEAVE_BUY, "类2买");
   return points;
 }
 
@@ -1702,11 +1738,18 @@ function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol)
         time: firstHigh.time, price: firstHigh.price,
         zd, segStart: dn.startTime, segEnd: dn.coverageEnd ?? dn.endTime,
       });
-      const later = highs.find(h =>
-        h.time > firstHigh.time && h.price < firstHigh.price &&
-        h.price >= zd && h.price <= (zg + c2tol)
-      );
-      if (later) points.push({ type: "类2卖", time: later.time, price: later.price });
+      // 同一中枢内，2卖之后每一个更低次高都标类2卖。
+      // 收敛后的 zg 是全部笔公共重叠，更早的类2卖可以高于这个 zg，只要上涨笔仍与中枢重叠。
+      let prevPx = firstHigh.price;
+      for (const h of highs) {
+        if (h.time <= firstHigh.time || !(h.price < prevPx)) continue;
+        const b = bis[h.biIdx];
+        const blo = Math.min(b.startPrice, b.endPrice);
+        if (h.price >= zd && blo <= (zg + c2tol)) {
+          points.push({ type: "类2卖", time: h.time, price: h.price });
+          prevPx = h.price;
+        }
+      }
     }
   } else {
     let structTopIdx = null;
@@ -1745,16 +1788,16 @@ function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol)
             time: secondSell.time, price: secondSell.price,
             zd, segStart: t0, segEnd: t1,
           });
-          let classSecond = null;
+          let prevPx = secondSell.price;
           for (let i = secondSell.biIdx + 1; i < bis.length; i++) {
             if (bis[i].type !== "up") continue;
             const p = bis[i].endPrice;
-            if (p < secondSell.price && p >= zd && p <= (zg + c2tol)) {
-              classSecond = { time: bis[i].endTime, price: p };
-              break;
+            const blo = Math.min(bis[i].startPrice, bis[i].endPrice);
+            if (p < prevPx && p >= zd && blo <= (zg + c2tol)) {
+              points.push({ type: "类2卖", time: bis[i].endTime, price: p });
+              prevPx = p;
             }
           }
-          if (classSecond) points.push({ type: "类2卖", time: classSecond.time, price: classSecond.price });
         }
       }
     }
@@ -1792,11 +1835,12 @@ function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol)
       }
     }
     if (valids.length > 0) {
-      thirdOut.push({ type: "3卖", time: valids[0].time, price: valids[0].price });
-      if (valids.length >= 2) thirdOut.push({ type: "类3卖", time: valids[1].time, price: valids[1].price });
+      valids.forEach((v, k) => {
+        thirdOut.push({ type: leavePointType(k, true), time: v.time, price: v.price });
+      });
     }
   }
-  appendThirdPoints(points, thirdOut, "3卖", "类3卖", "类2卖");
+  appendThirdPoints(points, thirdOut, LEAVE_SELL, "类2卖");
   return points;
 }
 

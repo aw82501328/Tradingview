@@ -5,6 +5,7 @@
     "server": "",
     "require_mode": "demo"
   },
+  "strategy": "chan_v1",
   "symbol": "XAUUSD",
   "db_symbol": "EXNESS:XAUUSD",
   "magic": 20260923,
