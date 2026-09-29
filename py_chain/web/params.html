@@ -36,6 +36,7 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 .prow .pname{flex:1;min-width:0}
 .prow .plabel{color:var(--text);font-size:12.5px;display:block}
 .prow .pdef{color:var(--muted);font-size:11px}
+.prow .pdef .pnew{color:#ffe566}
 .prow.mod{border-color:#7a5c1e;background:#1d1a10}
 .prow .badge{display:none;background:#3d3208;color:var(--warn);font-size:10px;padding:0 6px;
   border-radius:8px;margin-left:6px;border:0}
@@ -464,6 +465,34 @@ const ENTRY_GROUPS = [
   ['规则修复（07-07 06:30 案例锚点）', ['divergeReferByZs', 'sinkSkipLevel']],
 ];
 
+// 近等双顶规则更新句：卡片说明里用黄字标出（悬停 title 仍是纯文本）
+const PNEW_OPEN = '末根不等顶分型确认即可后移；';
+const PNEW_BODY = '容差只比实体，不比影线。';
+const PNEW_BY_KEY = {
+  nearDoubleAtrK: PNEW_BODY,
+  nearDoublePct: PNEW_BODY,
+  nearDoubleFixed: PNEW_BODY,
+  nearDouble3: PNEW_OPEN,
+  nearDouble15: PNEW_OPEN,
+  nearDouble60: PNEW_OPEN,
+  nearDouble240: PNEW_OPEN,
+  nearDoubleD: PNEW_OPEN,
+};
+function descPlain(key, desc) {
+  const mark = PNEW_BY_KEY[key];
+  if (!mark) return desc || '';
+  // 旧说明两句写在一起时，按卡片只留该留的那句
+  const text = (desc || '').replace(PNEW_OPEN + PNEW_BODY, '').replace(PNEW_OPEN, '').replace(PNEW_BODY, '');
+  return text + mark;
+}
+function descHtml(key, desc) {
+  const mark = PNEW_BY_KEY[key];
+  if (!mark) return desc || '';
+  const text = descPlain(key, desc);
+  const i = text.lastIndexOf(mark);
+  return text.slice(0, i) + '<span class="pnew">' + mark + '</span>' + text.slice(i + mark.length);
+}
+
 function rowHtml(key, spec, value, isMod, embed) {
   const defText = spec.type === 'bool' ? (spec.default ? '默认开' : '默认关')
     : spec.type === 'str' ? `默认 ${choiceLabel(key, spec.default)}`
@@ -486,7 +515,7 @@ function rowHtml(key, spec, value, isMod, embed) {
     : '';
   return `<div class="prow ${isMod ? 'mod' : ''} ${BREAK_BEFORE_KEYS.has(key) ? 'break-before' : ''}" title="${spec.desc}">
     <span class="pname"><span class="plabel">${spec.label}<span class="badge">已修改</span></span>
-    <span class="pdef">${defText} · ${spec.desc}</span></span>${control}${embedHtml}</div>`;
+    <span class="pdef">${defText} · ${descHtml(key, spec.desc)}</span></span>${control}${embedHtml}</div>`;
 }
 
 // 单个参数卡（含滑点行内嵌 ATR 系数；badge 在固定值或系数任一被改时亮）

@@ -27,7 +27,8 @@
 """
 
 from .chan_core import (BiBuildCtx, biSeqStep, biStep, biPair, fixBiExtremes,
-                        _stkLen, biListFromHead, countRaw, CHAN_CFG)
+                        _stkLen, biListFromHead, countRaw, CHAN_CFG,
+                        applyNearDoubleOpen)
 
 # 尾部重建的笔数裕量：覆盖阶段二最深 3 层回看 + 单次 update 的热区分型数。
 # 单次 _advance_cut（fine=3m）约并入 6 根 30S bar → 热区 seq 元素 ≤ ~8，
@@ -141,9 +142,32 @@ class BiIncBuilder:
             head = biStep(ctx, head, kk)
             self._heads.append(head)
             self._lens.append(_stkLen(head))
-        # 4) 阶段三 + 端点修正：冻结前缀按引用复用，仅重建尾部
-        self._splice_bis(head, merged, ctx, k)
+        # 4) 阶段三 + 端点修正：冻结前缀按引用复用，仅重建尾部。
+        # 末根合并K的近等后移只作用于本次输出，不写入 _heads（未确认分型不占单跳封顶）。
+        self._splice_bis(applyNearDoubleOpen(ctx, head), merged, ctx, k)
         return self._bis
+
+    def refresh_open(self, fractals, merged, macd, atr, nearDouble=False, lowerContext=None):
+        """分型未变时仍用当前末根合并K重算近等后移。
+
+        未确认端点不写入冻结栈，下一根仍相对原端点重判。
+        @returns 最后一笔端点（时间、价格）是否变化
+        """
+        if not nearDouble or not self._heads or self._stale:
+            return False
+        self._merged = merged
+        self._sync_gap_cum(len(merged))
+        last = self._bis[-1] if self._bis else None
+        before = None if last is None else (last.get("endTime"), last.get("endPrice"))
+        ctx = BiBuildCtx(merged, atr, macd, nearDouble=True,
+                         lowerContext=lowerContext, fractals=fractals,
+                         gapDiffs=self._gap_diffs, rawCounter=self.count_raw,
+                         res=self.res)
+        self._splice_bis(applyNearDoubleOpen(ctx, self._heads[-1]), merged, ctx,
+                         len(self._seq))
+        last = self._bis[-1] if self._bis else None
+        after = None if last is None else (last.get("endTime"), last.get("endPrice"))
+        return after != before
 
     # ---------------- 内部 ----------------
 
@@ -209,7 +233,8 @@ class BiIncBuilder:
             head = biStep(ctx, head, kk)
             self._heads.append(head)
             self._lens.append(_stkLen(head))
-        result = biListFromHead(head)
+        # 未确认末根只参与本次笔列表，不进入冻结栈
+        result = biListFromHead(applyNearDoubleOpen(ctx, head))
         self._bis = [biPair(result[i], result[i + 1], merged, ctx)
                      for i in range(len(result) - 1)]
         fixBiExtremes(self._bis, merged, count_raw=self.count_raw)

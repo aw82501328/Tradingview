@@ -13,7 +13,7 @@
   - 旧锚点保护：anchor 下锚点距收集时刻 > 检测周期 1 根 bar → 回落 confirm（fillMode=confirm-stale-anchor）。
 
 出场规则（三模式统一口径，模块级 advance_exit_decision / execute_pending_exit
-为唯一实现源；mark_entry.stop_ref_of/find_bi_event/forming_seg_ready/trend_following_of）：
+为唯一实现源；mark_entry.stop_ref_of/find_bi_event/lastBiOk/forming_seg_ready/trend_following_of）：
   - 触发判定在「已收盘 bar」进行（bar 完整 high/low 判止损穿越；三档止盈用
     endTime ≤ 收盘时刻的已确认笔 / 检测周期形成段合并K线计数）；
   - 成交统一「下一根K线开盘」：止损/保本止损/平一半/全平的事件时间 = 触发 bar 的
@@ -27,9 +27,9 @@
     路径无前视——研究口径可接受）；
   - 止盈1 保本：背驰周期（markRes）够笔（进场后首笔有利方向笔完成）→ 止损位上移至
     beStop（状态迁移，当拍生效、事件仅落盘）；
-  - 止盈2 平一半（仅顺势：计划 direction ∈ {多头多, 空头空}）：检测周期首个有利方向、
-    合并后 ≥5 根K且有成笔预期的形成段 → 下一开盘平一半，剩余半仓止损移至 beStop
-    （不要求保本先触发）；
+  - 止盈2 平一半（仅顺势：计划 direction ∈ {多头多, 空头空}）：检测周期有利方向够笔
+    （空单=末笔下跌、多单=末笔上涨；已完成笔，或形成中笔合并块数达到门槛）→
+    下一开盘平一半，剩余半仓止损移至 beStop（不要求保本先触发；末笔仍是不利方向则不半平）；
   - 止盈3 全平：顺势 = 检测周期有利方向笔破前高/前低（breakPrev）；逆势（多头空/空头多）
     = 检测周期首个有利方向形成段（合并后 ≥5 根K成笔预期）→ 下一开盘全平；
   - stopSr/stopBe：盘中破坏止损位 / 保本位 beStop；
@@ -65,7 +65,7 @@ from .trading_plan import (compute_plan, trend_state_of,
                            TREND_REBOUND, REBOUND_NEAR_PTS, REBOUND_ANGLE_REF)
 from .mark_entry import (
     compute_entries, stop_ref_of, sr_of_detect, find_bi_event, filterDetectPeriods,
-    trend_following_of, forming_seg_ready,
+    trend_following_of, forming_seg_ready, lastBiOk,
     DEFAULT_LOTS, DEFAULT_SLIP_STOP, DEFAULT_SLIP_FALLBACK, DEFAULT_SLIP_BE,
     DEFAULT_SLIP_STOP_ATR_K, DEFAULT_SLIP_FALLBACK_ATR_K, DEFAULT_SLIP_BE_ATR_K,
     NEAR as DEFAULT_NEAR, EXIT_MIN_MERGED, REALTIME_MIN_BARS, ZS_EXIT_WEAK_RATIO,
@@ -96,7 +96,8 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
     统一语义（出场阶梯重构 2026-09-09：止损±滑点+兜底 / beStop / 顺势逆势分支）：
       - 用 bar 完整 high/low 判止损/保本止损穿越（保本位 = beStop，非进场价）；
       - TP1 用 markRes 已确认笔（endTime <= t）；TP3a 用 periodX 已确认笔（有利方向
-        breakPrev）；TP2/逆势TP3b 用检测周期形成段「合并后≥5根K成笔预期」
+        breakPrev）；TP2 顺势半平用检测周期有利方向够笔（lastBiOk：空单末笔下跌、
+        多单末笔上涨）；逆势 TP3b 仍用检测周期形成段「合并后≥5根K成笔预期」
         （forming_seg_ready，px_merged_times 缺省 None 时跳过形成段判定）；
       - breakeven：仅状态迁移（止损位 → beStop），当拍生效、事件仅落盘；
       - half/close/stopSr/stopBe：成交型事件——只把 pos['pendingExit'] 挂起，
@@ -121,8 +122,9 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
     if tp1 and tp1["time"] <= t and not pos.get("beDone"):
         pos["beDone"] = True
         pos["exits"].append({"type": "breakeven", "time": tp1["time"], "price": tp1["price"]})
-    if trend and seg5 and not pos.get("halfDone"):
-        # TP2 平一半（仅顺势）：形成段成笔预期即触发，不要求保本先触发
+    if trend and lastBiOk(px_bis, fav) and not pos.get("halfDone"):
+        # TP2 平一半（仅顺势）：检测周期有利方向够笔才触发（空单=下跌够笔，多单=上涨够笔）。
+        # 末笔仍是不利方向（空单上涨）则不够笔，不半平。不要求保本先触发。
         pos["halfDone"] = True
         pos["pendingExit"] = "half"
         return "half"
@@ -544,15 +546,23 @@ class BacktestEngine:
             flat = self._synth_wick_view(res, bar)
             # 浅拷贝列表 + 拷贝末块 dict：_mergeStep 包含并入时会原地改末块
             # （high/low/time/_topCand），共享对象会污染引擎增量状态（实测笔结构漂移）
+            n0 = len(self._merged[res])
             m2 = list(self._merged[res])
             if m2:
                 m2[-1] = dict(m2[-1])
             _mergeStep(m2, self._merge_dir[res], flat)
+            # merged_times 同步尾接（与 _append_bars 同一维护口径：
+            # 新块诞生 append / 包含并入更新末元素），供结构上下文尾部二分
+            mt2 = list(self._merged_times.get(res) or [])
+            if len(m2) > n0:
+                mt2.append(flat["time"])
+            elif mt2:
+                mt2[-1] = flat["time"]
             f2 = updateFractalsTail(list(self._fractals[res]), m2)
             out[res] = {"bar": bar,
                         "macd": self._macd[res].provisional(bar),
                         "atr": self._atr[res].provisional(bar),
-                        "merged": m2, "fractals": f2,
+                        "merged": m2, "mergedTimes": mt2, "fractals": f2,
                         "macdTime": bar["time"]}
         return out
 
@@ -591,12 +601,20 @@ class BacktestEngine:
         bis_changed = False
         if len(new_f) != old_len or (new_f and old_last is not None and new_f[-1] != old_last):
             bis_changed = True
-        if bis_changed:
-            near_double = nearDoubleOn(res)
-            lower = self._lower_context_for(res)
-            self._bis[res] = self._bi_inc[res].update(
+        near_double = nearDoubleOn(res)
+        lower = self._lower_context_for(res) if near_double else None
+        inc = self._bi_inc[res]
+        # 重同步后构建器已失效：下一根即使分型没变，也要全量重建，末根近等才跟得上
+        if bis_changed or (near_double and inc._stale):
+            self._bis[res] = inc.update(
                 new_f, merged, macd.to_list(), atr.value,
                 nearDouble=near_double, lowerContext=lower)
+        elif near_double and inc.refresh_open(
+                new_f, merged, macd.to_list(), atr.value,
+                nearDouble=True, lowerContext=lower):
+            # 末根尚未形成顶/底分型，近等后移仍要落到当前笔上
+            self._bis[res] = inc._bis
+            bis_changed = True
         if self._extend_last(res):
             bis_changed = True
         return bis_changed
@@ -689,7 +707,8 @@ class BacktestEngine:
         raw = self._prefix_bars("15")
         return makeBiLowerContext(
             res, raw, cutoff=getattr(self, "_decision_time", float("inf")),
-            macd=self._macd["15"].to_list())
+            macd=self._macd["15"].to_list(),
+            times=self._macd_times.get("15"))
 
     def _prefix_bars(self, res):
         """返回 bars[:cut] 的稳定前缀列表：cut 增长时原地 extend（O(Δ)），避免整表拷贝。"""
@@ -1143,96 +1162,122 @@ class BacktestEngine:
         barsByPeriod = {}
         periodMacd = {res: self._macd[res].to_list() for res in self.periods}
         periodAtr = {res: self._atr[res].value for res in self.periods}
+        # 三套时间轴直通（与 barsByPeriod/macd 同源维护：_append_bars 追加、_rewind_res
+        # 整体重建，恒等长）：K线时间=macd_times、合并块时间=merged_times，
+        # 供结构上下文/收笔背驰/下层上下文免每拍 O(n) 现建与全量 calcMACD
+        timesByPeriod = {res: self._macd_times.get(res) for res in self.periods}
+        mergedTimesByPeriod = {res: self._merged_times.get(res) for res in self.periods}
         for res in slice_res:
             # cut 增长时原地 extend，避免每次重算 O(n) 切片拷贝
             barsByPeriod[res] = self._prefix_bars(res)
         mBy, fBy = self._merged, self._fractals
-        if synthViews:
-            mBy, fBy = dict(self._merged), dict(self._fractals)
-            for res, sv in synthViews.items():
-                barsByPeriod[res] = list(barsByPeriod[res]) + [sv["bar"]]
-                periodMacd[res] = list(periodMacd[res]) + [sv["macd"]]
-                periodAtr[res] = sv["atr"]
-                mBy[res] = sv["merged"]
-                fBy[res] = sv["fractals"]
-        from .chan_core import structurePeriods
-        periodBis = structurePeriods(self._bis, barsByPeriod, self._decision_time,
-                                     mBy, fBy, self._chain_work_cache)
-        self._structure_bis = periodBis
-        # 1. 买卖点（全链路完整性；默认关闭以提速，可由 --with-marks 开启）
-        if self.with_marks:
+        # 合成K尾接改原地 append + finally 弹出：bars/macd 列表与各消费者本就共享引擎
+        # 前缀（非合成周期一直是同一 list），尾接同样只读；免每拍 O(n) 整表拷贝
+        tail_lists = []
+        try:
+            if synthViews:
+                mBy, fBy = dict(self._merged), dict(self._fractals)
+                for res, sv in synthViews.items():
+                    barsByPeriod[res].append(sv["bar"])
+                    tail_lists.append(barsByPeriod[res])
+                    periodMacd[res].append(sv["macd"])
+                    tail_lists.append(periodMacd[res])
+                    if timesByPeriod.get(res) is not None:
+                        timesByPeriod[res].append(sv["bar"]["time"])
+                        tail_lists.append(timesByPeriod[res])
+                    # merged_times 末元素在包含并入时是「原地更新」而非追加，不能尾接共享
+                    # 列表——直接用 _synth_views 已维护好的整表副本（与 sv["merged"] 对齐）
+                    mergedTimesByPeriod[res] = sv["mergedTimes"]
+                    periodAtr[res] = sv["atr"]
+                    mBy[res] = sv["merged"]
+                    fBy[res] = sv["fractals"]
+            from .chan_core import structurePeriods
+            periodBis = structurePeriods(self._bis, barsByPeriod, self._decision_time,
+                                         mBy, fBy, self._chain_work_cache,
+                                         macdByPeriod=periodMacd,
+                                         timesByPeriod=timesByPeriod,
+                                         mergedTimesByPeriod=mergedTimesByPeriod)
+            self._structure_bis = periodBis
+            # 1. 买卖点（全链路完整性；默认关闭以提速，可由 --with-marks 开启）
+            if self.with_marks:
+                try:
+                    self._marks = compute_all_marks(periodBis, barsByPeriod, core,
+                                                    fromTs=None, periodMacd=periodMacd,
+                                                    periodAtr=periodAtr,
+                                                    **self.marks_params)
+                except Exception:
+                    self._marks = {}
+            # 2. 支阻位（密集区 + 黄金分割；传 periodMacdIn 复用增量 MACD 缓存）
+            srKw = {}
+            if self.sr_types is not None:
+                srKw["srTypes"] = self.sr_types
+            if self.fib_levels is not None:
+                srKw["fibLevels"] = self.fib_levels
+            if self.boll_length is not None:
+                srKw["bollLength"] = self.boll_length
+            if self.boll_mult is not None:
+                srKw["bollMult"] = self.boll_mult
+            if bar_times is not None:
+                srKw["periodBarTimesIn"] = bar_times
+            if price_arrays is not None:
+                core_set = set(core)
+                # compute_srflip 只按 core 键取用（sr_flip 内 for res in periods），
+                # 30S 的 numpy 前缀切片纯属浪费（每次链路重算 O(n_30S)）
+                srKw["periodBarArraysIn"] = {
+                    res: (arrays[0][:self._cut[res]], arrays[1][:self._cut[res]])
+                    for res, arrays in price_arrays.items()
+                    if arrays is not None and res in core_set
+                }
+            srKw.update(self.sr_kwargs)  # 预设 kwargs（含 manualLevels）优先于独立形参
             try:
-                self._marks = compute_all_marks(periodBis, barsByPeriod, core,
-                                                fromTs=None, periodMacd=periodMacd,
-                                                periodAtr=periodAtr,
-                                                **self.marks_params)
+                self._sr = compute_srflip(periodBis, barsByPeriod, core,
+                                          periodAtrsIn=periodAtr, periodMacdIn=periodMacd,
+                                          work_cache=self._chain_work_cache, **srKw)
             except Exception:
-                self._marks = {}
-        # 2. 支阻位（密集区 + 黄金分割；传 periodMacdIn 复用增量 MACD 缓存）
-        srKw = {}
-        if self.sr_types is not None:
-            srKw["srTypes"] = self.sr_types
-        if self.fib_levels is not None:
-            srKw["fibLevels"] = self.fib_levels
-        if self.boll_length is not None:
-            srKw["bollLength"] = self.boll_length
-        if self.boll_mult is not None:
-            srKw["bollMult"] = self.boll_mult
-        if bar_times is not None:
-            srKw["periodBarTimesIn"] = bar_times
-        if price_arrays is not None:
-            core_set = set(core)
-            # compute_srflip 只按 core 键取用（sr_flip 内 for res in periods），
-            # 30S 的 numpy 前缀切片纯属浪费（每次链路重算 O(n_30S)）
-            srKw["periodBarArraysIn"] = {
-                res: (arrays[0][:self._cut[res]], arrays[1][:self._cut[res]])
-                for res, arrays in price_arrays.items()
-                if arrays is not None and res in core_set
-            }
-        srKw.update(self.sr_kwargs)  # 预设 kwargs（含 manualLevels）优先于独立形参
-        try:
-            self._sr = compute_srflip(periodBis, barsByPeriod, core,
-                                      periodAtrsIn=periodAtr, periodMacdIn=periodMacd,
-                                      work_cache=self._chain_work_cache, **srKw)
-        except Exception:
-            self._sr = None
-        # 3. 交易计划（cfg = 参数中心交易计划模块参数）
-        try:
-            self._plan = compute_plan(periodBis, barsByPeriod, core,
-                                      periodMacd=periodMacd, periodAtr=periodAtr,
-                                      cfg=self.plan_cfg, work_cache=self._chain_work_cache,
-                                      range_res=self.range_res)
-        except Exception:
-            self._plan = {}
-        # 3.5 顺势参考周期方向状态（mark_entry 顺势过滤；与计划同拍重算——
-        #     每根 fine 链路重算时顺带更新，参考周期收盘/笔结构变化即刻生效；
-        #     挂链路 work_cache：参考周期输入未变时直接复用，重同步后已清空）
-        try:
-            self._trend_state = trend_state_of(periodBis, barsByPeriod, self.trend_res,
-                                               periodMacd=periodMacd,
-                                               work_cache=self._chain_work_cache,
-                                               cfg=self.rebound_cfg)
-        except Exception:
-            self._trend_state = None
-        # 4. 进出场（检测周期与 JS 一致：不含日线、不含 30S——30S 仅作背驰级别；
-        #    且须有已加载的更低级别可供区间套下沉，30S 未加载时 3 不作检测周期）
-        # realtime 全量回测通过 _collect_realtime 收集信号，不消费 _entries。
-        # 默认仍计算确认式结果，保持 step_to 等现有调用方的行为。
-        if not include_entries:
-            self._entries = {}
-            return
-        srLevels = (self._sr or {}).get("merged") or []
-        detectPeriods = filterDetectPeriods(self.periods)
-        try:
-            self._entries = compute_entries(periodBis, barsByPeriod, self._plan, srLevels,
-                                            detectPeriods=detectPeriods, near=self.near,
-                                            periodMacd=periodMacd, periodAtr=periodAtr,
-                                            with_30s=any(str(p).upper() == "30S" for p in self.periods),
-                                            zs_exit_weak_ratio=self.zs_exit_weak_ratio,
-                                            trend_res=self.trend_res,
-                                            trend_state=self._trend_state)
-        except Exception:
-            self._entries = {}
+                self._sr = None
+            # 3. 交易计划（cfg = 参数中心交易计划模块参数）
+            try:
+                self._plan = compute_plan(periodBis, barsByPeriod, core,
+                                          periodMacd=periodMacd, periodAtr=periodAtr,
+                                          cfg=self.plan_cfg, work_cache=self._chain_work_cache,
+                                          range_res=self.range_res)
+            except Exception:
+                self._plan = {}
+            # 3.5 顺势参考周期方向状态（mark_entry 顺势过滤；与计划同拍重算——
+            #     每根 fine 链路重算时顺带更新，参考周期收盘/笔结构变化即刻生效；
+            #     挂链路 work_cache：参考周期输入未变时直接复用，重同步后已清空）
+            try:
+                self._trend_state = trend_state_of(periodBis, barsByPeriod, self.trend_res,
+                                                   periodMacd=periodMacd,
+                                                   work_cache=self._chain_work_cache,
+                                                   cfg=self.rebound_cfg)
+            except Exception:
+                self._trend_state = None
+            # 4. 进出场（检测周期与 JS 一致：不含日线、不含 30S——30S 仅作背驰级别；
+            #    且须有已加载的更低级别可供区间套下沉，30S 未加载时 3 不作检测周期）
+            # realtime 全量回测通过 _collect_realtime 收集信号，不消费 _entries。
+            # 默认仍计算确认式结果，保持 step_to 等现有调用方的行为。
+            if not include_entries:
+                self._entries = {}
+                return
+            srLevels = (self._sr or {}).get("merged") or []
+            detectPeriods = filterDetectPeriods(self.periods)
+            try:
+                self._entries = compute_entries(periodBis, barsByPeriod, self._plan, srLevels,
+                                                detectPeriods=detectPeriods, near=self.near,
+                                                periodMacd=periodMacd, periodAtr=periodAtr,
+                                                with_30s=any(str(p).upper() == "30S" for p in self.periods),
+                                                zs_exit_weak_ratio=self.zs_exit_weak_ratio,
+                                                trend_res=self.trend_res,
+                                                trend_state=self._trend_state)
+            except Exception:
+                self._entries = {}
+
+        finally:
+            # 弹出合成K临时尾接，引擎共享前缀/增量数组恢复纯已收盘口径
+            # （bars/macd/K线时间轴逐一对称弹出；merged_times 用的是副本无需恢复）
+            for lst in reversed(tail_lists):
+                lst.pop()
 
     def _collect_signals(self, allSignals, seen, stats):
         """收集当前链路的进场信号（去重），返回本步新收集的信号列表（待成交）。"""
@@ -1293,30 +1338,41 @@ class BacktestEngine:
         atrViews = {res: self._atr[res].value for res in self.periods}
         mergedViews = dict(self._merged)
         macdTViews = dict(self._macd_times or {})
+        # 合成K尾接改原地 append + finally 弹出（与 _rebuild_chain 同口径，
+        # 免每拍 O(n) 整表拷贝；entries/macd_times 本就是引擎共享数组）
+        tail_lists = []
         if synth:
             for res, sv in synth.items():
-                macdViews[res] = list(macdViews[res]) + [sv["macd"]]
+                macdViews[res].append(sv["macd"])
+                tail_lists.append(macdViews[res])
                 atrViews[res] = sv["atr"]
                 mergedViews[res] = sv["merged"]
                 mt = macdTViews.get(res)
-                macdTViews[res] = (list(mt) + [sv["macdTime"]]) if mt is not None else \
-                    [m["time"] for m in macdViews[res]]
-        sigs = evaluateRealtimeEntries(
-            getattr(self, "_structure_bis", self._bis),
-            macdViews,
-            atrViews,
-            self._plan, srLevels, detectPeriods,
-            near=self.near, tCut=t, fired=self._rt_fired, firedIndex=self._rt_fired_idx,
-            periodTimes=self._times, periodMacdTimes=macdTViews,
-            periodMerged=mergedViews,
-            divergeConfirm=self.diverge_confirm,
-            expectBiEnabled=self.expect_bi,
-            entryMacdShrink=self.entry_macd_shrink,
-            realtimeMinBars=self.realtime_min_bars,
-            zsExitWeakRatio=self.zs_exit_weak_ratio,
-            trend_res=self.trend_res,
-            trend_state=self._trend_state,
-        )
+                if mt is not None:
+                    mt.append(sv["macdTime"])
+                    tail_lists.append(mt)
+                else:
+                    macdTViews[res] = [m["time"] for m in macdViews[res]]
+        try:
+            sigs = evaluateRealtimeEntries(
+                getattr(self, "_structure_bis", self._bis),
+                macdViews,
+                atrViews,
+                self._plan, srLevels, detectPeriods,
+                near=self.near, tCut=t, fired=self._rt_fired, firedIndex=self._rt_fired_idx,
+                periodTimes=self._times, periodMacdTimes=macdTViews,
+                periodMerged=mergedViews,
+                divergeConfirm=self.diverge_confirm,
+                expectBiEnabled=self.expect_bi,
+                entryMacdShrink=self.entry_macd_shrink,
+                realtimeMinBars=self.realtime_min_bars,
+                zsExitWeakRatio=self.zs_exit_weak_ratio,
+                trend_res=self.trend_res,
+                trend_state=self._trend_state,
+            )
+        finally:
+            for lst in reversed(tail_lists):
+                lst.pop()
         newSigs = []
         for s in sigs:
             stats["signals"] += 1

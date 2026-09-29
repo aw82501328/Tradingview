@@ -4,7 +4,7 @@
 覆盖（与 .cursor/skills/mark-entry/scripts/mark_entry.test.js 的「出场规则」describe 成对同构）：
   - stop_ref_of：支阻位 ± 滑点 / nearSr 错侧重选 / 最大止损硬上限（返回值永不为 None）
   - forming_seg_ready：合并后 ≥5 块门槛 / 末笔方向 / 延伸归零
-  - advance_exit_decision：TP1→beStop→stopBe / TP2 顺势（无需 TP1）→ half 后止损=beStop /
+  - advance_exit_decision：TP1→beStop→stopBe / TP2 顺势（检测周期有利方向够笔，无需 TP1）→ half 后止损=beStop /
     TP3a 顺势 breakPrev / TP3b 逆势 seg5 全平（无 half）/ stopSr / 同拍顺序 half 优先
   - execute_pending_exit：下一开盘成交、half 补 beDone
   - close_trade：lots 盈亏公式（half 加权 / 无 half）
@@ -172,9 +172,19 @@ class TestAdvanceExit(unittest.TestCase):
     def test_tp2_trend_half_without_tp1(self):
         pos = make_pos()
         mark_bis = [bi("up", 0, 500, 4440, 4455)]  # 无 signalTime 后的有利方向笔 → TP1 未触发
-        px_bis = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 300, 4440, 4450)]
+        # 末笔上涨，其后合并块已满 5：空单要的是下跌够笔，不半平
+        px_up = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 300, 4440, 4450)]
+        r = advance_exit_decision(pos, 700, bar(700, 4445, 4448, 4440, 4444), mark_bis, px_up, T8)
+        self.assertIsNone(r)
+        self.assertFalse(pos["halfDone"])
+
+    def test_tp2_trend_half_when_down_bi_enough(self):
+        pos = make_pos()
+        mark_bis = [bi("up", 0, 500, 4440, 4455)]  # 无 TP1
+        # 末笔下跌且已完成 = 够笔 → 半平（无需保本先触发）
+        px_bis = [bi("up", 0, 50, 4440, 4460), bi("down", 50, 300, 4460, 4440)]
         r = advance_exit_decision(pos, 700, bar(700, 4445, 4448, 4440, 4444), mark_bis, px_bis, T8)
-        self.assertEqual(r, "half")  # 顺势 seg5，无需 TP1
+        self.assertEqual(r, "half")
         self.assertTrue(pos["halfDone"])
         tr = execute_pending_exit(pos, bar(800, 4440, 4445, 4435, 4442))
         self.assertIsNone(tr)  # half 非终局
@@ -185,6 +195,22 @@ class TestAdvanceExit(unittest.TestCase):
         tr = execute_pending_exit(pos, bar(1000, 4454, 4458, 4450, 4452))
         # half@4440 + 终局@4454：pnl = (0.5*(4440-4450) + 0.5*(4454-4450)) * (-1) * 4 = 12
         self.assertEqual(tr["pnl"], 12.0)
+
+    def test_tp2_forming_down_needs_merged_count(self):
+        # 形成中的下跌笔：合并块数未到门槛不够笔；达到门槛才半平
+        mark_bis = [bi("up", 0, 500, 4440, 4455)]
+        forming = bi("down", 50, 300, 4460, 4440)
+        forming["_forming"] = True
+        forming["mergedCount"] = 4
+        px = [bi("up", 0, 50, 4440, 4460), forming]
+        pos = make_pos()
+        r = advance_exit_decision(pos, 700, bar(700, 4445, 4448, 4440, 4444), mark_bis, px, T8)
+        self.assertIsNone(r)
+        self.assertFalse(pos["halfDone"])
+        forming["mergedCount"] = 5
+        pos = make_pos()
+        r = advance_exit_decision(pos, 700, bar(700, 4445, 4448, 4440, 4444), mark_bis, px, T8)
+        self.assertEqual(r, "half")
 
     def test_tp2_counter_trend_no_half_close_on_seg5(self):
         pos = make_pos(planDirection="多头空")  # 逆势（多头计划下的空单）
@@ -220,11 +246,11 @@ class TestAdvanceExit(unittest.TestCase):
         self.assertEqual(tr["pnl"], (4462 - 4450) * (-1) * 4)
 
     def test_same_beat_half_takes_priority(self):
-        # seg5 与 tp3a 同拍满足 → 保本→半平→全平顺序，half 先挂起
+        # 末笔下跌够笔，且该笔破前低（tp3a）同拍满足 → 半平先于全平挂起
         pos = make_pos()
         mark_bis = [bi("up", 0, 500, 4440, 4455)]
         px_bis = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 150, 4440, 4450),
-                  bi("down", 150, 250, 4450, 4435), bi("up", 250, 300, 4435, 4445)]
+                  bi("down", 150, 250, 4450, 4435)]
         r = advance_exit_decision(pos, 300, bar(300, 4440, 4444, 4436, 4442), mark_bis, px_bis, T8)
         self.assertEqual(r, "half")
         self.assertEqual(pos["pendingExit"], "half")

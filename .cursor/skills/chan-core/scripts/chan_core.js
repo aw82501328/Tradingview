@@ -37,7 +37,7 @@ const CHAN_CFG = {
   divergeDurRatio: 3, // 背驰面积判据的时长可比上限：面积Σ = 柱高×K线根数、与区间时长线性相关，
                       // 两段时长比 > 该值时不具可比性，面积项不计入背驰（只用 DIF/柱高判据）
   debug: false,   // 调试打印（buildBi / 买卖点识别过程）
-  nearDoubleAtrK: 0.3, // 近等双顶/双底平台取后顶/后底：价差与回调深度的 ATR 系数
+  nearDoubleAtrK: 0.3, // 近等双顶/双底平台取后顶/后底：价差与回调深度的 ATR 系数（价差只比实体）
   nearDoublePct: 0.001, // 近等双顶/双底平台取后顶/后底：价差下限（价格比例，与 ATR 项取 max）
   nearDoubleFixed: 0.0, // 近等双顶/双底固定容差项（品种报价单位绝对价差，如黄金 0.1=0.1 美元）；
                         // thr = max(ATR项, 比例项, 该项)（并集取最大、只增不减），0=不启用
@@ -156,13 +156,39 @@ function markWickBars(rawBars) {
  * merged 尾部（原地修改），返回更新后的 direction。供 mark_entry.js 出场
  * 形成段「合并后≥5根K」计数回放使用（逐根推进时记录每块诞生时间）。
  */
+function absorbBody(m, bar) {
+  // 合并K记录覆盖范围内的实体极值（顶=max(open,close)，底=min(open,close)）。
+  // 近等容差只读这两个字段，不读影线 high/low。
+  const o = bar.open, c = bar.close;
+  if (o == null || c == null) return;
+  const bt = Math.max(o, c), bb = Math.min(o, c);
+  if (m.bodyTop == null || bt > m.bodyTop) m.bodyTop = bt;
+  if (m.bodyBottom == null || bb < m.bodyBottom) m.bodyBottom = bb;
+}
+
+function nearBodyPx(merged, idx, isTop) {
+  // 近等容差用的实体价。没有实体字段则返回 null，近等不成立。
+  if (!merged || idx == null || idx < 0 || idx >= merged.length) return null;
+  const m = merged[idx];
+  if (isTop) {
+    if (m.bodyTop != null) return m.bodyTop;
+    if (m.open != null && m.close != null) return Math.max(m.open, m.close);
+    return null;
+  }
+  if (m.bodyBottom != null) return m.bodyBottom;
+  if (m.open != null && m.close != null) return Math.min(m.open, m.close);
+  return null;
+}
+
 function mergeStep(merged, direction, bar) {
   const pushBar = (b) => {
-    merged.push({
+    const m = {
       ...b, _rawCount: 1, _firstTime: b.time,
       highTime: b.time, lowTime: b.time,
       rawHigh: b.high, rawLow: b.low, rawHighTime: b.time, rawLowTime: b.time,
-    });
+    };
+    absorbBody(m, b);
+    merged.push(m);
   };
   if (merged.length === 0) {
     pushBar(bar);
@@ -208,6 +234,7 @@ function mergeStep(merged, direction, bar) {
     }
     last._rawCount += 1;
     last.time = bar.time;
+    absorbBody(last, bar);
     return dir;
   }
   direction = bar.high > last.high ? 1 : -1;
@@ -462,6 +489,8 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lower
 
   // 相邻分型是否已成笔（与阶段二追加成笔同口径）。同类型不成笔。
   const pairFormsBi = (a, b) => {
+    // 未确认末根不是分型，不能当作已成笔的一端（右邻合并K尚不存在）。
+    if (a._openEndpoint || b._openEndpoint) return false;
     if (a.type === b.type) return false;
     const gap = b.mergedIdx - a.mergedIdx;
     if (gap >= 4 && noMoreExtremeInside(a, b) && fractalRangeClear(a, b)) return true;
@@ -470,6 +499,47 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lower
       return hasMacdCrossBetween(macdArr, merged, a.mergedIdx, b.mergedIdx, a.time, b.time, direction);
     }
     return false;
+  };
+
+  // 同类型近等取后。价差只比实体；中间真实回调仍用高低点。
+  // k 可以是已确认分型，也可以是未等右邻收盘的末根合并K。成功则打 nearDouble 并返回 true。
+  const tryNearEqualSameType = (last, k) => {
+    if (!nearDouble || !last || k.type !== last.type) return false;
+    if (last.gapLocked || k.locked || last.nearDouble) return false;
+    if (k.mergedIdx === last.mergedIdx) return false;
+    const isTop = k.type === "top";
+    const refPrice = nearBodyPx(merged, last.mergedIdx, isTop);
+    const newPrice = nearBodyPx(merged, k.mergedIdx, isTop);
+    if (refPrice == null || newPrice == null) return false;
+    const thr = Math.max(atr * CHAN_CFG.nearDoubleAtrK, Math.abs(refPrice) * CHAN_CFG.nearDoublePct,
+      CHAN_CFG.nearDoubleFixed);
+    const diff = isTop ? refPrice - newPrice : newPrice - refPrice;
+    const lowerConfirmed = diff > thr && diff <= thr * CHAN_CFG.nearDoubleLowerRelax
+      && lowerEndpointWeaker(last, k, fractals, lowerContext);
+    if (!(diff >= 0 && (diff <= thr || lowerConfirmed))) return false;
+    let pull = false, cnt = 0;
+    const chain = [last];
+    for (const f of fractals) {
+      if (f.mergedIdx <= last.mergedIdx || f.mergedIdx >= k.mergedIdx) continue;
+      cnt++;
+      if (isTop && f.type === "bottom" && last.high - f.low >= thr) pull = true;
+      if (!isTop && f.type === "top" && f.high - last.low >= thr) pull = true;
+      chain.push(f);
+    }
+    chain.push(k);
+    let joined = false;
+    if (cnt > 0) {
+      for (let i = 0; i < chain.length - 2; i++) {
+        if (pairFormsBi(chain[i], chain[i + 1]) && pairFormsBi(chain[i + 1], chain[i + 2])) {
+          joined = true;
+          break;
+        }
+      }
+    }
+    if (!(cnt > 0 && !joined && pull)) return false;
+    if (CHAN_CFG.debug) console.log(`[阶段二] 近等双顶/双底平台取后: ${k.type === "top" ? "顶" : "底"}@${last.mergedIdx}(${refPrice}) → ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}(${k.type === "top" ? k.high : k.low})（实体差 ${diff.toFixed(2)} ≤ ${(thr * (lowerConfirmed ? CHAN_CFG.nearDoubleLowerRelax : 1)).toFixed(2)}${lowerConfirmed ? '，15m双动能确认' : ''}，两顶间无相接成笔）`);
+    k.nearDouble = true;
+    return true;
   };
 
   if (CHAN_CFG.debug) {
@@ -495,55 +565,9 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lower
         if (k.type === "top") { if (k.high > last.high) result[result.length - 1] = k; }
         else { if (k.low < last.low) result[result.length - 1] = k; }
       }
-      // 近等双顶/双底平台取后顶/后底（走势终完美；由调用方按 nearDoubleOn(res) 开启）：
-      //   后顶/后底 k 与前顶/前底 last 近同价（k 略不极端，差 ≤ max(nearDoubleAtrK×ATR,
-      //   nearDoublePct×价, nearDoubleFixed 固定项)——并集取最大、只增不减）。
-      //   后移不能破坏原有结构：last→k 分型链上若已有两段首尾相接的成笔
-      //   （例如 00:00→01:30 成笔且 01:30→03:00 又成笔）则不后移。
-      //   单独一段成笔、前后接不上另一笔，不算拆结构，允许后移。
-      //   中间仍须有一次 ≥thr 的真实回调（平台震荡存在）。
-      //   例：1h 8-31 19:00 顶 4464.23 → 9-1 08:00 顶 4461.7（差 2.53），12 小时平台
-      //   （4415.75~4464）内所有分型间隔均 <4。
-      //   单跳封顶：被本规则替换的端点打 nearDouble 标记，不再二次替换（防止平台内连续
-      //   近等端点被反复后移、累积漂移超过阈值——实测 3 跳累计可超 1×ATR）。
-      //   locked（区间套对齐）/gapLocked（跳空）端点不参与；macdCross 端点不豁免——该端点
-      //   本就是间隔不足时靠 MACD 变色凑出的「脆弱」笔顶/底（如 1h 8-31 顶 4464.23），
-      //   与近等平台取后顶的语义一致，应允许被更晚的后顶/后底替换。
-      if (nearDouble && !last.gapLocked && !k.locked && !last.nearDouble) {
-        const refPrice = k.type === "top" ? last.high : last.low;
-        const thr = Math.max(atr * CHAN_CFG.nearDoubleAtrK, refPrice * CHAN_CFG.nearDoublePct,
-          CHAN_CFG.nearDoubleFixed);
-        const diff = k.type === "top" ? last.high - k.high : k.low - last.low;
-        const lowerConfirmed = diff > thr && diff <= thr * CHAN_CFG.nearDoubleLowerRelax
-          && lowerEndpointWeaker(last, k, fractals, lowerContext);
-        if (diff >= 0 && (diff <= thr || lowerConfirmed)) {
-          let pull = false, cnt = 0;
-          const chain = [last];
-          for (const f of fractals) {
-            if (f.mergedIdx <= last.mergedIdx || f.mergedIdx >= k.mergedIdx) continue;
-            cnt++;
-            if (k.type === "top" && f.type === "bottom" && last.high - f.low >= thr) pull = true;
-            if (k.type === "bottom" && f.type === "top" && f.high - last.low >= thr) pull = true;
-            chain.push(f);
-          }
-          chain.push(k);
-          // 仅两段首尾相接的成笔才禁止后移；单独一段成笔不挡
-          let joined = false;
-          if (cnt > 0) {
-            for (let i = 0; i < chain.length - 2; i++) {
-              if (pairFormsBi(chain[i], chain[i + 1]) && pairFormsBi(chain[i + 1], chain[i + 2])) {
-                joined = true;
-                break;
-              }
-            }
-          }
-          if (cnt > 0 && !joined && pull) {
-            if (CHAN_CFG.debug) console.log(`[阶段二] 近等双顶/双底平台取后: ${k.type === "top" ? "顶" : "底"}@${last.mergedIdx}(${refPrice}) → ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}(${k.type === "top" ? k.high : k.low})（差 ${diff.toFixed(2)} ≤ ${(thr * (lowerConfirmed ? CHAN_CFG.nearDoubleLowerRelax : 1)).toFixed(2)}${lowerConfirmed ? '，15m双动能确认' : ''}，两顶间无相接成笔）`);
-            k.nearDouble = true; // 单跳封顶
-            result[result.length - 1] = k;
-          }
-        }
-      }
+      // 近等双顶/双底：价差只比实体；锚点用替换前的 last
+      // （更极端的影线替换已先改 result，近等仍相对原端点判断）。
+      if (tryNearEqualSameType(last, k)) result[result.length - 1] = k;
       continue;
     }
     // 异类型
@@ -678,17 +702,21 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lower
           // last.locked（不吞锁定的中间分型）、prev.nearDouble（单跳封顶，防平台内连续后移漂移）。
           let nearEqualShift = false;
           if (!prev.gapLocked && !prev.locked && !last.locked && !prev.nearDouble) {
-            const refPriceR = k.type === "top" ? prev.high : prev.low;
-            const thrR = Math.max(atr * CHAN_CFG.nearDoubleAtrK, refPriceR * CHAN_CFG.nearDoublePct,
-              CHAN_CFG.nearDoubleFixed);
-            const diffR = k.type === "top" ? prev.high - k.high : k.low - prev.low;
-            const pulledR = k.type === "top" ? prev.high - last.low >= thrR
-              : last.high - prev.low >= thrR;
-            const lowerConfirmedR = diffR > thrR && diffR <= thrR * CHAN_CFG.nearDoubleLowerRelax
-              && lowerEndpointWeaker(prev, k, fractals, lowerContext);
-            if (diffR >= 0 && (diffR <= thrR || lowerConfirmedR) && pulledR
-                && (k.locked || (nearDouble && CHAN_CFG.nearDoubleRebound))) {
-              nearEqualShift = true;
+            const isTopR = k.type === "top";
+            const refPriceR = nearBodyPx(merged, prev.mergedIdx, isTopR);
+            const newPriceR = nearBodyPx(merged, k.mergedIdx, isTopR);
+            if (refPriceR != null && newPriceR != null) {
+              const thrR = Math.max(atr * CHAN_CFG.nearDoubleAtrK, Math.abs(refPriceR) * CHAN_CFG.nearDoublePct,
+                CHAN_CFG.nearDoubleFixed);
+              const diffR = isTopR ? refPriceR - newPriceR : newPriceR - refPriceR;
+              const pulledR = isTopR ? prev.high - last.low >= thrR
+                : last.high - prev.low >= thrR;
+              const lowerConfirmedR = diffR > thrR && diffR <= thrR * CHAN_CFG.nearDoubleLowerRelax
+                && lowerEndpointWeaker(prev, k, fractals, lowerContext);
+              if (diffR >= 0 && (diffR <= thrR || lowerConfirmedR) && pulledR
+                  && (k.locked || (nearDouble && CHAN_CFG.nearDoubleRebound))) {
+                nearEqualShift = true;
+              }
             }
           }
           if ((moreExtreme && (!prevLastValidBi || fragileMinimal)) || nearEqualShift) {
@@ -720,6 +748,26 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lower
           }
         }
       }
+    }
+  }
+
+  // 末根合并K不等右邻收盘成顶/底分型，即可参与同类型近等取后。
+  // 只走近等后移，不走更极端替换、也不新成笔。
+  if (nearDouble && result.length > 0 && merged.length > 0) {
+    const lastOpen = result[result.length - 1];
+    const openIdx = merged.length - 1;
+    if (openIdx > lastOpen.mergedIdx) {
+      const bar = merged[openIdx];
+      const isTopOpen = lastOpen.type === "top";
+      const openK = {
+        mergedIdx: openIdx,
+        type: lastOpen.type,
+        high: bar.high,
+        low: bar.low,
+        time: (isTopOpen ? bar.highTime : bar.lowTime) || bar.time,
+        _openEndpoint: true,
+      };
+      if (tryNearEqualSameType(lastOpen, openK)) result[result.length - 1] = openK;
     }
   }
 
