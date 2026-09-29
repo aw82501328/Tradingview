@@ -33,7 +33,7 @@ CLASS2_ZS_TOL = 0.0
 THIRD_ZS_TOL = 0.0
 
 # 跨周期共振匹配的正则：上级 1/2/3 类与类2/类3 买卖点
-_CLASS_RE = re.compile(r"^([123]买|[123]卖|类[23]买|类[23]卖)$")
+_CLASS_RE = re.compile(r"^([1234]买|[1234]卖|类[234]买|类[234]卖)$")
 
 
 def mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPrice):

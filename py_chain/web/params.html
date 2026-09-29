@@ -17,6 +17,7 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 .stabs button.on{border-color:#55d7b0;color:#92d1b4;font-weight:600}
 .stabs button .scode{color:var(--muted);font-size:11px;margin-left:6px;font-weight:400}
 .stabs button.on .scode{color:#6aa89a}
+/* 模块横向TAB（分组入口在工作台左侧导航「参数配置」子菜单；本页经 ?group=/postMessage 过滤TAB） */
 .ptabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin:0;flex-wrap:wrap}
 .ptabs button{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;
   color:var(--muted);font-size:13px;padding:8px 16px;cursor:pointer}
@@ -99,7 +100,7 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 <link rel="stylesheet" href="/legacy-theme.css">
 </head>
 <body>
-<h1>参数配置<span class="sub">顶层选品种，各模块参数按品种独立；画笔/买卖点/进出场算法阈值保存后对该品种即时生效，其余下一轮任务生效</span></h1>
+<h1>参数配置<span class="sub">顶层选品种，横向TAB选模块（分组由工作台左侧导航「参数配置」子菜单切换：基础组件 / 交易策略）；画笔/买卖点/进出场算法阈值保存后对该品种即时生效，其余下一轮任务生效</span></h1>
 <nav class="stabs" id="symbolTabs" aria-label="品种"></nav>
 <nav class="ptabs" id="tabs" aria-label="参数模块"></nav>
 <div class="pane" id="pane-sr" hidden><iframe id="srFrame" title="支阻位参数" loading="lazy"></iframe></div>
@@ -125,8 +126,26 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 const $ = id => document.getElementById(id);
 const PARAM_MODULES = ['chan', 'zs', 'points', 'entry', 'plan'];
 const TAB_IDS = ['chan', 'zs', 'points', 'sr', 'plan', 'entry'];
-const TABS = [['chan', '画笔'], ['zs', '画中枢'], ['points', '标记买卖点'], ['sr', '支阻位'], ['plan', '交易计划'], ['entry', '标记进出场']];
+// 左侧树形菜单（与 module_registry / analysis-catalog 一致）：
+// 基础公用组件（各策略共用的结构计算） + 交易策略（缠论V1：支阻位/交易计划/标记进出场；
+// 支阻位 2026-09-29 起归属策略——参数按方案单选生效；未来新策略在此追加组）
+// 分组入口在工作台左侧导航「参数配置」子菜单（三轮调整）：本页经 ?group= 或
+// postMessage{type:'params-group'} 只显示该组页签；无 group（直连 /params.html）= 全部平铺
+const TAB_GROUPS = [
+  { id: 'base', label: '基础组件', tabs: [['chan', '画笔'], ['zs', '画中枢'], ['points', '标记买卖点']] },
+  { id: 'strategy', label: '交易策略 · 缠论V1', tabs: [['sr', '支阻位'], ['plan', '交易计划'], ['entry', '标记进出场']] },
+];
+const TABS = TAB_GROUPS.flatMap(g => g.tabs);
+const GROUP_IDS = TAB_GROUPS.map(g => g.id);
 let modules = {}, active = 'chan', activeSymbol = 'XAUUSD', toastTimer;
+let activeGroup = null;   // 'base' | 'strategy' | null（全部平铺）
+const visibleTabs = () => (TAB_GROUPS.find(g => g.id === activeGroup) || { tabs: TABS }).tabs;
+function setGroup(gid) {
+  activeGroup = GROUP_IDS.includes(gid) ? gid : null;
+  if (visibleTabs().some(([id]) => id === active)) { drawTabs(); return; }
+  const first = visibleTabs()[0];
+  if (first) switchTab(first[0]);   // 当前模块不在组内 → 切到组内第一个（switchTab 内含 drawTabs）
+}
 
 // 模块逻辑规则说明（renderModule 时渲染在参数网格下方；顺势规则已并入图解表2 标题下方，
 // 与 trading_plan.trend_direction 同步维护）
@@ -364,7 +383,8 @@ function timeText(t) {
 }
 
 function drawTabs() {
-  $('tabs').innerHTML = TABS.map(([id, name]) =>
+  // 横向TAB：只显示当前分组的模块（无分组=全部平铺）；active 高亮当前模块
+  $('tabs').innerHTML = visibleTabs().map(([id, name]) =>
     `<button data-tab="${id}" class="${id === active ? 'on' : ''}" aria-pressed="${id === active}">${name}</button>`).join('');
 }
 
@@ -732,12 +752,20 @@ $('saveBtn').onclick = () => save(active).catch(err => toast(err.message, true))
 $('resetBtn').onclick = () => reset(active).catch(err => toast(err.message, true));
 
 (async function init() {
-  if (new URLSearchParams(location.search).has('embed')) document.body.classList.add('embedded');
+  const qs = new URLSearchParams(location.search);
+  if (qs.has('embed')) document.body.classList.add('embedded');
+  activeGroup = GROUP_IDS.includes(qs.get('group')) ? qs.get('group') : null;
+  // 工作台左侧导航切换分组 → postMessage 通知本页（不重载，未保存的编辑不丢）
+  window.addEventListener('message', e => {
+    if (e.origin !== location.origin || !e.data || e.data.type !== 'params-group') return;
+    setGroup(e.data.group);
+  });
   await refresh();
   drawSymbolTabs();
   drawTabs();
-  const saved = new URLSearchParams(location.search).get('tab');
-  switchTab(TAB_IDS.includes(saved) ? saved : 'chan');
+  const saved = qs.get('tab');
+  const ids = visibleTabs().map(([id]) => id);
+  switchTab(ids.includes(saved) ? saved : ids[0]);
 })().catch(err => toast(err.message, true));
 </script>
 </body>

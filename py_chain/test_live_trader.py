@@ -13,6 +13,7 @@ import shutil
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 
 from . import live_store
 from .backtest import DEFAULT_PERIODS
@@ -29,6 +30,28 @@ def _ts(s):
 
 
 class TestPure(unittest.TestCase):
+
+    def test_load_config_strategy(self):
+        """strategy 键（模块分层 2026-09-29）：默认 chan_v1；CLI/配置覆盖；未知拒绝启动。"""
+        self.assertEqual(load_config(None).get("strategy"), "chan_v1")
+        cfg = load_config(None, {"strategy": ""})
+        self.assertEqual(cfg["strategy"], "chan_v1")
+        with self.assertRaises(ValueError):
+            load_config(None, {"strategy": "ema_v9"})
+        # 显式配置文件覆盖（模拟 live_config.local.json 的 strategy 键）
+        import json as _json
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as d:
+            p = Path(d) / "live_config.json"
+            p.write_text(_json.dumps({"strategy": "chan_v1", "symbol": "XAUUSD"}),
+                         encoding="utf-8")
+            self.assertEqual(load_config(str(p))["strategy"], "chan_v1")
+
+    def test_state_key_strategy_suffix(self):
+        """kv 状态键带策略后缀（多策略并存=路径A 多进程互不覆盖）。"""
+        from . import live_store
+        self.assertEqual(live_store.state_key("session", "chan_v1"), "session@chan_v1")
+        self.assertEqual(live_store.state_key("heartbeat"), "heartbeat")  # 无策略语境保持原键
 
     def test_deep_merge(self):
         got = deep_merge({"a": {"x": 1, "y": 2}, "b": 1},
@@ -270,6 +293,85 @@ class TestGateShadow(LiveIntegrationBase):
         self.assertGreaterEqual(len(trades), 3)
         self.assertTrue(all(r["shadow"] == 1 for r in trades), "shadow 模式全部落 shadow")
         self.assertEqual(self.broker.positions(), [])   # 一张真单都没有
+
+
+class TestTradingToggle(LiveIntegrationBase):
+    """页面策略交易开关（kv trading_enabled@chan_v1）：缺键=开启；关闭只挡新开仓。"""
+
+    KEY = live_store.state_key("trading_enabled", "chan_v1")
+
+    def test_refresh_kv_semantics(self):
+        t, _ = self._trader()
+        self.assertTrue(t._trading_enabled)              # 初始缺省开启
+        t._refresh_trading_enabled()
+        self.assertTrue(t._trading_enabled)              # 缺键=开启（向后兼容）
+        live_store.save_state(self.KEY, {"enabled": True})
+        t._refresh_trading_enabled()
+        self.assertTrue(t._trading_enabled)
+        live_store.save_state(self.KEY, {"enabled": False})
+        t._refresh_trading_enabled()
+        self.assertFalse(t._trading_enabled)
+        live_store.delete_state(self.KEY)
+        t._refresh_trading_enabled()
+        self.assertTrue(t._trading_enabled)
+
+    def test_entry_gate_returns_disabled_reason(self):
+        t, _ = self._trader()
+        t.session = "S_gate_test"
+        live_store.save_state(self.KEY, {"enabled": False})
+        t._refresh_trading_enabled()
+        self.assertEqual(t._entry_gate("long"), (False, "策略交易已关闭(页面开关)"))
+        live_store.delete_state(self.KEY)
+        t._refresh_trading_enabled()
+        self.assertEqual(t._entry_gate("long"), (True, ""))   # 其余门全过（点差0.2<5）
+
+    def test_disabled_kv_blocks_entries(self):
+        live_store.save_state(self.KEY, {"enabled": False})
+        trader, feed = self._trader()                     # cfg 默认 shadow=False
+        trader.start(once=True)                           # start 即读 kv 生效
+        self._run(trader, feed)
+        trades = live_store.all_trades(trader.session)
+        self.assertGreaterEqual(len(trades), 3)
+        self.assertTrue(all(r["shadow"] == 1 for r in trades), "关闭后全部落 shadow")
+        self.assertEqual(self.broker.positions(), [])     # 一张真单都没有
+        self.assertTrue(any(o["retcomment"] == "gate:策略交易已关闭(页面开关)"
+                            for o in live_store.orders_of(trader.session)))
+        # _alert 统一写 kind="alert"，gate_blocked 在 payload.kind
+        evs = live_store.recent_events(trader.session, n=500)
+        self.assertTrue(any(e["kind"] == "alert"
+                            and isinstance(e["payload"], dict)
+                            and e["payload"].get("kind") == "gate_blocked"
+                            for e in evs))
+
+    def test_tick_rereads_toggle_mid_run(self):
+        trader, feed = self._trader()
+        trader.start(once=True)
+        # 跑到首个真实成交且无在途已下单未成交的挂单（否则其成交拍落在 cut 后仍非
+        # shadow）后写关闭 kv → 下一拍起生效
+        while not feed.done():
+            trader.tick()
+            filled = any(not r["shadow"] for r in live_store.all_trades(trader.session))
+            inflight = [p for p in trader._pending if p.get("status") == "ordered"]
+            if filled and not inflight:
+                break
+        cut = feed.cursor
+        live_store.save_state(self.KEY, {"enabled": False})
+        self._run(trader, feed)
+        trades = live_store.all_trades(trader.session)
+        self.assertTrue(any(not r["shadow"] and r["entry_time"] <= cut for r in trades),
+                        "关闭前应有真实成交")
+        after = [r for r in trades if r["entry_time"] > cut]
+        self.assertTrue(after, "关闭后应仍有新信号")
+        self.assertTrue(all(r["shadow"] == 1 for r in after), "关闭后进场全落 shadow")
+
+    def test_heartbeat_carries_trading_enabled(self):
+        live_store.save_state(self.KEY, {"enabled": False})
+        trader, feed = self._trader()
+        trader.start(once=True)
+        self._run(trader, feed)
+        hb = live_store.load_state(live_store.state_key("heartbeat", "chan_v1"))
+        self.assertIsNotNone(hb)
+        self.assertIs(hb.get("trading_enabled"), False)
 
 
 if __name__ == "__main__":

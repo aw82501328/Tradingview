@@ -272,5 +272,71 @@ class TestSrFromParamCenter(unittest.TestCase):
         self.assertIn("支阻预设", str(cm.exception))
 
 
+class StrategyRegistryTests(unittest.TestCase):
+    """模块分层（2026-09-29）：基础公用组件 vs 交易策略（缠论V1），注册表唯一来源。"""
+
+    def test_registry_stages_have_script_and_prefix(self):
+        from . import module_registry
+        from .analysis_service import SCRIPTS, PREFIX
+        for sid in module_registry.strategy_ids():
+            for stage in module_registry.order_of(sid):
+                if stage == "sr":
+                    continue  # sr 在进程内执行（sr_service），无 SCRIPTS 条目、PREFIX 有
+                self.assertIn(stage, SCRIPTS, f"{sid}.{stage} 缺技能脚本映射")
+                if stage == "points":
+                    continue  # 买卖点不落盘 json（结果在 stage report），无 PREFIX 条目
+                self.assertIn(stage, PREFIX, f"{sid}.{stage} 缺落盘前缀")
+
+    def test_default_strategy_order_equals_legacy_order(self):
+        from . import module_registry
+        self.assertEqual(module_registry.order_of(), ORDER)
+        self.assertEqual(module_registry.order_of(None), ORDER)
+        self.assertEqual(dependency_order("all"), ORDER)
+        self.assertEqual(dependency_order("entry", "chan_v1"),
+                         ["bi", "sr", "plan", "entry"])
+
+    def test_unknown_strategy_rejected(self):
+        from . import module_registry
+        with self.assertRaises(ValueError):
+            module_registry.order_of("ema_v9")
+        with self.assertRaises(ValueError):
+            module_registry.normalize_strategy("ema_v9")
+        self.assertEqual(module_registry.normalize_strategy(""), module_registry.DEFAULT_STRATEGY)
+        self.assertEqual(module_registry.normalize_strategy(None), module_registry.DEFAULT_STRATEGY)
+
+    def test_configure_strategy_validation(self):
+        """configure：缺省/空=默认策略；未知 → ValueError 且 cfg 保持原值。"""
+        self.tmp = tempfile.TemporaryDirectory()
+        self._orig_pm_file = param_center.PARAMS_FILE
+        param_center.PARAMS_FILE = str(Path(self.tmp.name) / "module_params.json")
+        try:
+            m = AnalysisManager(lambda *x: None, lambda n: True, lambda n: None,
+                                threading.Lock(), webapp.ControlApp.normalize_sr_cfg,
+                                lambda *x: None, storage=self.tmp.name,
+                                stage_runner=lambda *a: {}, target_reader=lambda cfg, restore=None: "15")
+            m.configure({"targetId": "t", "symbol": "OANDA:XAUUSD", "from": "2026-06-30",
+                         "sr": {"srTypes": ["cluster"]}})
+            self.assertEqual(m.cfg["strategy"], "chan_v1")
+            m.configure({"strategy": ""})
+            self.assertEqual(m.cfg["strategy"], "chan_v1")
+            with self.assertRaises(ValueError):
+                m.configure({"strategy": "ema_v9"})
+            self.assertEqual(m.cfg["strategy"], "chan_v1")
+            m.close()
+        finally:
+            param_center.PARAMS_FILE = self._orig_pm_file
+            self.tmp.cleanup()
+
+    def test_normalize_cfg_strategy_for_modes(self):
+        """三模式入口：strategy 缺省补默认、未知拒绝（webapp.normalize_cfg）。"""
+        base = {"symbol": "OANDA:XAUUSD", "periods": ["60"]}
+        for mode in ("backtest", "replay", "live"):
+            out = webapp.ControlApp.normalize_cfg(dict(base), mode)
+            self.assertEqual(out["strategy"], "chan_v1")
+        bad = dict(base, strategy="ema_v9")
+        with self.assertRaises(ValueError):
+            webapp.ControlApp.normalize_cfg(bad, "backtest")
+
+
 if __name__ == "__main__":
     unittest.main()

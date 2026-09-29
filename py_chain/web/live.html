@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>实盘监控（只读） · EXNESS MT5</title>
+<title>实盘监控 · EXNESS MT5</title>
 <link rel="stylesheet" href="/theme.css">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -15,6 +15,23 @@
   h1 { font-size: 20px; margin-bottom: 4px; }
   .sub { color: var(--muted); font-size: 12px; margin-bottom: 20px; }
   .sub a { color: var(--muted); }
+  .tabbar { display: flex; align-items: flex-end; gap: 10px;
+            margin-bottom: 16px; flex-wrap: wrap; }
+  .stabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border);
+           flex: 1; flex-wrap: wrap; }
+  .stabs button { background: transparent; border: 0;
+           border-bottom: 2px solid transparent; color: var(--muted);
+           font-size: 13px; padding: 8px 16px; cursor: pointer; }
+  .stabs button:hover { color: var(--text); }
+  .stabs button.on { border-color: #55d7b0; color: #92d1b4; font-weight: 600; }
+  .stabs .tstat { font-size: 11px; margin-left: 6px; font-weight: 400; }
+  .tgl-btn { border: 1px solid var(--border); border-radius: 8px;
+           padding: 7px 18px; font-size: 13px; cursor: pointer;
+           background: var(--card); color: var(--text); margin-bottom: 6px; }
+  .tgl-btn.stop  { background: #3b2226; border-color: #6b3a40; color: #e0938f; }
+  .tgl-btn.start { background: #0d3b31; border-color: #1d5c4c; color: #7fe0b0; }
+  .tgl-btn:disabled { opacity: .5; cursor: default; }
+  .pend { font-size: 11px; color: #f0b90b; margin-left: 8px; margin-bottom: 8px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
           gap: 10px; margin-bottom: 20px; }
   .stat { background: var(--card); border: 1px solid var(--border);
@@ -40,11 +57,23 @@
 </style>
 </head>
 <body>
-<h1>实盘监控（只读）</h1>
-<div class="sub">数据源 bars.db live_* 表 · 每 5s 刷新 · 本页零写操作（重启 webapp 不影响 live_trader 进程）·
+<h1>实盘监控</h1>
+<div class="sub">数据源 bars.db live_* 表 · 每 5s 刷新 · 策略按 TAB 分离 ·
+「开启/关闭交易」写 live_state（重启 webapp 不影响 live_trader 进程）·
 运行手册见 <a href="/live" onclick="return false">py_chain/LIVE_GUIDE.md</a></div>
 
+<div class="tabbar">
+  <div class="stabs" id="strategy-tabs" role="tablist"></div>
+  <div id="trade-ctl"></div>
+</div>
+
 <div class="grid" id="stats"></div>
+
+<div class="card">
+  <h2>盈亏汇总（已平仓） <span class="badge" id="pnl-closed">0 笔</span></h2>
+  <div class="grid" id="pnl-stats" style="margin-bottom:0"></div>
+  <div class="empty" id="pnl-empty">暂无已平仓交易</div>
+</div>
 
 <div class="card">
   <h2>当前持仓 <span class="badge" id="open-count">0</span></h2>
@@ -89,29 +118,108 @@ const esc = s => String(s ?? '—').replace(/[&<>"]/g,
 const dirCls = d => d === 'long' ? 'long' : 'short';
 const dirTxt = d => d === 'long' ? '多' : '空';
 
+let active = null, strategies = [], toggling = false;
+const current = () => strategies.find(s => s.strategy === active) || strategies[0];
+
 function fillTable(tid, rows, emptyId, rowHtml) {
   const tb = document.querySelector(tid + ' tbody');
   tb.innerHTML = rows.map(rowHtml).join('');
   document.getElementById(emptyId).style.display = rows.length ? 'none' : 'block';
 }
 
+function renderTabs() {
+  document.getElementById('strategy-tabs').innerHTML = strategies.map(s => `
+    <button data-strategy="${esc(s.strategy)}" role="tab"
+      aria-selected="${s.strategy === active}"
+      class="${s.strategy === active ? 'on' : ''}">${esc(s.strategy_title)}
+      <span class="tstat">${s.online ? '在线' : '离线'}${s.trading_enabled ? '' : ' · 已停交易'}</span>
+    </button>`).join('');
+  document.querySelectorAll('#strategy-tabs button').forEach(b =>
+    b.onclick = () => {
+      if (active === b.dataset.strategy) return;
+      active = b.dataset.strategy;
+      renderTabs();
+      render(current());
+    });
+  renderToggle();
+}
+
+function renderToggle() {
+  const s = current();
+  if (!s) return;
+  const pend = s.online && s.heartbeat && s.heartbeat.trading_enabled != null
+    && s.heartbeat.trading_enabled !== s.trading_enabled;
+  document.getElementById('trade-ctl').innerHTML = `
+    <button class="tgl-btn ${s.trading_enabled ? 'stop' : 'start'}" ${toggling ? 'disabled' : ''}>
+      ${s.trading_enabled ? '关闭交易' : '开启交易'}</button>
+    ${pend ? '<span class="pend">待进程生效…</span>' : ''}
+    ${s.online ? '' : '<span class="pend">进程离线：开关已记录，恢复后生效</span>'}`;
+  document.querySelector('.tgl-btn').onclick = toggleTrading;
+}
+
+async function toggleTrading() {
+  if (toggling) return;
+  const s = current(), target = !s.trading_enabled;
+  const msg = target
+    ? `确认开启「${s.strategy_title}」策略交易？开启后将恢复真实下单（若非 shadow 模式）。`
+    : `确认关闭「${s.strategy_title}」策略交易？关闭后停止新开仓，存量持仓照常管理出场，新信号转 shadow 记录。`;
+  if (!confirm(msg)) return;
+  toggling = true;
+  renderToggle();
+  try {
+    const r = await fetch('/api/live/trading', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ strategy: s.strategy, enabled: target })
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw Error(d.error || `请求失败 ${r.status}`);
+    s.trading_enabled = d.enabled;   // 成功才改本地态；失败由下轮轮询同步真实 kv
+  } catch (e) { alert(e.message); }
+  toggling = false;
+  renderTabs();
+  render(current());
+}
+
 async function refresh() {
   let d;
   try { d = await (await fetch('/api/live/overview')).json(); }
   catch (e) { return; }
-  const s = d.session || {};
-  const hbAge = d.heartbeat && d.heartbeat.ts ? Math.round(Date.now()/1000 - d.heartbeat.ts) : null;
+  strategies = d.strategies || [];
+  if (!strategies.length) return;
+  if (!strategies.some(s => s.strategy === active)) active = strategies[0].strategy;
+  renderTabs();
+  render(current());
+}
+
+function render(s) {
+  const sess = s.session || {};
+  const hbAge = s.heartbeat && s.heartbeat.ts ? Math.round(Date.now()/1000 - s.heartbeat.ts) : null;
   document.getElementById('stats').innerHTML = `
     <div class="stat"><label>进程状态</label>
-      <b><span class="badge ${d.online ? 'on' : 'off'}">${d.online ? '在线' : '离线'}</span></b></div>
-    <div class="stat"><label>会话</label><b class="mono">${esc(s.id || '—')}</b></div>
-    <div class="stat"><label>模式</label><b>${s.shadow ? 'shadow（不下单）' : '实单'}</b></div>
-    <div class="stat"><label>品种/手数</label><b>${esc(s.symbol || '—')} · ${esc(s.lots ?? '—')}回测手</b></div>
+      <b><span class="badge ${s.online ? 'on' : 'off'}">${s.online ? '在线' : '离线'}</span></b></div>
+    <div class="stat"><label>交易策略</label><b>${esc(s.strategy_title || s.strategy || '—')}</b></div>
+    <div class="stat"><label>会话</label><b class="mono">${esc(sess.id || '—')}</b></div>
+    <div class="stat"><label>模式</label><b>${sess.shadow ? 'shadow（不下单）' : '实单'}</b></div>
+    <div class="stat"><label>策略交易</label>
+      <b><span class="badge ${s.trading_enabled ? 'on' : 'off'}">${s.trading_enabled ? '开启' : '已关闭'}</span></b></div>
+    <div class="stat"><label>品种/手数</label><b>${esc(sess.symbol || '—')} · ${esc(sess.lots ?? '—')}回测手</b></div>
     <div class="stat"><label>心跳</label><b>${hbAge === null ? '—' : hbAge + 's 前'}</b></div>
-    <div class="stat"><label>引擎推进至</label><b>${d.engine_cursor && d.engine_cursor.fine_last ? fmtT(d.engine_cursor.fine_last) : '—'}</b></div>`;
+    <div class="stat"><label>引擎推进至</label><b>${s.engine_cursor && s.engine_cursor.fine_last ? fmtT(s.engine_cursor.fine_last) : '—'}</b></div>`;
 
-  document.getElementById('open-count').textContent = d.open_trades.length;
-  fillTable('#open-table', d.open_trades, 'open-empty', t => `<tr>
+  const pnl = s.pnl_summary;
+  const pnlStats = document.getElementById('pnl-stats');
+  document.getElementById('pnl-empty').style.display = pnl && pnl.closed ? 'none' : 'block';
+  pnlStats.style.display = pnl && pnl.closed ? '' : 'none';
+  document.getElementById('pnl-closed').textContent = pnl ? pnl.closed + ' 笔' : '0 笔';
+  pnlStats.innerHTML = pnl ? `
+    <div class="stat"><label>合计盈亏（引擎）</label><b class="${(pnl.engine_pnl || 0) >= 0 ? 'long' : 'short'}">${esc(pnl.engine_pnl?.toFixed(2))}</b></div>
+    <div class="stat"><label>合计盈亏（券商）</label><b class="${(pnl.broker_pnl || 0) >= 0 ? 'long' : 'short'}">${pnl.broker_pnl == null ? '—' : esc(pnl.broker_pnl.toFixed(2))}</b></div>
+    <div class="stat"><label>胜率</label><b>${pnl.win_rate == null ? '—' : (pnl.win_rate * 100).toFixed(1) + '%'}</b></div>
+    <div class="stat"><label>平均偏差</label><b>${pnl.avg_deviation == null ? '—' : esc(pnl.avg_deviation.toFixed(2))}</b></div>` : '';
+
+  document.getElementById('open-count').textContent = s.open_trades.length;
+  fillTable('#open-table', s.open_trades, 'open-empty', t => `<tr>
     <td>${t.engine_trade_no}</td>
     <td class="${dirCls(t.direction)}">${dirTxt(t.direction)}</td>
     <td class="mono">${fmtT(t.entry_time)}</td>
@@ -123,8 +231,8 @@ async function refresh() {
     <td>${t.shadow ? 'shadow' : ''}</td>
     <td class="mono muted">${esc(t.position_ticket || '—')}</td></tr>`);
 
-  document.getElementById('closed-count').textContent = d.closed_trades.length;
-  fillTable('#closed-table', d.closed_trades, 'closed-empty', t => `<tr>
+  document.getElementById('closed-count').textContent = s.closed_trades.length;
+  fillTable('#closed-table', s.closed_trades, 'closed-empty', t => `<tr>
     <td>${t.engine_trade_no}</td>
     <td class="${dirCls(t.direction)}">${dirTxt(t.direction)}</td>
     <td class="mono">${fmtT(t.entry_time)}</td>
@@ -135,8 +243,8 @@ async function refresh() {
     <td class="mono">${esc(t.deviation)}</td>
     <td class="muted">${esc(t.state)}</td></tr>`);
 
-  document.getElementById('order-count').textContent = d.orders.length;
-  fillTable('#order-table', d.orders, 'order-empty', o => `<tr>
+  document.getElementById('order-count').textContent = s.orders.length;
+  fillTable('#order-table', s.orders, 'order-empty', o => `<tr>
     <td class="mono">${fmtT(o.ts_utc)}</td>
     <td>${esc(o.action)}</td>
     <td>${o.engine_trade_no ?? '—'}</td>
@@ -147,7 +255,7 @@ async function refresh() {
     <td class="${o.ok ? '' : 'short'}">${o.ok ? '成功' : '失败 ' + esc(o.retcode)}${o.retcomment ? ' ' + esc(o.retcomment).slice(0, 40) : ''}</td>
     <td>${o.shadow ? 'shadow' : ''}</td></tr>`);
 
-  fillTable('#event-table', d.events, 'event-empty', e => `<tr>
+  fillTable('#event-table', s.events, 'event-empty', e => `<tr>
     <td class="mono">${fmtT(e.ts_utc)}</td>
     <td>${esc(e.kind)}</td>
     <td class="mono muted">${esc(JSON.stringify(e.payload)).slice(0, 160)}</td></tr>`);

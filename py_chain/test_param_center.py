@@ -13,12 +13,21 @@ class ParamCenterTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self._orig_file = param_center.PARAMS_FILE
         param_center.PARAMS_FILE = str(Path(self.tmp.name) / "module_params.json")
+        # 支阻方案文件同样隔离（set_sr_preset 读全局方案列表）
+        self._orig_presets = param_center.SR_PRESETS_FILE
+        param_center.SR_PRESETS_FILE = str(Path(self.tmp.name) / "sr_presets.json")
+        Path(param_center.SR_PRESETS_FILE).write_text(json.dumps([
+            {"name": "方案A", "cfg": {"periods": ["D", "60"], "clusterAtr": "0.5",
+                                      "fibLevels": "0.382,0.5", "symbol": "X", "from": "2026-01-01"}},
+            {"name": "方案B", "cfg": {"periods": ["D", "15"], "clusterAtr": "0.6"}},
+        ], ensure_ascii=False), encoding="utf-8")
         # 每个用例从干净默认态开始（CHAN_CFG 恢复默认、清掉上一个用例落盘的 overrides）
         chan_core.reset_cfg()
 
     def tearDown(self):
         chan_core.reset_cfg()
         param_center.PARAMS_FILE = self._orig_file
+        param_center.SR_PRESETS_FILE = self._orig_presets
         self.tmp.cleanup()
 
     def test_normalize_rejects_bad_values(self):
@@ -218,6 +227,57 @@ class ParamCenterTests(unittest.TestCase):
         self.assertEqual(titles["points"], "标记买卖点")
         self.assertEqual(titles["entry"], "标记进出场")
         self.assertEqual(titles["plan"], "交易计划")
+
+    def test_module_categories_align_registry(self):
+        """模块分层归属（2026-09-29 二轮）：chan/zs/points=基础组件，
+        sr/plan/entry=策略（缠论V1——支阻位归策略组，参数按方案单选生效）。"""
+        for name, spec in param_center.PARAM_MODULES.items():
+            self.assertIn(spec["category"], ("base", "strategy"), name)
+        self.assertEqual(set(param_center.PARAM_MODULES[n]["category"]
+                             for n in ("chan", "zs", "points")), {"base"})
+        self.assertEqual(set(param_center.PARAM_MODULES[n]["category"]
+                             for n in ("plan", "entry")), {"strategy"})
+        snap = param_center.snapshot()
+        self.assertEqual(snap["sr"]["category"], "strategy")
+        self.assertEqual(snap["plan"]["category"], "strategy")
+
+    def test_sr_preset_apply_switch_unset(self):
+        """生效方案单选（复制语义）：生效=方案参数复制入桶并标记；切换=覆盖；取消=保留参数。"""
+        eff = param_center.set_sr_preset("XAUUSD", "方案A")
+        self.assertEqual(eff["periods"], ["D", "60"])          # 方案参数已入桶
+        self.assertNotIn("symbol", eff)                         # 运行时键剥离
+        self.assertNotIn("preset", eff)                         # 元数据键不进 effective
+        snap = param_center.snapshot()
+        self.assertEqual(snap["sr"]["bySymbol"]["XAUUSD"]["preset"], "方案A")
+        self.assertIsNone(snap["sr"]["bySymbol"]["XAGUSD"]["preset"])  # 按品种独立
+        # 切换（单选覆盖）
+        param_center.set_sr_preset("XAUUSD", "方案B")
+        eff2 = param_center.effective_sr("XAUUSD")
+        self.assertEqual(eff2.get("clusterAtr"), "0.6")
+        self.assertEqual(param_center.snapshot()["sr"]["bySymbol"]["XAUUSD"]["preset"], "方案B")
+        # 取消：标记清除、桶参数保留
+        param_center.set_sr_preset("XAUUSD", None)
+        snap3 = param_center.snapshot()
+        self.assertIsNone(snap3["sr"]["bySymbol"]["XAUUSD"]["preset"])
+        self.assertEqual(param_center.effective_sr("XAUUSD").get("clusterAtr"), "0.6")
+        # 未知方案拒绝
+        with self.assertRaises(ValueError):
+            param_center.set_sr_preset("XAUUSD", "不存在")
+
+    def test_update_sr_keeps_preset_marker(self):
+        """编辑器保存（update_sr）不携带 preset 键——落盘保留品种已选生效标记。"""
+        param_center.set_sr_preset("XAUUSD", "方案A")
+        param_center.update_sr("XAUUSD", {"periods": ["D"], "clusterAtr": "0.7"})
+        snap = param_center.snapshot()
+        self.assertEqual(snap["sr"]["bySymbol"]["XAUUSD"]["preset"], "方案A")
+        self.assertEqual(param_center.effective_sr("XAUUSD").get("clusterAtr"), "0.7")
+
+    def test_reset_sr_clears_preset_marker(self):
+        """恢复默认=清空品种桶（含生效标记）。"""
+        param_center.set_sr_preset("XAUUSD", "方案A")
+        param_center.reset_sr("XAUUSD")
+        snap = param_center.snapshot()
+        self.assertIsNone(snap["sr"]["bySymbol"]["XAUUSD"]["preset"])
 
     def test_trend_res_enum(self):
         # plan.trendRes 字符串枚举：合法值通过、非法值/非字符串 raise；默认 = TREND_RES

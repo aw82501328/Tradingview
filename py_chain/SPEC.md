@@ -97,6 +97,36 @@
 - 回测完成后回画**实际成交的进场箭头**：做多=红色向上箭头、做空=绿色向下箭头；出场阶梯（§2.1）已实现，一并回画**出场标记**（`marks.py`：终局 `xcross` / 平一半 `circle`，默认色 `DEFAULT_EXIT_COLOR = #FFEB3B`，与 JS 技能和 Web 控制台一致）。
 - 依赖：`websocket-client`（CDP 通信）；其余为 Python 标准库。**尚未执行 pip 安装验证**。
 
+## 1.5 模块分层架构（2026-09-29，基础公用组件 vs 交易策略）
+
+全系统模块分为两大类，**分层唯一来源 = `py_chain/module_registry.py`**（纯常量注册表，无内部依赖）：
+
+- **基础公用组件** `BASE_STAGES = [bi, zs, points]`：画笔/画中枢/标记买卖点——结构计算与标注，所有策略共用，不含「何时交易」决策。
+- **交易策略** `STRATEGIES`（按策略成组，组内 = 支阻 + 计划 + 进场三步）：当前唯一策略 **缠论V1**（id=`chan_v1`，stages=[sr, plan, entry]，engine="chan"；**sr 自同日二轮调整起归属策略**——支阻参数按策略经「方案列表单选生效」选定）。
+
+各处消费同一口径：
+
+| 入口 | 位置 | 行为 |
+| --- | --- | --- |
+| 工作台流程 | `analysis_service.py`（ORDER/DEPENDENCIES 由注册表生成；`configure`/`start` 按 `cfg["strategy"]` 取阶段） | 流程分两组渲染（analysis-catalog.json 带 `category`/`strategyId`），策略下拉；旧 state.json 无 strategy 键 → 默认 chan_v1 |
+| 参数配置页 | `param_center.py` `PARAM_MODULES` 每模块带 `category`；`web/params.html` `TAB_GROUPS` 分组页签 | 基础组件 / 交易策略·缠论V1 两组 |
+| 三模式（回测/回放/监控） | `webapp.normalize_cfg`：`strategy` 缺省=chan_v1，未知 → 400 拒绝启动 | 卡片策略下拉；**引擎不分发**（唯一实现，行为恒等；键随 cfg 落历史方案快照） |
+| MT5 实盘 | `live_trader.load_config`：同校验，CLI `--strategy` 覆盖；strategy 写入 session 状态 | /live 只读页显示策略名（`live_api.overview.strategy_title`） |
+
+**策略引擎分发契约**：实盘与回测共用 `BacktestEngine`（`live_trader._build_engine` 构造，靠 `engine.step_to(t)` 事件流驱动）。新策略引擎实现同款 `step_to` 接口（推进到 t → 返回 fills/exits/suppressed）即可接入实盘全链路（预热/重放恢复/下单/风控/对账零改动）；第二策略到来时在 Worker 构建处与 `_build_engine` 按 `STRATEGIES[engine]` 分发。
+
+**新增策略五步**：①实现策略（引擎 `step_to` 接口 + 工作台 JS 技能，复用 chan-core 基础算法）→ ②注册表加条目 → ③`analysis-catalog.json` 加模块条目 + `analysis_service.SCRIPTS` 映射（下拉/分组自动生效）→ ④`PARAM_MODULES` 加参数模块 + `params.html` TAB_GROUPS 追加（参数页签自动生效）→ ⑤引擎分发点按 engine 标识构建。完整清单见 `.cursor/skills/README.md`。
+
+**实盘多策略并存（已定路径 A = 多进程）**：每策略一个 `live_trader` 实例（独立 live_config + **不同 magic**）；MT5 按 magic 隔离持仓，live_trades/live_orders/live_events 已按 session 隔离，**kv 状态键已带策略后缀**（`live_store.state_key`，`session@<strategy>` 等，2026-09-29 起写入/读取两侧同步——升级后需重启 live_trader 进程，旧单键不再被读取）。/live 页已多会话聚合（2026-09-29：按策略 TAB 展示 + 每策略「开启/关闭交易」按钮，`POST /api/live/trading` 写 `trading_enabled@<策略>` kv、live_trader 每拍重读、关闭=停新开仓转 shadow）。留待第二个策略接入时实施：账户级风控分额/合计守卫。
+
+**UI 入口调整（同日）**：工作台「回测与监控」子菜单第三项由「实时监控」改为「MT5实盘」（嵌入只读 /live 页：进程在线状态、策略、持仓、盈亏汇总）；图表驱动的实时监控（LiveWorker/LiveMonitor）代码保留，直连 `/modes.html?mode=live` 仍可用。
+
+**二轮调整（同日晚，用户拍板三项）**：
+
+1. **支阻位归入策略组**：`BASE_STAGES` 移除 sr，`STRATEGIES.chan_v1.stages=[sr, plan, entry]`（合并 ORDER/DEPENDENCIES 数值不变）；catalog/参数 category、参数页树、技能标注同步——工作台流程分组变为 基础组件(画笔/中枢/买卖点) + 策略组(支阻位/交易计划/进出场)。
+2. **支阻方案「生效」单选（复制语义）**：参数配置支阻位页方案列表每品种**单选一个生效方案**——`param_center.set_sr_preset(symbol, name|null)`：方案 cfg（剥离运行时键）**复制入品种桶**并标记 `modules.sr.<symbol>.preset`；再点生效行=取消标记（桶参数保留已复制内容）；切换=覆盖。`effective_sr()` 返回前剔除 preset 键（运行时消费方零感知）；`update_sr` 保留旧标记；删除方案时前端自动清标记。API：`POST /api/params/sr/preset`。Excel 导入导出**仅移除界面按钮**（行内导入/导出 + 顶部导入为新方案），后端接口与测试保留。**全量回测卡「支阻预设」下拉移除**——回测支阻参数统一=参数中心该品种桶（含生效方案复制的参数）；`_sr_preset_kwargs` 的 cfg.sr_preset 优先级保留仅为历史方案重放兼容，UI 不再产生该键。
+3. **参数配置分组导航（三轮定稿）**：分组入口放在**工作台左侧导航「参数配置」子菜单**（基础组件 / 交易策略·缠论V1，`analysis.js` `paramEntries`+`params-subnav`，同回测与监控的子菜单模式）；参数页内保持**横向模块TAB**——经 `?group=` 或 postMessage`{type:'params-group'}` 只显示该组页签（切换不重载、编辑不丢），直连 `/params.html` 无分组=全部平铺。
+
 ## 2. 架构与数据流
 
 ```

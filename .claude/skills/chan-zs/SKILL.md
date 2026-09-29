@@ -7,6 +7,8 @@ description: Draw Chanlun (缠论) ZhongShu (中枢, central pivot areas) on the
 
 通过 CDP 连接 TradingView Desktop，读取 **`chan-bi`（画笔）SKILL 落盘的笔数据**，按缠论中枢定义在图上画**中枢矩形**（颜色与该周期笔一致、仅本周期显示）。
 
+> **模块分类**：基础公用组件（所有交易策略共用的结构计算；分层见 `.cursor/skills/README.md`）。
+>
 > **算法来源**：所有缠论算法由 **`chan-core`**（`.cursor/skills/chan-core/scripts/chan_core.js`）提供（唯一算法源），本脚本只负责读取笔数据、调算法、绘制与落盘中枢数据。修改算法规则请改 `chan-core`。
 >
 > **强制依赖画笔数据**：本 SKILL **不计算笔**，**强制读取 `chan-bi` 画笔 SKILL 落盘的笔数据文件**（`.cursor/cache/bis_<品种>.json`）。如果文件不存在、或文件品种与当前图表品种不一致，脚本会**报错退出**，必须先对当前品种运行「画笔」（chan-bi）后再画中枢。

@@ -80,6 +80,8 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
 .plist-item{display:flex;align-items:center;gap:4px;padding:2px 6px;border-bottom:1px solid var(--border)}
 .plist-item:last-child{border-bottom:none}
 .plist-item.on{background:#1d2a44}
+.plist-item.active-preset{background:#173227;outline:1px solid #2f5a48}
+.plist-item.active-preset .nm{color:#92d1b4;font-weight:600}
 .plist-item .nm{flex:1;min-width:35px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;background:transparent;border:none;color:var(--text);padding:3px 4px;cursor:pointer;font-size:12px}
 .plist-item .nm:hover{color:#fff}
 .plist-empty{color:var(--muted);padding:8px;font-size:11px}
@@ -155,14 +157,12 @@ tr.edit-sub:hover td{background:#1a2030}
     </div>
     <div class="merge-tip" id="raw-note" style="display:none;">叠加 RAW· 本周期原始候选线：每张图只显示 本图周期 的全部候选（密集区黄 / 黄金分割蓝 / BOLL 青），与灰线同框对照；只画距时点价（时点空=现价）≤ 距离上限×本周期ATR 的候选。</div>
     <div class="row" style="border-top:1px solid var(--border);margin-top:8px;padding-top:7px">
-      <span style="color:#fff;font-size:12px">预设</span>
-      <input type="text" id="preset-name" placeholder="新预设名称" maxlength="40">
+      <span style="color:#fff;font-size:12px">方案</span>
+      <input type="text" id="preset-name" placeholder="新方案名称" maxlength="40">
       <button class="sm primary" id="btn-preset-save">新建</button>
     </div>
-    <div class="merge-tip">全局命名模板（不分品种）：点名称载入到当前品种编辑器 → 再「保存本模块」落桶 · 行内「保存」=用当前编辑器参数改写该项</div>
-    <input type="file" id="preset-excel-file" accept=".xlsx" hidden>
-    <div id="preset-excel-status" class="merge-tip" role="status"></div>
-    <button type="button" class="sm" id="preset-excel-new">导入 Excel 为新预设</button>
+    <div class="merge-tip">全局命名模板（不分品种）：每品种<b>单选一个「生效」方案</b>——生效=该方案参数复制为本品种策略所用支阻参数 · 点名称载入编辑器微调 · 行内「保存」=用当前编辑器参数改写该方案</div>
+    <div class="merge-tip" id="active-preset-badge" role="status"></div>
     <div class="plist" id="preset-list"></div>
     <div class="merge-tip" id="loaded-badge"></div>
   </div>
@@ -402,7 +402,8 @@ const state = { busy: null, active: null, hasResult: false, computedAt: null,
                 tab: 'periods', watchdogs: {},
                 sessionComputed: false,   // 本页面会话内是否真实计算成功（画图解锁的唯一依据）
                 results: {}, viewSymbol: null,
-                loadedPreset: null };   // 当前编辑器内容来自哪份预设（切品种/恢复默认即清除）
+                loadedPreset: null,     // 当前编辑器内容来自哪份预设（切品种/恢复默认即清除）
+                activePreset: null };   // 当前品种生效方案名（单选；来自参数中心桶 preset 键）
 let logs = [];
 let clusterParamsByPeriod = {};
 const defaultMinTouchs = {W:4,D:4,'240':4,'60':3,'15':3,'3':8};
@@ -651,6 +652,9 @@ async function loadSymbolCfg(sid) {
   const eff = bucket.effective || r.modules.sr.defaults || {};
   const fromKeep = el('cfg-from').value.trim();
   applyCfgToUI({ ...eff, symbol: metaOf(sid).code, from: fromKeep || eff.from });
+  state.activePreset = bucket.preset || null;   // 生效方案标记（切品种随桶切换）
+  renderActiveBadge();
+  refreshPresetList();      // 高亮随品种切换刷新（activePreset 刚更新）
   markLoadedPreset(null);   // 编辑器内容换成品种桶参数，预设徽章清除
   const when = bucket.savedAt ? ' · 最近保存 ' + fmtTime(bucket.savedAt) : '';
   moduleStatus(metaOf(sid).label + ' 参数已载入' + when, true);
@@ -709,61 +713,56 @@ async function refreshPresetList() {
   if (!r) return;
   const presets = r.presets || [];
   if (!presets.length) {
-    box.innerHTML = '<div class="plist-empty">暂无预设，输入名称后点新建，或导入 Excel</div>';
+    box.innerHTML = '<div class="plist-empty">暂无方案，输入名称后点新建</div>';
     return;
   }
   box.innerHTML = presets.map(p => {
     const n = esc(p.name);
-    return `<div class="plist-item" data-name="${n}">` +
-      `<button type="button" class="nm" data-act="load" title="载入">${n}</button>` +
+    const on = p.name === state.activePreset;
+    return `<div class="plist-item${on ? ' active-preset' : ''}" data-name="${n}">` +
+      `<button type="button" class="nm" data-act="load" title="载入到当前品种编辑器">${on ? '● ' : ''}${n}</button>` +
+      `<button type="button" class="sm${on ? ' primary' : ''}" data-act="active" title="${on ? '当前生效中，点击取消' : '设为当前品种生效方案（单选，参数复制入品种桶）'}">${on ? '生效中' : '生效'}</button>` +
       `<button type="button" class="sm" data-act="save">保存</button>` +
-      `<button type="button" class="sm danger" data-act="del">删除</button>` +
-      `<button type="button" class="sm" data-act="import" title="从 Excel 更新此预设">导入</button>` +
-      `<button type="button" class="sm" data-act="export" title="导出此预设已保存的全部参数">导出</button></div>`;
+      `<button type="button" class="sm danger" data-act="del">删除</button></div>`;
   }).join('');
   markLoadedPreset(state.loadedPreset);
 }
-let excelTarget = '', excelBusy = false;
-function excelStatus(text, error=false) {
-  el('preset-excel-status').textContent=text;
-  el('preset-excel-status').style.color=error?'var(--warn)':'var(--ok)';
+/** 当前生效方案徽章（每品种单选；复制语义：生效=方案参数复制入品种桶） */
+function renderActiveBadge() {
+  const b = el('active-preset-badge');
+  if (!b) return;
+  if (state.activePreset) {
+    b.textContent = `当前生效：${state.activePreset}（${metaOf(currentSid).label} · 单选；再点「生效中」可取消）`;
+    b.style.color = 'var(--ok)';
+  } else {
+    b.textContent = `当前生效：无（${metaOf(currentSid).label} 使用下方编辑器保存的品种参数）`;
+    b.style.color = '';
+  }
 }
-function choosePresetExcel(name) {
-  if(excelBusy)return;
-  excelTarget=name;el('preset-excel-file').value='';el('preset-excel-file').click();
+/** 生效方案单选切换（复制语义）：POST /api/params/sr/preset；再点当前生效行=取消（桶参数保留） */
+async function setActivePreset(name) {
+  if (busyNow() || anyModeRunning()) { log('计算进行中不能切换生效方案（会改写表单参数）', true); return; }
+  const target = state.activePreset === name ? null : name;
+  const r = await api('/api/params/sr/preset', { symbol: currentSid, name: target });
+  if (!r) return;
+  state.activePreset = target;
+  if (target) {
+    const list = await api('/api/sr/presets', undefined, 'GET');
+    const p = (list && list.presets || []).find(x => x.name === target);
+    if (p) applyCfgToUI({ ...presetCfgForUI(p.cfg), symbol: currentCode(), from: el('cfg-from').value.trim() });
+    markLoadedPreset(target);
+    log(`已生效方案「${target}」：参数复制入 ${currentSid} 品种桶（单选覆盖，下一轮任务生效）`);
+  } else {
+    log('已取消生效方案（品种桶保留已复制参数）');
+  }
+  renderActiveBadge();
+  await refreshPresetList();
 }
-async function exportPresetExcel(name) {
-  if(excelBusy)return;excelBusy=true;
-  try {
-    const r=await fetch('/api/sr/presets/excel/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
-    if(!r.ok)throw Error((await r.json()).error||'导出失败');
-    const url=URL.createObjectURL(await r.blob()),a=document.createElement('a');
-    a.href=url;a.download=name.replace(/[\\/:*?"<>|]/g,'_')+'.xlsx';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);
-    excelStatus('已导出 '+name+' 的全部已保存参数。');
-  } catch(e){excelStatus(e.message,true);} finally{excelBusy=false;}
-}
-/** 载入预设到当前品种编辑器：剥离 symbol/symbols（不切品种 TAB）与 from（保留当前时点，
- *  与 loadSymbolCfg/resetModule 的 fromKeep 惯例一致——时点是运行时输入，不是方案内容） */
+/** 载入预设到当前品种编辑器：剥离 symbol/symbols（不切品种 TAB）与 from/preset
+ *  （时点与生效标记是运行时/元数据，不是方案内容） */
 function presetCfgForUI(cfg) {
-  const { symbol: _s, symbols: _ss, from: _f, ...rest } = cfg || {};
+  const { symbol: _s, symbols: _ss, from: _f, preset: _p, ...rest } = cfg || {};
   return rest;
-}
-async function importPresetExcel() {
-  const file=el('preset-excel-file').files[0];if(!file||excelBusy)return;
-  if(!/\.xlsx$/i.test(file.name)||file.size>2*1024*1024){excelStatus('请选择不超过 2 MB 的 .xlsx 文件。',true);return;}
-  excelBusy=true;excelStatus('正在校验并导入…');
-  try {
-    let target=excelTarget;
-    if(!target){
-      const existing=await api('/api/sr/presets',undefined,'GET');if(!existing)throw Error('无法读取预设列表');
-      const base=(el('preset-name').value.trim()||file.name.replace(/\.xlsx$/i,'')).slice(0,34)||'导入预设';target=base;let i=1;
-      while((existing.presets||[]).some(p=>p.name===target))target=base+' ('+(i++)+')';
-    }
-    const r=await fetch('/api/sr/presets/excel/import?name='+encodeURIComponent(target),{method:'POST',headers:{'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'},body:await file.arrayBuffer()});
-    const data=await r.json();if(!r.ok||!data.ok)throw Error(data.error||'导入失败');
-    applyCfgToUI(presetCfgForUI(data.cfg));el('preset-name').value=data.name;markLoadedPreset(data.name);await refreshPresetList();
-    excelStatus('已导入并载入 '+data.name+'，计算后生效。');
-  } catch(e){excelStatus(e.message,true);} finally{excelBusy=false;el('preset-excel-file').value='';}
 }
 async function savePreset(name) {
   name = (name || el('preset-name').value).trim();
@@ -801,6 +800,15 @@ async function delPreset(name) {
   if (r) {
     log(`已删除预设：${name}`);
     if (state.loadedPreset === name) markLoadedPreset(null);
+    // 删的是当前品种的生效方案 → 清除标记（桶里已复制参数保留，避免标记指向不存在的方案）
+    if (state.activePreset === name) {
+      const rr = await api('/api/params/sr/preset', { symbol: currentSid, name: null });
+      if (rr) {
+        state.activePreset = null;
+        renderActiveBadge();
+        log('生效方案已被删除，标记已清除（品种桶保留已复制参数）');
+      }
+    }
     await refreshPresetList();
   }
 }
@@ -1115,8 +1123,6 @@ function bindEvents() {
   el('btn-save-module').onclick = () => saveModule();
   el('btn-reset-module').onclick = () => resetModule();
   el('btn-preset-save').onclick = () => savePreset();
-  el('preset-excel-new').onclick = () => choosePresetExcel('');
-  el('preset-excel-file').onchange = importPresetExcel;
   el('preset-list').onclick = (e) => {
     const btn = e.target.closest('[data-act]');
     if (!btn) return;
@@ -1124,10 +1130,9 @@ function bindEvents() {
     if (!row) return;
     const name = row.dataset.name;
     if (btn.dataset.act === 'load') loadPreset(name);
+    else if (btn.dataset.act === 'active') setActivePreset(name);
     else if (btn.dataset.act === 'save') savePreset(name);
     else if (btn.dataset.act === 'del') delPreset(name);
-    else if (btn.dataset.act === 'import') choosePresetExcel(name);
-    else if (btn.dataset.act === 'export') exportPresetExcel(name);
   };
   el('d-raw').onchange = noteRawToggle;
   el('d-text').onchange = () => {};

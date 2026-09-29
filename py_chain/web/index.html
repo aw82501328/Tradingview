@@ -267,7 +267,7 @@
       <table>
         <thead>
           <tr>
-            <th>对比</th><th>名称</th><th>保存时间</th><th>品种</th><th>周期</th><th>起始</th>
+            <th>对比</th><th>名称</th><th>保存时间</th><th>品种</th><th>周期</th><th>起始</th><th>结束</th>
             <th>已平仓</th><th>胜率</th><th>盈亏比</th>
             <th id="bt-runs-pnl-header" aria-sort="none"><button type="button" id="sort-bt-runs-pnl" class="sort-button" title="点击按合计盈亏从高到低排序">合计 ↕</button></th>
             <th>信号数</th><th>运行</th><th>操作</th>
@@ -464,6 +464,13 @@ function isAnyModeRunning() {
   return Object.values(state.modes).some(w => ['running', 'paused'].includes(w.state));
 }
 
+// 本地日历日 YYYY-MM-DD（全量回测结束日期默认当日）
+function todayYmd() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 // ---------- 卡片渲染 ----------
 function buildCard(m) {
   // 定位后保留K线：三模式卡共用一份定义，与明细页共享 localStorage 持久化（bt_common.js）。
@@ -476,9 +483,7 @@ function buildCard(m) {
       { k: 'lead_days', label: '预热提前（天）·0=从起始日交易', type: 'text', def: '60' },
       { k: 'warmup', label: '预热根数（提前=0 时生效）', type: 'text', def: '60' },
       locateField,
-      { k: 'sr_preset', label: '支阻预设', type: 'select', def: '', options: [
-        ['', '默认（按品种读参数中心桶）'],
-      ] },
+      // 支阻预设下拉已移除（2026-09-29）：支阻参数统一=参数配置该品种当前生效方案/品种桶
     ],
     replay: [
       { k: 'start', label: '回放起点', type: 'date', def: '2026-08-01' },
@@ -516,10 +521,13 @@ function buildCard(m) {
     : `<div class="field"><label>品种</label><select data-cfg="symbol">${SYMBOL_OPTIONS.map(s =>
         `<option>${s}</option>`).join('')}</select></div>`;
   rows.push(`<div class="row">
+    <div class="field"><label>交易策略</label><select data-cfg="strategy">
+      <option value="chan_v1" selected>缠论V1</option>
+    </select></div>
     ${symbolsHtml}
     ${periodsHtml}
     <div class="field"><label>${m.id === 'backtest' ? '起始日期（开始交易）' : '起始日期'}</label><input type="date" data-cfg="from" value="2026-07-02"></div>
-    ${m.id === 'backtest' ? '<div class="field"><label>结束日期（空=到最新）</label><input type="date" data-cfg="to"></div>' : ''}
+    ${m.id === 'backtest' ? `<div class="field"><label>结束日期（默认当日，空=到最新）</label><input type="date" data-cfg="to" value="${todayYmd()}"></div>` : ''}
   </div>`);
   const extraHtml = (extras[m.id] || []).map(f => {
     const attr = f.cfg === false
@@ -1240,6 +1248,13 @@ async function refreshBtRuns() {
   }
 }
 
+// 结束日期：优先读方案 cfg（旧存档的 cfg_summary 尚未带 to）；空=到最新
+function btRunEndLabel(r) {
+  const cfg = r.cfg || {};
+  const to = Object.prototype.hasOwnProperty.call(cfg, 'to') ? cfg.to : r.cfg_summary?.to;
+  return btCfgVal('to', to);
+}
+
 function renderBtRuns() {
   el('bt-runs-status').textContent = btRuns.length
     ? `${btRuns.length} 个方案 · 保存于本地数据库（data/bars.db），不受清空表格与服务重启影响`
@@ -1250,7 +1265,7 @@ function renderBtRuns() {
   el('sort-bt-runs-pnl').title = {none:'点击按合计盈亏从高到低排序',descending:'点击按合计盈亏从低到高排序',ascending:'点击恢复默认顺序'}[sort];
   const body = el('bt-runs-body');
   if (!btRuns.length) {
-    body.innerHTML = `<tr><td colspan="13" style="color:var(--muted);white-space:normal;">回测完成后点卡片上的「保存方案」；已保存方案与当前信号表格互不影响</td></tr>`;
+    body.innerHTML = `<tr><td colspan="14" style="color:var(--muted);white-space:normal;">回测完成后点卡片上的「保存方案」；已保存方案与当前信号表格互不影响</td></tr>`;
   } else {
     // 仅排列展示副本；无合计盈亏的方案置后，相同盈亏保持保存时间顺序
     const runs = btRuns.slice();
@@ -1272,6 +1287,7 @@ function renderBtRuns() {
         <td>${esc(r.cfg_summary?.symbol || '-')}</td>
         <td>${esc(r.cfg_summary?.periods || '-')}</td>
         <td>${esc(r.cfg_summary?.from || '-')}</td>
+        <td>${esc(btRunEndLabel(r))}</td>
         <td>${s.closed ?? '-'}</td>
         <td>${s.win_rate != null ? s.win_rate + '%' : '—'}</td>
         <td>${s.payoff_ratio != null ? s.payoff_ratio.toFixed(2) : '—'}</td>
@@ -1636,20 +1652,8 @@ function bindBtErrors() {
 
 // ---------- 初始化 ----------
 
-// 支阻预设下拉：选项来自 /api/sr/presets（与 /sr 调参页共享同一预设源，全局不分品种）。
-// 空 = 按回测品种读参数中心桶；选名 = 该命名预设优先于品种桶（webapp._sr_preset_kwargs）。
-async function loadSrPresetOptions() {
-  const sel = document.querySelector('#card-backtest [data-cfg="sr_preset"]');
-  if (!sel) return;
-  try {
-    const r = await fetch('/api/sr/presets').then(x => x.json());
-    (r.presets || []).forEach(p => {
-      const o = document.createElement('option');
-      o.value = p.name; o.textContent = p.name;
-      sel.appendChild(o);
-    });
-  } catch (e) { /* 预设列表拉取失败：保留「默认」选项，不影响回测 */ }
-}
+// 支阻预设下拉已移除（2026-09-29 模块分层二轮）：支阻参数统一在「参数配置 → 支阻位」
+// 经方案列表单选生效（复制入品种桶），回测按品种读参数中心桶，不再单独选预设。
 
 // 品种下拉（三张卡共用 data-cfg="symbol"）：选项 = 静态默认 ∪ 基础数据已入库品种，
 // 与基础数据页 refreshFetchSymbol 同口径（去重、保留当前选择）
@@ -1692,7 +1696,6 @@ async function init() {
     }
   });
   selectMode(selectedMode);
-  loadSrPresetOptions();
   loadStoreSymbols();
   el('mode-nav').onclick=e=>{const b=e.target.closest('[data-mode]');if(b)selectMode(b.dataset.mode)};
   if(parent!==window)parent.postMessage({type:'modes-ready'},location.origin);

@@ -179,7 +179,7 @@ def compute_summary(rows):
 
 
 def build_cfg_summary(cfg):
-    """列表/对比表头用的参数摘要：品种 / 周期（+ 连接）/ 起始日期。"""
+    """列表/对比表头用的参数摘要：品种 / 周期（+ 连接）/ 起始日期 / 结束日期。"""
     periods = cfg.get("periods") or []
     if isinstance(periods, str):
         periods = [p.strip() for p in periods.split(",") if p.strip()]
@@ -187,6 +187,7 @@ def build_cfg_summary(cfg):
         "symbol": cfg.get("symbol"),
         "periods": "+".join(str(p) for p in periods),
         "from": cfg.get("from"),
+        "to": cfg.get("to") or "",
     }
 
 

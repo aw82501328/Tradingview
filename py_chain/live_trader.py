@@ -34,6 +34,7 @@ DEFAULT_CONFIG_PATH = os.path.join(REPO_ROOT, "py_chain", "web", "live_config.js
 
 DEFAULT_LIVE_CONFIG = {
     "account": {"login": 0, "server": "", "require_mode": "demo"},
+    "strategy": "chan_v1",
     "symbol": "XAUUSD", "db_symbol": "EXNESS:XAUUSD", "magic": 20260923, "lots": 2,
     "risk": {
         "max_volume_per_order": 0.02, "max_total_open_volume": 0.06,
@@ -68,14 +69,20 @@ def deep_merge(base, override):
 
 
 def load_config(path=None, cli_overrides=None):
-    """默认值 ← live_config.json ← live_config.local.json ← CLI 覆盖。"""
+    """默认值 ← live_config.json ← live_config.local.json ← CLI 覆盖。
+
+    strategy 键经 module_registry 校验（空 = 默认策略 缠论V1，未知拒绝启动）；
+    kv 状态键与会话快照均带该策略（多进程多策略并存=路径A）。"""
     cfg = dict(DEFAULT_LIVE_CONFIG)
     for p in ([path] if path else [DEFAULT_CONFIG_PATH,
                                    DEFAULT_CONFIG_PATH.replace(".json", ".local.json")]):
         if p and os.path.exists(p):
             with open(p, encoding="utf-8") as f:
                 cfg = deep_merge(cfg, json.load(f))
-    return deep_merge(cfg, cli_overrides or {})
+    cfg = deep_merge(cfg, cli_overrides or {})
+    from . import module_registry
+    cfg["strategy"] = module_registry.normalize_strategy(cfg.get("strategy"))
+    return cfg
 
 
 def _abspath(p):
@@ -198,6 +205,8 @@ class ReplayFeed:
 class LiveTrader:
     def __init__(self, cfg, broker, feed, log=None, accept_param_drift=False):
         self.cfg = cfg
+        # kv 状态键带策略后缀（多策略并存=路径A 多进程互不覆盖；单策略等价于独占）
+        self._skey = lambda base: live_store.state_key(base, cfg.get("strategy"))
         self.broker = broker
         self.feed = feed
         self.log = log or (lambda *a, **k: print(*a))
@@ -216,6 +225,7 @@ class LiveTrader:
         self._last_reconcile = 0.0
         self._last_prune = 0.0
         self._day_guard = None     # 内存缓存（避免每拍读库）
+        self._trading_enabled = True  # 页面交易开关 kv 缓存（缺键=开启，向后兼容）
         self._last_ckpt = (0, 0.0) # (fine_last, wall_ts)：fine 未推进且 <60s 跳过写库
         self.pre_tick_hook = None  # 测试钩子：每轮 tick 开头调用（忽略异常）
 
@@ -258,7 +268,7 @@ class LiveTrader:
         chan_core.apply_cfg(param_center.chan_cfg_effective(c.get("symbol")))
         # ⑤ 会话与参数漂移守卫
         h = config_hash(self._pm, self.cfg)
-        st = live_store.load_state("session")
+        st = live_store.load_state(self._skey("session"))
         if st and st.get("config_hash") != h:
             if rc["param_drift"] == "refuse" and not self.accept_param_drift:
                 raise RuntimeError(
@@ -281,14 +291,16 @@ class LiveTrader:
             init = self.engine.step_to(t_start)      # 预热：忽略历史信号（LiveMonitor 同款）
             if init:
                 self.log(f"[live] 预热完成：忽略初始历史信号 {len(init)} 个")
-            live_store.save_state("session", {
+            live_store.save_state(self._skey("session"), {
                 "id": self.session, "started_at": int(time.time()), "T_start": t_start,
                 "config_hash": h, "symbol": c["symbol"], "lots": c["lots"],
+                "strategy": c.get("strategy"),
                 "shadow": bool(c["run"]["shadow"])})
             live_store.log_event(self.session, "session_start", {
                 "account": {k: acc[k] for k in ("login", "server", "trade_mode")},
                 "spec": spec, "config_hash": h, "shadow": c["run"]["shadow"]})
         self._refresh_day_guard()
+        self._refresh_trading_enabled()
         self.reconcile()
         self.log(f"[live] 就绪：session={self.session} shadow={c['run']['shadow']} "
                  f"lots={c['lots']}（{vol} 手）")
@@ -411,6 +423,7 @@ class LiveTrader:
                 self.pre_tick_hook()
             except Exception as e:
                 self.log(f"[live] pre_tick_hook 异常（忽略）：{e}")
+        self._refresh_trading_enabled()
         tail = self.feed.tail()
         last_ts = max((bs[-1]["time"] for bs in tail.values() if bs), default=0)
         if not last_ts:
@@ -818,6 +831,8 @@ class LiveTrader:
         rc, rk = self.cfg["run"], self.cfg["risk"]
         if rc["shadow"]:
             return False, "shadow模式"
+        if not self._trading_enabled:
+            return False, "策略交易已关闭(页面开关)"
         if self._halted_day:
             return False, f"日亏熔断({self._halted_day})"
         spread = self.broker.spread()
@@ -852,10 +867,10 @@ class LiveTrader:
             return
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if self._day_guard is None or self._day_guard.get("date") != today:
-            g = live_store.load_state("day_guard")
+            g = live_store.load_state(self._skey("day_guard"))
             if not g or g.get("date") != today:
                 g = {"date": today, "start_equity": self.broker.account_equity()}
-                live_store.save_state("day_guard", g)
+                live_store.save_state(self._skey("day_guard"), g)
             self._day_guard = g
             self._halted_day = None
         eq = self.broker.account_equity()
@@ -867,6 +882,14 @@ class LiveTrader:
             self._halted_day = today
             self._alert("day_loss_halt", f"当日权益回撤 {dd:.2f}% ≥ "
                                          f"{rk['day_loss_halt_pct']}%，停新开仓（存量管理到终局）")
+
+    def _refresh_trading_enabled(self):
+        """每拍重读页面交易开关 kv（trading_enabled@<strategy>；缺键=开启，向后兼容）。"""
+        kv = live_store.load_state(self._skey("trading_enabled"))
+        val = True if not kv else bool(kv.get("enabled", True))
+        if val != self._trading_enabled:
+            self._last_ckpt = (0, 0.0)   # 值变化→强制下拍立即写心跳，回报生效状态
+        self._trading_enabled = val
 
     # -- 对账 -----------------------------------------------------------------
 
@@ -931,10 +954,12 @@ class LiveTrader:
         if fine_ts == self._last_ckpt[0] and now - self._last_ckpt[1] < 60:
             return
         self._last_ckpt = (fine_ts, now)
-        live_store.save_state("heartbeat", {"ts": int(now), "fine_last": fine_ts})
-        live_store.save_state("engine_cursor", {
+        live_store.save_state(self._skey("heartbeat"), {
+            "ts": int(now), "fine_last": fine_ts,
+            "trading_enabled": self._trading_enabled})
+        live_store.save_state(self._skey("engine_cursor"), {
             "session": self.session,
-            "T_start": (live_store.load_state("session", {}) or {}).get("T_start"),
+            "T_start": (live_store.load_state(self._skey("session"), {}) or {}).get("T_start"),
             "fine_last": fine_ts})
 
     def _alert(self, kind, text):
@@ -1100,21 +1125,27 @@ def main(argv=None):
     ap.add_argument("--replay-from", type=int, default=None,
                     help="replay feed 起点（UTC epoch 秒，测试用）")
     ap.add_argument("--replay-to", type=int, default=None)
+    ap.add_argument("--strategy", default=None,
+                    help="覆盖配置的交易策略（默认 缠论V1；注册表见 module_registry）")
     ap.add_argument("--log-file", default=None, help="日志文件（默认 data/live_trader.log）")
     args = ap.parse_args(argv)
 
+    cli = {}
+    if args.shadow is not None:
+        cli["run"] = {"shadow": args.shadow}
+    if args.strategy:
+        cli["strategy"] = args.strategy
+    cfg = load_config(args.config, cli)
+
     if args.audit:
-        sess = live_store.load_state("session", {})
+        sess = live_store.load_state(
+            live_store.state_key("session", cfg.get("strategy")), {})
         if not sess or not sess.get("id"):
             print("无会话")
             return
         audit(sess["id"])
         return
 
-    cli = {}
-    if args.shadow is not None:
-        cli = {"run": {"shadow": args.shadow}}
-    cfg = load_config(args.config, cli)
     log_path = _abspath(args.log_file or "data/live_trader.log")
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     lf = open(log_path, "a", encoding="utf-8")

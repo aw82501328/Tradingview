@@ -112,6 +112,12 @@ def _now():
 
 # -- live_state（KV） --------------------------------------------------------
 
+def state_key(base, strategy=None):
+    """kv 状态键带策略后缀（多策略并存=路径A 多进程：每策略一套键互不覆盖）。
+    strategy 为空 → 原键（无策略语境的调用方保持旧行为）。"""
+    return f"{base}@{strategy}" if strategy else base
+
+
 def save_state(key, obj):
     conn = _connect()
     try:

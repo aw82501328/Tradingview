@@ -607,7 +607,7 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
       const RED = '#F23645', GREEN = '#089981';
       const upperRes = pi > 0 ? PERIODS[pi - 1] : null;
       const upperMarks = upperRes ? periodMarks[upperRes] : null;
-      const upperClassRe = /^([123]买|[123]卖|类[23]买|类[23]卖)$/;
+      const upperClassRe = /^([1234]买|[1234]卖|类[234]买|类[234]卖)$/;
       for (const mk of marks) {
         mk.color = RED;
         if ((mk.label === '1买' || mk.label === '1卖') && upperMarks) {

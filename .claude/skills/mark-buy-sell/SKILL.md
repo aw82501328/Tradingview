@@ -7,6 +7,8 @@ description: Mark Chanlun (缠论) buy/sell points (1/2/3类买卖点) on the Tr
 
 通过 CDP 连接 TradingView Desktop，基于**各周期上画的笔**，按照缠论定义在图上标记各周期的 **1、2、3 类买卖点**（红色文字，跨周期共振点用绿色文字）。
 
+> **模块分类**：基础公用组件（所有交易策略共用的结构计算；分层见 `.cursor/skills/README.md`）。
+>
 > **算法来源**：所有缠论算法（含买卖点识别）由 **`chan-core`**（`.cursor/skills/chan-core/scripts/chan_core.js`）提供（唯一算法源），本脚本只负责读取笔数据、调算法、绘制标记。修改算法规则请改 `chan-core`。
 >
 > **强制依赖画笔数据**：本 SKILL **不再自己计算笔**，而是**强制读取 `chan-bi` 画笔 SKILL 落盘的笔数据文件**（`.cursor/cache/bis_<品种>.json`）。如果文件不存在、或文件品种与当前图表品种不一致，脚本会**报错退出**，必须先对当前品种运行「画笔」后再标记买卖点。

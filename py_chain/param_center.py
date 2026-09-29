@@ -1,13 +1,18 @@
 # -*- coding: utf-8 -*-
 """参数中心：分模块参数的 schema / 校验 / 持久化。
 
-模块清单（与 web/params.html 页签一一对应，顺序对齐工作台六步）：
+模块清单（与 web/params.html 页签一一对应，顺序对齐工作台流程；归属两大类见
+module_registry——基础公用组件 vs 交易策略，2026-09-29 模块分层）：
+  【基础公用组件】
   chan   画笔（成笔相关 CHAN_CFG 子集；内部 id 仍为 chan，避免改 API / 落盘键）
   zs     画中枢（各周期是否绘制、每周期最近保留个数）
   points 标记买卖点（邻近合并/保留数/中枢容差 + divergeDurRatio）
-  entry  标记进出场（near/lots/slip_* 与出场门槛 + 进场扩展 CHAN_CFG）
+  【交易策略 · 缠论V1（chan_v1；策略页签组，未来新策略在此追加）】
+  sr     支阻位（整份 cfg 按品种存于 modules.sr，不在 PARAM_MODULES / 无 schema；
+           2026-09-29 起归属策略组——支阻参数按策略经「方案列表单选生效」选定：
+           modules.sr.<品种>.preset 标记来源方案名，生效=方案 cfg 复制入品种桶）
   plan   交易计划（震荡判定阈值 RANGE_DEFAULTS + 顺势参考周期 trendRes）
-  sr     支阻位（整份 cfg 按品种存于 modules.sr，不在 PARAM_MODULES / 无 schema）
+  entry  标记进出场（near/lots/slip_* 与出场门槛 + 进场扩展 CHAN_CFG）
 
 存储 web/module_params.json：
   PARAM_MODULES → **只存与代码默认不同的键（overrides-only）**，按五品种分桶；
@@ -75,6 +80,7 @@ CHAN_CFG_MODULES = frozenset(("chan", "points", "entry"))
 # 未列 min/max 的布尔键只做类型校验。
 PARAM_MODULES = {
     "chan": {
+        "category": "base",
         "title": "画笔",
         "params": {
             "gapFilter": ("跳空成笔阈值", "相邻K线缺口 ≥ 该值×ATR 时强制独立成笔", 0.0, 5.0),
@@ -123,6 +129,7 @@ PARAM_MODULES = {
         },
     },
     "zs": {
+        "category": "base",
         "title": "画中枢",
         "params": {
             "drawD": ("日线画中枢", "是否在日线周期绘制中枢矩形", None, None),
@@ -138,12 +145,13 @@ PARAM_MODULES = {
         },
     },
     "points": {
+        "category": "base",
         "title": "标记买卖点",
         "params": {
             "nearAtrRatio": ("邻近合并阈值(×ATR)", "1买与2买价差 ≤ 该值×ATR 时合并为「真1买」", 0.0, 5.0),
             "keep": ("每周期保留标记数", "每周期买卖点标记总数上限（买+卖合并取最近N）", 1, 100),
             "class2ZsTol": ("类2破中枢容差(点)", "类2买/类2卖允许越过中枢边界的绝对点数（0=严格）", 0.0, 1000.0),
-            "thirdZsTol": ("3类进中枢容差(点)", "3买/类3买/3卖/类3卖允许进入中枢的绝对点数（0=严格）", 0.0, 1000.0),
+            "thirdZsTol": ("3类进中枢容差(点)", "3买/类3买/4买/类4买/3卖/类3卖/4卖/类4卖允许进入中枢的绝对点数（0=严格）", 0.0, 1000.0),
             "divergeDurRatio": ("背驰时长可比上限", "两段时长比超过该值时面积项不计入背驰判据", 1, 100),
             "anchorUndecidedSkip": ("未定型点不接管",
                                     "2/3类点分类「未定型」（点后反向段不存在/未达根数）时不接管"
@@ -153,6 +161,7 @@ PARAM_MODULES = {
         },
     },
     "entry": {
+        "category": "strategy",
         "title": "标记进出场",
         "params": {
             "near": ("近支阻阈值", "背驰点价与支阻位价差 ≤ 该值视为接近（绝对价差，不乘ATR）", 0.1, 1000.0),
@@ -186,6 +195,7 @@ PARAM_MODULES = {
         },
     },
     "plan": {
+        "category": "strategy",
         "title": "交易计划",
         "params": {
             "rangeBoundOn": ("①横盘判定", "参考周期横盘整理判定（K线窄带+笔端点+涨跌交替）；关闭后跳过此类", None, None),
@@ -209,7 +219,7 @@ PARAM_MODULES = {
                          0.0, 1000.0),
             "secondNearPts": ("回踩2买/2卖点容差(点)", "未过前高（前低）时，最近一笔回调（反弹）终点距2买（2卖）点价 ≤ 该值 视为回踩到位 → 等回调后的类2买点/类2卖点",
                          0.0, 1000.0),
-            "thirdStrongTrend": ("③3类点强档顺势", "开=3买/类3买（3卖/类3卖）过前高不背驰时顺势「等待回调后的新买点/新卖点」；关=3类点一律弱档（多头空/空头多，等一卖/一买）。默认关",
+            "thirdStrongTrend": ("③3类点强档顺势", "开=3买/类3买/4买/类4买（3卖/类3卖/4卖/类4卖）过前高不背驰时顺势「等待回调后的新买点/新卖点」；关=这些点一律弱档（多头空/空头多，等一卖/一买）。默认关",
                          None, None),
         },
     },
@@ -665,14 +675,74 @@ def chan_cfg_effective(symbol=None):
 
 
 def effective_sr(symbol=None):
-    """支阻位有效 cfg：有存量返回整份；空 symbol=黄金页；未列品种 / 无存量 → SR_DEFAULTS。"""
+    """支阻位有效 cfg：有存量返回整份；空 symbol=黄金页；未列品种 / 无存量 → SR_DEFAULTS。
+
+    品种桶内的 preset 键（生效方案标记，set_sr_preset 写入）为溯源元数据，
+    不属于算法参数——返回前剔除，运行时消费方（分析 configure / 回测 kwargs）零感知。"""
     sid = symbol_id(symbol)
     if sid is None:
         return dict(SR_DEFAULTS)
     ov = (_load().get("sr") or {}).get(sid)
     if isinstance(ov, dict) and ov:
-        return dict(ov)
+        out = dict(ov)
+        out.pop("preset", None)
+        return out
     return dict(SR_DEFAULTS)
+
+
+def _find_sr_preset(name):
+    """按名查全局支阻方案（web/sr_presets.json），返回 cfg dict；无/损坏 → None。"""
+    try:
+        with open(SR_PRESETS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            for p in data:
+                if isinstance(p, dict) and p.get("name") == name:
+                    cfg = p.get("cfg")
+                    return cfg if isinstance(cfg, dict) else None
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def set_sr_preset(symbol, name):
+    """选定/取消该品种的生效支阻方案（单选；复制语义，2026-09-29）。
+
+    name 非空：方案 cfg（剥离运行时键）复制入品种桶并标记来源名——该方案即此品种
+    策略的生效支阻参数（方案后续改动不自动同步，重新生效即再复制）；
+    方案不存在 → ValueError。name 空/None：仅清除标记，桶参数保留已复制内容。
+    @returns effective_sr(symbol)
+    """
+    sid = _require_symbol(symbol)
+    name = str(name or "").strip()
+    with _lock:
+        overrides = _load()
+        saved_at = _read_saved_at()
+        by = dict(overrides.get("sr") or {})
+        cur = dict(by.get(sid) or {}) if isinstance(by.get(sid), dict) else {}
+        if name:
+            preset_cfg = _find_sr_preset(name)
+            if preset_cfg is None:
+                raise ValueError(f"支阻方案「{name}」不存在（已删除或改名）")
+            clean = _strip_sr_runtime(preset_cfg)
+            if not clean:
+                raise ValueError(f"支阻方案「{name}」无有效参数")
+            clean["preset"] = name
+            by[sid] = clean
+        else:
+            cur.pop("preset", None)
+            if cur:
+                by[sid] = cur
+            else:
+                by.pop(sid, None)
+        overrides["sr"] = by
+        mod_at = saved_at.get("sr")
+        if not isinstance(mod_at, dict):
+            mod_at = {}
+        mod_at[sid] = time.time()
+        saved_at["sr"] = mod_at
+        _save(overrides, saved_at)
+    return effective_sr(symbol)
 
 
 def _snapshot_module(name, spec, overrides, saved_at_all):
@@ -694,7 +764,8 @@ def _snapshot_module(name, spec, overrides, saved_at_all):
         }
     gold = by_symbol["XAUUSD"]
     return {
-        "title": spec["title"], "schema": schema_of(name),
+        "title": spec["title"], "category": spec.get("category", "base"),
+        "schema": schema_of(name),
         "defaults": defaults, "bySymbol": by_symbol,
         "symbols": [{"id": s, "label": l, "code": c} for s, l, c in SYMBOL_META],
         "overrides": gold["overrides"], "effective": gold["effective"],
@@ -703,7 +774,9 @@ def _snapshot_module(name, spec, overrides, saved_at_all):
 
 
 def _snapshot_sr(overrides, saved_at_all):
-    """modules.sr 的 snapshot：同形 bySymbol；effective=完整 cfg；schema=null。"""
+    """modules.sr 的 snapshot：同形 bySymbol；effective=完整 cfg；schema=null。
+
+    归属交易策略组（2026-09-29 起）；preset=该品种生效方案名（UI 回显，无则 null）。"""
     by = overrides.get("sr") or {}
     mod_at = saved_at_all.get("sr")
     if not isinstance(mod_at, dict):
@@ -715,13 +788,15 @@ def _snapshot_sr(overrides, saved_at_all):
         by_symbol[sid] = {
             "label": label, "code": code, "overrides": ov,
             "effective": eff, "savedAt": mod_at.get(sid),
+            "preset": ov.get("preset") or None,
         }
     gold = by_symbol["XAUUSD"]
     return {
-        "title": "支阻位", "schema": None,
+        "title": "支阻位", "category": "strategy", "schema": None,
         "defaults": dict(SR_DEFAULTS), "bySymbol": by_symbol,
         "symbols": [{"id": s, "label": l, "code": c} for s, l, c in SYMBOL_META],
         "overrides": gold["overrides"], "effective": gold["effective"],
+        "preset": gold["preset"],
         "savedAt": gold["savedAt"],
     }
 
@@ -814,6 +889,7 @@ def reset(module, symbol=None):
 
 def update_sr(symbol, cfg):
     """保存某品种整份支阻 cfg（调用方已 normalize）；剔除运行时键后落盘。
+    编辑器表单不含 preset 键——保留品种已选的生效方案标记（set_sr_preset 写入）。
     @returns effective_sr(symbol)
     """
     sid = _require_symbol(symbol)
@@ -824,7 +900,10 @@ def update_sr(symbol, cfg):
         overrides = _load()
         saved_at = _read_saved_at()
         by = dict(overrides.get("sr") or {})
+        old = by.get(sid) if isinstance(by.get(sid), dict) else {}
         if clean:
+            if old.get("preset") and "preset" not in clean:
+                clean["preset"] = old["preset"]
             by[sid] = clean
         else:
             by.pop(sid, None)

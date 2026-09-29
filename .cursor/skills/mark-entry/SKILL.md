@@ -16,6 +16,8 @@ disable-model-invocation: true
 - **终局出场**（支阻位止损 / 保本止损 / 全平）→ 黄 `↓/↑`
 - **平一半** → 黄 `↓/↑`（保本/仍持仓仅落盘，不画图）
 
+> **模块分类**：交易策略 · **缠论V1**（计划→进出场为同一策略的两步；分层与新增策略接入见 `.cursor/skills/README.md`）。
+>
 > **算法来源**：背驰判定复用 `chan-core` 的 `isBiDiverge`，中枢复用 `buildZSByUpper`（唯一算法源）；**进场状态判定不自行实现**，直接读取 `trading-plan` 落盘的 `.cursor/cache/plan_<品种>.json`（各周期 `direction/strategy`）。
 >
 > **强制依赖三个前置数据**：

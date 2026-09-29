@@ -61,6 +61,7 @@ schtasks /Create /TN "live_trader" /RL HIGHEST /SC ONSTART /RU <用户名> ^
 | 机制 | 触发 | 行为 |
 |---|---|---|
 | kill 文件 | `data/LIVE_KILL` 存在 | 拒新开仓并退出，存量保留（券商 SL 兜底）；`--kill-close` 全平后退出 |
+| 策略开关 | /live 页「开启/关闭交易」按钮（写 kv `trading_enabled@<策略>`，缺键=开启） | 停新开仓（新信号转 shadow），存量管理到终局；进程离线时记录、恢复后 ≤1 个 poll 周期生效 |
 | 日亏熔断 | 当日 equity 回撤 ≥ `day_loss_halt_pct`(3%) | 停新开仓，存量管理到终局 |
 | 点差门 | 点差 > `max_spread_entry`(0.5) | 该笔落 shadow（引擎照常），出场永不被拦 |
 | 手数上限 | 单笔/总敞口/仓位数 | 拒新开仓（shadow） |
@@ -70,6 +71,11 @@ schtasks /Create /TN "live_trader" /RL HIGHEST /SC ONSTART /RU <用户名> ^
 
 告警通道（可选 Telegram）：`notify.enabled=true` + `chat_id` + 环境变量
 `LIVE_TG_TOKEN`（bot token）。事件全量落 bars.db `live_events`（审计主证据）。
+
+策略开关（2026-09-29）：`POST /api/live/trading`（body `{strategy, enabled}`）
+仅写 live_state kv + `trading_disabled/enabled` 审计事件，不触碰 live_trader
+进程与 live_config（无参数漂移拒启风险）；live_trader 每拍重读生效，shadow 模式
+下 gate 原因仍报 "shadow模式"（更强的全进程事实）。多策略时 /live 页按 TAB 分策略展示。
 
 ## 4. 常见演练（模拟盘阶段至少各做一次）
 
@@ -81,7 +87,8 @@ schtasks /Create /TN "live_trader" /RL HIGHEST /SC ONSTART /RU <用户名> ^
 
 ## 5. 数据表（bars.db）
 
-`live_state`（会话/游标/心跳）· `live_events`（事件流，保留 180 天）·
+`live_state`（会话/游标/心跳/页面交易开关 `trading_enabled@<策略>`）·
+`live_events`（事件流，保留 180 天）·
 `live_orders`（每次下单/改单/平仓一行，含失败与 shadow）·
 `live_trades`（引擎 trade 镜像 + MT5 ticket 挂接，对账核心）。行情复用 `bars` 表
 symbol=`EXNESS:XAUUSD`。
@@ -99,7 +106,8 @@ symbol=`EXNESS:XAUUSD`。
 Windows Server VPS（2C/4G/60G，伦敦机房低延迟）：装 Python 3.12 + MT5 终端（自动
 登录）+ git clone 本仓库 + `pip install -r requirements.txt` →
 `python -m py_chain.mt5_feed history --days 365`（重建 EXNESS:XAUUSD 数据）→
-注册任务计划 → SSH 隧道访问 webapp 只读「实盘」页签（127.0.0.1:8001）。
+注册任务计划 → SSH 隧道访问 webapp「实盘」页签（127.0.0.1:8001，多策略 TAB +
+策略交易开关）。
 上线顺序：VPS shadow 与本地对照 1 周 → 模拟盘 1 周 → 实盘小手数。
 
 ## 8. 已知边界

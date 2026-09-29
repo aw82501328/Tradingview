@@ -14,13 +14,14 @@ import urllib.request
 import uuid
 
 from .data_loader import CDPClient, CDPConfig
-from . import sr_service, sr_draw, param_center
+from . import sr_service, sr_draw, param_center, module_registry
 from .monitor import replay_started
 
 ROOT = Path(__file__).resolve().parent.parent
-ORDER = ["bi", "zs", "points", "sr", "plan", "entry"]
-DEPENDENCIES = {"bi": [], "zs": ["bi"], "points": ["bi", "zs"], "sr": ["bi"],
-                "plan": ["bi"], "entry": ["bi", "sr", "plan"]}
+# 流程顺序与依赖来自模块分层注册表：基础公用组件（bi/zs/points/sr）+ 默认策略
+# （缠论V1：plan→entry）。按 cfg["strategy"] 运行的入口见 dependency_order/start。
+ORDER = module_registry.order_of()
+DEPENDENCIES = module_registry.dependencies_of()
 SCRIPTS = {"bi": ("chan-bi", "chan_bi"), "points": ("mark-buy-sell", "mark_buy_sell"),
            "zs": ("chan-zs", "chan_zs"), "plan": ("trading-plan", "trading_plan"),
            "entry": ("mark-entry", "mark_entry")}
@@ -39,18 +40,20 @@ def atomic_json(path, data):
         tmp.unlink(missing_ok=True)
 
 
-def dependency_order(step):
+def dependency_order(step, strategy=None):
+    order = module_registry.order_of(strategy)
+    deps = module_registry.dependencies_of(strategy)
     if step == "all":
-        return ORDER[:]
-    if step not in DEPENDENCIES:
+        return order[:]
+    if step not in deps:
         raise ValueError("未知分析模块")
     found = set()
     def visit(key):
-        for dep in DEPENDENCIES[key]:
+        for dep in deps[key]:
             visit(dep)
         found.add(key)
     visit(step)
-    return [key for key in ORDER if key in found]
+    return [key for key in order if key in found]
 
 
 def symbol_key(symbol):
@@ -90,7 +93,7 @@ class AnalysisManager:
         self.auto = False
         self.next_at = None
         self.cfg = {"from": "2026-06-30", "intervalMinutes": 5, "port": 9222,
-                    "with30s": False, "keep": 10,
+                    "with30s": False, "keep": 10, "strategy": module_registry.DEFAULT_STRATEGY,
                     "near": 10.0, "slip_stop": 3.0, "slip_fallback": 10.0, "slip_be": 3.0,
                     "slip_stop_atr_k": 0.0, "slip_fallback_atr_k": 0.0, "slip_be_atr_k": 0.0}
         self.job = None
@@ -99,6 +102,8 @@ class AnalysisManager:
         try:
             saved = json.loads((self.storage / "state.json").read_text(encoding="utf-8"))
             self.cfg.update(saved.get("cfg", {}))
+            # 旧存量 state.json 无 strategy 键 → 补默认策略（缠论V1），行为不变
+            self.cfg["strategy"] = module_registry.normalize_strategy(self.cfg.get("strategy"))
             self.last_success = saved.get("lastSuccess")
             self.job = saved.get("job")
             if self.job and self.job.get("state") in ("running", "stopping"):
@@ -129,6 +134,8 @@ class AnalysisManager:
         if not isinstance(cfg, dict):
             raise ValueError("配置须为对象")
         candidate = {**self.cfg, **copy.deepcopy(cfg)}
+        # 交易策略（注册表校验）：空 → 默认策略；未知 → ValueError（走 400 报错路径）
+        candidate["strategy"] = module_registry.normalize_strategy(candidate.get("strategy"))
         date = dt.date.fromisoformat(str(candidate.get("from", "")))
         candidate["from"] = date.isoformat()
         interval = float(candidate.get("intervalMinutes", 5))
@@ -210,11 +217,12 @@ class AnalysisManager:
                 self._changed()
 
     def start(self, step="all", automatic=False):
-        stages = dependency_order(step)
         with self.lock:
             if self.thread and self.thread.is_alive():
                 return {"ok": False, "error": "分析任务正在运行"}
             self.configure(self.cfg)
+            # 阶段列表按当前策略取（"all" = 基础组件 + 该策略步骤；未知模块 ValueError）
+            stages = dependency_order(step, self.cfg.get("strategy"))
             holder = self.acquire("analysis")
             if holder is not True:
                 return {"ok": False, "error": f"等待 {holder} 任务结束"}
@@ -227,7 +235,8 @@ class AnalysisManager:
                 self.waiting = None
                 self.job = {"id": ident, "state": "running", "step": step, "startedAt": time.time(),
                             "cfg": copy.deepcopy(self.cfg), "error": None, "logs": [],
-                            "stages": {key: {"state": "pending" if key in stages else "stale"} for key in ORDER}}
+                            "stages": {key: {"state": "pending" if key in stages else "stale"}
+                                       for key in module_registry.order_of(self.cfg.get("strategy"))}}
                 self.next_at = None
                 self._changed()
                 self.thread = threading.Thread(target=self._run, args=(copy.deepcopy(self.job), stages),

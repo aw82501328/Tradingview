@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""参数中心 HTTP 适配器：GET /api/params、POST /api/params/{module}[/reset]。
+"""参数中心 HTTP 适配器：GET /api/params、POST /api/params/{module}[/reset|/preset]。
 
 画笔 / 标记买卖点 / 标记进出场 的保存/恢复会拼合写回 CHAN_CFG——任一计算任务运行中返回 409，
 防止单次计算中途混用两套参数（zs/plan/sr 在每次任务启动时读取，无此约束）。
 
-支阻位：POST /api/params/sr、/api/params/sr/reset → update_sr / reset_sr。
+支阻位：POST /api/params/sr、/api/params/sr/reset → update_sr / reset_sr；
+POST /api/params/sr/preset → set_sr_preset（生效方案单选，复制语义，2026-09-29）。
 全部 PARAM_MODULES 与 sr 均按品种（body.symbol）读写。
 """
 
@@ -28,7 +29,7 @@ def handle(handler, app, method, busy=None):
                 return True
             result = {"modules": param_center.snapshot()}
         elif method == "POST":
-            body = handler._read_body() if action in ("reset", "") else {}
+            body = handler._read_body() if action in ("reset", "preset", "") else {}
             if not isinstance(body, dict):
                 body = {}
             symbol = body.get("symbol")
@@ -37,6 +38,12 @@ def handle(handler, app, method, busy=None):
                 if action == "reset":
                     effective = param_center.reset_sr(symbol)
                     result = {"effective": effective, "reset": True}
+                elif action == "preset":
+                    # 生效方案单选（复制语义）：{symbol, name|null}——name 空=取消生效
+                    name = body.get("name")
+                    name = str(name).strip() if name not in (None, "") else None
+                    effective = param_center.set_sr_preset(symbol, name)
+                    result = {"effective": effective, "preset": name}
                 elif action == "":
                     if not isinstance(body.get("cfg"), dict):
                         raise ValueError("请求体须为 {cfg: {...}, symbol: ...}")

@@ -204,11 +204,11 @@ function strategyOf(res, type, reason, label, cls, cfg) {
     }
     return { ...base, direction: "空头多", strategy: "等待低点附近的一买" };
   }
-  if (type === "3买" || type === "类3买") {
+  if (type === "3买" || type === "类3买" || type === "4买" || type === "类4买") {
     if (thirdStrong && cls === "过左高不背驰") return { ...base, direction: "多头多", strategy: "等待回调后的新买点" };
     return { ...base, direction: "多头空", strategy: "等待高点附近的一卖" };
   }
-  if (type === "3卖" || type === "类3卖") {
+  if (type === "3卖" || type === "类3卖" || type === "4卖" || type === "类4卖") {
     if (thirdStrong && cls === "过左低不背驰") return { ...base, direction: "空头空", strategy: "等待反弹后的新卖点" };
     return { ...base, direction: "空头多", strategy: "等待低点附近的一买" };
   }
@@ -404,7 +404,7 @@ function predictPlan(opts) {
   // 3. 先取最后一笔终点的买卖点；4. 无 → 逐笔向前扫描。
   //    A 开关（anchorUndecidedSkip）：分类「未定型」的端点视同无点——跳过继续向前扫描；
   //    无可回退前锚时由未定型点本身接管（维持旧行为，保守；与 py_chain 对齐 2026-09-26）。
-  const clsOf = (p) => (/^(2买|类2买|3买|类3买|2卖|类2卖|3卖|类3卖)$/.test(p.type)
+  const clsOf = (p) => (/^(2买|类2买|3买|类3买|4买|类4买|2卖|类2卖|3卖|类3卖|4卖|类4卖)$/.test(p.type)
     ? classifySecond(bis, macdArr, p, RANGE_CFG) : "其他");
   const undecided = (m) => !!(m && core.CHAN_CFG.anchorUndecidedSkip && clsOf(m.point) === "未定型");
   const outOf = (m, origin) => {
@@ -433,7 +433,7 @@ function predictPlan(opts) {
   if (false) {
     const p = prevMatch.point;
     const reason = `找到最近买卖点 ${p.type} @ ${fmtT(p.time)} ${p.price.toFixed(2)}（向前扫描最近笔端点）`;
-    const cls = /^(2买|类2买|3买|类3买|2卖|类2卖|3卖|类3卖)$/.test(p.type) ? classifySecond(bis, macdArr, p, RANGE_CFG) : "其他";
+    const cls = /^(2买|类2买|3买|类3买|4买|类4买|2卖|类2卖|3卖|类3卖|4卖|类4卖)$/.test(p.type) ? classifySecond(bis, macdArr, p, RANGE_CFG) : "其他";
     const out = strategyOf(res, p.type, reason, `趋势|${p.type}`, cls, RANGE_CFG);
     out.strategyLabel = out.strategy;
     out.pointDesc = `${p.type}@${fmtT(p.time)}(${p.price.toFixed(2)})`;
@@ -594,7 +594,7 @@ function trendDirection(res, bis, bars, upperBis, macdArr, tCut = null, rebound 
   if (!pts.length) return fallback;
   const p = pts[pts.length - 1];
   const t = p.type;
-  const isBuy = ["1买", "2买", "类2买", "3买", "类3买"].includes(t);
+  const isBuy = ["1买", "2买", "类2买", "3买", "类3买", "4买", "类4买"].includes(t);
   if (t === "1买" || t === "1卖") {
     // 1类点须先出现强分型（合并K链与 buildBi 同源；懒计算——仅 1类点需要）
     const merged = mergeBars(markWickBars(bars || []));
