@@ -24,8 +24,10 @@ ORDER = module_registry.order_of()
 DEPENDENCIES = module_registry.dependencies_of()
 SCRIPTS = {"bi": ("chan-bi", "chan_bi"), "points": ("mark-buy-sell", "mark_buy_sell"),
            "zs": ("chan-zs", "chan_zs"), "plan": ("trading-plan", "trading_plan"),
-           "entry": ("mark-entry", "mark_entry")}
-PREFIX = {"bi": "bis", "zs": "zs", "sr": "srflip", "plan": "plan", "entry": "entry"}
+           "entry": ("mark-entry", "mark_entry"),
+           "fxma_entry": ("fxma-entry", "fxma_entry")}
+PREFIX = {"bi": "bis", "zs": "zs", "sr": "srflip", "plan": "plan", "entry": "entry",
+          "fxma_entry": "fxma"}
 PERIODS = ["D", "240", "60", "15", "3"]
 
 
@@ -364,7 +366,7 @@ class AnalysisManager:
         pm = param_center.effective_all(cfg["symbol"])
         command.append("--chan-cfg=" + json.dumps(param_center.chan_cfg_effective(cfg["symbol"]),
                                                   separators=(",", ":")))
-        if cfg["with30s"] and stage in ("bi", "entry"):
+        if cfg["with30s"] and stage in ("bi", "entry", "fxma_entry"):
             command.append("--with-30s")
         if stage == "points":
             command.append("--keep=" + str(cfg["keep"]))
@@ -405,6 +407,24 @@ class AnalysisManager:
             command.append("--trend-rebound=" + ("1" if pm["plan"].get("trendRebound", True) else "0"))
             command.append("--rebound-near-pts=" + str(pm["plan"].get("reboundNearPts", 5)))
             command.append("--rebound-angle-ref=" + str(pm["plan"].get("reboundAngleRef", 5)))
+        if stage == "fxma_entry":
+            # 强分型均线V1：策略参数全部来自参数中心 fxma 品种桶（工作台无策略专属数字）
+            fx = pm["fxma"]
+            command.append("--entry-res=" + str(fx.get("entryRes", "3,15,60")))
+            command.append("--point-classes=" + str(fx.get("pointClasses", "1,2,3")))
+            command.append("--ma-type=" + str(fx.get("maType", "SMA")))
+            command.append("--ma-fast-1=" + str(fx.get("maFast1", 8)))
+            command.append("--ma-slow-1=" + str(fx.get("maSlow1", 20)))
+            command.append("--ma-fast-2=" + str(fx.get("maFast2", 5)))
+            command.append("--ma-slow-2=" + str(fx.get("maSlow2", 8)))
+            command.append("--cross-min-pts=" + str(fx.get("crossMinPts", 2.0)))
+            command.append("--strong-fx-min-pts=" + str(fx.get("strongFxMinPts", 0.0)))
+            command.append("--point-valid-bars=" + str(fx.get("pointValidBars", 0)))
+            command.append("--stop-pts=" + str(fx.get("stopPts", 10.0)))
+            command.append("--tp-pts=" + str(fx.get("tpPts", 30.0)))
+            command.append("--same-bar-priority=" + str(fx.get("sameBarPriority", "stop")))
+            command.append("--mutex-scope=" + str(fx.get("mutexScope", "global")))
+            command.append("--lots=" + str(fx.get("lots", 4)))
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         # Output is drained in a separate reader so a hung CDP cannot defeat timeout.
         with subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

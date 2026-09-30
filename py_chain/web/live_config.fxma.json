@@ -1,0 +1,49 @@
+{
+  "_comment": "强分型均线V1（fxma_v1）实盘配置模板——与缠论V1（live_config.json）并行运行：本策略独立进程 + 独立 magic（20261101，勿与缠论V1的 20260923 冲突）；策略参数（进出场周期/类别/均线/止损止盈/默认手数）在参数中心「交易策略·强分型均线V1」按品种设置，本文件只放账户/风控/运行参数。30S 周期实盘不支持（load_config 拒启）。真实账号值放 live_config.fxma.local.json（gitignore），本文件只提交安全默认值。account.login=0 为占位，启动时因账号守卫拒启。",
+  "account": {
+    "login": 0,
+    "server": "",
+    "require_mode": "demo"
+  },
+  "strategy": "fxma_v1",
+  "symbol": "XAUUSD",
+  "db_symbol": "EXNESS:XAUUSD",
+  "magic": 20261101,
+  "lots": 2,
+  "risk": {
+    "max_volume_per_order": 0.02,
+    "max_total_open_volume": 0.06,
+    "max_positions": 2,
+    "day_loss_halt_pct": 3.0,
+    "equity_floor": 0,
+    "max_spread_entry": 0.5,
+    "hard_spread_alert": 1.5,
+    "entry_session_block_srv": [["21:55", "22:15"]],
+    "weekend": "drop",
+    "orphan_policy": "close",
+    "max_account_total_volume": 0.1,
+    "max_account_positions": 4
+  },
+  "broker": {
+    "deviation_pts": 50,
+    "order_retry": 3,
+    "modify_retry": 3,
+    "clamp_stops_level": true
+  },
+  "run": {
+    "shadow": true,
+    "poll_sec": 10,
+    "replay_start_days_ago": 10,
+    "kill_file": "data/LIVE_KILL_FXMA",
+    "arm_file": "data/LIVE_ARMED_FXMA",
+    "reconcile_min": 5,
+    "param_drift": "refuse",
+    "events_retention_days": 180
+  },
+  "notify": {
+    "enabled": false,
+    "channel": "telegram",
+    "chat_id": "",
+    "token_env": "LIVE_TG_TOKEN"
+  }
+}

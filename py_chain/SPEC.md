@@ -102,7 +102,7 @@
 全系统模块分为两大类，**分层唯一来源 = `py_chain/module_registry.py`**（纯常量注册表，无内部依赖）：
 
 - **基础公用组件** `BASE_STAGES = [bi, zs, points]`：画笔/画中枢/标记买卖点——结构计算与标注，所有策略共用，不含「何时交易」决策。
-- **交易策略** `STRATEGIES`（按策略成组，组内 = 支阻 + 计划 + 进场三步）：当前唯一策略 **缠论V1**（id=`chan_v1`，stages=[sr, plan, entry]，engine="chan"；**sr 自同日二轮调整起归属策略**——支阻参数按策略经「方案列表单选生效」选定）。
+- **交易策略** `STRATEGIES`（按策略成组）：**缠论V1**（id=`chan_v1`，stages=[sr, plan, entry]，engine="chan"；**sr 自同日二轮调整起归属策略**——支阻参数按策略经「方案列表单选生效」选定）与**强分型均线V1**（id=`fxma_v1`，stages=[fxma_entry]，dependencies={fxma_entry:[points]}，param_modules=[fxma]，engine="fx_ma"；2026-09-30 接入，规则见 §2.3，引擎 `fx_ma.FxMaEngine`）。
 
 各处消费同一口径：
 
@@ -117,7 +117,7 @@
 
 **新增策略五步**：①实现策略（引擎 `step_to` 接口 + 工作台 JS 技能，复用 chan-core 基础算法）→ ②注册表加条目 → ③`analysis-catalog.json` 加模块条目 + `analysis_service.SCRIPTS` 映射（下拉/分组自动生效）→ ④`PARAM_MODULES` 加参数模块 + `params.html` TAB_GROUPS 追加（参数页签自动生效）→ ⑤引擎分发点按 engine 标识构建。完整清单见 `.cursor/skills/README.md`。
 
-**实盘多策略并存（已定路径 A = 多进程）**：每策略一个 `live_trader` 实例（独立 live_config + **不同 magic**）；MT5 按 magic 隔离持仓，live_trades/live_orders/live_events 已按 session 隔离，**kv 状态键已带策略后缀**（`live_store.state_key`，`session@<strategy>` 等，2026-09-29 起写入/读取两侧同步——升级后需重启 live_trader 进程，旧单键不再被读取）。/live 页已多会话聚合（2026-09-29：按策略 TAB 展示 + 每策略「开启/关闭交易」按钮，`POST /api/live/trading` 写 `trading_enabled@<策略>` kv、live_trader 每拍重读、关闭=停新开仓转 shadow）。留待第二个策略接入时实施：账户级风控分额/合计守卫。
+**实盘多策略并存（已定路径 A = 多进程）**：每策略一个 `live_trader` 实例（独立 live_config + **不同 magic**，如 fxma=live_config.fxma.json/magic 20261101）；MT5 按 magic 隔离持仓，live_trades/live_orders/live_events 已按 session 隔离，**kv 状态键已带策略后缀**（`live_store.state_key`，`session@<strategy>` 等，2026-09-29 起写入/读取两侧同步——升级后需重启 live_trader 进程，旧单键不再被读取）。/live 页已多会话聚合（2026-09-29：按策略 TAB 展示 + 每策略「开启/关闭交易」按钮，`POST /api/live/trading` 写 `trading_enabled@<策略>` kv、live_trader 每拍重读、关闭=停新开仓转 shadow）。**账户级合计守卫已随第二策略接入（2026-09-30）**：`risk.max_account_total_volume` / `risk.max_account_positions`（键缺省=不启用）——进场门统计本品种**跨 magic** 全部持仓，超合计上限停新开仓（live_trader._entry_gate）。
 
 **UI 入口调整（同日）**：工作台「回测与监控」子菜单第三项由「实时监控」改为「MT5实盘」（嵌入只读 /live 页：进程在线状态、策略、持仓、盈亏汇总）；图表驱动的实时监控（LiveWorker/LiveMonitor）代码保留，直连 `/modes.html?mode=live` 仍可用。
 
@@ -464,6 +464,52 @@ run() 批量路径成交 bar 当拍未收盘，存在 ≤1 根 fine bar 的微�
 `by_symbol`）。「画图」带 `symbol` 参数画**当前查看品种**：显式品种无结果直接 400 不回退；
 `sr_draw.draw_sr_lines(symbol=)` 在一切周期/历史操作**之前**切图表品种并等就绪（就绪条件
 镜像 `locate_signal`——旧品种 bars 残留窗口会误判历史覆盖 → 坏线），画完不切回。
+
+## 2.3 强分型均线V1（fxma_v1，2026-09-30 接入；与缠论V1并行）
+
+第二交易策略：**缠论买卖点 + 强分型 + 均线分离 + 固定点数止损止盈**。引擎 `py_chain/fx_ma.py`
+（`FxMaEngine(BacktestEngine)` 子类，step_to/run 接口与缠论V1 完全一致），工作台侧
+`.cursor/skills/fxma-entry/scripts/fxma_entry.js`（同一套规则，工作台口径差同 §2.1.5.2）。
+复用基类增量笔机制（_advance_cut/BiIncBuilder/分型/MACD/ATR），**跳过支阻位与交易计划链路**
+（本策略不消费，回测性能远轻于缠论V1）。策略参数全部在参数中心 `fxma` 模块按品种桶管理
+（回测卡无策略专属数字）；引擎分发点 `py_chain/engine_dispatch.py`（回测/回放/监控 Worker、
+bt_batch 子进程与 live_trader._build_engine 共用）。
+
+### 2.3.1 信号（每个所选进出场周期 P 独立，P 每根已收K线收盘评估）
+
+1. **买卖点**：P 上最新买卖点（`findBuyPoints/findSellPoints`，笔经 structurePeriods 对齐、
+   上级笔按周期链 30S→3→15→60→240 推导）属所选类别（`pointClasses` 多选）：1买/1卖→1类、
+   2买/类2买（卖侧对称）→2类、3买/类3买→3类，**4类不交易**；反向点出现后该点作废。
+2. **强分型**：点之后出现强分型（实体口径，同 `trading_plan.strong_fractal_after`）：
+   卖点→强顶分型（左肩开盘−右肩收盘 ≥ `strongFxMinPts` 点）、买点→强底分型（对称）；0=现口径任意落差。
+3. **均线分离**：按类别选均线对——1类 `maFast1/maSlow1`（默认8/20）、2/3类 `maFast2/maSlow2`
+   （默认5/8），SMA/EMA 按 P 周期收盘价；当拍收盘 快线低于慢线 ≥ `crossMinPts` 点（卖）/
+   高于慢线 ≥ `crossMinPts` 点（买）——间距不足不算上/下穿成立。
+4. **时窗与触发**：三者齐备的首个收盘拍出信号（每个买卖点只触发一次；`pointValidBars` 根内
+   未齐备作废，0=不限）；信号拍=决策拍=P 收盘边界。
+
+### 2.3.2 成交与出场
+
+- 成交 = 信号拍下一根 P 周期K线开盘价（跳空自然体现）。
+- 止损 = 进场价 ∓ `stopPts`（默认10点）、止盈 = 进场价 ± `tpPts`（默认30点，绝对价差）。
+- 出场 = P 已收K线 high/low 触及价位 → 收盘确认后**下一根 P 开盘成交**；同根双触按
+  `sameBarPriority`（默认止损优先=保守）；期末未触发按最新收盘 mark-to-market（exitType=stop|takeProfit）。
+- 互斥：`mutexScope`=global（同向全局一笔，多空并存，同缠论V1）/ perPeriod（每周期独立）；
+  同拍多周期同向共振取最大周期一条。
+- 手数：回测卡/实盘配置显式 lots 优先，缺省用参数中心 `fxma.lots`（默认4）。
+
+### 2.3.3 与缠论V1的差异要点
+
+- **无支阻位/交易计划/背驰下沉链/顺势过滤**——信号三条件即全部条件；
+- **买卖点直接消费**（不做邻近合并/一买锚定/跨周期共振染色）；
+- **30S 上的买卖点为本策略新口径**（缠论V1 的 30S 只作背驰级别不进买卖点）；
+  30S 仅回测/工作台可用（MT5 实盘行情由 M1 重采样无法生成 30S，`live_trader.load_config`
+  对 entryRes 含 30S 拒启）；30S 回测窗口受本地库 30S 数据深度限制；
+- 信号 dict 附 `provStop/provTp`（触发拍收盘价 ∓/± 点数）：实盘信号拍立即下市价单时
+  随单挂 SL/TP（`market_order(tp=)`），成交拍由引擎 `stopRef/tpRef` 对齐
+  （`modify_sl(tp=)`，2026-09-30 起 TP 语义=保留现值除非显式传入）；
+- 跳拍近似：暂停后继续/step_to 大步推进错过多根 P K线时，出场按窗口内首根触发K线挂起、
+  成交取当前拍下一开盘；信号以窗口末根收盘拍评估（正常逐拍推进退化为单根，无近似）。
 
 ## 3. 文件清单与状态（截至 2026-09-01）
 

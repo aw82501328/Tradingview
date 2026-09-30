@@ -212,7 +212,7 @@ class ParamCenterTests(unittest.TestCase):
             self.assertEqual(set(schema), set(defaults))
             for key, spec in schema.items():
                 self.assertEqual(spec["default"], defaults[key])
-                self.assertIn(spec["type"], ("bool", "int", "float", "str"))
+                self.assertIn(spec["type"], ("bool", "int", "float", "str", "multi"))
                 self.assertTrue(spec["label"])
         # 归属：成笔键在画笔；背驰时长在买卖点；进场扩展在进出场
         self.assertIn("gapFilter", param_center.defaults_of("chan"))

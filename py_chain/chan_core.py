@@ -1046,6 +1046,36 @@ def applyNearDoubleOpen(ctx, head):
     return head if shifted is None else shifted
 
 
+def _shiftBreakRestore(ctx, last, k, tail):
+    """近等后移的端点被更极端的同类型分型破坏，且被弹出的转折与新端点已能成笔时，补回被吞掉的笔。
+
+    近等后底/后顶当时把转折（last 之前的一笔）弹掉，是因为回撤腿还不成笔。
+    之后这个后底/后顶分型本身被破坏（底被更低底、顶被更高顶），而从被弹出的转折
+    到新端点已经满足成笔，则按正确的两笔画回。只改端点序列：进场仍按当时的笔，
+    不会回头重开已错过的单。返回新栈头；不能补回则 None。
+    tail 是当前端点之下的栈（head[1]，近等后移时原端点已不在栈里）。"""
+    mid = last.get("_shiftMid")
+    anchor = last.get("_shiftAnchor")
+    if mid is None or anchor is None or k.get("type") != last.get("type"):
+        return None
+    # 只修被破坏的后底。后顶被更高顶打断仍沿用原替换，避免改掉已经成立的顶分型结构。
+    if k["type"] != "bottom" or k["low"] >= last["low"]:
+        return None
+    # 被弹出的那段当时已在笔栈里（端点可能随后被同类型更极值替换过），
+    # 不再用分型范围重审，只确认间隔和笔内极值。新的一笔必须完整成笔。
+    if not (ctx.isValid(anchor, mid) and ctx.noMoreExtremeInside(anchor, mid)):
+        return None
+    if not (ctx.isValid(mid, k) and ctx.noMoreExtremeInside(mid, k)
+            and ctx.fractalRangeClear(mid, k)):
+        return None
+    if CHAN_CFG["debug"]:
+        kind = "底" if k["type"] == "bottom" else "顶"
+        print(f"[阶段二] 近等端点被破坏，补回笔: {kind}@{anchor['mergedIdx']} → "
+              f"{'顶' if mid['type']=='top' else '底'}@{mid['mergedIdx']} → "
+              f"{kind}@{k['mergedIdx']}")
+    return _stkCons(k, _stkCons(mid, _stkCons(anchor, tail)))
+
+
 def biStep(ctx, head, k):
     """阶段二单步（回溯替换）：把分型 k 并入不可变结果栈 head，返回新 head。
     规则体与原 buildBi 阶段二逐行一致；result[-n] 栈操作映射见 _stkCons 注释。
@@ -1058,12 +1088,17 @@ def biStep(ctx, head, k):
             # locked 端点（上级笔端点，区间套强制对齐）不可被同类型分型替换
             return head
         if not last.get("gapLocked", False):
-            if k["type"] == "top":
-                if k["high"] >= last["high"]:
-                    head = _stkCons(k, head[1])       # result[-1] = k
-            else:
-                if k["low"] <= last["low"]:
-                    head = _stkCons(k, head[1])       # result[-1] = k
+            more = (k["high"] >= last["high"]) if k["type"] == "top" else (k["low"] <= last["low"])
+            # 近等后移的端点被更极端同类型分型破坏：能与被弹出的转折成笔就补回，
+            # 否则端点后移并带走修正线索，等后续真正成笔的底/顶再补。
+            if more and last.get("_shiftMid") is not None:
+                restored = _shiftBreakRestore(ctx, last, k, head[1])
+                if restored is not None:
+                    return restored
+                k["_shiftAnchor"] = last.get("_shiftAnchor")
+                k["_shiftMid"] = last["_shiftMid"]
+            if more:
+                head = _stkCons(k, head[1])           # result[-1] = k
         else:
             # 跳空锁定的端点：仅当后续同类型分型「突破」锁定价格时才解锁替换
             if k["type"] == "top":
@@ -1240,6 +1275,9 @@ def biStep(ctx, head, k):
                     if not last.get("locked", False) and not prev.get("locked", False):
                         if near_equal_shift:
                             k["nearDouble"] = True  # 单跳封顶：被近等后移的端点不允许二次后移
+                            # 记下被替换的端点和被弹出的转折，供后续分型破坏时补回笔
+                            k["_shiftAnchor"] = prev
+                            k["_shiftMid"] = last
                             if CHAN_CFG["debug"]:
                                 print(f"[阶段二] 近等后顶/后底(反弹不成笔)取后: {'顶' if prev['type']=='top' else '底'}"
                                       f"@{prev['mergedIdx']}({prev['high'] if prev['type']=='top' else prev['low']}) -> "

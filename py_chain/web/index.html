@@ -497,7 +497,7 @@ function buildCard(m) {
     ],
   };
   const rows = [];
-  const periodsHtml = `<div class="field"><label>周期</label><div class="ms" data-ms="periods">
+  const periodsHtml = `<div class="field f-periods"><label>周期</label><div class="ms" data-ms="periods">
     <button type="button" class="ms-toggle" data-ms-toggle aria-expanded="false" title="勾选一个或多个周期">
       <span class="ms-value">${PERIOD_OPTIONS.join(',')}</span><span class="ms-caret">▾</span>
     </button>
@@ -1022,11 +1022,45 @@ function collectCfg(m) {
   return cfg;
 }
 
+// ---------- 策略下拉（与工作台 catalog 同源动态渲染）+ 策略专属字段显隐 ----------
+// 非缠论V1策略隐藏其不消费的通用字段（后端按策略自行推导，参数在参数中心该策略页签按品种设置）：
+// fxma_v1：周期（取数周期由参数中心 entryRes 推导）、30秒级别开关、预热根数（用默认）
+const STRATEGY_FIELD_HIDE = {
+  fxma_v1: ['periods', 'with_30s', 'warmup'],
+};
+function applyStrategyFields() {
+  document.querySelectorAll('[data-cfg="strategy"]').forEach(sel => {
+    const card = sel.closest('.card');
+    if (!card) return;
+    const hide = STRATEGY_FIELD_HIDE[sel.value] || [];
+    const fields = [
+      card.querySelector('.f-periods'),
+      card.querySelector('[data-cfg="with_30s"]')?.closest('.field'),
+      card.querySelector('[data-cfg="warmup"]')?.closest('.field'),
+    ];
+    ['periods', 'with_30s', 'warmup'].forEach((key, i) => {
+      if (fields[i]) fields[i].style.display = hide.includes(key) ? 'none' : '';
+    });
+  });
+}
+async function loadStrategyOptions() {
+  try {
+    const c = await (await fetch('/analysis-catalog.json')).json();
+    const list = (c.strategies || []).map(s => [s.id, s.name]);
+    if (!list.length) return;
+    document.querySelectorAll('[data-cfg="strategy"]').forEach(sel => {
+      const cur = sel.value;
+      sel.innerHTML = list.map(([v, t]) => `<option value="${v}">${t}</option>`).join('');
+      sel.value = list.some(([v]) => v === cur) ? cur : list[0][0];
+    });
+  } catch { /* catalog 不可用 → 保持缠论V1 单选（内置默认） */ }
+  applyStrategyFields();
+}
+
 // ---------- 周期/品种多选下拉 ----------
 // 勾选变化 → 按面板内选项顺序（= 常量清单顺序）同步隐藏 input（data-cfg）与按钮文案。
 // 面板带 data-ms="periods"|"symbols" 区分用途（2026-09-23 品种多选加入后泛化）
-function syncMs(ms) {
-  if (!ms) return;
+function syncMs(ms) {  if (!ms) return;
   const boxes = [...ms.querySelectorAll('[data-ms-opt]')];
   const values = boxes.filter(c => c.checked).map(c => c.value);
   const input = ms.querySelector('input[data-cfg]');
@@ -1675,6 +1709,11 @@ async function init() {
   applyStoredAfterBars();   // 定位后保留K线：回填持久值并挂同步监听（三卡+明细页共用）
   bindLocateAfterBars();
   MODES.forEach(m => bindCard(m.id));
+  // 策略下拉：catalog 同源动态渲染 + 切换时显隐策略不消费的字段
+  document.addEventListener('change', e => {
+    if (e.target.matches?.('[data-cfg="strategy"]')) applyStrategyFields();
+  });
+  loadStrategyOptions();
   // 周期多选下拉：点击按钮开合，点击面板外收起；勾选变化即同步隐藏 input
   document.addEventListener('click', e => {
     const toggle = e.target.closest('[data-ms-toggle]');

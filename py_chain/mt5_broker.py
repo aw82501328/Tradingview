@@ -31,6 +31,10 @@ _RC_DONE, _RC_INVALID_STOPS, _RC_INVALID_FILL = 10009, 10016, 10030
 _MODE_DEMO, _MODE_REAL = 0, 2
 _MARGIN_HEDGING = 2
 
+# modify_sl 的 TP 语义哨兵：默认保留持仓现 TP（旧行为发 tp=0 会清掉 TP；缠论V1
+# 从不挂 TP 故无感，fxma 固定止盈需要 TP 不被 SL 修改误清）
+_TP_UNCHANGED = object()
+
 
 @dataclass
 class OrderResult:
@@ -74,6 +78,18 @@ def clamp_sl(ref_price, sl, direction, spec):
     if direction == "long":
         return min(sl, normalize_price(ref_price - min_d, spec))
     return max(sl, normalize_price(ref_price + min_d, spec))
+
+
+def clamp_tp(ref_price, tp, direction, spec):
+    """TP 距离不足 stops_level 时 clamp 到合法最小距离（方向感知，与 clamp_sl 镜像）。
+
+    direction="long"：TP 在上方，距离=tp-ref；"short"：TP 在下方，距离=ref-tp。"""
+    min_d = (spec.get("stops_level") or 0) * spec["point"]
+    if min_d <= 0:
+        return tp
+    if direction == "long":
+        return max(tp, normalize_price(ref_price + min_d, spec))
+    return min(tp, normalize_price(ref_price - min_d, spec))
 
 
 def fld(obj, name):
@@ -227,14 +243,18 @@ class MT5Broker:
         # 字段访问走 fld()（np.void 下标式 / namedtuple 属性式，见注释）
         return [p for p in ps if not magic or fld(p, "magic") == magic]
 
-    def market_order(self, direction, volume, sl=None, comment=""):
-        """市价单（带 SL；filling 旋转；成交以返回结果实际量价回填）。"""
+    def market_order(self, direction, volume, sl=None, tp=None, comment=""):
+        """市价单（带 SL/可选 TP；filling 旋转；成交以返回结果实际量价回填）。
+
+        tp 供固定点数止盈策略（fxma_v1）随单挂 TP；None=不挂（缠论V1 原行为）。"""
         self.spec()
         volume = self.normalize_volume(volume)
         bid, ask = self.quote()
         ref = ask if direction == "long" else bid
         if sl is not None:
             sl = clamp_sl(ref, self.normalize_price(sl), direction, self._spec)
+        if tp is not None:
+            tp = clamp_tp(ref, self.normalize_price(tp), direction, self._spec)
         req = {
             "action": _ACTION_DEAL,
             "symbol": self.symbol,
@@ -249,6 +269,8 @@ class MT5Broker:
         }
         if sl is not None:
             req["sl"] = sl
+        if tp is not None:
+            req["tp"] = tp
         last = None
         for fill in self._fills:
             req["type_filling"] = fill
@@ -275,18 +297,28 @@ class MT5Broker:
                                 "deal": getattr(res, "deal", None),
                                 "order": getattr(res, "order", None)})
 
-    def modify_sl(self, position_ticket, sl, clamp=True, retry=3):
-        """改持仓 SL（TRADE_ACTION_SLTP）。clamp=True 时按 stops_level 合法化。"""
+    def modify_sl(self, position_ticket, sl, clamp=True, retry=3, tp=_TP_UNCHANGED):
+        """改持仓 SL（TRADE_ACTION_SLTP）。clamp=True 时按 stops_level 合法化。
+
+        tp：_TP_UNCHANGED（默认）=保留持仓现 TP；数值=同时改 TP（fxma 固定止盈对齐用）。"""
         spec = self.spec()
         pos = self._position_of(position_ticket)
-        direction = "long" if pos["type"] == _BUY else "short"
+        direction = "long" if pos["type"] == _BUY else _SELL
         sl = self.normalize_price(sl)
         if clamp:
             bid, ask = self.quote()
             ref = bid if direction == "long" else ask
             sl = clamp_sl(ref, sl, direction, spec)
+        if tp is _TP_UNCHANGED:
+            tp = fld(pos, "tp") or 0.0
+        else:
+            tp = self.normalize_price(tp) if tp else 0.0
+            if clamp and tp:
+                bid, ask = self.quote()
+                ref = bid if direction == "long" else ask
+                tp = clamp_tp(ref, tp, direction, spec)
         req = {"action": _ACTION_SLTP, "symbol": self.symbol,
-               "position": position_ticket, "sl": sl, "tp": 0.0}
+               "position": position_ticket, "sl": sl, "tp": tp}
         for i in range(max(1, retry)):
             res = mt5.order_send(req)
             if res is not None and res.retcode == _RC_DONE:
@@ -455,7 +487,7 @@ class MockBroker:
         magic = self.magic if magic is None else magic
         return [dict(p) for p in self.positions_store.values() if p["magic"] == magic]
 
-    def market_order(self, direction, volume, sl=None, comment=""):
+    def market_order(self, direction, volume, sl=None, tp=None, comment=""):
         rc = self._maybe_fail()
         if rc is not None:
             return OrderResult(False, retcode=rc, retcomment="mock 注入失败")
@@ -465,11 +497,13 @@ class MockBroker:
         price = self.fill_policy(direction, ref)
         if sl is not None:
             sl = clamp_sl(ref, self.normalize_price(sl), direction, self._spec)
+        if tp is not None:
+            tp = clamp_tp(ref, self.normalize_price(tp), direction, self._spec)
         self._next_ticket += 1
         ticket = self._next_ticket
         ptype = _BUY if direction == "long" else _SELL
         self.positions_store[ticket] = {
-            "ticket": ticket, "type": ptype, "volume": volume, "sl": sl,
+            "ticket": ticket, "type": ptype, "volume": volume, "sl": sl, "tp": tp,
             "price_open": price, "magic": self.magic, "comment": comment,
             "time": int(time.time()), "profit": 0.0,
         }
@@ -480,7 +514,7 @@ class MockBroker:
         return OrderResult(True, retcode=_RC_DONE, retcomment="mock done",
                            position_ticket=ticket, deal_price=price, deal_volume=volume)
 
-    def modify_sl(self, position_ticket, sl, clamp=True, retry=3):
+    def modify_sl(self, position_ticket, sl, clamp=True, retry=3, tp=_TP_UNCHANGED):
         rc = self._maybe_fail()
         if rc is not None:
             return OrderResult(False, retcode=rc, retcomment="mock 注入失败",
@@ -495,10 +529,19 @@ class MockBroker:
             bid, ask = self.quote_now
             ref = bid if direction == "long" else ask
             sl = clamp_sl(ref, sl, direction, self._spec)
+        if tp is _TP_UNCHANGED:
+            tp = p.get("tp") or 0.0
+        else:
+            tp = self.normalize_price(tp) if tp else 0.0
+            if clamp and tp:
+                bid, ask = self.quote_now
+                ref = bid if direction == "long" else ask
+                tp = clamp_tp(ref, tp, direction, self._spec)
         p["sl"] = sl
+        p["tp"] = tp
         return OrderResult(True, retcode=_RC_DONE, retcomment="mock done",
                            position_ticket=position_ticket,
-                           raw={"request": {"position": position_ticket, "sl": sl}})
+                           raw={"request": {"position": position_ticket, "sl": sl, "tp": tp}})
 
     def close_position(self, position_ticket, volume=None, comment=""):
         rc = self._maybe_fail()

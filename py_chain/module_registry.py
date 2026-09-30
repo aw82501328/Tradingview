@@ -36,6 +36,16 @@ STRATEGIES = {
         "param_modules": ["sr", "plan", "entry"],
         "engine": "chan",
     },
+    # 强分型均线V1（2026-09-30 接入）：缠论买卖点 + 强分型 + 均线分离 + 固定点数止损止盈。
+    # 无支阻/计划步骤（不消费）；工作台单步 fxma_entry 依赖基础组件 points 的笔结构。
+    # 引擎 fx_ma = fx_ma.FxMaEngine（step_to 接口同 chan，回测/实盘分发点按此构建）。
+    "fxma_v1": {
+        "title": "强分型均线V1",
+        "stages": ["fxma_entry"],
+        "dependencies": {"fxma_entry": ["points"]},
+        "param_modules": ["fxma"],
+        "engine": "fx_ma",
+    },
 }
 
 DEFAULT_STRATEGY = "chan_v1"

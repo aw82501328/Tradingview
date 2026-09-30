@@ -18,6 +18,14 @@
 6. **配置**：复制 `py_chain/web/live_config.json` 为 `live_config.local.json`（已
    gitignore），填入 `account.login`（登录号）与 `account.server`（服务器名）。
    **密码不写任何配置文件**——只存终端凭据。
+7. **强分型均线V1（fxma_v1）并行实盘（可选）**：复制 `py_chain/web/live_config.fxma.json`
+   为 `live_config.fxma.local.json` 填账号（**magic 必须与缠论V1 不同**，模板已用
+   20261101）；策略参数（进出场周期/类别/均线/止损止盈/默认手数）在参数中心
+   「交易策略 · 强分型均线V1」按品种设置，live_config 只放账户/风控/运行参数。
+   启动：`python -m py_chain.live_trader --config py_chain/web/live_config.fxma.local.json`
+   （或 `--strategy fxma_v1` 覆盖默认配置的策略键）。**30S 周期实盘不支持**——
+   entryRes 含 30S 时 load_config 拒启（MT5 行情由 M1 重采样构成）。账户级合计守卫
+   （跨 magic）：`risk.max_account_total_volume` / `max_account_positions`，超限停新开仓。
 
 ## 1. 启动与验证（分阶段）
 

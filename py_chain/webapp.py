@@ -43,6 +43,7 @@ from . import chan_core
 from . import data_store, td_launcher, sr_service, sr_draw, sr_tune, sr_tune_api, sr_preset_excel, analysis_service, analysis_api, bt_runs, bt_errors, param_center, params_api, live_api
 from . import mark_entry
 from . import module_registry
+from . import engine_dispatch
 
 # ============================================================
 # 全局互斥：三种模式同一时间最多运行一种
@@ -741,6 +742,11 @@ class BacktestWorker(ModeWorker):
         # 恰 1 个品种时 normalize_cfg 已折叠回 cfg["symbol"]，走下方原单品种路径
         if len([s for s in (cfg.get("symbols") or []) if s]) > 1:
             return self._run_batch()
+        # 引擎分发（2026-09-30 第二策略）：fx_ma = 强分型均线V1 独立路径
+        # （取数周期/构造参数/日志均不同，不走缠论V1 的 _engine_kwargs_of）
+        strategy = module_registry.normalize_strategy(cfg.get("strategy"))
+        if module_registry.STRATEGIES[strategy]["engine"] == "fx_ma":
+            return self._run_fxma()
         periods = cfg.get("periods") or DEFAULT_PERIODS
         # 预热提前（lead_days > 0）：「起始日期=交易开始日」口径——取数自动前移 lead 天
         # 建状态（笔/支阻位/MACD 就绪），引擎 start_ts 前只推进状态不交易、从空仓起步；
@@ -810,6 +816,74 @@ class BacktestWorker(ModeWorker):
         self.log(f"回测完成：{st['steps']} 步，信号 {st['signals']}，成交 {st['executed']}，"
                  f"同向过滤 {st.get('suppressed', 0)}，已平仓 {st.get('closed', 0)}")
 
+    def _run_fxma(self):
+        """全量回测（强分型均线V1）：FxMaEngine.run() 逐根推进。
+
+        策略参数全部来自参数中心 fxma 品种桶（回测卡无策略专属数字）；
+        手数 = 显式 cfg["lots"]（回测卡/历史方案复现）优先 > 参数中心 fxma.lots，
+        回写 cfg 保持 bt_runs 快照口径。取数周期 = 默认链 + 30S（entryRes 选中才加）。
+        """
+        cfg = self.cfg
+        pm = param_center.effective_all(cfg.get("symbol"))
+        chan_core.apply_cfg(param_center.chan_cfg_effective(cfg.get("symbol")))
+        periods = engine_dispatch.fxma_load_periods(pm["fxma"]["entryRes"])
+        lead_days = int(cfg.get("lead_days") or 0)
+        from_ts = int(cfg.get("from_ts", 0))
+        data_from_ts = max(0, from_ts - lead_days * 86400)
+        start_ts = from_ts if lead_days > 0 else None
+        to_ts = int(cfg.get("to_ts") or 0) or None
+        src = cfg.get("data_source") or ("cache" if cfg.get("use_cache") else "live")
+        if lead_days > 0:
+            self.log(f"预热提前 {lead_days} 天：数据起点 {fmtT(data_from_ts)}，交易起点 {fmtT(from_ts)}")
+        self.log(f"取数：数据源={'本地存储' if src == 'store' else '本地缓存' if src == 'cache' else 'CDP实时'} "
+                 f"symbol={cfg.get('symbol')} periods={periods}"
+                 f"{' to_ts=' + str(to_ts) if to_ts else ''}")
+        if src == "store":
+            bars = data_store.load_store(cfg.get("symbol"), periods=periods,
+                                         from_ts=data_from_ts, to_ts=to_ts)
+        else:
+            bars = load_bars(periods=periods, from_ts=data_from_ts, to_ts=to_ts,
+                             use_cache=cfg.get("use_cache", False),
+                             symbol=cfg.get("symbol"), log=self.log)
+        for res in periods:
+            n = len(bars.get(res, []) or [])
+            if n:
+                self.log(f"  {res:>4}: {n} 根（{fmtT(bars[res][-1]['time'])} 止）")
+        if cfg.get("lots") is None:
+            cfg["lots"] = pm["fxma"].get("lots") or mark_entry.DEFAULT_LOTS
+        kw = param_center.fxma_engine_kwargs(
+            pm, lots_override=cfg["lots"],
+            contract_mult=mark_entry.contract_mult_of(cfg.get("symbol")))
+        engine = engine_dispatch.engine_class_of("fxma_v1")(bars, **kw)
+        self.log(f"回测开始（强分型均线V1：周期 {','.join(engine.entry_res)}，"
+                 f"类别 {','.join(str(c) for c in sorted(engine.point_classes))}，"
+                 f"{engine.ma_type} {engine.ma_fast1}/{engine.ma_slow1}+{engine.ma_fast2}/{engine.ma_slow2}，"
+                 f"分离≥{engine.cross_min_pts}点，止损{engine.stop_pts}/止盈{engine.tp_pts}点，"
+                 f"互斥 {engine.mutex_scope}，最小周期 {engine.fine_res}）...")
+        result = engine.run(
+            start_ts=start_ts,
+            log=self.log,
+            on_progress=self._on_progress,
+            on_signal=self._on_signal,
+            on_trade=self._on_trade,
+            on_exit=self._on_exit,
+            on_suppressed=self._on_suppressed,
+            paused=self._pause_evt,
+            stopped=self._stop_evt,
+        )
+        if self._stop_evt.is_set():
+            self.set_state("stopped")
+        else:
+            self.set_state("done")
+        for tr in result["trades"]:
+            if tr.get("state") == "closed":
+                continue
+            row = self.signals.fill_trade(self.MODE, tr, symbol=self.cfg.get('symbol'))
+            self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
+        st = result["stats"]
+        self.log(f"回测完成：{st['steps']} 步，信号 {st['signals']}，成交 {st['executed']}，"
+                 f"同向过滤 {st.get('suppressed', 0)}，已平仓 {st.get('closed', 0)}")
+
     # ---- 多品种批量并行（2026-09-23）----
     def _run_batch(self):
         """多品种并行全量回测：统一参数、仅 symbol 不同，每品种一个 spawn 子进程
@@ -853,6 +927,10 @@ class BacktestWorker(ModeWorker):
         pause_e = ctx.Event()
         stop_e = ctx.Event()
         procs = {}
+        # 引擎分发（2026-09-30）：fxma = 每品种从 fxma 品种桶取 entryRes 推导取数周期，
+        # 构造 kwargs 走 fxma_engine_kwargs（缠论V1 走 _engine_kwargs_of，原路径不变）
+        strategy = module_registry.normalize_strategy(cfg.get("strategy"))
+        engine_id = module_registry.STRATEGIES[strategy]["engine"]
         try:
             for sym in todo:
                 scfg = dict(cfg)
@@ -860,12 +938,21 @@ class BacktestWorker(ModeWorker):
                 # 进出场按品种取桶：清掉共享 cfg 可能带来的统一 near/滑点/手数
                 for k in ENTRY_FILL_KEYS:
                     scfg.pop(k, None)
-                kw = self._engine_kwargs_of(scfg, periods, log=self.log)
+                if engine_id == "fx_ma":
+                    pm_sym = param_center.effective_all(sym)
+                    sym_periods = engine_dispatch.fxma_load_periods(pm_sym["fxma"]["entryRes"])
+                    kw = param_center.fxma_engine_kwargs(
+                        pm_sym, lots_override=None,
+                        contract_mult=mark_entry.contract_mult_of(sym))
+                else:
+                    sym_periods = periods
+                    kw = self._engine_kwargs_of(scfg, periods, log=self.log)
                 # 记入 self.batch[sym] 供 _save_one 回写各自 cfg 快照
                 self.batch[sym]["lots"] = kw["lots"]
                 self.batch[sym]["contract_mult"] = kw["contract_mult"]
-                child_cfg = {"chan_cfg": param_center.chan_cfg_effective(sym),
-                             "engine_kwargs": kw, "periods": periods,
+                child_cfg = {"strategy": strategy,
+                             "chan_cfg": param_center.chan_cfg_effective(sym),
+                             "engine_kwargs": kw, "periods": sym_periods,
                              "data_from_ts": data_from_ts, "to_ts": to_ts, "start_ts": start_ts}
                 p = ctx.Process(target=bt_batch.run_symbol,
                                 args=(child_cfg, sym, msg_q, pause_e, stop_e),
@@ -1021,15 +1108,29 @@ class LiveWorker(ModeWorker):
 
     def _run(self):
         cfg = self.cfg
-        periods = cfg.get("periods") or DEFAULT_PERIODS
-        pm = param_center.effective_all(cfg.get("symbol"))
-        chan_core.apply_cfg(param_center.chan_cfg_effective(cfg.get("symbol")))
-        m = LiveMonitor(symbol=cfg.get("symbol"), periods=periods,
-                        from_ts=cfg.get("from_ts", 0), port=cfg.get("port", DEFAULT_CDP_PORT),
-                        interval=cfg.get("interval", 15.0), tail=cfg.get("tail", 100),
-                        use_cache=cfg.get("use_cache", False), log=self.log,
-                        lots=param_center.lots_of(pm["entry"], cfg.get("symbol")),
-                        module_params=param_center.engine_module_params(pm))
+        strategy = module_registry.normalize_strategy(cfg.get("strategy"))
+        if module_registry.STRATEGIES[strategy]["engine"] == "fx_ma":
+            pm = param_center.effective_all(cfg.get("symbol"))
+            chan_core.apply_cfg(param_center.chan_cfg_effective(cfg.get("symbol")))
+            m = LiveMonitor(symbol=cfg.get("symbol"),
+                            periods=engine_dispatch.fxma_load_periods(pm["fxma"]["entryRes"]),
+                            from_ts=cfg.get("from_ts", 0), port=cfg.get("port", DEFAULT_CDP_PORT),
+                            interval=cfg.get("interval", 15.0), tail=cfg.get("tail", 100),
+                            use_cache=cfg.get("use_cache", False), log=self.log,
+                            strategy=strategy,
+                            engine_kwargs=param_center.fxma_engine_kwargs(
+                                pm, lots_override=cfg.get("lots"),
+                                contract_mult=mark_entry.contract_mult_of(cfg.get("symbol"))))
+        else:
+            periods = cfg.get("periods") or DEFAULT_PERIODS
+            pm = param_center.effective_all(cfg.get("symbol"))
+            chan_core.apply_cfg(param_center.chan_cfg_effective(cfg.get("symbol")))
+            m = LiveMonitor(symbol=cfg.get("symbol"), periods=periods,
+                            from_ts=cfg.get("from_ts", 0), port=cfg.get("port", DEFAULT_CDP_PORT),
+                            interval=cfg.get("interval", 15.0), tail=cfg.get("tail", 100),
+                            use_cache=cfg.get("use_cache", False), log=self.log,
+                            lots=param_center.lots_of(pm["entry"], cfg.get("symbol")),
+                            module_params=param_center.engine_module_params(pm))
         self.monitor = m
         self.log("实时监控就绪（Ctrl+C 无效，用停止按钮）")
         while not self._stop_evt.is_set():
@@ -1067,17 +1168,33 @@ class ReplayWorker(ModeWorker):
 
     def _run(self):
         cfg = self.cfg
-        periods = cfg.get("periods") or DEFAULT_PERIODS
-        pm = param_center.effective_all(cfg.get("symbol"))
-        chan_core.apply_cfg(param_center.chan_cfg_effective(cfg.get("symbol")))
-        m = ReplayMonitor(symbol=cfg.get("symbol"), periods=periods,
-                          from_ts=cfg.get("from_ts", 0), port=cfg.get("port", DEFAULT_CDP_PORT),
-                          start_ts=cfg.get("start_ts"),
-                          speed_ms=cfg.get("speed", 1000), hold_sec=cfg.get("hold", 2.0),
-                          interval=cfg.get("interval", 0.5), tail=cfg.get("tail", 100),
-                          use_cache=cfg.get("use_cache", False), log=self.log,
-                          lots=param_center.lots_of(pm["entry"], cfg.get("symbol")),
-                          module_params=param_center.engine_module_params(pm))
+        strategy = module_registry.normalize_strategy(cfg.get("strategy"))
+        if module_registry.STRATEGIES[strategy]["engine"] == "fx_ma":
+            pm = param_center.effective_all(cfg.get("symbol"))
+            chan_core.apply_cfg(param_center.chan_cfg_effective(cfg.get("symbol")))
+            m = ReplayMonitor(symbol=cfg.get("symbol"),
+                              periods=engine_dispatch.fxma_load_periods(pm["fxma"]["entryRes"]),
+                              from_ts=cfg.get("from_ts", 0), port=cfg.get("port", DEFAULT_CDP_PORT),
+                              start_ts=cfg.get("start_ts"),
+                              speed_ms=cfg.get("speed", 1000), hold_sec=cfg.get("hold", 2.0),
+                              interval=cfg.get("interval", 0.5), tail=cfg.get("tail", 100),
+                              use_cache=cfg.get("use_cache", False), log=self.log,
+                              strategy=strategy,
+                              engine_kwargs=param_center.fxma_engine_kwargs(
+                                  pm, lots_override=cfg.get("lots"),
+                                  contract_mult=mark_entry.contract_mult_of(cfg.get("symbol"))))
+        else:
+            periods = cfg.get("periods") or DEFAULT_PERIODS
+            pm = param_center.effective_all(cfg.get("symbol"))
+            chan_core.apply_cfg(param_center.chan_cfg_effective(cfg.get("symbol")))
+            m = ReplayMonitor(symbol=cfg.get("symbol"), periods=periods,
+                              from_ts=cfg.get("from_ts", 0), port=cfg.get("port", DEFAULT_CDP_PORT),
+                              start_ts=cfg.get("start_ts"),
+                              speed_ms=cfg.get("speed", 1000), hold_sec=cfg.get("hold", 2.0),
+                              interval=cfg.get("interval", 0.5), tail=cfg.get("tail", 100),
+                              use_cache=cfg.get("use_cache", False), log=self.log,
+                              lots=param_center.lots_of(pm["entry"], cfg.get("symbol")),
+                              module_params=param_center.engine_module_params(pm))
         self.monitor = m
         m.enter_replay()
         self.log(f"回放自动播放已启动：速度 {m.speed_ms}ms/根，默认驻留 3m")

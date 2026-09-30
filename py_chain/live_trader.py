@@ -26,7 +26,7 @@ from . import chan_core, data_store, live_store, param_center
 from .backtest import BacktestEngine, DEFAULT_PERIODS
 from .mark_entry import (DEFAULT_SLIP_FALLBACK, DEFAULT_SLIP_STOP,
                          contract_mult_of)
-from .mt5_broker import MT5Broker
+from .mt5_broker import MT5Broker, _TP_UNCHANGED
 from .mt5_feed import MT5Feed, DEFAULT_TAIL_M1
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -72,7 +72,9 @@ def load_config(path=None, cli_overrides=None):
     """默认值 ← live_config.json ← live_config.local.json ← CLI 覆盖。
 
     strategy 键经 module_registry 校验（空 = 默认策略 缠论V1，未知拒绝启动）；
-    kv 状态键与会话快照均带该策略（多进程多策略并存=路径A）。"""
+    kv 状态键与会话快照均带该策略（多进程多策略并存=路径A）。
+    fxma_v1：参数中心 entryRes 含 30S 时拒绝启动（MT5 实盘行情由 M1 重采样
+    无法生成 30S——30S 仅回测/工作台可用）。"""
     cfg = dict(DEFAULT_LIVE_CONFIG)
     for p in ([path] if path else [DEFAULT_CONFIG_PATH,
                                    DEFAULT_CONFIG_PATH.replace(".json", ".local.json")]):
@@ -82,6 +84,11 @@ def load_config(path=None, cli_overrides=None):
     cfg = deep_merge(cfg, cli_overrides or {})
     from . import module_registry
     cfg["strategy"] = module_registry.normalize_strategy(cfg.get("strategy"))
+    if cfg["strategy"] == "fxma_v1":
+        entry_res = param_center.effective_all(cfg.get("symbol"))["fxma"].get("entryRes", "")
+        if "30S" in [r.strip().upper() for r in str(entry_res).split(",") if r.strip()]:
+            raise ValueError("fxma_v1 实盘不支持 30 秒周期（MT5 行情由 M1 重采样构成），"
+                             "请在参数中心把进出场周期改为 3/15/60")
     return cfg
 
 
@@ -311,9 +318,38 @@ class LiveTrader:
 
     def _build_engine(self, t_start, warmup_days):
         """从 bars.db 载入 [T_start-预热窗, 当前] 构建引擎（当前=feed.current_time，
-        重放恢复时含 T_start~现在的全部已入库 bar——重放即由它们驱动）。"""
+        重放恢复时含 T_start~现在的全部已入库 bar——重放即由它们驱动）。
+
+        引擎按注册表 engine 标识分发（2026-09-30 第二策略）：chan=BacktestEngine
+        （原路径不变）；fx_ma=FxMaEngine（参数中心 fxma 品种桶，fine=最小所选周期）。"""
+        from . import engine_dispatch, module_registry
+        from .chan_core import intervalSecOf
+        from .fx_ma import parse_multi as fxma_parse_multi, ENTRY_RES_OPTIONS
         to_ts = self.feed.current_time()
         from_ts = t_start - int(warmup_days) * 86400
+        engine_id = module_registry.STRATEGIES[self.cfg.get("strategy")]["engine"]
+        pm = self._pm or param_center.effective_all(self.cfg["symbol"])
+        if engine_id == "fx_ma":
+            entry_res = fxma_parse_multi(pm["fxma"].get("entryRes", "3,15,60"),
+                                         ENTRY_RES_OPTIONS, "entryRes")
+            fine = min(entry_res, key=lambda r: intervalSecOf(r) or 0)
+            periods = engine_dispatch.fxma_load_periods(entry_res)
+            bars = data_store.load_store(self.cfg["db_symbol"], periods, from_ts, to_ts)
+            if not bars.get(fine):
+                # 首启：库为空 → 深拉（MT5Feed 路径；ReplayFeed 数据已在）
+                self.feed.history(min_depth_days=int(warmup_days))
+                bars = data_store.load_store(self.cfg["db_symbol"], periods, from_ts, to_ts)
+                if not bars.get(fine):
+                    raise RuntimeError(f"行情预热失败：{fine} 无数据")
+            n_f = len(bars.get(fine) or [])
+            self.log(f"[live] 预载 {self.cfg['db_symbol']}（fxma_v1 周期 "
+                     f"{','.join(entry_res)}）：{fine}×{n_f}")
+            self.engine = engine_dispatch.engine_class_of("fxma_v1")(
+                bars, **param_center.fxma_engine_kwargs(
+                    pm, lots_override=self.cfg.get("lots"),
+                    contract_mult=contract_mult_of(self.cfg["symbol"]),
+                    fill_at_open_bar=True, fine_res=fine))
+            return
         periods = [p for p in DEFAULT_PERIODS]
         bars = data_store.load_store(self.cfg["db_symbol"], periods, from_ts, to_ts)
         if not bars.get("3"):
@@ -329,7 +365,7 @@ class LiveTrader:
         self.engine = BacktestEngine(
             bars, periods=periods, warmup_bars=0, lots=self.cfg["lots"],
             contract_mult=contract_mult_of(self.cfg["symbol"]),
-            module_params=param_center.engine_module_params(self._pm),
+            module_params=param_center.engine_module_params(pm),
             fill_at_open_bar=True,   # 逐拍同拍成交（见 backtest.py 注释；批量口径不变）
             fine_res="3")            # 显式固定 fine=3m：OANDA 补深 240/D 后各周期数据
                                     # 跨度不齐，自动探测会误选 240 作时间轴（2026-09-24
@@ -515,13 +551,21 @@ class LiveTrader:
                                         f"{s['strategyKey']}")
             return
         bid, ask = self.broker.quote()
-        sl = provisional_sl(d, bid, ask, s.get("nearSr"))
-        sl = self.broker.normalize_price(sl)
+        # 信号拍临时 SL/TP：fxma 信号自带固定点数价位（provStop/provTp，来自触发拍
+        # 收盘价 ∓/± 点数）；缠论V1 信号走近支阻 ± 滑点的 provisional_sl（原行为）。
+        tp = None
+        if s.get("provStop") is not None:
+            sl = self.broker.normalize_price(s["provStop"])
+            if s.get("provTp") is not None:
+                tp = self.broker.normalize_price(s["provTp"])
+        else:
+            sl = provisional_sl(d, bid, ask, s.get("nearSr"))
+            sl = self.broker.normalize_price(sl)
         vol = self.broker.normalize_volume(self.cfg["lots"] * 0.01)
         comment = f"chai_{d}_{s['time']}"
         r = None
         for _ in range(max(1, self.cfg["broker"]["order_retry"])):
-            r = self.broker.market_order(d, vol, sl=sl, comment=comment)
+            r = self.broker.market_order(d, vol, sl=sl, tp=tp, comment=comment)
             if r.ok:
                 break
         if r.ok:
@@ -535,7 +579,7 @@ class LiveTrader:
                                   "order_row_id": oid,
                                   "position_ticket": r.position_ticket,
                                   "deal_price": r.deal_price, "deal_volume": r.deal_volume,
-                                  "sl": sl})
+                                  "sl": sl, "tp": tp})
             self.log(f"[live] 进场单已发：{d} {vol} 手 SL={sl} ticket={r.position_ticket} "
                      f"成交={r.deal_price}")
         else:
@@ -594,13 +638,17 @@ class LiveTrader:
             return
         if p["status"] == "blocked":
             return   # 门控拦截：行已 shadow
-        # SL 对齐：临时 SL → 引擎冻结 stopRef
+        # SL/TP 对齐：临时 SL → 引擎冻结 stopRef；fxma 同时对齐固定止盈 tpRef
         if t["stopRef"] is not None and p.get("sl") is not None:
             eps = (self.broker.spec()["point"] or 0.01)
-            if abs(p["sl"] - t["stopRef"]) > eps:
+            want_tp = t.get("tpRef")
+            tp_diff = (want_tp is not None and p.get("tp") is not None
+                       and abs(p["tp"] - want_tp) > eps)
+            if abs(p["sl"] - t["stopRef"]) > eps or tp_diff:
                 m = self.broker.modify_sl(p["position_ticket"], t["stopRef"],
                                           clamp=self.cfg["broker"]["clamp_stops_level"],
-                                          retry=self.cfg["broker"]["modify_retry"])
+                                          retry=self.cfg["broker"]["modify_retry"],
+                                          tp=want_tp if tp_diff else _TP_UNCHANGED)
                 live_store.log_order(self.session, "sl_modify", engine_trade_no=no,
                                      direction=t["direction"], sl=t["stopRef"],
                                      position_ticket=p["position_ticket"], ok=int(m.ok),
@@ -850,6 +898,23 @@ class LiveTrader:
             return False, f"总敞口{open_vol + vol_new:.2f}>{rk['max_total_open_volume']}"
         if len(rows) + 1 > rk["max_positions"]:
             return False, f"持仓数{len(rows) + 1}>{rk['max_positions']}"
+        # 账户级合计守卫（多策略并存=路径A 多进程，2026-09-30 第二策略接入补齐）：
+        # 统计本品种全部持仓（跨 magic——各策略实例独立 magic），超账户级合计上限
+        # 时停新开仓。键缺省（旧配置/缠论V1 单策略）= 不启用，行为不变。
+        acct_vol_cap = rk.get("max_account_total_volume")
+        acct_pos_cap = rk.get("max_account_positions")
+        if acct_vol_cap or acct_pos_cap:
+            try:
+                all_pos = self.broker.positions(magic=0) or []
+            except Exception:
+                all_pos = []
+            if all_pos:
+                from .mt5_broker import fld
+                acct_vol = sum(fld(p, "volume") or 0 for p in all_pos)
+                if acct_vol_cap and acct_vol + vol_new > float(acct_vol_cap) + 1e-9:
+                    return False, f"账户合计敞口{acct_vol + vol_new:.2f}>{acct_vol_cap}"
+                if acct_pos_cap and len(all_pos) + 1 > int(acct_pos_cap):
+                    return False, f"账户合计持仓数{len(all_pos) + 1}>{acct_pos_cap}"
         eq = self.broker.account_equity()
         if rk.get("equity_floor") and eq is not None and eq < rk["equity_floor"]:
             return False, f"权益{eq}<{rk['equity_floor']}"

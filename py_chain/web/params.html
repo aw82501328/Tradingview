@@ -45,6 +45,9 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 .prow input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px}
 .prow select{background:var(--bg);color:var(--text);border:1px solid var(--border);
   border-radius:4px;padding:3px 6px;font-size:12px}
+/* 多选参数（逗号串）：复选框组（fxma entryRes/pointClasses 等） */
+.multi-opts{display:flex;flex-wrap:wrap;gap:4px 12px;justify-content:flex-end;max-width:60%}
+.multi-opts .ms-opt{display:flex;align-items:center;gap:4px;color:var(--text);font-size:12px;white-space:nowrap}
 .prow.dim{opacity:.45}
 .prow.dim input,.prow.dim select{pointer-events:none}
 .prow .zs-side{display:flex;align-items:center;gap:12px;flex-shrink:0}
@@ -135,6 +138,7 @@ const TAB_IDS = ['chan', 'zs', 'points', 'sr', 'plan', 'entry'];
 const TAB_GROUPS = [
   { id: 'base', label: '基础组件', tabs: [['chan', '画笔'], ['zs', '画中枢'], ['points', '标记买卖点']] },
   { id: 'strategy', label: '交易策略 · 缠论V1', tabs: [['sr', '支阻位'], ['plan', '交易计划'], ['entry', '标记进出场']] },
+  { id: 'fxma', label: '交易策略 · 强分型均线V1', tabs: [['fxma', '强分型均线V1']] },
 ];
 const TABS = TAB_GROUPS.flatMap(g => g.tabs);
 const GROUP_IDS = TAB_GROUPS.map(g => g.id);
@@ -443,7 +447,12 @@ function switchTab(name) {
 
 // 枚举参数的选项展示名（choices 原值提交，展示用中文）
 const CHOICE_LABELS = { trendRes: { '': '关闭', '240': '4小时', 'D': '日线' },
-                        rangeRes: { '240': '4小时', 'D': '日线' } };
+                        rangeRes: { '240': '4小时', 'D': '日线' },
+                        entryRes: { '30S': '30秒(仅回测)', '3': '3分钟', '15': '15分钟', '60': '1小时' },
+                        pointClasses: { '1': '一类买卖点', '2': '二类买卖点', '3': '三类买卖点' },
+                        maType: { 'SMA': '简单均线SMA', 'EMA': '指数均线EMA' },
+                        sameBarPriority: { 'stop': '止损优先(保守)', 'tp': '止盈优先' },
+                        mutexScope: { 'global': '全局同向一笔(同缠论V1)', 'perPeriod': '每周期独立互斥' } };
 const choiceLabel = (key, v) => (CHOICE_LABELS[key] && CHOICE_LABELS[key][v]) || v;
 
 // 三滑点的 ATR 系数键（entry 模块）：系数不独立成行，内嵌进各自滑点行（2026-09-19）
@@ -495,7 +504,7 @@ function descHtml(key, desc) {
 
 function rowHtml(key, spec, value, isMod, embed) {
   const defText = spec.type === 'bool' ? (spec.default ? '默认开' : '默认关')
-    : spec.type === 'str' ? `默认 ${choiceLabel(key, spec.default)}`
+    : (spec.type === 'str' || spec.type === 'multi') ? `默认 ${choiceLabel(key, spec.default)}`
     : `默认 ${spec.default}`;
   let control;
   if (spec.type === 'bool') {
@@ -503,6 +512,11 @@ function rowHtml(key, spec, value, isMod, embed) {
   } else if (spec.type === 'str') {
     control = `<select data-k="${key}">` + (spec.choices || [])
       .map(c => `<option value="${c}" ${c === value ? 'selected' : ''}>${choiceLabel(key, c)}</option>`).join('') + '</select>';
+  } else if (spec.type === 'multi') {
+    // 多选（逗号串存储）：复选框组，collect 按 data-multi 合并
+    const sel = new Set(String(value ?? '').split(',').map(s => s.trim()).filter(Boolean));
+    control = `<span class="multi-opts">` + (spec.choices || [])
+      .map(c => `<label class="ms-opt" title="${choiceLabel(key, c)}"><input type="checkbox" data-k="${key}" data-multi value="${c}" ${sel.has(c) ? 'checked' : ''}>${choiceLabel(key, c)}</label>`).join('') + '</span>';
   } else {
     const step = spec.type === 'int' ? '1' : 'any';
     const min = spec.min != null ? ` min="${spec.min}"` : '';
@@ -719,10 +733,16 @@ function applyPlanRangeDim() {
 
 function collect(name) {
   const cfg = {};
+  const multi = {};
   document.querySelectorAll('#pgrid [data-k]').forEach(inp => {
+    if (inp.dataset.multi !== undefined) {  // 多选：勾选值按 data-k 分组逗号合并
+      if (inp.checked) (multi[inp.dataset.k] = multi[inp.dataset.k] || []).push(inp.value);
+      return;
+    }
     if (inp.type === 'checkbox') cfg[inp.dataset.k] = inp.checked;
     else cfg[inp.dataset.k] = inp.value;
   });
+  for (const k of Object.keys(multi)) cfg[k] = multi[k].join(',');
   return cfg;
 }
 

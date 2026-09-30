@@ -547,6 +547,27 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lower
     console.log("[阶段一] 交替分型序列:", seq.map(ft).join(" → "));
   }
 
+  // 近等后移的端点被更极端的同类型分型破坏，且被弹出的转折与新端点已能成笔时，补回被吞掉的笔。
+  // 只改端点序列，不回头重开已错过的单。能补回返回 true。
+  const shiftBreakRestore = (last, k) => {
+    const mid = last._shiftMid;
+    const anchor = last._shiftAnchor;
+    if (!mid || !anchor || k.type !== last.type) return false;
+    // 只修被破坏的后底。后顶被更高顶打断仍沿用原替换。
+    if (k.type !== "bottom" || k.low >= last.low) return false;
+    // 被弹出的那段当时已在笔栈里，不再用分型范围重审。新的一笔必须完整成笔。
+    if (!(isValid(anchor, mid) && noMoreExtremeInside(anchor, mid))) return false;
+    if (!(isValid(mid, k) && noMoreExtremeInside(mid, k) && fractalRangeClear(mid, k))) return false;
+    if (CHAN_CFG.debug) {
+      const kind = k.type === "bottom" ? "底" : "顶";
+      const midKind = mid.type === "top" ? "顶" : "底";
+      console.log(`[阶段二] 近等端点被破坏，补回笔: ${kind}@${anchor.mergedIdx} → ${midKind}@${mid.mergedIdx} → ${kind}@${k.mergedIdx}`);
+    }
+    result.pop();
+    result.push(anchor, mid, k);
+    return true;
+  };
+
   // 阶段二：移除间隔不足的中间分型（回溯替换）
   const result = [];
   for (const k of seq) {
@@ -558,8 +579,15 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lower
         continue;
       }
       if (!last.gapLocked) {
-        if (k.type === "top") { if (k.high >= last.high) result[result.length - 1] = k; }
-        else { if (k.low <= last.low) result[result.length - 1] = k; }
+        const more = k.type === "top" ? k.high >= last.high : k.low <= last.low;
+        // 近等后移的端点被更极端同类型分型破坏：能与被弹出的转折成笔就补回，
+        // 否则端点后移并带走修正线索，等后续真正成笔的底/顶再补。
+        if (more && last._shiftMid) {
+          if (shiftBreakRestore(last, k)) continue;
+          k._shiftAnchor = last._shiftAnchor;
+          k._shiftMid = last._shiftMid;
+        }
+        if (more) result[result.length - 1] = k;
       } else {
         // 跳空锁定的端点：仅当后续同类型分型「突破」锁定价格时才解锁替换
         if (k.type === "top") { if (k.high > last.high) result[result.length - 1] = k; }
@@ -740,6 +768,9 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, lower
             if (!last.locked && !prev.locked) {
               if (nearEqualShift) {
                 k.nearDouble = true; // 单跳封顶：被近等后移的端点不允许二次后移
+                // 记下被替换的端点和被弹出的转折，供后续分型破坏时补回笔
+                k._shiftAnchor = prev;
+                k._shiftMid = last;
                 if (CHAN_CFG.debug) console.log(`[阶段二] 近等后顶/后底(反弹不成笔)取后: ${k.type === "top" ? "顶" : "底"}@${prev.mergedIdx}(${k.type === "top" ? prev.high : prev.low}) → ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}(${k.type === "top" ? k.high : k.low})${k.locked ? "（k为上级锁定端点，区间套落地）" : ""}，prev→last 真实回调、last→k 反弹不成笔`);
               }
               result[result.length - 2] = k;

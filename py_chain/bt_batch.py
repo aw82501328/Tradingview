@@ -18,12 +18,16 @@ apply_cfg → load_store → BacktestEngine → run，事件经共享 mp.Queue �
 import time
 
 from . import chan_core, data_store, mark_entry
+from . import engine_dispatch
 from .backtest import BacktestEngine
 from .chan_core import fmtT
 
 
 def run_symbol(child_cfg, symbol, msg_q, pause_evt, stop_evt):
-    """单品种 headless 全量回测。child_cfg 见 _run_batch：全部为可 pickle 的纯 dict。"""
+    """单品种 headless 全量回测。child_cfg 见 _run_batch：全部为可 pickle 的纯 dict。
+
+    引擎按 child_cfg["strategy"] 分发（2026-09-30：fx_ma = 强分型均线V1）；
+    缺省 None = 缠论V1（历史 child_cfg 无该键，行为不变）。"""
 
     def _send(**msg):
         msg["symbol"] = symbol
@@ -56,13 +60,18 @@ def run_symbol(child_cfg, symbol, msg_q, pause_evt, stop_evt):
         # 不违子进程约束；手数已在父进程 _run_batch 循环按品种解析进 engine_kwargs
         kw = dict(child_cfg["engine_kwargs"])
         kw["contract_mult"] = mark_entry.contract_mult_of(symbol)
-        engine = BacktestEngine(bars, **kw)
-        _log(f"回测开始（最小周期 {engine.fine_res}，成交口径 {engine.fill_mode}，"
-             f"信号模式 {'当下背驰' if engine.signal_mode == 'realtime' else '确认制'}，"
-             f"背驰进场 {'分型确认后下一根开盘' if engine.diverge_confirm else '当下'}，"
-             f"柱缩闸 {'开' if engine.entry_macd_shrink else '关'}，"
-             f"止损下限 {'开' if engine.stop_entry_bar_floor else '关'}，"
-             f"检测周期够笔 {'预期' if engine.expect_bi else '分型确认'}）...")
+        engine_cls = engine_dispatch.engine_class_of(child_cfg.get("strategy"))
+        engine = engine_cls(bars, **kw)
+        if engine_cls is BacktestEngine:
+            _log(f"回测开始（最小周期 {engine.fine_res}，成交口径 {engine.fill_mode}，"
+                 f"信号模式 {'当下背驰' if engine.signal_mode == 'realtime' else '确认制'}，"
+                 f"背驰进场 {'分型确认后下一根开盘' if engine.diverge_confirm else '当下'}，"
+                 f"柱缩闸 {'开' if engine.entry_macd_shrink else '关'}，"
+                 f"止损下限 {'开' if engine.stop_entry_bar_floor else '关'}，"
+                 f"检测周期够笔 {'预期' if engine.expect_bi else '分型确认'}）...")
+        else:
+            _log(f"回测开始（强分型均线V1：周期 {','.join(engine.entry_res)}，"
+                 f"最小周期 {engine.fine_res}，止损{engine.stop_pts}/止盈{engine.tp_pts}点）...")
         result = engine.run(
             start_ts=child_cfg.get("start_ts"),
             log=_log,

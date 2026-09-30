@@ -13,6 +13,9 @@ module_registry——基础公用组件 vs 交易策略，2026-09-29 模块分�
            modules.sr.<品种>.preset 标记来源方案名，生效=方案 cfg 复制入品种桶）
   plan   交易计划（震荡判定阈值 RANGE_DEFAULTS + 顺势参考周期 trendRes）
   entry  标记进出场（near/lots/slip_* 与出场门槛 + 进场扩展 CHAN_CFG）
+  【交易策略 · 强分型均线V1（fxma_v1；引擎 fx_ma.FxMaEngine，与缠论V1并行）】
+  fxma   强分型均线V1（进出场周期/买卖点类别多选 + 均线对 + 强分型落差 + 点有效期 +
+         止盈止损点数 + 互斥范围；spec 第4位 "multi" = 多选逗号串类型）
 
 存储 web/module_params.json：
   PARAM_MODULES → **只存与代码默认不同的键（overrides-only）**，按五品种分桶；
@@ -37,6 +40,7 @@ from . import chan_core
 from . import mark_buy_sell
 from . import mark_entry
 from . import trading_plan
+from .fx_ma import FXMA_DEFAULTS, ENTRY_RES_OPTIONS as FXMA_RES_OPTIONS
 
 # 持久化文件（原子写：tempfile + os.replace，与 webapp._presets_save 同模式）
 PARAMS_FILE = os.path.join(os.path.dirname(__file__), "web", "module_params.json")
@@ -235,6 +239,34 @@ PARAM_MODULES = {
                          None, None),
         },
     },
+    "fxma": {
+        "category": "strategy",
+        "title": "强分型均线V1",
+        "params": {
+            "entryRes": ("进出场周期", "多选并行产生信号（逗号分隔；30S 仅回测可用——MT5 实盘行情由 M1 重采样无法生成 30S）",
+                         FXMA_RES_OPTIONS, "multi"),
+            "pointClasses": ("买卖点类别", "只交易所选类别的缠论买卖点：1买/1卖→1类，2买/类2买（卖侧对称）→2类，3买/类3买→3类；4类不交易",
+                             ("1", "2", "3"), "multi"),
+            "maType": ("均线类型", "收盘价简单/指数均线（按进出场周期K线计算）", ("SMA", "EMA"), None),
+            "maFast1": ("一类点快线", "1类买卖点用的均线对（快线周期）", 1, 500),
+            "maSlow1": ("一类点慢线", "1类买卖点用的均线对（慢线周期）", 2, 500),
+            "maFast2": ("二三类点快线", "2/3类买卖点共用的均线对（快线周期）", 1, 500),
+            "maSlow2": ("二三类点慢线", "2/3类买卖点共用的均线对（慢线周期）", 2, 500),
+            "crossMinPts": ("均线上下穿确认点数", "交叉成立须快线与慢线间距≥该点数（如8均线下穿20均线2个点=快线低于慢线≥2点）；0=任意落差",
+                            0.0, 100.0),
+            "strongFxMinPts": ("强分型实体最小落差", "0=现口径（顶分型右肩收盘<左肩开盘即可）；>0 时须至少低/高该点数才算强分型",
+                               0.0, 100.0),
+            "pointValidBars": ("点有效期(根)", "买卖点出现后，强分型+均线分离须在 N 根K线内齐备，超时该点作废；0=不限（直到反向点出现）",
+                               0, 1000),
+            "stopPts": ("止损点数", "多：进场价−N；空：进场价+N（绝对点数，收盘确认触及后下一根开盘成交）", 0.1, 1000.0),
+            "tpPts": ("止盈点数", "多：进场价+N；空：进场价−N（绝对点数）", 0.1, 1000.0),
+            "sameBarPriority": ("同根双触优先级", "同一根K线同时触及止损与止盈时按哪个成交（stop=保守）", ("stop", "tp"), None),
+            "mutexScope": ("同向互斥范围", "global=同向全局一笔未终局持仓（同缠论V1）；perPeriod=每个进出场周期独立互斥",
+                           ("global", "perPeriod"), None),
+            "lots": ("默认开仓手数", "回测卡/实盘配置显式指定手数时以配置为准；盈亏 = 价差 × 方向 × 手数 × 合约乘数(1手=0.01标准手)",
+                     0.01, 100.0),
+        },
+    },
 }
 
 
@@ -293,6 +325,8 @@ def defaults_of(module, symbol=None):
                 "prevHighNearPts": trading_plan.PREV_HIGH_NEAR_PTS,
                 "secondNearPts": trading_plan.SECOND_NEAR_PTS,
                 "thirdStrongTrend": trading_plan.THIRD_STRONG_TREND}
+    elif module == "fxma":
+        base = dict(FXMA_DEFAULTS)
     else:
         raise ValueError(f"未知参数模块：{module}")
     return base
@@ -362,6 +396,22 @@ def engine_module_params(pm):
             "zs_exit_weak_ratio": ep["zs_exit_weak_ratio"]}
 
 
+def fxma_engine_kwargs(pm, lots_override=None, **override):
+    """effective_all(symbol) → FxMaEngine 构造 kwargs（回测卡/实盘分发点共用）。
+
+    lots_override：回测卡/实盘配置显式手数（优先于参数中心 fxma.lots 默认）。
+    marks_params：买卖点容差（points 品种桶）由 FxMaEngine 消费——见 override。
+    """
+    from .fx_ma import FxMaEngine
+    kw = FxMaEngine.kwargs_from_params(pm["fxma"])
+    if lots_override:
+        kw["lots"] = lots_override
+    kw["marks_params"] = {"class2ZsTol": pm["points"].get("class2ZsTol", 0.0),
+                          "thirdZsTol": pm["points"].get("thirdZsTol", 0.0)}
+    kw.update(override)
+    return kw
+
+
 def zs_draw_spec(zs_cfg=None):
     """从画中枢参数得到 CLI 用周期列表与每周期 keep。
     @returns (periods:list[str], keep_by_res:dict[str,int])
@@ -386,19 +436,43 @@ def _type_of(default):
     return "float"
 
 
+def _is_multi(module, key):
+    """spec 第4位 == "multi" → 多选逗号串类型（choices 在第3位）。"""
+    meta = PARAM_MODULES[module]["params"][key]
+    return len(meta) > 3 and meta[3] == "multi"
+
+
+def _parse_multi_str(value, choices, key):
+    """多选逗号串 → 去重保序规范串；逐元素校验 ∈ choices，至少一项。"""
+    if not isinstance(value, str):
+        raise ValueError(f"{key} 须为逗号分隔串（可选：{','.join(choices)}）")
+    items, seen = [], set()
+    for v in (s.strip() for s in value.split(",")):
+        if not v:
+            continue
+        if v not in choices:
+            raise ValueError(f"{key} 含非法值 {v!r}（可选：{','.join(choices)}）")
+        if v not in seen:
+            seen.add(v)
+            items.append(v)
+    if not items:
+        raise ValueError(f"{key} 至少选择一项（可选：{','.join(choices)}）")
+    return ",".join(items)
+
+
 def schema_of(module):
     """前端渲染用 schema：每键 label/desc/type/min/max/default（str 枚举另带 choices）。"""
     defaults = defaults_of(module)
     spec = PARAM_MODULES[module]["params"]
     out = {}
     for key, meta in spec.items():
-        typ = _type_of(defaults[key])
+        typ = "multi" if _is_multi(module, key) else _type_of(defaults[key])
         item = {"label": meta[0], "desc": meta[1], "type": typ,
-                "min": None if typ == "str" else meta[2],
-                "max": None if typ == "str" else meta[3],
+                "min": None if typ in ("str", "multi") else meta[2],
+                "max": None if typ in ("str", "multi") else meta[3],
                 "default": defaults[key]}
-        if typ == "str":
-            item["choices"] = list(meta[2])  # spec 第3位 = 允许值列表（枚举）
+        if typ in ("str", "multi"):
+            item["choices"] = list(meta[2])  # spec 第3位 = 允许值列表（枚举/多选）
         out[key] = item
     return out
 
@@ -416,6 +490,10 @@ def normalize(module, cfg):
         if key not in spec["params"]:
             raise ValueError(f"未知参数：{module}.{key}")
         dv = defaults[key]
+        if _is_multi(module, key):
+            choices = PARAM_MODULES[module]["params"][key][2]
+            out[key] = _parse_multi_str(value, choices, key)
+            continue
         typ = _type_of(dv)
         if typ == "bool":
             if not isinstance(value, bool):
