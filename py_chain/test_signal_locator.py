@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from . import signal_locator as locator, webapp
+from . import monitor, signal_locator as locator, webapp
 
 
 class ImmediateThread:
@@ -21,6 +21,13 @@ class SignalLocatorTests(unittest.TestCase):
         self.lock = webapp.ChartLock()
         self.emit = Mock()
         self.manager = locator.LocateManager(self.signals, self.lock, self.emit)
+        # locate_signal 扩窗重跳会真调 monitor.replay_started（一次 evaluate）；
+        # 本类 CDP 全是 Mock 且 side_effect 列表逐项耗尽，多耗一项即 StopIteration
+        # （42af19e 引入重跳时测试未同步）。统一 patch 成 False：是否走回放由
+        # 各用例对 _replay_to_signal 的断言覆盖。
+        self._replay_started = patch.object(monitor, 'replay_started', return_value=False)
+        self._replay_started.start()
+        self.addCleanup(self._replay_started.stop)
 
     def test_original_symbol_survives_fill_and_configuration_change(self):
         # symbol 入键（2026-09-23 多品种并行）：同品种回填命中原行且不覆盖其 symbol
@@ -218,6 +225,24 @@ class SignalLocatorTests(unittest.TestCase):
         self.assertIn('"minutesTo": 59', expr)
         self.assertIn('"hoursTo": 24', expr)
         self.assertIn('arrow_mark_up', expr)
+
+    def test_draw_after_locate_includes_fxma_exits_and_offset_anchor(self):
+        """强分型均线V1 出场（stop/takeProfit）画箭头；锚点外移不压K线。"""
+        client = Mock()
+        client.evaluate.side_effect = [0, {'drawn': 3, 'ids': ['x'], 'barTime': 100}]
+        row = {**self.row, 'price': 2663.25,
+               'exits': [{'type': 'takeProfit', 'time': 150, 'price': 2670.0},
+                         {'type': 'stop', 'time': 200, 'price': 2650.0},
+                         {'type': 'breakeven', 'time': 120, 'price': 2660.0}]}
+        out = locator._draw_after_locate(client, row, 100)
+        self.assertEqual(out['drawn'], 3)   # 进场 + 止盈 + 止损（breakeven 不画）
+        expr = client.evaluate.call_args.args[0]
+        self.assertIn('固定止盈 2670.00', expr)
+        self.assertIn('固定止损 2650.00', expr)
+        self.assertNotIn('breakeven', expr)
+        # 锚点外移：进场 arrow_up → low 下方；出场按平仓方向放到 high 上/low 下
+        self.assertIn('anchorOff', expr)
+        self.assertIn('up?loP-m:hiP+m', expr.replace(' ', ''))
 
     def test_api_validates_input_and_uses_server_record(self):
         app = SimpleNamespace(locator=self.manager)

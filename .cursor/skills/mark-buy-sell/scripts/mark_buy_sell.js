@@ -82,10 +82,13 @@ const THIRD_ZS_TOL = Math.max(0, parseFloat(getArg("third-zs-tol", 0)) || 0);
 
 const ANCHOR_BUFFER = 30;
 
-// 小周期只加载最近 N 天的K线：3分钟最近15天、15分钟最近30天，
-// 与画笔 chan-bi 的 DRAW_WINDOW_DAYS 保持一致——画笔只绘制窗口内笔，
-// 本脚本加载K线只需覆盖窗口内买卖点即可，避免为覆盖起始日期加载数月完整历史而超时。
-const DRAW_WINDOW_DAYS = { '3': 15, '15': 30 };
+// 小周期只加载最近 N 天的K线：默认 3分钟15天、15分钟30天，天数来自参数中心
+// CHAN_CFG.windowDays*（--chan-cfg 已在上方合并进 core.CHAN_CFG，须在此之后构造），
+// 与画笔 chan-bi 的绘制窗口同源同值——画笔只绘制窗口内笔，本脚本加载K线只需覆盖
+// 窗口内买卖点即可，避免为覆盖起始日期加载数月完整历史而超时；值 0 = 不限窗口。
+const DRAW_WINDOW_DAYS = {};
+if (core.CHAN_CFG.windowDays3 > 0) DRAW_WINDOW_DAYS['3'] = core.CHAN_CFG.windowDays3;
+if (core.CHAN_CFG.windowDays15 > 0) DRAW_WINDOW_DAYS['15'] = core.CHAN_CFG.windowDays15;
 
 // ============================================================
 // 买卖点显示配置
@@ -507,7 +510,6 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
         ? { bis: structuredBis[lower], bars: barsHeld[lower], barSec: intervalSecOf(lower) }
         : null;
       structuredBis[res] = core.buildStructureContext(rawBis, d.bars, intervalSecOf(res), nowCut, null, null,
-        res === "60" ? core.makeBiLowerContext(res, (bisCache.bars || {})["15"] || [], nowCut) : null,
         lowerStroke).bis;
     }
 

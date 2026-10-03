@@ -125,12 +125,25 @@
   夹具问题：分型落在 idx 0 / 缺右邻 bar，与双向 fractalRangeClear 冲突——非算法改动）。
 
 
-## 一小时近等端点补充确认（2026-09-10）
+## 一小时近等端点补充确认（2026-09-10 起；**2026-10-02 已取消**）
 
-原阈值 max(0.3×ATR, 0.001×价格) 保持。仅60分钟价差超过原阈值但不超过1.5倍时，可由15分钟双动能确认：后段同色柱峰值与同侧DIF极值绝对值均不超过前段50%，两段柱峰值均非零，双底DIF均负、双顶均正。保留平台间隔、原阈值反向波动、锁定端点和单次替换保护；数据不足不走补充分支，不改变买卖点创新极值背驰定义。
+本分支已整体删除：取消 `nearDoubleAtrK`/`nearDoublePct`/`nearDoubleLowerRelax`/`nearDoubleLowerRatio` 四参数与 `makeBiLowerContext`/`lowerEndpointWeaker`/`buildBi.lowerContext` 管线。容差只保留 `nearDoubleFixed`（默认 2.0），比较「先影线后实体」（影线更极端直接后移；影线不满足比实体，后实体不低于前实体直接后移、更低则差 ≤ 固定容差）；详见 chan-core SPEC §2.4.2-2 与 py_chain/SPEC.md「近等双顶/双底参数简化与先影线后实体（2026-10-02）」。
 
-JS/Python的`buildBi`增加可选末参`lowerContext`；用`makeBiLowerContext(res,bars,cutoff,macd)`准备15分钟数据和MACD索引，缺省参数保持旧行为。新增配置`nearDoubleLowerRelax=1.5`、`nearDoubleLowerRatio=0.5`。
+## 区间套锁定下沉引擎 + 端到端口径统一（2026-09-30）
 
-画笔构建60分钟前需要完整15分钟历史（最近30天仅限显示）；回测、回放和监控仅使用当前决策时刻已收盘数据，先更新低周期。目标小时K线为8月7日08:00、4229.875，15分钟精确极值为08:45；固定样本仅目标相邻两笔变化，实际全量影响需回归检查。
+背景：画笔链（chan-bi）buildBi 传 `lockedPivotsOf(prevBis)` 区间套锁定并对齐，回测引擎此前传 None——实测 60m 约 10% 的笔因此不一致（9/95），并级联影响 15m/3m。窗口/预热差异实测 0 笔（上级锚定窗口足够长，ATR/MACD 已收敛），当根未收盘口径差异由画笔侧 `--closed` 对照模式消除。
 
-完整条件、接口、保护和测试见[现行补充规范](../spec/plans/SPEC_near_double_lower_confirmation.md)。早期章节中原阈值的说明描述基础分支，与本补充分支共同适用。
+规则与实现：
+
+- 引擎笔结构阶段改为**外→内**（D→240→60→15→3→30S）逐级构建：`_advance_cut` 数据阶段（细→粗推进不变）后新增 `_rebuild_bis_inc` 外→内循环；`_locked_pivots_for(res)` 从刚更新的上级笔取锁定端点（数据 ≤ 决策时刻，无未来函数）；`step_to` 实时重放、`resync_all` 同改外→内。
+- `BiIncBuilder.update` 增加 `lockedPivots`：锁端点集指纹变化 → 全量重建（历史分型锁标记重排）；不变时增量路径只对本次新折叠的 seq 元素补 `_markLockedPivots` 标记（与 buildBi 全序列标记同口径）。引擎侧 update 门控增加「锁指纹变化」条件（分型没变也要重建）。
+- 模块级 `build_bis`（engine_consistency 对拍的批量副本）同口径：外→内逐级 `lockedPivotsOf`。
+- chan-bi `--closed`：主K线与 15m 校准基准都过滤未收盘当根（默认行为不变，含当根）。
+
+回归与验证（`py_chain/test_engine_lock_parity.py`，XAUUSD 240/60/15，2026-07-01 起）：
+
+1. 重同步点增量引擎 == 带锁批量 build_bis 前缀逐笔一致（引擎既有契约：重同步点严格等于 batch；重同步点间尾部漂移为 HEAD 已有的容忍行为）；
+2. **未来函数腐蚀测试**：改写 t 之后全部K线 ±25%，t 前笔结构逐字节不变——锁定下沉未引入未来数据，且此后任何破坏无未来函数的改动会被该测试拦截。
+3. 锁定效果实测（2026-06-01 起 XAUUSD）：60m 99 vs 97 笔（79 处端点差异）、15m 392 vs 388 笔（208 处）——引擎与画笔的区间套口径现已同源。
+
+遗留（后续）：`alignBiToUpper`/`calibrateBiTimes` 仍只在画笔显示链（端点对齐与时间校准），引擎未做——为第二级差异，待需要逐字节对齐落盘数据时再下沉；`test_near_double`（JS 4/Python 3）与 `buildZS`、`test_divergence_fallback`（6）为 2026-09-30 之前既有的预存失败，与本次无关。

@@ -35,6 +35,8 @@ node .cursor/skills/mark-buy-sell/scripts/mark_buy_sell.js --from=2026-07-02 --p
 ```
 
 > `--from` 起始日期应与画笔时一致（脚本会读取该日期之后的笔数据来计算买卖点）。
+> 小周期K线加载窗口与画笔同源：参数中心「基础组件 → 画笔」的「小周期绘制窗口」（`windowDays3/15/30S`），
+> 手动调用时若参数中心有自定义值应加 `--chan-cfg=` 透传（导出方式见 chan-bi SKILL）。
 
 ### 参数说明
 

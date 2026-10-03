@@ -72,9 +72,12 @@ DEFAULT_EXIT_COLOR = "#FFEB3B"
 # 出场事件 → 是否绘制与文本名。
 # 出场点绘制（用户规则 2026-09-06）：与进场同款箭头（createShape），方向 = 平仓方向
 # （多头出场 ↓ / 空头出场 ↑），统一灰（DEFAULT_EXIT_COLOR），只在本背驰周期显示。
-# breakeven（保本）/ 仍持仓不在集合内 → 仅落盘不画图。
-EXIT_SHAPES = {"stopSr": True, "stopBe": True, "close": True, "half": True}
-EXIT_NAMES = {"stopSr": "止损", "stopBe": "保损", "close": "全平", "half": "半平"}
+# 缠论V1：stopSr/stopBe/close/half；强分型均线V1（fx_ma）：stop/takeProfit（固定点数，
+# 名称与 bt_journal.EXIT_LABELS 同源）。breakeven（保本）/ 仍持仓不在集合内 → 仅落盘不画图。
+EXIT_SHAPES = {"stopSr": True, "stopBe": True, "close": True, "half": True,
+               "stop": True, "takeProfit": True}
+EXIT_NAMES = {"stopSr": "止损", "stopBe": "保损", "close": "全平", "half": "半平",
+              "stop": "固定止损", "takeProfit": "固定止盈"}
 
 
 def _colors(colors=None):
@@ -446,6 +449,11 @@ def _draw_chunk(c, chunk, colors, prefix=MARK_PREFIX, ids_key=IDS_KEY, dual_tf=F
                 with_iv=True):
     """一次 CDP 执行画出一批箭头 + 出场标记，并把新 shape id 累积记录到 localStorage。
 
+    箭头锚点不压K线（用户规则 2026-10-02）：arrow_up 锚在该根 low 下方、
+    arrow_down 锚在 high 上方，外移量 = max(本根振幅, 近邻±10根均幅) × 0.6；
+    拿不到K线数组（内部结构变化/旧版本）时回退信号价原位锚定。
+    其余同旧实现：文本仍写实际成交价。
+
     @param colors  {'buy': '#..', 'sell': '#..', 'exit': '#..'} 做多/做空/出场颜色
     @param prefix  文本前缀（批量 ML· / 单行 ML·单），清除按前缀扫
     @param ids_key localStorage 记录 shape id 的键（批量/单行隔离）
@@ -454,54 +462,64 @@ def _draw_chunk(c, chunk, colors, prefix=MARK_PREFIX, ids_key=IDS_KEY, dual_tf=F
     @param with_iv False = 不写 intervalsVisibilities（回放态个别版本会因此创建失败）
     @returns 新画的 shape id 列表
     """
-    calls = []
+    items = []
     for s in chunk:
-        shape = "arrow_up" if s["direction"] == "long" else "arrow_down"
-        color = colors["buy"] if s["direction"] == "long" else colors["sell"]
-        label = "BUY" if s["direction"] == "long" else "SELL"
-        text = f"{prefix}{label} {float(s['price']):.2f}"
+        long = s["direction"] == "long"
+        color = colors["buy"] if long else colors["sell"]
+        label = "BUY" if long else "SELL"
         # 箭头可见性：背驰周期（markRes）+ 检测周期（periodX）并集；无法识别时保持默认不限
         iv = None
         if with_iv:
-            iv = _interval_visibility_js(
-                [s.get("markRes"), s.get("periodX")] if dual_tf else s.get("markRes"))
-        iv_part = f", intervalsVisibilities: {iv}" if iv else ""
-        t, p = int(s["time"]), float(s["price"])
-        calls.append(
-            "chart.createShape("
-            f"{{ time: {t}, price: {p} }}, "
-            f"{{ shape: '{shape}', text: '{text}', lock: false, "
-            f"color: '{color}', textColor: '{color}', "
-            # arrow_up/arrow_down 工具的箭头图标颜色是独立字段 arrowColor，
-            # 不走顶层 color/textColor（否则恒为默认黄 #FFEB3B），必须用 overrides 指定
-            f"overrides: {{ arrowColor: '{color}'{iv_part} }} }})"
-        )
+            iv = _iv_json([s.get("markRes"), s.get("periodX")] if dual_tf else s.get("markRes"))
+        items.append({
+            "shape": "arrow_up" if long else "arrow_down",
+            "time": int(s["time"]), "price": float(s["price"]),
+            "text": f"{prefix}{label} {float(s['price']):.2f}", "color": color, "iv": iv,
+        })
         # 出场标记：与进场同款箭头（统一灰，同款周期可见性），方向=平仓方向：
         #   多头出场（平多）= 向下箭头 ↓、空头出场（平空）= 向上箭头 ↑，
         #   与进场箭头用颜色区分（进场红/绿、出场灰）——用户要求"出场点也变成箭头"。
         # 保本（breakeven）/ 仍持仓仅落盘不画图（不在 EXIT_SHAPES 中）。
-        eov_part = f", intervalsVisibilities: {iv}" if iv else ""
-        exit_shape = "arrow_down" if s["direction"] == "long" else "arrow_up"
         for ev in (s.get("exits") or []):
             et = ev.get("type")
             if et not in EXIT_SHAPES or ev.get("price") is None or ev.get("time") is None:
                 continue
-            ex_text = f"{prefix}{EXIT_NAMES[et]} {float(ev['price']):.2f}"
-            xt, xp = int(ev["time"]), float(ev["price"])
-            calls.append(
-                "chart.createShape("
-                f"{{ time: {xt}, price: {xp} }}, "
-                f"{{ shape: '{exit_shape}', text: '{ex_text}', lock: false, "
-                f"color: '{colors['exit']}', textColor: '{colors['exit']}', "
-                # 箭头图标颜色独立字段 arrowColor（同进场箭头）
-                f"overrides: {{ arrowColor: '{colors['exit']}'{eov_part} }} }})"
-            )
+            items.append({
+                "shape": "arrow_down" if long else "arrow_up",
+                "time": int(ev["time"]), "price": float(ev["price"]),
+                "text": f"{prefix}{EXIT_NAMES[et]} {float(ev['price']):.2f}",
+                "color": colors["exit"], "iv": iv,
+            })
     expr = (
         "(async () => { const chart = TradingViewApi.activeChart(); "
         "if (!chart) return { error: 'no_chart' }; const ids = []; "
+        # K线数组读不到（内部结构变化）时 bars=[]，锚点回退信号价
+        "let bars = []; try { bars = chart.chartModel().mainSeries().data().m_bars._items || []; } catch (e) {} "
+        # 锚点外移：q=unix秒；箭头向上→low下方，向下→high上方（margin 见 _draw_chunk docstring）
+        "function anchorOff(q, up, ref) { "
+        "  if (!bars.length) return ref; "
+        "  const norm = b => { const t0 = b.value[0]; return t0 > 1e12 ? t0 / 1000 : t0; }; "
+        "  let lo = 0, hi = bars.length; "
+        "  while (lo < hi) { const mid = (lo + hi) >> 1; if (norm(bars[mid]) <= q) lo = mid + 1; else hi = mid; } "
+        "  const i = lo - 1; if (i < 0) return ref; "
+        "  const hiP = bars[i].value[2], loP = bars[i].value[3]; "
+        "  let sum = 0, n = 0; "
+        "  for (let k = Math.max(0, i - 10); k < Math.min(bars.length, i + 11); k++) "
+        "    { sum += bars[k].value[2] - bars[k].value[3]; n++; } "
+        "  const m = Math.max(hiP - loP, n ? sum / n : 0) * 0.6; "
+        "  return (isFinite(m) && m > 0) ? (up ? loP - m : hiP + m) : ref; "
+        "} "
+        "for (const s of " + json.dumps(items, ensure_ascii=False) + ") { "
         # 只记录有效 id（createShape 偶发返回 undefined 时避免存入死 id）
-        + "; ".join(f"{{ const v = await ({call}); if (v) ids.push(v); }}" for call in calls) +
-        "; "
+        "  const pr = anchorOff(s.time, s.shape === 'arrow_up', s.price); "
+        "  const ov = { arrowColor: s.color }; "
+        "  if (s.iv) ov.intervalsVisibilities = s.iv; "
+        # arrow_up/arrow_down 工具的箭头图标颜色是独立字段 arrowColor，
+        # 不走顶层 color/textColor（否则恒为默认黄 #FFEB3B），必须用 overrides 指定
+        "  try { const v = await chart.createShape({ time: s.time, price: pr }, "
+        "    { shape: s.shape, text: s.text, lock: false, color: s.color, "
+        "      textColor: s.color, overrides: ov }); if (v) ids.push(v); } catch (e) {} "
+        "} "
         "try { const old = JSON.parse(localStorage.getItem('" + ids_key + "') || '[]'); "
         "localStorage.setItem('" + ids_key + "', JSON.stringify(old.concat(ids))); } catch (e) {} "
         "; return ids; })()"

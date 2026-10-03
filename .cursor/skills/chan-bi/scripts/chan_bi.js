@@ -23,7 +23,7 @@ const CDP = require("../../../../server-cdp/node_modules/chrome-remote-interface
 const core = require("../../chan-core/scripts/chan_core.js");
 const {
   markWickBars, mergeBars, findFractals, countRaw, hasGapBetween, buildBi, fixBiExtremes, lockedPivotsOf, alignBiToUpper,
-  calcATR, calcMACD, hasMacdCrossBetween, makeBiLowerContext,
+  calcATR, calcMACD, hasMacdCrossBetween,
   extendLastBi, lowerResOf, calibrateBiTimes, intervalSecOf, nearDoubleOn,
 } = core;
 
@@ -50,15 +50,46 @@ const GAP_FILTER = getArg("gap", 1.0);
 const DEBUG = args.includes("--debug");
 core.CHAN_CFG.debug = DEBUG;
 core.CHAN_CFG.gapFilter = GAP_FILTER;
-// 长影标记参数（见 chan-core markWickBars）：影线占比阈值 + 绝对长度下限（wickAtrK*ATR）
+// 长影标记参数（见 chan-core markWickBars）：影线占比阈值 + 绝对长度下限 wickMinLen
+// （2026-10-02 起为具体数值，原 --wick-atr 系数口径废除）+ 前提约束 wickMinRange
+// （整根K线价差须大于该值才判插针压平）
 core.CHAN_CFG.wickRatio = getArg("wick-ratio", core.CHAN_CFG.wickRatio);
-core.CHAN_CFG.wickAtrK = getArg("wick-atr", core.CHAN_CFG.wickAtrK);
+core.CHAN_CFG.wickMinLen = getArg("wick-len", core.CHAN_CFG.wickMinLen);
+core.CHAN_CFG.wickMinRange = getArg("wick-range", core.CHAN_CFG.wickMinRange);
 // 参数中心（WEB 参数配置页）整体覆盖：在上述单键 CLI 之后应用、优先级更高；
 // 未知键在 JS 侧闲置无害（Python 回测引擎的扩展键如 sinkFallback 不在本脚本读取）
 const CHAN_CFG_JSON = getStrArg("chan-cfg", "");
 if (CHAN_CFG_JSON) {
   try { Object.assign(core.CHAN_CFG, JSON.parse(CHAN_CFG_JSON)); }
   catch (e) { console.log("警告: --chan-cfg JSON 解析失败，忽略该参数"); }
+}
+// 参数中心自动跟随（2026-10-02）：未显式传 --chan-cfg 时，读取参数中心保存时导出的
+// 当前品种有效配置（py_chain/param_center 写 .cursor/cache/chan_cfg_<品种>.json）。
+// 候选文件依次：品种后缀（参数中心桶 id，如 OANDA:XAUUSD → XAUUSD）→ 完整品种名
+// sanitized；都不存在则用代码默认（与 chan_cfg_effective「未列品种走默认」语义一致）。
+// --debug 是运行诊断开关，不受参数中心覆盖；单键 CLI（--gap 等）先于此应用、
+// 参数中心优先级更高（与 --chan-cfg 同序）。
+function loadParamCenterCfg(symbol) {
+  if (CHAN_CFG_JSON) return; // 显式 --chan-cfg 优先（Web 工作台 analysis_service 路径）
+  const sanitize = (s) => String(s).replace(/[^A-Za-z0-9_.-]/g, "_");
+  const cands = [];
+  const colon = String(symbol).lastIndexOf(":");
+  if (colon >= 0) cands.push(String(symbol).slice(colon + 1));
+  cands.push(sanitize(symbol));
+  for (const c of cands) {
+    if (!c) continue;
+    const f = path.join(CACHE_DIR, `chan_cfg_${sanitize(c)}.json`);
+    if (!fs.existsSync(f)) continue;
+    try {
+      const payload = JSON.parse(fs.readFileSync(f, "utf8"));
+      Object.assign(core.CHAN_CFG, payload.cfg || payload);
+      core.CHAN_CFG.debug = DEBUG;
+      console.log(`已应用参数中心配置: ${path.basename(f)}`);
+      return;
+    } catch (e) {
+      console.log(`警告: 参数中心配置 ${path.basename(f)} 解析失败，忽略（${e.message}）`);
+    }
+  }
 }
 // 指定的日线起点日期（如 2026-07-02），解析为 UTC 当天 0 点的时间戳
 const FROM_DATE = getStrArg("from", "");
@@ -75,6 +106,9 @@ if (FROM_DATE) {
 // 外层先画，内层以外层一笔的起点为锚，嵌套迭代画内部笔
 // --with-30s：追加 30 秒级别（30S 只计算落盘、不绘制，见 COMPUTE_ONLY）
 const WITH_30S = args.includes("--with-30s");
+// --closed：只用已收盘K线（bar.time + 周期间隔 <= 当前时刻），过滤未收盘当根。
+// 默认含当根（实盘看图反应更快）；--closed 用于与回测引擎精确对照（回测严格只用收盘数据）。
+const CLOSED_ONLY = args.includes("--closed");
 const PERIODS = getStrArg("periods", "D,240,60,15,3")
   .split(",").map(s => s.trim()).filter(Boolean);
 if (WITH_30S && !PERIODS.includes("30S")) PERIODS.push("30S");
@@ -84,11 +118,24 @@ const MIN_WINDOW_BARS = 20;
 // 内层计算缓冲：锚点前额外取的K线数，保证窗口起点处能形成完整分型
 const ANCHOR_BUFFER = 30;
 
-// 小周期只加载并绘制最近 N 天的笔：3分钟最近15天、15分钟最近30天，
-// 避免从起始日期到最新的全部笔堆叠导致图上过密，同时缩小加载量、
+// 小周期只加载并绘制最近 N 天的笔：默认 3分钟15天、15分钟30天、30秒3天（30秒密度是
+// 3 分钟的 6 倍，窗口 3 天 ≈5.5k 根，与 3分钟×15天 同量级）。天数来自参数中心
+// CHAN_CFG.windowDays*（--chan-cfg 已在上方合并进 core.CHAN_CFG，须在此之后构造）；
+// 值 0 = 该周期不限窗口（与 60m/240m/D 同口径，从 --from 全量）。
+// 动机：避免从起始日期到最新的全部笔堆叠导致图上过密，同时缩小加载量、
 // 避免 3 分钟为覆盖起始日期加载数月完整历史而超时。
-// 30秒密度是 3 分钟的 6 倍，窗口取 3 天（≈5.5k 根，与 3分钟×15天 同量级）。
-const DRAW_WINDOW_DAYS = { '3': 15, '15': 30, '30S': 3 };
+const DRAW_WINDOW_DAYS = {};
+// 窗口天数须在「参数合并完成后」取值：--chan-cfg 在文件头部已并入 core.CHAN_CFG，
+// 而 CLI 自动跟随（loadParamCenterCfg）要等连上 CDP 拿到品种后才应用——若只在
+// 此处构建一次，CLI 路径会用代码默认 30/15/3 而非参数中心的 windowDays*（WEB
+// 路径无此问题）。故封装重建函数，247 行参数中心应用后重调一次。
+const rebuildDrawWindows = () => {
+  for (const k of Object.keys(DRAW_WINDOW_DAYS)) delete DRAW_WINDOW_DAYS[k];
+  if (core.CHAN_CFG.windowDays3 > 0) DRAW_WINDOW_DAYS['3'] = core.CHAN_CFG.windowDays3;
+  if (core.CHAN_CFG.windowDays15 > 0) DRAW_WINDOW_DAYS['15'] = core.CHAN_CFG.windowDays15;
+  if (core.CHAN_CFG.windowDays30S > 0) DRAW_WINDOW_DAYS['30S'] = core.CHAN_CFG.windowDays30S;
+};
+rebuildDrawWindows();
 
 // 只计算不绘制的周期：30秒笔太密不画在图上，仅计算并落盘到 bis_<品种>.json，
 // 供 mark-entry --with-30s 的「以下级别背驰」检测使用（笔计算/锚定/窗口过滤全部照常）。
@@ -204,6 +251,10 @@ function intervalVisibility(res) {
     const originalRes = curVal.resolution;
     console.log("品种:", SYMBOL, "当前周期:", originalRes);
     console.log("将绘制周期:", PERIODS.join(", "));
+    // 参数中心配置在品种确定后、周期构建前应用（fractalSideRealWick / nearDouble* 等）；
+    // 应用后须重建小周期绘制窗口（windowDays* 可能被参数中心覆盖，见 rebuildDrawWindows 注释）
+    loadParamCenterCfg(SYMBOL);
+    rebuildDrawWindows();
 
     // 切换到指定周期并等待K线加载完成（长度连续两次一致视为稳定）
     const ensureResolution = async (targetRes) => {
@@ -328,6 +379,40 @@ function intervalVisibility(res) {
       }
       // 始终没等到目标周期数据：返回 null，由调用方跳过该周期，避免用错误周期的K线画图
       return null;
+    };
+
+    // 从 bars.db（回放深拉历史库，py_chain/data_store 维护）读取 [fromTs, toTs] 段K线，
+    // 供校准基准补齐图表加载不到的更早小周期历史——TV 图表 3m 深度仅约 2 个月，
+    // 回放深拉库可到多年前（WEB 基础数据页 / python -m py_chain.data_store 拉取）。
+    // python 不可用、库缺段或读库异常时返回空数组，调用方退化为纯图表基准。
+    const fetchStoreBars = (res, fromTs, toTs) => {
+      if (fromTs === null || fromTs === undefined || !toTs || toTs <= fromTs) return [];
+      const root = path.join(__dirname, "..", "..", "..", "..");
+      const script = [
+        "import sys, json",
+        `sys.path.insert(0, ${JSON.stringify(root)})`,
+        "from py_chain import data_store",
+        `r = data_store.query_bars(${JSON.stringify(String(SYMBOL))}, ${JSON.stringify(String(res))},`,
+        `    int(${Math.floor(fromTs)}), to_ts=int(${Math.floor(toTs)}), limit=200000, order='asc')`,
+        "print(json.dumps(r.get('rows') or []))",
+      ].join("\n");
+      try {
+        const { spawnSync } = require("child_process");
+        const p = spawnSync("python", ["-c", script],
+          { cwd: root, encoding: "utf8", timeout: 90000, windowsHide: true,
+            maxBuffer: 64 * 1024 * 1024 }); // 全窗口 3m 可达数万根（~数 MB JSON），默认 1MB 会截断
+        if (p.status !== 0 || !p.stdout) {
+          if (DEBUG) console.log(`[校准基准] bars.db 读取失败（status=${p.status} ${String(p.stderr || "").slice(0, 200)}），退化为图表数据`);
+          return [];
+        }
+        const rows = JSON.parse(p.stdout);
+        return Array.isArray(rows)
+          ? rows.filter(b => b && typeof b.time === "number" && typeof b.high === "number" && b.high >= b.low)
+          : [];
+      } catch (e) {
+        if (DEBUG) console.log(`[校准基准] bars.db 读取异常（${e.message}），退化为图表数据`);
+        return [];
+      }
     };
 
     const toT = (ts) => {
@@ -516,7 +601,7 @@ function intervalVisibility(res) {
               applyIV(id);
               created.push(id);
               out.bi_ok++;
-            } catch(e) { out.bi_err.push(e.message); }
+            } catch(e) { created.push(null); out.bi_err.push(e.message); } // null 占位保持与 BIS 索引对齐
           }
 
           return { ...out, created_ids: created };
@@ -530,9 +615,10 @@ function intervalVisibility(res) {
     // 创建后回读校验辅助：按 id 读回已创建笔的端点 / 按 id 批量删除
     // （创建成功 ≠ 端点正确：TradingView 会把超出数据范围的时间静默吸附到数据边缘）
     // ============================================================
-    const readStrokesByIds = async (ids) => {
+    // replayOk=true 时表达式带回放守卫白名单前缀（回放补绘流程内使用）
+    const readStrokesByIds = async (ids, replayOk) => {
       const r = await client.Runtime.evaluate({
-        expression: `(function() {
+        expression: `${replayOk ? RP : ""}(function() {
           const chart = TradingViewApi.activeChart();
           const IDS = ${JSON.stringify(ids)};
           return IDS.map(id => {
@@ -549,16 +635,287 @@ function intervalVisibility(res) {
       return (r.result && r.result.value) || [];
     };
 
-    const removeShapesByIds = async (ids) => {
+    const removeShapesByIds = async (ids, replayOk) => {
       if (!ids || ids.length === 0) return;
       await client.Runtime.evaluate({
-        expression: `(function() {
+        expression: `${replayOk ? RP : ""}(function() {
           const chart = TradingViewApi.activeChart();
           for (const id of ${JSON.stringify(ids)}) { try { chart.removeEntity(id); } catch (e) {} }
           return 'ok';
         })()`,
         returnByValue: true, awaitPromise: true, timeout: 20000,
       });
+    };
+
+    // ============================================================
+    // 回放定位补绘：把「超出图表深度」的笔分段画上（与基础数据页回放深拉同路径）
+    // 小周期图表深度（3m 约 2 个月）盖不住 15m 150 天窗口的早期笔——进入回放模式、
+    // 定位到该批最晚端点（回放数据 = 定位点之前的历史）、scrollToFirstBar 翻页扩出
+    // 更早段，在数据范围内创建笔；全部批次完成后退出回放。shape 锚点持久且两种模式
+    // 下一致（已实测：退出回放后读回端点与落盘分毫不差），用户回放回看早期行情时
+    // 笔可见且位置正确。回放不可用/定位失败等任何异常都只降级为「图上不绘制」，
+    // 不影响落盘与 job 结果。
+    // ============================================================
+    // 回放定位补绘专用 evaluate 前缀：analysis_bridge 的回放态守卫见此前缀放行
+    // （否则进回放后第一个 evaluate 就被 ANALYSIS_REPLAY_ACTIVE fail-fast 杀进程）
+    const RP = "/*CHAN_REPLAY_OK*/";
+
+    const replayCall = (call, argsJs, awaitIt) => {
+      const expr = `${RP}(function() {
+        const ra = window.TradingViewApi._replayApi;
+        if (!ra) return { error: 'no_replay_api' };
+        const t = (ra && typeof ra === 'object' && typeof ra.value === 'function') ? ra.value() : ra;
+        if (!t || typeof t.${call} !== 'function') return { error: 'no_method_${call}' };
+        try {
+          const v = t.${call}(${argsJs || ''});
+          ${awaitIt ? `return (v && typeof v.then === 'function')
+            ? v.then(function(u){ return { value: u }; }).catch(function(e){ return { error: String(e) }; })
+            : { value: v };` : `return { value: v };`}
+        } catch (e) { return { error: String(e) }; }
+      })()`;
+      return client.Runtime.evaluate({
+        expression: expr, returnByValue: true, awaitPromise: true, timeout: 30000,
+      }).then(r => (r.result && r.result.value) || { error: 'no_result' });
+    };
+
+    // 当前图表已加载K线范围（首根/末根/数量/末根收盘）——回放态数据沉降与推进判定
+    const readBarsRange = async () => {
+      const r = await client.Runtime.evaluate({
+        expression: `${RP}(function() {
+          const c = TradingViewApi.activeChart();
+          const items = c.chartModel().mainSeries().data().m_bars._items;
+          if (!items || !items.length) return null;
+          const f = items[0].value, l = items[items.length - 1].value;
+          return { first: f[0], last: l[0], len: items.length, lastClose: l[4] };
+        })()`,
+        returnByValue: true, awaitPromise: true, timeout: 15000,
+      });
+      return (r.result && r.result.value) || null;
+    };
+
+    const scrollFirstBar = async () => {
+      await client.Runtime.evaluate({
+        expression: `${RP}(function(){ const c=TradingViewApi.activeChart();
+          const w=c._chartWidget||(c.chartModel&&c.chartModel()._chartWidget);
+          const ts=(w&&w.model)?w.model().timeScale():c.chartModel().timeScale();
+          ts.scrollToFirstBar(); return 'ok'; })()`,
+        returnByValue: true, awaitPromise: true, timeout: 15000,
+      });
+    };
+
+    const readShapePoints = async (id) => {
+      const r = await client.Runtime.evaluate({
+        expression: `${RP}(function(){
+          const sh = TradingViewApi.activeChart().getShapeById(${JSON.stringify(id)});
+          const pts = sh && sh._source && sh._source._points;
+          return (pts && pts.length >= 2)
+            ? [{ time: pts[0].time, price: pts[0].price }, { time: pts[1].time, price: pts[1].price }] : null;
+        })()`,
+        returnByValue: true, awaitPromise: true, timeout: 15000,
+      });
+      return (r.result && r.result.value) || null;
+    };
+
+    // 只创建（不清除旧笔），time 传「落盘时间 + comp」——回放态 createMultipointShape
+    // 对传入时间做一次「墙钟」解释（实测偏移=本地时区），comp 由探针动态探测，
+    // 不依赖时区假设
+    const createShapesOnly = async (res, bis, comp) => {
+      const BI_COLOR = resolutionColor(res);
+      const BI_TITLE = "CHAN_BI_" + res;
+      const IV_CFG = intervalVisibility(res);
+      const r = await client.Runtime.evaluate({
+        expression: `${RP}(async function() {
+          const chart = TradingViewApi.activeChart();
+          const BIS = ${JSON.stringify(bis)};
+          const COMP = ${JSON.stringify(comp || 0)};
+          const BI_COLOR = "${BI_COLOR}";
+          const BI_TITLE = "${BI_TITLE}";
+          const IV_CFG = ${JSON.stringify(IV_CFG)};
+          const out = { bi_ok: 0, bi_err: [] };
+          const created = [];
+          const applyIV = (id) => {
+            if (!IV_CFG) return;
+            try {
+              const iv = chart.getShapeById(id)._source._properties.intervalsVisibilities;
+              iv.ticks.setValue(IV_CFG.ticks);
+              iv.seconds.setValue(IV_CFG.seconds);
+              iv.minutesFrom.setValue(IV_CFG.minutesFrom);
+              iv.minutesTo.setValue(IV_CFG.minutesTo);
+              iv.hoursFrom.setValue(IV_CFG.hoursFrom);
+              iv.hoursTo.setValue(IV_CFG.hoursTo);
+              iv.days.setValue(IV_CFG.days);
+              iv.daysFrom.setValue(IV_CFG.daysFrom);
+              iv.daysTo.setValue(IV_CFG.daysTo);
+              iv.weeks.setValue(IV_CFG.weeks);
+              iv.weeksFrom.setValue(IV_CFG.weeksFrom);
+              iv.weeksTo.setValue(IV_CFG.weeksTo);
+              iv.months.setValue(IV_CFG.months);
+              iv.monthsFrom.setValue(IV_CFG.monthsFrom);
+              iv.monthsTo.setValue(IV_CFG.monthsTo);
+              iv.ranges.setValue(false);
+            } catch(e) {}
+          };
+          for (const b of BIS) {
+            try {
+              const id = await chart.createMultipointShape(
+                [{ time: b.startTime + COMP, price: b.startPrice }, { time: b.endTime + COMP, price: b.endPrice }],
+                { shape: 'polyline', lock: false, overrides: { linecolor: BI_COLOR, linewidth: 1, title: BI_TITLE } });
+              applyIV(id);
+              created.push(id);
+              out.bi_ok++;
+            } catch(e) { created.push(null); out.bi_err.push(e.message); } // null 占位保持与 BIS 索引对齐
+          }
+          return { ...out, created_ids: created };
+        })()`,
+        returnByValue: true, awaitPromise: true, timeout: 120000,
+      });
+      return (r.result && r.result.value) || { bi_ok: 0, bi_err: ['no_result'], created_ids: [] };
+    };
+
+    // 锚点校验：TradingView 存储的 shape 锚点是「墙钟时间」（bar UTC ts + 图表时区偏移
+    // tzOff，实测约 +8h），渲染时再减回——故比对前须先减 tzOff。tzOff 由探针动态测出
+    // （回放补绘流程）；实时段主流程沿用原「紧跟创建读请求值」的竞态口径，不传 tzOff
+    const verifyShapes = async (ids, bis, tol, replayOk, tzOff) => {
+      const off = tzOff || 0;
+      const ptsArr = await readStrokesByIds(ids, replayOk);
+      const bad = [];
+      for (let i = 0; i < ids.length; i++) {
+        const p = ptsArr[i];
+        if (!p || !p[0] || !p[1]) continue; // 端点读不到 → 未校验，不误判
+        const b = bis[i];
+        const tBad = Math.abs(p[0].time - off - b.startTime) > tol || Math.abs(p[1].time - off - b.endTime) > tol;
+        const pBad = Math.abs(p[0].price - b.startPrice) > 0.01 || Math.abs(p[1].price - b.endPrice) > 0.01;
+        if (tBad || pBad) bad.push({ id: ids[i], bi: b });
+      }
+      return bad;
+    };
+
+    const drawClippedViaReplay = async (res, drawRes, clippedBis) => {
+      const out = { created: 0, failed: 0, skipped: 0, rounds: 0, reason: '', fallbackBis: [], tzOff: 0 };
+      const lowerSec = intervalSecOf(drawRes) || 60;
+      const tol = intervalSecOf(drawRes) || 1;
+      let inReplay = false;
+      try {
+        const avail = await replayCall('isReplayAvailable');
+        if (!avail || avail.error || !avail.value) { out.reason = 'replay API 不可用'; return out; }
+        const shown = await replayCall('showReplayToolbar', null, true);
+        if (shown && shown.error) { out.reason = '打开回放工具栏失败: ' + shown.error; return out; }
+
+        let pending = [...clippedBis].sort((a, b) => a.endTime - b.endTime);
+        let lastCoverFrom = Infinity;
+        for (let round = 0; round < 12 && pending.length > 0; round++) {
+          out.rounds = round + 1;
+          const targetTs = pending[pending.length - 1].endTime;   // 剩余笔最晚端点
+          const anchor = targetTs + lowerSec;                     // 定位到其后一根 bar：回放数据=定位点之前历史
+          const sel = await replayCall('selectDate', String(anchor * 1000), true);
+          if (sel && sel.error) { out.reason = '回放定位失败: ' + sel.error; break; }
+          inReplay = true;
+          // 数据沉降：末根须盖住最晚端点（否则创建会被吸附到数据边缘）
+          let range = null;
+          for (let i = 0; i < 14; i++) {
+            await sleep(3000);
+            range = await readBarsRange();
+            if (range && range.last >= targetTs) break;
+          }
+          if (!range || range.last < targetTs) { out.reason = '回放数据未沉降'; break; }
+          // 翻页扩出更早历史：滚到「首根连续两轮不前移」或覆盖剩余最早笔
+          const needMin = pending.reduce((m, b) => Math.min(m, b.startTime), Infinity);
+          let stable = 0, first = range.first;
+          for (let i = 0; i < 30 && first > needMin; i++) {
+            await scrollFirstBar();
+            await sleep(4000);
+            const r2 = await readBarsRange();
+            if (!r2) break;
+            if (r2.first >= first) { stable++; if (stable >= 2) break; }
+            else { stable = 0; first = r2.first; }
+          }
+          range = (await readBarsRange()) || range;
+          const coverFrom = range.first;
+          const batch = pending.filter(b => b.startTime >= coverFrom && b.endTime >= coverFrom);
+          if (batch.length === 0) {
+            if (coverFrom >= lastCoverFrom) {
+              out.reason = `回放数据最早到 ${toT(coverFrom)}`;
+              out.skipped = pending.length;
+              break;
+            }
+            lastCoverFrom = coverFrom;
+            continue;
+          }
+          lastCoverFrom = coverFrom;
+          // 墙钟偏移探针：在末根 bar（必在数据内、且是 bar 边界）创建临时线段，
+          // 存储-请求 = 图表时区偏移 tzOff（shape 锚点按墙钟存储、渲染时减回，
+          // 校验与创建后比对都用它换算）。创建一律直传落盘 ts——字面命中存在的
+          // bar，不补偿（曾按 -tzOff 补偿导致存储值缺偏移、渲染整体偏 8 小时，
+          // 且补偿值常落进休市/周末断档引发吸附，两坑均已实测）
+          const probe = await client.Runtime.evaluate({
+            expression: `${RP}(async function(){
+              const chart = TradingViewApi.activeChart();
+              const id = await chart.createMultipointShape(
+                [{ time: ${range.last - lowerSec}, price: ${range.lastClose} }, { time: ${range.last}, price: ${range.lastClose} }],
+                { shape: 'polyline', lock: false, overrides: { linecolor: '#000000', linewidth: 1, title: 'REPLAY_PROBE' } });
+              return id;
+            })()`,
+            returnByValue: true, awaitPromise: true, timeout: 20000,
+          }).then(r => r.result && r.result.value).catch(() => null);
+          let tzOff = null;
+          if (probe) {
+            await sleep(2500);
+            const pts = await readShapePoints(probe);
+            if (pts && pts[1] && typeof pts[1].time === 'number') tzOff = pts[1].time - range.last;
+            await removeShapesByIds([probe], true);
+          }
+          if (tzOff === null) {
+            if (typeof out.tzOff === 'number' && out.tzOff !== 0) tzOff = out.tzOff; // 复用上一轮
+            else { out.reason = '墙钟偏移探针失败'; break; }
+          }
+          out.tzOff = tzOff;
+
+          const created = await createShapesOnly(res, batch, 0);
+          const ids = created.created_ids || [];
+          out.created += created.bi_ok || 0;
+          // 吸附是创建后异步生效的：紧跟创建立即读回会得到「请求值」（竞态放行），
+          // 必须等吸附沉降后再校验（实测 ~2s 后 _points 已更新为存储值）
+          await sleep(2500);
+          let bad = await verifyShapes(ids, batch, tol, true, tzOff);
+          if (bad.length > 0) {
+            await removeShapesByIds(bad.map(x => x.id), true);
+            out.created -= bad.length;
+            const retryBis = bad.map(x => x.bi);
+            const retry = await createShapesOnly(res, retryBis, 0);
+            out.created += retry.bi_ok || 0;
+            await sleep(2500);
+            const bad2 = await verifyShapes(retry.created_ids || [], retryBis, tol, true, tzOff);
+            if (bad2.length > 0) {
+              await removeShapesByIds(bad2.map(x => x.id), true);
+              out.created -= bad2.length;
+              // 目标 bar 在回放数据中不存在（数据地板/加载边缘）时无法精确锚定——
+              // 收集起来退出回放后由调用方在源周期实时图上重建（吸附到源周期 bar
+              // 边界，误差 ≤1 根源周期 K 线）
+              out.fallbackBis.push(...bad2.map(x => x.bi));
+            }
+          }
+          const batchSet = new Set(batch);
+          pending = pending.filter(b => !batchSet.has(b));
+        }
+        out.skipped += pending.length;
+        if (pending.length > 0 && !out.reason) out.reason = '达轮次上限';
+      } catch (e) {
+        // 任何异常（含守卫拦截）都降级为「图上不绘制」：落盘数据完整，不炸进程
+        const msg = String(e && e.message ? e.message : e).replace(/\s+/g, ' ').slice(0, 120);
+        out.reason = out.reason || ('回放补绘异常: ' + msg);
+      } finally {
+        if (inReplay) {
+          try {
+            await replayCall('stopReplay', null, true);
+            for (let i = 0; i < 10; i++) {
+              await sleep(2000);
+              const s = await replayCall('isReplayStarted');
+              if (!s || !s.value) break;
+            }
+          } catch (e) { /* 退出尽力而为 */ }
+        }
+      }
+      return out;
     };
 
     // 周期字符串归一化（chart.resolution() 对日线可能返回 "1D"，与我们的 "D" 等价）
@@ -579,7 +936,9 @@ function intervalVisibility(res) {
     // 画某个周期时，按需加载其「低一级」周期K线作为端点时间校准基准
     //   （15分钟用3分钟校准，1小时用15分钟校准，4小时用1小时校准，日线用4小时校准）
     const refCache = {};
-    let lowerContext60 = null;
+    // 各基准周期实际覆盖到的最早时间（key=周期）：用于绘制裁剪时判断「被裁笔的端点
+    // 是否已在校准基准覆盖内」（bars.db 回放库拼接成功 → 只是图画不上，数据完整）
+    const refCoverFrom = {};
     const allRawBars = {};
     const allBis = {}; // 收集各周期最终绘制的笔（含校准后的端点时间），循环结束后落盘供 mark-buy-sell 读取
 
@@ -637,7 +996,11 @@ function intervalVisibility(res) {
         anchorInfo = "(上层无笔，取全部K线)";
       }
 
-      const rawBars = windowBars;
+      // --closed 对照口径：剔除未收盘当根（与回测引擎一致），15m 逐级校准基准数据同理
+      const nowSec = Math.floor(Date.now() / 1000);
+      const rawBars = CLOSED_ONLY
+        ? windowBars.filter(k => k.time + intervalSecOf(res) <= nowSec)
+        : windowBars;
       allRawBars[res] = rawBars;
       // ATR/MACD 基于未剔除的原始K线计算（ATR 是波动率度量，插针也属波动；
       // MACD 用收盘价序列，不受长影剔除影响）
@@ -653,21 +1016,24 @@ function intervalVisibility(res) {
       // 区间套强制对齐：把上一层（更高级别）笔的端点作为锁定端点传入 buildBi，
       // 保证本级别笔端点与上级笔的极值端点严格重合（优先级最高）。
       const lockedPivots = lockedPivotsOf(prevBis);
-      // 60m近等端点补充确认需要完整15m历史，显示窗口不限制计算输入。
+      // 60m 端点时间校准需要完整 15m 基准（refCache['15'] 预热；显示窗口不限制计算输入）。
       if (res === '60') {
         await ensureResolution('15');
         const lower = await fetchBars(900, FROM_TS || rawBars[0].time, ANCHOR_BUFFER);
         if (lower && !lower.error && lower.bars?.length) {
-          lowerContext60 = makeBiLowerContext('60', lower.bars, Math.floor(Date.now() / 1000));
-          refCache['15'] = markWickBars(lower.bars);
+          const lowerBars = CLOSED_ONLY
+            ? lower.bars.filter(k => k.time + 900 <= nowSec)
+            : lower.bars;
+          refCache['15'] = markWickBars(lowerBars);
+          refCoverFrom['15'] = refCache['15'][0].time;
         }
         await ensureResolution(res);
         currentRes = res;
       }
 
-      // 近等双顶/双底平台取后顶/后底：按 nearDoubleOn(res) 每周期开关（默认 60/240/D 开、
-      // 15m/3m 关——平台尾噪声多，全周期实施曾实测 61 次触发致微观结构大面积重排）
-      let bis = buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDoubleOn(res), res === '60' ? lowerContext60 : null, res);
+      // 近等双顶/双底平台取后顶/后底：按 nearDoubleOn(res) 每周期开关（2026-10-02 起
+      // 容差=nearDoubleFixed，先影线后实体；15m双动能补充确认已取消）
+      let bis = buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDoubleOn(res), res);
 
       // 端点极值修正：包含合并可能吞掉更极端的插针低点/高点（如 60分钟 7-29 09:00 的 4010.41 被
       // 08:00/09:00 的向上合并吞掉），把笔终点平移到区间内被掩盖的真实极值，使笔终点落在真实极值K线上
@@ -705,16 +1071,61 @@ function intervalVisibility(res) {
       // 使不同周期对同一极值的标记位置在图上重合
       //   （15分钟用3分钟校准，1小时用15分钟校准，4小时用1小时校准，日线用4小时校准）
       const lowerRes = lowerResOf(res);
+      // 校准基准需求起点（= 绘制窗口起点；跨窗口起笔的笔头可早于此）。
+      // 提升到 if (lowerRes) 外声明：下方绘制裁剪的分级判定（refOk）也要用
+      let refNeedFrom = 0;
       if (lowerRes) {
         let refBars = refCache[lowerRes];
+        // 校准基准需求起点：跟随「被校准周期」的绘制窗口（如 15m 窗 150 天 → 3m 基准
+        // 同样覆盖 150 天），而非基准周期自身的画笔窗口（windowDays3 只管 3m 自己画几天的笔）；
+        // 无窗口周期（60/240/D）维持旧语义：覆盖 --from 全量
+        const lowerSec = intervalSecOf(lowerRes);
+        const winDays = DRAW_WINDOW_DAYS[res];
+        const latestTs = rawBars.length ? rawBars[rawBars.length - 1].time : 0;
+        refNeedFrom = winDays
+          ? Math.max(FROM_TS || 0, latestTs - winDays * 86400)
+          : (FROM_TS || (rawBars.length ? rawBars[0].time : 0));
+        // 用 bars.db 回放库补更早段：库末与图表首根间隔 ≤5 天（周末/假期口径，与
+        // data_store.missing_segments 一致）视为无缝拼接；库无数据或有断层返回 null
+        const mergeStorePrefix = (bars) => {
+          if (!bars.length || bars[0].time <= refNeedFrom + lowerSec) return bars;
+          const chartFirst = bars[0].time;
+          const storeBars = fetchStoreBars(lowerRes, refNeedFrom, chartFirst + lowerSec);
+          if (!storeBars.length) return null;
+          if (storeBars[storeBars.length - 1].time < chartFirst - 5 * 86400) return null;
+          const byTime = new Map(storeBars.map(b => [b.time, b]));
+          for (const b of bars) byTime.set(b.time, b); // 同刻图表值优先（实时源更新）
+          const merged = [...byTime.values()].sort((a, b) => a.time - b.time);
+          console.log(`[校准基准] ${res} 用 ${lowerRes} 校准：图表自 ${toT(chartFirst)}，bars.db 回放库补前段 ${storeBars.length} 根（起点 ${toT(merged[0].time)}）`);
+          return merged;
+        };
         if (!refBars) {
           await ensureResolution(lowerRes);
-          const dref = await fetchBars(intervalSecOf(lowerRes), FROM_TS, ANCHOR_BUFFER, DRAW_WINDOW_DAYS[lowerRes]);
-          if (dref && !dref.error && dref.bars && dref.bars.length > 0) {
+          // 先取当前已加载段（不做覆盖深拉），更早历史从 bars.db 回放库拼接——TV 小周期
+          // 图表深度仅约 2 个月（如 3m），回放深拉库可到多年前，常规路径秒级完成；
+          // 库无数据/断层时退回旧的覆盖深拉路径（scrollToFirstBar 拉到图表极限）
+          let dref = await fetchBars(lowerSec, null, 0);
+          let chartBars = (dref && !dref.error && dref.bars) ? dref.bars : [];
+          let merged = chartBars.length ? mergeStorePrefix(chartBars) : null;
+          if (merged === null && (!chartBars.length || chartBars[0].time > refNeedFrom + 86400)) {
+            dref = await fetchBars(lowerSec, refNeedFrom, ANCHOR_BUFFER);
+            const deepBars = (dref && !dref.error && dref.bars) ? dref.bars : [];
+            if (deepBars.length && (!chartBars.length || deepBars[0].time < chartBars[0].time)) {
+              chartBars = deepBars;
+              merged = mergeStorePrefix(chartBars);
+              if (merged === null) merged = chartBars; // 深拉结果直接用（等价旧路径）
+            }
+          }
+          const finalBars = merged || chartBars;
+          if (finalBars && finalBars.length > 0) {
+            if (finalBars[0].time > refNeedFrom + 86400) {
+              console.log(`[校准基准] 提示: ${lowerRes} 基准仅到 ${toT(finalBars[0].time)}（图表深度限制且 bars.db 无更早数据；可在 WEB 基础数据页回放深拉补齐），更早的 ${res} 笔端点将不做低级别校准`);
+            }
             // 校准基准同样做长影标记（markWickBars 内部用全窗口稳定 ATR），
             // 避免把已剔除的插针端点校准回插针时间
-            refBars = markWickBars(dref.bars);
+            refBars = markWickBars(finalBars);
             refCache[lowerRes] = refBars;
+            refCoverFrom[lowerRes] = refBars[0].time;
             if (DEBUG) console.log(`[校准基准] ${res} 用 ${lowerRes} 校准，已加载 ${refBars.length} 根 ${lowerRes} 分钟K线`);
           }
           await ensureResolution(res);
@@ -831,6 +1242,8 @@ function intervalVisibility(res) {
       }
       // 绘制前确保图表数据覆盖最早笔的时间（切换周期后图表可能只加载最近K线，
       // 会导致较早笔的端点超出数据范围而被 TradingView 吸附到数据边缘，形成无效笔）
+      let replayPendingBis = null; // 超出图表深度、待回放定位补绘的笔（见 drawClippedViaReplay）
+      let replayStats = null;      // 回放补绘统计（并入绘制结果）
       if (drawBis.length > 0) {
         const minBiTime = drawBis.reduce(
           (m, b) => Math.min(m, b.startTime, b.endTime),
@@ -842,10 +1255,40 @@ function intervalVisibility(res) {
           // 被吸附成无效笔，宁可跳过并警告。落盘数据不受影响（allBis 已保存完整列表）
           if (!cover.covered && cover.first !== null) {
             const before = drawBis.length;
+            const clippedBis = drawBis.filter(b => b.startTime < cover.first || b.endTime < cover.first);
             drawBis = drawBis.filter(b => b.startTime >= cover.first && b.endTime >= cover.first);
-            console.log(`[周期 ${res}] 警告: ${drawRes} 周期数据仅加载到 ${toT(cover.first)}，跳过 ${before - drawBis.length} 根更早的笔（避免吸附成无效笔；落盘数据完整）`);
+            const skippedCount = before - drawBis.length;
+            // 基准已覆盖被裁笔的端点（bars.db 回放库拼接成功）→ 裁剪只是「图上画不上」
+            // （TradingView 小周期图表深度限制），落盘数据完整且端点已校准——降级为提示，
+            // 不计入 report errors、不阻断「更新全部」后续步骤；基准也没覆盖到 → 维持
+            // 原警告口径如实失败（先在 WEB 基础数据页回放深拉补齐基准数据）
+            const refFrom = lowerRes ? refCoverFrom[lowerRes] : -1;
+            // 容差 5 天（周末/假期休市口径，与 data_store.FILL_GAP_SEC 及上方
+            // mergeStorePrefix 的无缝拼接判定一致）；比较基准取窗口需求起点
+            // refNeedFrom 而非最早笔端点 minBiTime——窗口起点落在周末时第一根笔
+            // 从上周五起笔，minBiTime 会被拉早 2~3 天，而基准首根已是窗口内可得的
+            // 最早行情（周一开盘，回放也补不出周末数据），不算基准缺失；早于窗口
+            // 起点的笔头不校准只损失精细度（保留本级 bar 时间）。基准首根晚于窗口
+            // 起点 5 天以上才是真缺段（先在 WEB 基础数据页回放深拉补库）
+            const refOk = typeof refFrom === "number" && refFrom >= 0
+              && refNeedFrom > 0
+              && refFrom <= refNeedFrom + 5 * 86400;
+            if (refOk) {
+              console.log(`[周期 ${res}] 提示: ${drawRes} 图表数据仅到 ${toT(cover.first)}，更早 ${skippedCount} 根笔已完整落盘（端点经 ${lowerRes} 回放库基准校准，窗口外笔头保留本级时间），将经回放定位补绘（超出 ${drawRes} 图表深度）`);
+              if (clippedBis.length > 0 && lowerRes) replayPendingBis = clippedBis;
+            } else {
+              console.log(`[周期 ${res}] 警告: ${drawRes} 周期数据仅加载到 ${toT(cover.first)}，跳过 ${skippedCount} 根更早的笔（避免吸附成无效笔；落盘数据完整；可在 WEB 基础数据页回放深拉补齐 ${lowerRes || drawRes} 基准）`);
+            }
             if (drawBis.length === 0) {
-              console.log(`[周期 ${res}] 全部笔超出已加载数据范围，本轮跳过绘制`);
+              // 全部笔都超范围：直接回放补绘全部笔后收尾（含断档兜底重建）
+              if (replayPendingBis) {
+                const rp = await drawClippedViaReplay(res, drawRes, replayPendingBis);
+                console.log(`[周期 ${res}] 回放补绘: ${rp.rounds} 轮定位，画上 ${rp.created} 根${rp.failed ? `，失败 ${rp.failed} 根` : ''}${rp.skipped ? `，${rp.skipped} 根超出回放深度未画` : ''}${rp.reason ? `（${rp.reason}）` : ''}`);
+                replayStats = rp;
+                replayPendingBis = null;
+              } else {
+                console.log(`[周期 ${res}] 全部笔超出已加载数据范围，本轮跳过绘制`);
+              }
               continue;
             }
           }
@@ -893,6 +1336,40 @@ function intervalVisibility(res) {
             bi_bad: bad2.length,
           };
         }
+      }
+      // 实时段画完后回放补绘：超出图表深度的笔经「回放定位 + 翻页加载」分段画上
+      // （放在实时段之后——进/出回放会重置图表数据，避免影响上面实时段的覆盖加载）；
+      // 回放态无法精确锚定的笔（补偿请求落在休市/周末断档）再回源周期图重建兜底
+      const runReplayBackfill = async () => {
+        const rp = await drawClippedViaReplay(res, drawRes, replayPendingBis);
+        replayPendingBis = null;
+        let fbNote = '';
+        if (rp.fallbackBis && rp.fallbackBis.length > 0) {
+          const fbBis = rp.fallbackBis;
+          const minT = fbBis.reduce((m, b) => Math.min(m, b.startTime, b.endTime), Infinity);
+          await ensureResolution(res);
+          currentRes = res;
+          if (minT !== Infinity) await ensureBarsCover(res, minT);
+          const fbCreate = await createShapesOnly(res, fbBis, 0);
+          await sleep(2500);
+          const fbTol = intervalSecOf(res) || 900;
+          const fbBad = await verifyShapes(fbCreate.created_ids || [], fbBis, fbTol, false, rp.tzOff);
+          const fbOk = Math.max(0, (fbCreate.bi_ok || 0) - fbBad.length);
+          if (fbBad.length > 0) await removeShapesByIds(fbBad.map(x => x.id));
+          rp.created += fbOk;
+          fbNote = `，${fbBis.length} 根回放断档改源周期图重建（成功 ${fbOk}）`;
+          if (drawRes !== res) { await ensureResolution(drawRes); currentRes = drawRes; }
+        }
+        console.log(`[周期 ${res}] 回放补绘: ${rp.rounds} 轮定位，画上 ${rp.created} 根${rp.failed ? `，失败 ${rp.failed} 根` : ''}${rp.skipped ? `，${rp.skipped} 根超出回放深度未画` : ''}${fbNote}${rp.reason ? `（${rp.reason}）` : ''}`);
+        replayStats = rp;
+      };
+      if (replayPendingBis) await runReplayBackfill();
+      if (replayStats) {
+        finalResult = {
+          ...finalResult,
+          bi_ok: (finalResult.bi_ok || 0) + (replayStats.created || 0),
+          bi_bad: (finalResult.bi_bad || 0) + (replayStats.failed || 0),
+        };
       }
       console.log("\n=== 绘制结果 [周期 " + res + "] ===");
       console.log(JSON.stringify(finalResult, null, 2));

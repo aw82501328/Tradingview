@@ -7,11 +7,23 @@
 //        （1买/1卖→1类，2买/类2买、2卖/类2卖→2类，3买/类3买、3卖/类3卖→3类；4类不交易）；
 //        反向点出现后该点失效
 //     ② 点之后出现强分型（实体口径：底=右肩收盘>左肩开盘，顶=右肩收盘<左肩开盘，
-//        落差 ≥ strongFxMinPts 点）
+//        落差 ≥ strongFxMinPts 点；--strong-fx-on=0 跳过本条）
 //     ③ 均线分离（按类别选均线对：1类=maFast1/maSlow1，2/3类=maFast2/maSlow2）：
-//        当拍收盘 快线高于慢线≥crossMinPts（买）/ 低于慢线≥crossMinPts（卖）
-//     ④ pointValidBars 根内齐备 → 触发（每点一次）→ 下一根 P 周期K线开盘成交
-//   出场：P 已收K线触及 止损(进场∓stopPts)/止盈(进场±tpPts) → 下一根 P 开盘成交；
+//        当拍收盘 快线高于慢线≥crossMinPts（买）/ 低于慢线≥crossMinPts（卖）；
+//        --ma-on=0 跳过本条
+//     ④ 收盘站线（按类别选站线均线：1类=maStand1、2/3类=maStand2）：
+//        当拍收盘价 买点须严格站上/卖点须严格站下该均线；--ma-stand-on=0 跳过本条
+//     ⑤ 黄金分割附近（--fib-near-on=1 开，默认关；仅 2/3 类点，1 类点豁免）：
+//        摆动段 = 前一同侧买卖点价格 → 其后至本点前（时间窗 (前点, 本点]）的
+//        P 周期真实K线极值（买取最高/卖取最低），按 fibLevels 算回撤位，
+//        本点价格须落在任一档位 ±fibNearPts（绝对点数）内；无前点/摆动退化不触发
+//     ⑥ 上级周期同向（--upper-dir-on=1 开，默认关；全部类别）：上级周期
+//        （30S→3→15→60→240）当前笔方向须与信号同向（买=up/卖=down）
+//     ⑦ pointValidBars 根内齐备 + pointValidPts 盘中价距点极值上限（买=评估根最高价
+//        −买点最低价、卖=卖点最高价−评估根最低价；超距只等待不作废）→ 触发（每点一次）
+//        → 下一根 P 周期K线开盘成交（各条件开关全关=点属所选类别且未失效当拍即触发）
+//   出场：K线盘中价触及 止损(进场∓stopPts)/止盈(进场±tpPts) → 即时按该触发价成交
+//        （与实盘 MT5 SL/TP 同口径，不等收盘确认、不等下一根开盘；进场那根收盘后即判）；
 //        同根双触按 sameBarPriority（默认止损优先）；期末未触发 mark-to-market。
 //   互斥：mutexScope=global 同向全局一笔 / perPeriod 每周期独立。
 //
@@ -50,14 +62,24 @@ const getNumArg = (name, def) => {
 const FROM_DATE = getStrArg("from", "");
 const ENTRY_RES = String(getStrArg("entry-res", "3,15,60")).split(",").map(s => s.trim()).filter(Boolean);
 const POINT_CLASSES = new Set(String(getStrArg("point-classes", "1,2,3")).split(",").map(s => s.trim()).filter(Boolean));
+const MA_ON = getStrArg("ma-on", "1") !== "0";       // 均线分离条件开关（"0"=关，缺省开）
 const MA_TYPE = String(getStrArg("ma-type", "SMA")).toUpperCase() === "EMA" ? "EMA" : "SMA";
 const MA_FAST1 = getNumArg("ma-fast-1", 8);
 const MA_SLOW1 = getNumArg("ma-slow-1", 20);
 const MA_FAST2 = getNumArg("ma-fast-2", 5);
 const MA_SLOW2 = getNumArg("ma-slow-2", 8);
 const CROSS_MIN_PTS = getNumArg("cross-min-pts", 2.0);
+const MA_STAND_ON = getStrArg("ma-stand-on", "1") !== "0"; // 收盘站线条件开关（"0"=关，缺省开）
+const MA_STAND_1 = getNumArg("ma-stand-1", 5);              // 一类点站线均线周期
+const MA_STAND_2 = getNumArg("ma-stand-2", 5);              // 二三类点站线均线周期
+const FIB_NEAR_ON = getStrArg("fib-near-on", "0") === "1";  // 黄金分割附近条件开关（"1"=开，默认关）
+const FIB_LEVELS = parseFibLevels(getStrArg("fib-levels", "0.382,0.5,0.618"));
+const FIB_NEAR_PTS = getNumArg("fib-near-pts", 5.0);        // 档位容差（绝对点数）
+const UPPER_DIR_ON = getStrArg("upper-dir-on", "0") === "1"; // 上级周期同向条件开关（"1"=开，默认关）
+const STRONG_FX_ON = getStrArg("strong-fx-on", "1") !== "0";  // 强分型条件开关（"0"=关，缺省开）
 const STRONG_FX_MIN_PTS = getNumArg("strong-fx-min-pts", 0.0);
 const POINT_VALID_BARS = Math.max(0, Math.round(getNumArg("point-valid-bars", 0)));
+const POINT_VALID_PTS = Math.max(0, getNumArg("point-valid-pts", 0)); // 点有效期（值；0=不限）
 const STOP_PTS = getNumArg("stop-pts", 10.0);
 const TP_PTS = getNumArg("tp-pts", 30.0);
 const SAME_BAR_PRIORITY = String(getStrArg("same-bar-priority", "stop")) === "tp" ? "tp" : "stop";
@@ -70,6 +92,17 @@ const POINT_CLASS = {
   "3买": 3, "类3买": 3, "3卖": 3, "类3卖": 3,
 };
 
+// 模块级参数快照（由 CLI 常量组装）：scanPeriodSignals 缺省用它；测试可注入覆盖
+// （脚本在模块顶层解析 argv，require 时常量固定为默认值，故提供注入口）。
+const MODULE_OPTS = {
+  pointClasses: POINT_CLASSES, strongFxOn: STRONG_FX_ON, strongFxMinPts: STRONG_FX_MIN_PTS,
+  maOn: MA_ON, maType: MA_TYPE, crossMinPts: CROSS_MIN_PTS,
+  maFast1: MA_FAST1, maSlow1: MA_SLOW1, maFast2: MA_FAST2, maSlow2: MA_SLOW2,
+  maStandOn: MA_STAND_ON, maStand1: MA_STAND_1, maStand2: MA_STAND_2,
+  fibNearOn: FIB_NEAR_ON, fibLevels: FIB_LEVELS, fibNearPts: FIB_NEAR_PTS,
+  upperDirOn: UPPER_DIR_ON, pointValidBars: POINT_VALID_BARS, pointValidPts: POINT_VALID_PTS,
+};
+
 const BUY_COLOR = "#F23645";
 const SELL_COLOR = "#089981";
 const EXIT_COLOR = "#FFEB3B";
@@ -78,6 +111,18 @@ const BAR_BUFFER = 30;
 // ============================================================
 // 纯函数（导出供单元测试）
 // ============================================================
+
+/** 黄金分割档位（逗号串）→ 去重保序浮点数组；逐元素校验 0<r<1（与 fx_ma.parse_fib_levels 同式）。 */
+function parseFibLevels(s) {
+  const out = [];
+  for (const v of String(s).split(",").map(x => x.trim()).filter(Boolean)) {
+    const r = parseFloat(v);
+    if (!(r > 0 && r < 1)) throw new Error(`fibLevels 档位须满足 0<r<1（收到 ${v}）`);
+    if (!out.includes(r)) out.push(r);
+  }
+  if (!out.length) throw new Error("fibLevels 至少一个档位（0<r<1）");
+  return out;
+}
 
 /** SMA/EMA 序列：closes[i] → ma[i]（窗口未满为 null）。 */
 function maSeries(closes, period, type) {
@@ -122,14 +167,17 @@ function strongFxAfter(merged, fractals, t, kind, minPts, barSec) {
 /**
  * 单周期信号扫描（工作台口径：全窗口K线 + 最终笔快照，按时间轴回放）。
  * @param bars P 周期K线（升序）；periodBis 画笔落盘 {res: [bi]}；upperRes 上级周期键
+ * @param opts 条件参数（缺省=模块 CLI 常量快照 MODULE_OPTS；测试可注入覆盖）
  * @returns signals [{periodX, direction, strategyKey, pointType, pointTime, signalTime,
- *                    signalPrice, entryIdx}]（未含互斥过滤；entryIdx=成交K线下标）
+ *                    signalPrice, entryIdx, fibLevel, fibGap, upperDir}]（未含互斥过滤；
+ *                    entryIdx=成交K线下标）
  */
-function scanPeriodSignals(P, bars, periodBis, upperRes) {
+function scanPeriodSignals(P, bars, periodBis, upperRes, opts = MODULE_OPTS) {
   const barSec = intervalSecOf(P) || 180;
   const closes = bars.map(b => b.close);
-  const f1 = maSeries(closes, MA_FAST1, MA_TYPE), s1 = maSeries(closes, MA_SLOW1, MA_TYPE);
-  const f2 = maSeries(closes, MA_FAST2, MA_TYPE), s2 = maSeries(closes, MA_SLOW2, MA_TYPE);
+  const f1 = maSeries(closes, opts.maFast1, opts.maType), s1 = maSeries(closes, opts.maSlow1, opts.maType);
+  const f2 = maSeries(closes, opts.maFast2, opts.maType), s2 = maSeries(closes, opts.maSlow2, opts.maType);
+  const st1 = maSeries(closes, opts.maStand1, opts.maType), st2 = maSeries(closes, opts.maStand2, opts.maType);
   const merged = mergeBars(markWickBars(bars));
   const fractals = findFractals(merged);
   const macdArr = calcMACD(bars);
@@ -138,6 +186,10 @@ function scanPeriodSignals(P, bars, periodBis, upperRes) {
   // 点按时间升序（回放时维护「当前最新点」——引擎语义：只有最新点可触发）
   const pts = [...buys.map(p => ({ ...p, side: "buy" })),
                ...sells.map(p => ({ ...p, side: "sell" }))].sort((a, b) => a.time - b.time);
+  // 各点的同侧前一买卖点（黄金分割摆动段锚点；引擎 _fx_prev_point 对应物）
+  const prevOf = new Map();
+  { let lb = null, ls = null;
+    for (const p of pts) { prevOf.set(p, p.side === "buy" ? lb : ls); if (p.side === "buy") lb = p; else ls = p; } }
   const signals = [];
   const fired = new Set();
   let pi = 0, curBuy = null, curSell = null;
@@ -150,28 +202,90 @@ function scanPeriodSignals(P, bars, periodBis, upperRes) {
     for (const [pt, direction, kind] of [[curBuy, "long", "bottom"], [curSell, "short", "top"]]) {
       if (!pt) continue;
       const cls = POINT_CLASS[pt.type];
-      if (cls === undefined || !POINT_CLASSES.has(String(cls))) continue;
+      if (cls === undefined || !opts.pointClasses.has(String(cls))) continue;
       const key = `${P}|${pt.type}|${pt.time}`;
       if (fired.has(key)) continue;
       const opp = direction === "long" ? curSell : curBuy;
       if (opp && opp.time > pt.time) { fired.add(key); continue; } // 反向点已出现
-      if (POINT_VALID_BARS > 0) {
+      if (opts.pointValidBars > 0) {
         let after = 0;
         for (let j = 0; j <= i; j++) if (bars[j].time > pt.time) after++;
-        if (after > POINT_VALID_BARS) { fired.add(key); continue; } // 超时作废
+        if (after > opts.pointValidBars) { fired.add(key); continue; } // 超时作废
       }
-      const fx = strongFxAfter(merged, fractals, pt.time, kind, STRONG_FX_MIN_PTS, barSec);
-      if (!fx || fx.confirmTime > closeT) continue;
-      const fa = cls === 1 ? f1[i] : f2[i], sl = cls === 1 ? s1[i] : s2[i];
-      if (fa === null || sl === null) continue;
-      const diff = direction === "short" ? sl - fa : fa - sl;
-      if (!(diff > 0 && diff >= CROSS_MIN_PTS)) continue;
+      // 点有效期（值）：评估根盘中价距点极值（买=high−点价、卖=点价−low）；超距等待（点保持存活）
+      if (opts.pointValidPts > 0) {
+        const far = direction === "long" ? bars[i].high - pt.price : pt.price - bars[i].low;
+        if (far > opts.pointValidPts) continue;
+      }
+      let fxTime = null, crossGap = null;
+      if (opts.strongFxOn) {
+        const fx = strongFxAfter(merged, fractals, pt.time, kind, opts.strongFxMinPts, barSec);
+        if (!fx || fx.confirmTime > closeT) continue;
+        fxTime = fx.time;
+      }
+      if (opts.maOn) {
+        const fa = cls === 1 ? f1[i] : f2[i], sl = cls === 1 ? s1[i] : s2[i];
+        if (fa === null || sl === null) continue;
+        const diff = direction === "short" ? sl - fa : fa - sl;
+        if (!(diff > 0 && diff >= opts.crossMinPts)) continue;
+        crossGap = Math.round(diff * 10000) / 10000;
+      }
+      // ④ 收盘站线（1类=maStand1、2/3类=maStand2；买=收盘严格站上、卖=严格站下）
+      let standGap = null;
+      if (opts.maStandOn) {
+        const sv = cls === 1 ? st1[i] : st2[i];
+        if (sv === null) continue; // 站线均线未满周期
+        const gap = closes[i] - sv;
+        if (!(direction === "long" ? gap > 0 : gap < 0)) continue;
+        standGap = Math.round(gap * 10000) / 10000;
+      }
+      // ⑤ 黄金分割附近（默认关；仅 2/3 类点，1 类点豁免）：摆动段 = 前一同侧买卖点
+      //    价格 → 其后至本点前（时间窗 (前点, 本点]）的 P 周期真实K线极值（买取最高/
+      //    卖取最低）；本点价格距任一档位回撤 ≤ fibNearPts（绝对点数）
+      let fibLevel = null, fibGap = null;
+      if (opts.fibNearOn && cls !== 1) {
+        const prev = prevOf.get(pt);
+        if (!prev) continue; // 无前一同侧买卖点（摆动段无锚点）
+        let lo = 0;
+        while (lo < bars.length && bars[lo].time <= prev.time) lo++;
+        let hi = lo, ext = null;
+        while (hi < bars.length && bars[hi].time <= pt.time) {
+          const b = bars[hi];
+          if (direction === "long") ext = ext === null ? b.high : Math.max(ext, b.high);
+          else ext = ext === null ? b.low : Math.min(ext, b.low);
+          hi++;
+        }
+        const swing = ext === null ? null
+          : (direction === "long" ? ext - prev.price : prev.price - ext);
+        if (swing === null || swing <= 0) continue; // 摆动段退化
+        let best = null; // {gap, level, ratio}
+        for (const r of opts.fibLevels) {
+          const level = direction === "long" ? ext - r * swing : ext + r * swing;
+          const gap = Math.abs(pt.price - level);
+          if (!best || gap < best.gap) best = { gap, level, ratio: r };
+        }
+        if (best.gap > opts.fibNearPts) continue; // 不在任何档位附近
+        fibLevel = best.ratio;
+        fibGap = Math.round(best.gap * 10000) / 10000;
+      }
+      // ⑥ 上级周期同向（默认关；全部类别）：上级当前笔（startTime ≤ 本根时间的最后一
+      //    根笔，最终快照口径）方向须与信号同向（买=up/卖=down）
+      let upperDir = null;
+      if (opts.upperDirOn) {
+        const ubis = periodBis[upperRes] || [];
+        let cur = null;
+        for (const b of ubis) { if (b.startTime <= bars[i].time) cur = b; else break; }
+        if (!cur) continue; // 上级无笔
+        upperDir = cur.type;
+        if (upperDir !== (direction === "long" ? "up" : "down")) continue;
+      }
       fired.add(key);
       signals.push({
         periodX: P, direction,
         strategyKey: `fx${cls}${direction === "long" ? "Buy" : "Sell"}`,
         pointType: pt.type, pointTime: pt.time, pointPrice: pt.price,
-        strongFxTime: fx.time, crossGap: Math.round(diff * 10000) / 10000,
+        strongFxTime: fxTime, crossGap, standGap,
+        fibLevel, fibGap, upperDir,
         signalTime: closeT, signalPrice: closes[i], entryIdx: i + 1,
       });
     }
@@ -180,7 +294,7 @@ function scanPeriodSignals(P, bars, periodBis, upperRes) {
 }
 
 /**
- * 全局互斥 + 出场模拟（与引擎同口径：已收K线触及 → 下一开盘成交）。
+ * 全局互斥 + 出场模拟（与引擎同口径：盘中触及触发价 → 即时按触发价成交）。
  * @returns 每个信号补齐 entryTime/entryPrice/stopRef/tpRef/exits/exitType/pnl/suppressed
  */
 function applyMutexAndSimulate(signals, barsByP, contractMult = 1.0) {
@@ -204,24 +318,21 @@ function applyMutexAndSimulate(signals, barsByP, contractMult = 1.0) {
     s.entryTime = entryTime; s.entryPrice = entryPrice;
     s.stopRef = stopRef; s.tpRef = tpRef; s.lots = LOTS;
     s.exits = []; s.exitType = null; s.pnl = null;
-    let pending = null;
-    for (let j = ei; j < bars.length; j++) {
+    for (let j = ei; j < bars.length; j++) { // 进场那根（j===ei）收盘后即参与判定
       const b = bars[j];
-      if (pending) { // 上一根已收盘判定挂起 → 本根开盘成交
-        const ex = { type: pending, time: b.time, price: b.open };
-        s.exits.push(ex); s.exitType = pending; s.exitTime = b.time; s.exitPrice = b.open;
-        s.pnl = (b.open - entryPrice) * d * LOTS * contractMult;
-        break;
-      }
-      if (j === ei) continue; // 进场那根不判出场（引擎 _evalCut 口径）
       const stopHit = short ? b.high >= stopRef : b.low <= stopRef;
       const tpHit = short ? b.low <= tpRef : b.high >= tpRef;
-      if (stopHit && tpHit) pending = SAME_BAR_PRIORITY === "stop" ? "stop" : "takeProfit";
-      else if (stopHit) pending = "stop";
-      else if (tpHit) pending = "takeProfit";
-      if (pending) s.exitTriggerTime = b.time;
+      if (!stopHit && !tpHit) continue;
+      const pick = (stopHit && tpHit)
+        ? (SAME_BAR_PRIORITY === "stop" ? "stop" : "takeProfit")
+        : (stopHit ? "stop" : "takeProfit");
+      const exitPrice = pick === "stop" ? stopRef : tpRef;
+      s.exits.push({ type: pick, time: b.time, price: exitPrice });
+      s.exitType = pick; s.exitTriggerTime = b.time;
+      s.exitTime = b.time; s.exitPrice = exitPrice;
+      s.pnl = (exitPrice - entryPrice) * d * LOTS * contractMult;
+      break;
     }
-    if (pending && !s.exitType) { s.pendingUnfilled = true; } // 触发K线无下一根：仍持仓
     if (!s.exitType) { // 未终局 → mark-to-market（最新收盘）
       const last = bars[bars.length - 1];
       s.state = "open";
@@ -283,8 +394,14 @@ async function main() {
     const originalRes = curRes.result.value.resolution;
     console.log("品种:", SYMBOL, "当前周期:", originalRes);
     console.log(`强分型均线V1：进出场周期 ${ENTRY_RES.join(",")}，类别 ${[...POINT_CLASSES].join(",")}，`
-      + `${MA_TYPE} ${MA_FAST1}/${MA_SLOW1}+${MA_FAST2}/${MA_SLOW2}，分离≥${CROSS_MIN_PTS}点，`
-      + `止损${STOP_PTS}/止盈${TP_PTS}点，互斥 ${MUTEX_SCOPE}`);
+      + `强分型${STRONG_FX_ON ? "开" : "关"}，均线分离${MA_ON ? "开" : "关"}`
+      + (MA_ON ? `（${MA_TYPE} ${MA_FAST1}/${MA_SLOW1}+${MA_FAST2}/${MA_SLOW2}，分离≥${CROSS_MIN_PTS}点）` : "")
+      + `，收盘站线${MA_STAND_ON ? "开" : "关"}`
+      + (MA_STAND_ON ? `（${MA_STAND_1}/${MA_STAND_2}）` : "")
+      + `，黄金分割附近${FIB_NEAR_ON ? "开" : "关"}`
+      + (FIB_NEAR_ON ? `（${FIB_LEVELS.join(",")}±${FIB_NEAR_PTS}点）` : "")
+      + `，上级同向${UPPER_DIR_ON ? "开" : "关"}`
+      + `，止损${STOP_PTS}/止盈${TP_PTS}点，互斥 ${MUTEX_SCOPE}`);
 
     // 依赖：画笔落盘（chan-bi 产出）
     const bisFile = cacheFile("bis", SYMBOL);
@@ -404,10 +521,16 @@ async function main() {
     const outFile = cacheFile("fxma", SYMBOL);
     fs.writeFileSync(outFile, JSON.stringify({
       symbol: SYMBOL, strategy: "fxma_v1", generatedAt: new Date().toISOString(),
-      params: { entryRes: ENTRY_RES, pointClasses: [...POINT_CLASSES], maType: MA_TYPE,
+      params: { entryRes: ENTRY_RES, pointClasses: [...POINT_CLASSES],
+                maOn: MA_ON, maType: MA_TYPE,
                 maFast1: MA_FAST1, maSlow1: MA_SLOW1, maFast2: MA_FAST2, maSlow2: MA_SLOW2,
-                crossMinPts: CROSS_MIN_PTS, strongFxMinPts: STRONG_FX_MIN_PTS,
-                pointValidBars: POINT_VALID_BARS, stopPts: STOP_PTS, tpPts: TP_PTS,
+                crossMinPts: CROSS_MIN_PTS,
+                maStandOn: MA_STAND_ON, maStand1: MA_STAND_1, maStand2: MA_STAND_2,
+                fibNearOn: FIB_NEAR_ON, fibLevels: FIB_LEVELS, fibNearPts: FIB_NEAR_PTS,
+                upperDirOn: UPPER_DIR_ON,
+                strongFxOn: STRONG_FX_ON, strongFxMinPts: STRONG_FX_MIN_PTS,
+                pointValidBars: POINT_VALID_BARS, pointValidPts: POINT_VALID_PTS,
+                stopPts: STOP_PTS, tpPts: TP_PTS,
                 sameBarPriority: SAME_BAR_PRIORITY, mutexScope: MUTEX_SCOPE, lots: LOTS },
       signals: allSignals,
     }), "utf8");
@@ -513,7 +636,7 @@ async function main() {
 }
 
 module.exports = { maSeries, strongFxAfter, scanPeriodSignals, applyMutexAndSimulate,
-                   POINT_CLASS, UPPER_OF };
+                   parseFibLevels, MODULE_OPTS, POINT_CLASS, UPPER_OF };
 
 if (require.main === module) {
   main();

@@ -78,7 +78,7 @@ let bis = core.buildBi(fractals, merged, atr, macdArr); // ③ 笔构建
 |------|------|
 | `fmtT(ts)` | 时间格式化（调试打印用） |
 | `biMacdMetrics(bi, macdArr)` | 一笔区间内的 `{redArea, greenArea, difHigh, difLow, redMax, greenMax}` |
-| `isBiDiverge(bi, refer, macdArr)` | 背驰判定：柱面积变小 **或** 黄白线动能减弱 **或** 柱最大高度变小（OR） |
+| `isBiDiverge(bi, refer, macdArr)` | 背驰判定（2026-10-01 起双判据 AND）：黄白线动能减弱（DIF 低点抬高/高点变低）**且**（时长可比时）柱面积变小；时长比>3 时面积不计入，DIF 单判据兜底 |
 
 ### 买卖点识别
 
@@ -114,23 +114,26 @@ let bis = core.buildBi(fractals, merged, atr, macdArr); // ③ 笔构建
 - `keepRecentEach` 为历史保留函数，主流程已不再调用（现所有周期全部保留买卖点）。
 
 
-## 一小时近等端点补充确认（2026-09-10）
+## 一小时近等端点补充确认（2026-09-10 起；**2026-10-02 已取消**）
 
-原阈值 max(0.3×ATR, 0.001×价格) 保持。仅60分钟价差超过原阈值但不超过1.5倍时，可由15分钟双动能确认：后段同色柱峰值与同侧DIF极值绝对值均不超过前段50%，两段柱峰值均非零，双底DIF均负、双顶均正。保留平台间隔、原阈值反向波动、锁定端点和单次替换保护；数据不足不走补充分支，不改变买卖点创新极值背驰定义。2026-09-25 起：阈值含固定容差并集项 `nearDoubleFixed`（默认 0 不启用）；本补充分支随 60m 周期开关 `nearDouble60` 可关。
+本分支已整体删除：取消 `nearDoubleAtrK`/`nearDoublePct`/`nearDoubleLowerRelax`/`nearDoubleLowerRatio` 四参数与 `makeBiLowerContext`/`lowerEndpointWeaker`/`buildBi.lowerContext` 管线。容差只保留 `nearDoubleFixed`（默认 2.0），比较改为「先影线后实体」——影线更极端直接后移（更极端替换，不带 nearDouble 封顶）；影线不满足比实体（bodyTop/bodyBottom）：后实体价不低于前实体直接后移，更低则差 ≤ 固定容差才后移；中间真实回调深度闸门同用该值，双底完全镜像。详见 .cursor/skills/chan-core/SPEC.md §2.4.2-2。历史背景：原为仅60m 价差超阈值至 1.5 倍时以 15m 双动能确认后端点（8-7 08:00 4229.875 / 15m 08:45）；新规则下该端点经后底实体 4232.90 低于前底实体 4233.815 直接后移到达，画笔不再需要为 60m 预取完整 15m 历史。
 
-JS/Python的`buildBi`增加可选末参`lowerContext`；用`makeBiLowerContext(res,bars,cutoff,macd)`准备15分钟数据和MACD索引，缺省参数保持旧行为。新增配置`nearDoubleLowerRelax=1.5`、`nearDoubleLowerRatio=0.5`。
 
-画笔构建60分钟前需要完整15分钟历史（最近30天仅限显示）；回测、回放和监控仅使用当前决策时刻已收盘数据，先更新低周期。目标小时K线为8月7日08:00、4229.875，15分钟精确极值为08:45；固定样本仅目标相邻两笔变化，实际全量影响需回归检查。
+## 近等后移腿终局守卫（2026-09-30）
 
-完整条件、接口、保护和测试见[现行补充规范](../../../spec/plans/SPEC_near_double_lower_confirmation.md)。早期章节中原阈值的说明描述基础分支，与本补充分支共同适用。
+「近等后顶/后底（反弹不成笔）取后」在提交前必须通过**腿终局守卫**：若合并端点 k 此后被更极端同类型分型突破，且被弹出的反弹段（本段结构极值 anchor → 区间实际最优反向极值 best → 突破点 k2）本可构成两笔有效笔（判据与 `shiftBreakRestore` 补回条件同源），则**拒绝合并**——prev/last 留在序列里，正确结构由标准成笔规则自动长出；否则按原规则取后。`k.locked`（区间套落地）豁免；突破点只看近处（最多 8 个更极端同类型分型，防长程扫描）。
 
+- 动机：近等后移在分型 k 到来时用局部信息断言「反弹腿终结于 k」。若随后价格突破 k 且被弹出的反弹本可成笔，该断言被市场否定——反弹被永久吞进大笔（例：60m 2026-08-31 10:00 底 4396.525→9-1 08:00 顶 4461.7 上涨笔被吞；15m 2026-09-28 17:00 底 4140.775→20:15 顶 4171.42 上涨笔缺失且 20:15 顶被毒化丢弃；60m 07-21 / 08-20 平台后顶同类）。
+- 判据只拦「可证成笔」的破坏：已被后续走势消化的历史合并不受影响（历史重算稳定性）。
+- 守卫只接在近等后移入口；平台取后（`tryNearEqualSameType`）与末根取后不接——其吞没幅度受近等阈值约束且历史面广（2026-09-10 fixture 依赖平台路径）。
+- JS/Python 同构：`nearEqualShiftFalsified`（chan_core.js 阶段二间隔不足分支）/ `_near_equal_shift_falsified`（chan_core.py）；fixture 全量对拍逐笔一致。
 
 ## 近等后顶/后底（反弹不成笔）取后（2026-09-26）
 
 「间隔不足→回溯替换」分支扩展，与近等平台取后顶（2026-09-25 参数化那组）互补：平台规则仅在两顶间已有两段首尾相接的成笔时禁止后移（单独一段成笔不挡）；本规则处理中间**已有合格反向分型**（回调甚至已成有效笔）、但 last→k 反弹/回撤腿 gap<4 拆不出反弹笔的「**回调够深、反弹太短**」场景。
 
 - 条件（k 与 prev=result[-2] 同类型、分支前提 last→k 间隔 <4）：
-  - 近等：`0 ≤ prev−k ≤ thr`（thr 同平台规则 max(nearDoubleAtrK×ATR, nearDoublePct×价, nearDoubleFixed)；仅60m可 1.5×thr + 15m 双动能确认）；
+  - 近等（先影线后实体，2026-10-02）：影线更极端时走 moreExtreme 顶替或 prev 受有效笔保护；影线不满足比实体，`prev−k ≤ thr`（thr = `nearDoubleFixed`，后实体不低于前实体直接取后）；
   - 真实回调：prev→last 反向幅度 ≥ thr；
   - 权限二选一：**k.locked**（上级笔端点=区间套强制落地，任何周期生效、不受 nearDoubleRebound 开关限制——上级已后移的端点必须在本级复现）或 nearDoubleOn(res) 开启周期（60/240/D）且 `nearDoubleRebound`（默认 true）；
   - 排除：prev.gapLocked / prev.locked / last.locked / prev.nearDouble（单跳封顶）；回溯替换保护（lastIsDeeper）仍优先。
@@ -138,3 +141,13 @@ JS/Python的`buildBi`增加可选末参`lowerContext`；用`makeBiLowerContext(r
 - 例：60m 2026-09-18 15:00 顶 4399.67 → 22:00 底 4342.73（22:00/23:00 包含合并）→ 9-19 01:00 顶 4397.045，反弹腿仅 3 根合并K、近等差 2.625 ≤ thr；240 层平台规则已把 4h 顶后移到 9-19 01:00 → 60m 经 k.locked 复现：上涨笔 09-18 11:00 4334.295 → 09-19 01:00 4397.045，下跌笔至 09-21 22:00 4322.81。底对称。
 - 测试：py_chain/test_near_double.cjs / test_near_double.py（fixture near_double_rebound_xauusd_20260919.json.gz：开关关=端点停 4399.67；k.locked 路径不受开关限制；镜像双底案例）。完整条件见 chan-core SPEC §2.4.2-2b（速查表 #6b）。
 
+
+## 缠论结构修正三件套（2026-10-01）
+
+起因：15m XAUUSD 10-1 02:00–06:00 反弹（4147.415→4160.615）不成笔。三层规则过定共同吞掉该反弹，逐层修正后按标准缠论成笔。JS/Python 同步实现，跨端四周期逐笔一致。
+
+1. **向下合并改标准低低（删 `_hiKeep` 创新高保留）**：高点按「压平前真实高点」（`_contain_high`）取较小者。两侧未压平=正统低低（04:45+06:00 取 4159.77，不再保留 4160.615 压制 04:30 顶）；块内含长影压平K且新K真实高点更高时，块高点不低于两者真实较小值（60m 9-21 18:00 压平 4345.73 vs 19:00 真实高 4371.11 → 块高 4356.77，17:00 底分型存活）。
+2. **终点侧反向贯穿改实体口径**：`fractalRangeClear` 终点侧三根证据从影线极值改为 bodyTop/bodyBottom（回退 open/close、再回退影线）；影线刺穿不算（10-1 09:00 长阳高 4161.385 刺穿 04:30 顶 4160.41、实体顶 4159.67 未越过）。单根长K豁免（影线振幅口径）不变。
+3. **平台取后可证伪回退（新规则 `6r`）**：`tryNearEqualSameType` 后移时记 `_platAnchor`；间隔不足分支**入口**（优先于 moreExtreme 顶替/近等后移）若原端点与 k 能完整成笔（`_pair_forms_bi`）且起点侧极值守卫通过（区间内无比起点更极值的同向极值，如 60m 9-18 04:00 底上方藏 4339.72 则不回退）→ 回退原端点并接入 k。例：15m 10-1 02:00 底被近等后移到 03:0、04:30 顶只剩 4 根合并K → 回退后 02:00→04:30 成笔（04:00 长下影压平使包含链多并一块是间隔被挤的诱因）。
+
+回归：15m 全历史 294→342 笔、60m 74→82、240 22→24、D 不变；`_cmp_merge.py`/`_cmp_merge_js.cjs` 生产口径对拍；test_chan_core_rules / test_near_double(.py/.cjs) 断言已按新口径更新。详见 chan-core SPEC §2.1、§2.4.4 与速查表 #6r。

@@ -20,7 +20,7 @@
 - 跳空差值表只存价格差；判定阈值始终用**当前 ATR**（与批量每次重建一致）。
 - 若 ATR 漂移使任一已固化相邻对的跳空布尔翻转，从阶段二起点重放
   （k=0），保证与全量重建同结果。
-- nearDouble / lowerContext 与 buildBi 同参；任一变化触发全量重建。
+- nearDouble 与 buildBi 同参；变化触发全量重建。
 - 重同步（BacktestEngine._resync_bis → invalidate + 批量重建）后严格归零。
   （曾试「批量结果与增量旧值深度相等则换绑续用」：输出相等不足以证明内部栈状态
   一致，增量漂移会跨重同步点存活导致后续 bis 偏离，已回退——见 SPEC §11。）
@@ -28,7 +28,7 @@
 
 from .chan_core import (BiBuildCtx, biSeqStep, biStep, biPair, fixBiExtremes,
                         _stkLen, biListFromHead, countRaw, CHAN_CFG,
-                        applyNearDoubleOpen)
+                        applyNearDoubleOpen, _markLockedPivots, resetBiFlags)
 
 # 尾部重建的笔数裕量：覆盖阶段二最深 3 层回看 + 单次 update 的热区分型数。
 # 单次 _advance_cut（fine=3m）约并入 6 根 30S bar → 热区 seq 元素 ≤ ~8，
@@ -57,7 +57,7 @@ class BiIncBuilder:
         self._cum_final = 1     # cum 有效下标数（0.._cum_final-1）
         self._gap_threshold = None  # 上次构建用的跳空阈值（ATR×gapFilter）
         self._near_double = False
-        self._lower_key = None  # lowerContext 指纹（长度/末时/cutoff），避免对象身份误伤
+        self._lock_key = None   # lockedPivots 指纹（上级笔端点集），变化 → 全量重建
 
     # ---------------- 对外接口 ----------------
 
@@ -65,47 +65,29 @@ class BiIncBuilder:
         """批量重同步后调用：下一次 update 走全量重建（严格等于 batch 口径）。"""
         self._stale = True
 
-    @staticmethod
-    def _lower_fingerprint(lowerContext):
-        """lowerContext 内容指纹：bars 切片对象每次新建，不能用 is 比较。
-
-        不含 cutoff：决策时刻每根 fine 都变，若纳入指纹会迫使 60m 每次阶段二从 0 重放；
-        cutoff 仍传入 BiBuildCtx，仅影响尾部 nearDouble 补充分支（与批量「当前 cutoff」一致
-        的尾部重放足够——接缝用 _TAIL 裕量覆盖）。
-        """
-        if not lowerContext:
-            return None
-        bars = lowerContext.get("bars") or []
-        return (
-            len(bars),
-            bars[-1]["time"] if bars else None,
-            len(lowerContext.get("macd") or []),
-        )
-
-    def update(self, fractals, merged, macd, atr, nearDouble=False, lowerContext=None):
+    def update(self, fractals, merged, macd, atr, nearDouble=False,
+               lockedPivots=None):
         """分型尾部变化后重建笔列表；返回笔列表（self._bis，同一对象）。
 
-        nearDouble/lowerContext 与 buildBi 同口径（按 nearDoubleOn(res) 每周期开关的
-        近等双顶/双底、60m 的 15m 补充分支）。
+        nearDouble/lockedPivots 与 buildBi 同口径（按 nearDoubleOn(res)
+        每周期开关的近等双顶/双底、上级笔端点区间套锁定）。
+        lockedPivots 变化 → 全量重建（上级端点集变动会重标历史分型的锁定位）；
+        不变时增量路径只对本次新折叠的 seq 元素补锁标记（与 buildBi 标记同口径）。
         """
         nearDouble = bool(nearDouble)
-        lower_key = self._lower_fingerprint(lowerContext)
-        # nearDouble 开关变化 → 全量重建；lowerContext 内容变化在增量路径里阶段二重放
+        lock_key = tuple((lp["dir"], lp["price"]) for lp in (lockedPivots or ()))
+        # nearDouble 开关/锁定端点集变化 → 全量重建
         if (self._stale or fractals is not self._fracs or merged is not self._merged
-                or nearDouble != self._near_double):
+                or nearDouble != self._near_double or lock_key != self._lock_key):
             return self._full_rebuild(fractals, merged, macd, atr,
-                                      nearDouble=nearDouble, lowerContext=lowerContext)
+                                      nearDouble=nearDouble,
+                                      lockedPivots=lockedPivots)
         self._sync_gap_cum(len(merged))
         if len(fractals) < 2:
             self._bis = []
             return self._bis
-        # ATR 跳空布尔翻转 → 从首个受影响 seq 起重放；lowerContext 长度变化 → 尾部重放
+        # ATR 跳空布尔翻转 → 从首个受影响 seq 起重放
         atr_rewind = self._atr_gap_rewind_to(atr)
-        if lower_key != self._lower_key:
-            # 15m 上下文变长：只重放尾部（近等双顶补充分支只影响新分型决策）
-            tail_k = max(0, len(self._seq) - _TAIL)
-            atr_rewind = tail_k if atr_rewind is None else min(atr_rewind, tail_k)
-            self._lower_key = lower_key
         # 1) 分型热区：updateFractalsTail 只保留/新增 mergedIdx ≥ n-2 的尾部元素，
         #    d = 首个热区分型索引（此前的前缀 dict 与索引均已冻结）
         n2 = len(merged) - 2
@@ -124,18 +106,27 @@ class BiIncBuilder:
         fold_from = self._seq_start[k] if k < len(self._seq_start) else d
         del self._seq[k:]
         del self._seq_start[k:]
+        n_seq0 = len(self._seq)
         for fi in range(fold_from, len(fractals)):
             f = fractals[fi]
             before = len(self._seq)
             biSeqStep(self._seq, f)
             if len(self._seq) > before:
                 self._seq_start.append(fi)
+        # 重放区旗标重置（2026-10-03 修复）：分型 dict 跨拍复用，上一拍重放留下的
+        # locked/nearDouble/_shiftAnchor 等残留会改变本拍重放的折叠结果（与批量口径
+        # 漂移；实证见 chan_core.resetBiFlags 注释）。n_seq0==k（del 之后、重折叠之前
+        # 捕获），即整个重折叠区；锁定标记随后按当前 lockedPivots 从同一起点重标。
+        resetBiFlags(self._seq, start=n_seq0)
+        # 锁定端点集未变时，新折叠的 seq 元素仍可能与既有锁价格命中（如上级端点晚于
+        # 下级同价位分型出现）——与 buildBi 的全序列标记同口径，只补标新增段。
+        _markLockedPivots(self._seq, lockedPivots, start=n_seq0)
         # 3) 阶段二重放：从受影响位置的前一快照起 biStep（规则体与批量共用）
         del self._heads[k:]
         del self._lens[k:]
         head = self._heads[k - 1] if k > 0 else None
         ctx = BiBuildCtx(merged, atr, macd, nearDouble=nearDouble,
-                         lowerContext=lowerContext, fractals=fractals,
+                         fractals=fractals,
                          gapDiffs=self._gap_diffs, rawCounter=self.count_raw,
                          res=self.res)
         for kk in self._seq[k:]:
@@ -147,7 +138,7 @@ class BiIncBuilder:
         self._splice_bis(applyNearDoubleOpen(ctx, head), merged, ctx, k)
         return self._bis
 
-    def refresh_open(self, fractals, merged, macd, atr, nearDouble=False, lowerContext=None):
+    def refresh_open(self, fractals, merged, macd, atr, nearDouble=False):
         """分型未变时仍用当前末根合并K重算近等后移。
 
         未确认端点不写入冻结栈，下一根仍相对原端点重判。
@@ -160,7 +151,7 @@ class BiIncBuilder:
         last = self._bis[-1] if self._bis else None
         before = None if last is None else (last.get("endTime"), last.get("endPrice"))
         ctx = BiBuildCtx(merged, atr, macd, nearDouble=True,
-                         lowerContext=lowerContext, fractals=fractals,
+                         fractals=fractals,
                          gapDiffs=self._gap_diffs, rawCounter=self.count_raw,
                          res=self.res)
         self._splice_bis(applyNearDoubleOpen(ctx, self._heads[-1]), merged, ctx,
@@ -204,11 +195,11 @@ class BiIncBuilder:
         return countRaw(self._merged, a, b)
 
     def _full_rebuild(self, fractals, merged, macd, atr,
-                      nearDouble=False, lowerContext=None):
+                      nearDouble=False, lockedPivots=None):
         self._fracs = fractals
         self._merged = merged
         self._near_double = bool(nearDouble)
-        self._lower_key = self._lower_fingerprint(lowerContext)
+        self._lock_key = tuple((lp["dir"], lp["price"]) for lp in (lockedPivots or ()))
         self._gap_diffs = []
         self._gap_final = 0
         self._cum = [0]
@@ -224,8 +215,12 @@ class BiIncBuilder:
             biSeqStep(self._seq, f)
             if len(self._seq) > before:
                 self._seq_start.append(fi)
+        # 全量重建同样先去污染（分型 dict 持久、可能带着增量期的残留旗标），再重标
+        # 锁定——否则重建结果依赖历史路径，破坏「重同步点输出严格等于 batch(前缀)」。
+        resetBiFlags(self._seq)
+        _markLockedPivots(self._seq, lockedPivots)
         ctx = BiBuildCtx(merged, atr, macd, nearDouble=self._near_double,
-                         lowerContext=lowerContext, fractals=fractals,
+                         fractals=fractals,
                          gapDiffs=self._gap_diffs, rawCounter=self.count_raw,
                          res=self.res)
         head = None

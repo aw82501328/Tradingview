@@ -1,3 +1,6 @@
+import os as _os
+_os.environ.setdefault("PY_CHAIN_BT_JOURNAL", "0")  # 引擎测试不落交易日志
+
 # -*- coding: utf-8 -*-
 """合约乘数（2026-09-23 统一 MT4/MT5 经纪商口径：1 手 = 0.01 标准手）单元测试。
 

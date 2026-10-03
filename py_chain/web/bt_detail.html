@@ -302,11 +302,18 @@ function btDetailMetricsHtml(s) {
 
 function btDetailExitsHtml(s) {
   const ex = s.exits || {};
-  const cats = [
+  // 缠论V1 三类 + 强分型均线V1 两类（stop/takeProfit；同一方案只命中一组，
+  // fxma 类为 0 时不列行，环形图 0 值段自动隐藏）
+  const base = [
     { label: '保损', n: Number(ex.stopBe || 0), color: '#5a8de6' },
     { label: '止损', n: Number(ex.stopSr || 0), color: '#c8742a' },
     { label: '全平', n: Number(ex.close || 0), color: '#8f6ce8' },
   ];
+  const fx = [
+    { label: '止盈', n: Number(ex.takeProfit || 0), color: '#3aa981' },
+    { label: '固定止损', n: Number(ex.stop || 0), color: '#9a6b2f' },
+  ].filter(c => c.n > 0);
+  const cats = base.concat(fx);
   const total = cats.reduce((n, c) => n + c.n, 0);
   return `<div class="bt-distribution">${donutHtml(cats, String(total), '次出场')}
     <div class="bt-exit-legend">${cats.map(c => `<div class="bt-exit-row"><span><i class="sw" style="background:${c.color}"></i>${c.label}</span><b>${c.n} 次</b><span>${total ? Math.round(c.n / total * 100) + '%' : '—'}</span></div>`).join('')}</div></div>

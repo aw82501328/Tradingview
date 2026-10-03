@@ -53,8 +53,8 @@ import bisect
 import time
 
 from .chan_core import (
-    buildBi, makeBiLowerContext, fixBiExtremes, calcATR, calcMACD, intervalSecOf, fmtT,
-    nearDoubleOn, CHAN_CFG,
+    buildBi, fixBiExtremes, calcATR, calcMACD, intervalSecOf, fmtT,
+    nearDoubleOn, CHAN_CFG, lockedPivotsOf,
     MacdAccumulator, AtrAccumulator, extendLastBi, extendLastBiFrom,
 )
 from .mark_buy_sell import compute_all_marks
@@ -70,6 +70,7 @@ from .mark_entry import (
     DEFAULT_SLIP_STOP_ATR_K, DEFAULT_SLIP_FALLBACK_ATR_K, DEFAULT_SLIP_BE_ATR_K,
     NEAR as DEFAULT_NEAR, EXIT_MIN_MERGED, REALTIME_MIN_BARS, ZS_EXIT_WEAK_RATIO,
 )
+from .bt_journal import BtJournal, FILL_MODE_LABELS, DIR_LABELS
 
 DEFAULT_PERIODS = ["D", "240", "60", "15", "3"]
 DEFAULT_WARMUP_BARS = 60
@@ -118,19 +119,42 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
     tp3a = find_bi_event(px_bis, pos["signalTime"], fav, break_prev=True) if trend else None
     seg5 = forming_seg_ready(px_bis, px_merged_times, is_short, min_merged) \
         if px_merged_times else False
+    fav_cn = "下跌" if is_short else "上涨"
     # 同一拍顺序：保本 → 半平 → 全平 → 止损（逐拍各挂一个）
     if tp1 and tp1["time"] <= t and not pos.get("beDone"):
         pos["beDone"] = True
-        pos["exits"].append({"type": "breakeven", "time": tp1["time"], "price": tp1["price"]})
+        pos["exits"].append({
+            "type": "breakeven", "time": tp1["time"], "price": tp1["price"],
+            "why": (f"TP1 保本：背驰周期 {pos.get('markRes')} 首笔有利方向（{fav_cn}）笔 "
+                    f"{fmtT(tp1['time'])} @ {tp1['price']:.2f} 完成（信号 "
+                    f"{fmtT(pos['signalTime'])} 之后），止损位上移至保本位 beStop "
+                    f"{pos.get('beStop'):.2f}（当拍生效，仅状态迁移不成交）")})
     if trend and lastBiOk(px_bis, fav) and not pos.get("halfDone"):
         # TP2 平一半（仅顺势）：检测周期有利方向够笔才触发（空单=下跌够笔，多单=上涨够笔）。
         # 末笔仍是不利方向（空单上涨）则不够笔，不半平。不要求保本先触发。
         pos["halfDone"] = True
         pos["pendingExit"] = "half"
+        pos["pendingWhy"] = (
+            f"TP2 半平触发（顺势，计划方向 {pos.get('planDirection')}）：检测周期 "
+            f"{pos.get('periodX')} 有利方向（{fav_cn}）已够笔（末笔方向满足 lastBiOk），"
+            f"平一半挂起；剩余半仓止损移至保本位 beStop {pos.get('beStop'):.2f}")
         return "half"
     if (tp3a and tp3a["time"] <= t) or ((not trend) and seg5):
         # TP3 全平：顺势=有利方向笔破前高/前低；逆势=形成段成笔预期快速离场
         pos["pendingExit"] = "close"
+        if trend:
+            ref = tp3a.get("refPrice")
+            ref_txt = (f"破前一同向笔端点 {ref:.2f}（{fmtT(tp3a['refTime'])}）"
+                       if ref is not None else "破前一同向笔端点")
+            pos["pendingWhy"] = (
+                f"TP3 全平触发（顺势，计划方向 {pos.get('planDirection')}）：检测周期 "
+                f"{pos.get('periodX')} 有利方向（{fav_cn}）笔 {fmtT(tp3a['time'])} @ "
+                f"{tp3a['price']:.2f} {ref_txt}，全平挂起")
+        else:
+            pos["pendingWhy"] = (
+                f"TP3 全平触发（逆势，计划方向 {pos.get('planDirection')}）：检测周期 "
+                f"{pos.get('periodX')} 有利方向（{fav_cn}）形成段合并后≥{min_merged}根K"
+                f"（成笔预期），快速离场，全平挂起")
         return "close"
     # 进场K线止损下限（stopEntryBarFloor）：进场背驰周期K线仍在走（bar 落在其窗口内）
     # 且未保本 → 用当根极值更新运行极值并把止损外推到 运行极值±有效止损滑点（只放松，
@@ -139,6 +163,7 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
     bs, be = pos.get("entryBarStart"), pos.get("entryBarEnd")
     if (bs is not None and not pos.get("beDone")
             and bs <= bar["time"] < be):
+        prev_stop = pos.get("stopRef")
         e = bar["high"] if is_short else bar["low"]
         cur = pos.get("entryBarExt")
         pos["entryBarExt"] = e if cur is None else \
@@ -152,12 +177,23 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
         if ml is not None:
             pos["stopRef"] = min(pos["stopRef"], ml) if is_short \
                 else max(pos["stopRef"], ml)
+        if pos["stopRef"] != prev_stop:
+            # 止损位被进场K线极值外推改变（只放松）→ 来源注记同步（日志叙事用）
+            pos["stopSource"] = (f"进场K线外推：运行极值 {pos['entryBarExt']:.2f}"
+                                 f"{'+' if is_short else '-'}止损滑点 "
+                                 f"{pos.get('slipStopEff', 0):.2f}")
     stop = pos.get("beStop") if pos.get("beDone") else pos.get("stopRef")
     if stop is not None:  # 止损位永不为 None（最大止损兜底），此保护仅防御旧持仓数据
         hit = bar["high"] > stop if is_short else bar["low"] < stop
         if hit:
             typ = "stopBe" if pos.get("beDone") else "stopSr"
+            ext = bar["high"] if is_short else bar["low"]
+            src = (f"保本位 beStop {stop:.2f}" if pos.get("beDone")
+                   else f"止损位 {stop:.2f}（来源：{pos.get('stopSource') or '支阻位±滑点'}）")
             pos["pendingExit"] = typ
+            pos["pendingWhy"] = (
+                f"{typ} 触发：{fmtT(bar['time'])} 当根{'最高' if is_short else '最低'} "
+                f"{ext:.2f} {'冲上' if is_short else '跌破'}{src}，止损挂起")
             return typ
     return None
 
@@ -172,7 +208,13 @@ def execute_pending_exit(pos, exec_bar):
     if et is None:
         return None
     pos["pendingExit"] = None
-    pos["exits"].append({"type": et, "time": exec_bar["time"], "price": exec_bar["open"]})
+    # 触发叙事跨拍携带（决策拍挂起 → 成交拍落事件）：决策与成交隔一拍，
+    # pendingExit 守卫保证不被并发覆盖
+    why = pos.pop("pendingWhy", None)
+    if why:
+        why += f"；下一开盘 {fmtT(exec_bar['time'])} @ {exec_bar['open']:.2f} 成交"
+    pos["exits"].append({"type": et, "time": exec_bar["time"],
+                         "price": exec_bar["open"], "why": why})
     if et == "half":
         # 剩余半仓止损移至保本位 beStop（后续打止损记 stopBe；若 TP1 尚未发生过，
         # breakeven 事件不补记——half 本身已是状态迁移）
@@ -187,6 +229,7 @@ def close_trade(pos, exit_type, exit_time, exit_price):
     pos["exitType"] = exit_type
     pos["exitTime"] = exit_time
     pos["exitPrice"] = exit_price
+    pos["exitWhy"] = (pos.get("exits") or [{}])[-1].get("why") if pos.get("exits") else None
     d = 1 if pos["direction"] == "long" else -1
     entry = pos["entryPrice"]
     lots = pos.get("lots", 1)
@@ -388,6 +431,8 @@ class BacktestEngine:
         # 增量笔构建器（bi_inc：分型尾部变化只续算尾部，避免 O(全窗口) 全量重建
         # 的平方级放大）。全周期启用；ATR 跳空布尔翻转时阶段二重放；重同步时 invalidate。
         self._bi_inc = {res: BiIncBuilder(res) for res in self.periods}
+        # 数据阶段记录的分型变化标记（_append_bars 写、_rebuild_bis_inc 消费）
+        self._frac_changed = {res: False for res in self.periods}
         # bars 前缀缓存：cut 只增不减时原地 extend，避免每次链路重算 O(cut) 切片拷贝
         self._bars_prefix = {res: [] for res in self.periods}
         self._bars_prefix_cut = {res: 0 for res in self.periods}
@@ -397,10 +442,9 @@ class BacktestEngine:
         self._macd_times = {res: [] for res in self.periods}  # 与 macd.entries 一一对应（切片二分用）
         self._atr = {res: AtrAccumulator(14) for res in self.periods}
         # 长影预处理增量状态（markWickBars 的逐根版，见 _wick_process）：
-        # prev/prev2=最近两根原始bar（延迟判 _topCand 的左右邻）、trSum/trCnt/prevClose=
-        # 运行TR均值、pending=上一根压平后的bar
-        self._wick = {res: {"prev": None, "prev2": None, "trSum": 0.0, "trCnt": 0,
-                            "prevClose": None, "pending": None} for res in self.periods}
+        # prev/prev2=最近两根原始bar（延迟判 _topCand 的左右邻）、pending=上一根压平后的bar。
+        # wickMinLen 改具体数值（2026-10-02）后不再维护运行 TR 均值（trSum/trCnt/prevClose 已删）
+        self._wick = {res: {"prev": None, "prev2": None, "pending": None} for res in self.periods}
         self._trimmed = {res: [] for res in self.periods}  # 压平后K线（merge/延伸用，与原始bar一一对应）
         self._marks = {}
         self._sr = None
@@ -426,27 +470,18 @@ class BacktestEngine:
     def _wick_process(self, res, bar):
         """长影预处理（markWickBars 的逐根增量版，与图表批量版逐条对齐）：
 
-        - 压平判定自足（影线占比 ≥ wickRatio 且 ≥ wickAtrK×运行TR均值），新 bar 到达即判、
+        - 压平判定自足（影线占比 ≥ wickRatio 且影线长度 ≥ wickMinLen 具体数值，且整根
+          价差（high-low）> wickMinRange 前提），新 bar 到达即判、
           立即生效；长上影 high 压平至实体顶，长下影 low 压平至实体底并记 _origLow。
         - _topCand 需右邻原始低点，延后一根判（图表批量版同样无法给最后一根判 _topCand——
           无 next）：下一根到达时若「low 不低于左右相邻原始K线低点」，把 _topCand=原 high
           回标到 merged 尾巴（带 > 传播守卫，与 _mergeStep 传播规则一致）。
-        - 运行 TR 均值 = 已收K线的全量均值（含当前根 TR），与批量版「全窗口含末根」同构，
-          只随窗口增长渐稳、不随局部行情抖动。
 
         返回压平后的 bar（喂 _mergeStep 与延伸）；原始 bar 由调用方喂 MACD/ATR 累加器。"""
         w = self._wick[res]
         merged = self._merged[res]
-        # 1) 运行 TR 均值（先含当前根 TR，再判当前根——与批量版口径一致）
-        if w["prevClose"] is not None:
-            tr = max(bar["high"] - bar["low"],
-                     abs(bar["high"] - w["prevClose"]),
-                     abs(bar["low"] - w["prevClose"]))
-            w["trSum"] += tr
-            w["trCnt"] += 1
-        w["prevClose"] = bar["close"]
-        min_wick = (w["trSum"] / w["trCnt"]) * CHAN_CFG["wickAtrK"] if w["trCnt"] else 0.0
-        # 2) 上一根的延迟 _topCand 判定：左右邻原始低点现已齐全（pend.low 未被上影压平改动）
+        min_wick = CHAN_CFG.get("wickMinLen", 0.5)
+        # 1) 上一根的延迟 _topCand 判定：左右邻原始低点现已齐全（pend.low 未被上影压平改动）
         pend = w["pending"]
         if pend is not None and pend.get("_wantTopCand"):
             prev2 = w["prev2"]  # pend 的左邻原始 bar
@@ -457,10 +492,10 @@ class BacktestEngine:
                 if top_cand > last.get("_topCand", 0):
                     last["_topCand"] = top_cand
                     last["_topCandTime"] = pend["time"]
-        # 3) 当前 bar 压平判定（自足）
+        # 2) 当前 bar 压平判定（自足）
         b = dict(bar)
         amp = b["high"] - b["low"]
-        if amp > 0:
+        if amp > CHAN_CFG.get("wickMinRange", 0.0):
             body_top = max(b["open"], b["close"])
             body_bottom = min(b["open"], b["close"])
             upper = b["high"] - body_top
@@ -481,20 +516,12 @@ class BacktestEngine:
 
     def _synth_wick_view(self, res, bar):
         """试算合成K的压平视图（C-1；不改 _wick 运行状态）。口径与 _wick_process
-        第 3 步一致：min_wick 含合成K自身 TR（与批量版「先含当前根再判」对齐）；
-        合成K即末根、无右邻，不做 _topCand 延迟回标（真实 bar 收盘时走正常通道）。"""
-        w = self._wick[res]
-        tr_sum, tr_cnt = w["trSum"], w["trCnt"]
-        if w["prevClose"] is not None:
-            tr = max(bar["high"] - bar["low"],
-                     abs(bar["high"] - w["prevClose"]),
-                     abs(bar["low"] - w["prevClose"]))
-            tr_sum += tr
-            tr_cnt += 1
-        min_wick = (tr_sum / tr_cnt) * CHAN_CFG["wickAtrK"] if tr_cnt else 0.0
+        第 2 步一致（wickMinLen 具体数值，2026-10-02 起）；合成K即末根、无右邻，
+        不做 _topCand 延迟回标（真实 bar 收盘时走正常通道）。"""
+        min_wick = CHAN_CFG.get("wickMinLen", 0.5)
         b = dict(bar)
         amp = b["high"] - b["low"]
-        if amp > 0:
+        if amp > CHAN_CFG.get("wickMinRange", 0.0):
             body_top = max(b["open"], b["close"])
             body_bottom = min(b["open"], b["close"])
             upper = b["high"] - body_top
@@ -567,10 +594,12 @@ class BacktestEngine:
         return out
 
     def _append_bars(self, res, new_bars):
-        """把 res 周期新增的K线逐根并入增量状态；返回该周期笔结构是否变化（新分型或延伸推进）。
+        """把 res 周期新增的K线逐根并入增量状态（数据阶段）；返回是否有新K线并入。
 
         长影预处理先行（_wick_process）：压平后的 bar 才进包含合并与笔延伸；
-        MACD/ATR 累加器始终用原始 bar（与 chan-bi：ATR/MACD 基于未剔除的原始K线一致）。"""
+        MACD/ATR 累加器始终用原始 bar（与 chan-bi：ATR/MACD 基于未剔除的原始K线一致）。
+        笔结构构建不在本方法（由 _rebuild_bis_inc 按 D→240→60→15→3 外→内顺序执行，
+        保证下级锁定端点取自刚更新的上级笔）。"""
         from .chan_core import _mergeStep, updateFractalsTail, extendLastBiFrom
         merged = self._merged[res]
         direction = self._merge_dir[res]
@@ -598,20 +627,50 @@ class BacktestEngine:
         old_last = old_f[-1] if old_f else None
         new_f = updateFractalsTail(old_f, merged)
         self._fractals[res] = new_f
-        bis_changed = False
-        if len(new_f) != old_len or (new_f and old_last is not None and new_f[-1] != old_last):
-            bis_changed = True
+        # 分型是否变化：由后续 _rebuild_bis_inc（外→内顺序）消费，锁端点取当时的上级笔
+        self._frac_changed[res] = bool(
+            len(new_f) != old_len or (new_f and old_last is not None and new_f[-1] != old_last))
+        return True
+
+    def _upper_res_of(self, res):
+        """按周期从大到小排列后的上一级（D→240→60→15→3 逐级锁定，与 chan-bi PERIODS 顺序一致）。"""
+        order = sorted(self.periods, key=lambda r: -(intervalSecOf(r) or 0))
+        for i, r in enumerate(order):
+            if str(r) == str(res):
+                return order[i - 1] if i > 0 else None
+        return None
+
+    def _locked_pivots_for(self, res):
+        """下级区间的区间套锁定端点：来自刚更新完的上级笔（数据 ≤ 决策时刻，无未来函数）。"""
+        upper = self._upper_res_of(res)
+        if upper is None:
+            return None
+        return lockedPivotsOf(self._bis.get(upper))
+
+    def _rebuild_bis_inc(self, res):
+        """笔结构阶段：增量构建器更新 + 末根近等后移 + 最后一笔延伸。
+
+        必须按外→内顺序调用（_advance_cut / step_to 重放均已保证）——上级笔先更新，
+        _locked_pivots_for 才拿到与 chan-bi 同口径的新鲜端点。返回笔结构是否变化。
+        """
+        new_f = self._fractals[res]
+        merged = self._merged[res]
+        macd = self._macd[res]
+        atr = self._atr[res]
+        bis_changed = self._frac_changed.get(res, False)
         near_double = nearDoubleOn(res)
-        lower = self._lower_context_for(res) if near_double else None
+        locks = self._locked_pivots_for(res)
+        lock_key = tuple((lp["dir"], lp["price"]) for lp in (locks or ()))
         inc = self._bi_inc[res]
-        # 重同步后构建器已失效：下一根即使分型没变，也要全量重建，末根近等才跟得上
-        if bis_changed or (near_double and inc._stale):
+        # 重同步后构建器已失效：下一根即使分型没变，也要全量重建，末根近等才跟得上。
+        # 锁端点集变化（上级笔更新）同样要重建——分型没变时锁标记也会重排。
+        if bis_changed or (near_double and inc._stale) or lock_key != inc._lock_key:
             self._bis[res] = inc.update(
                 new_f, merged, macd.to_list(), atr.value,
-                nearDouble=near_double, lowerContext=lower)
+                nearDouble=near_double, lockedPivots=locks)
         elif near_double and inc.refresh_open(
                 new_f, merged, macd.to_list(), atr.value,
-                nearDouble=True, lowerContext=lower):
+                nearDouble=True):
             # 末根尚未形成顶/底分型，近等后移仍要落到当前笔上
             self._bis[res] = inc._bis
             bis_changed = True
@@ -665,18 +724,8 @@ class BacktestEngine:
         self._bis[res] = self._build_bis(res, merged, self._fractals[res],
                                          self._macd[res].to_list(), self._atr[res].value)
         self._extend_last(res)
-        # wick 运行状态重建（与已收前缀一致）
+        # wick 运行状态重建（与已收前缀一致；wickMinLen 具体数值后无 TR 均值可重建）
         w = self._wick[res]
-        w["trSum"] = 0.0
-        w["trCnt"] = 0
-        prev_close = None
-        for b in raw:
-            if prev_close is not None:
-                tr = max(b["high"] - b["low"], abs(b["high"] - prev_close), abs(b["low"] - prev_close))
-                w["trSum"] += tr
-                w["trCnt"] += 1
-            prev_close = b["close"]
-        w["prevClose"] = prev_close
         w["prev"] = raw[-1] if len(raw) >= 1 else None
         w["prev2"] = raw[-2] if len(raw) >= 2 else None
         # pending 恢复：末根若被上影压平（批量口径），保留 _wantTopCand 语义，
@@ -694,21 +743,12 @@ class BacktestEngine:
                 w["pending"] = dict(last_p)
 
     def resync_all(self):
-        """全部周期批量重同步（run() 收尾前调用，使最终状态严格等于 batch(全前缀)）。"""
-        for res in self.periods:
+        """全部周期批量重同步（run() 收尾前调用，使最终状态严格等于 batch(全前缀)）。
+        外→内顺序（与 chan-bi 逐级构建一致）：_build_bis 的区间套锁定端点取自
+        刚重建的上级笔。"""
+        for res in sorted(self.periods, key=lambda r: -(intervalSecOf(r) or 0)):
             self._resync_bis(res)
         self._last_resync = self._cut.get(self.fine_res, 0)
-
-    def _lower_context_for(self, res):
-        """60m 近等双顶/底的 15m 补充分支上下文（与批量 buildBi 同口径）。"""
-        if str(res) != "60" or "15" not in self._cut:
-            return None
-        # 复用前缀缓存，避免每次切片新 list（指纹仍含 len/末时/cutoff）
-        raw = self._prefix_bars("15")
-        return makeBiLowerContext(
-            res, raw, cutoff=getattr(self, "_decision_time", float("inf")),
-            macd=self._macd["15"].to_list(),
-            times=self._macd_times.get("15"))
 
     def _prefix_bars(self, res):
         """返回 bars[:cut] 的稳定前缀列表：cut 增长时原地 extend（O(Δ)），避免整表拷贝。"""
@@ -731,13 +771,15 @@ class BacktestEngine:
     def _build_bis(self, res, merged, fractals, macd, atr):
         """从分型重建笔并做端点极值修正；返回按时间升序的笔列表。
         近等双顶/双底平台取后顶/后底与 chan-bi/build_bis 一致：按 nearDoubleOn(res)
-        每周期开关开启（默认 60/240/D）。
+        每周期开关开启（默认 60/240/D）。区间套锁定端点取自刚更新的上级笔
+        （_locked_pivots_for，数据 ≤ 决策时刻——与 chan-bi lockedPivotsOf(prevBis)
+        逐级同口径，无未来函数）。
         重同步路径走批量 buildBi；增量路径走 BiIncBuilder.update。"""
         from .chan_core import fixBiExtremes
         if len(fractals) < 2:
             return []
-        lower = self._lower_context_for(res)
-        bis = buildBi(fractals, merged, atr, macd, None, nearDoubleOn(res), lower, res)
+        bis = buildBi(fractals, merged, atr, macd,
+                      self._locked_pivots_for(res), nearDoubleOn(res), res)
         bis = fixBiExtremes(bis, merged) or bis
         return bis
 
@@ -821,7 +863,8 @@ class BacktestEngine:
         self._decision_time = t
         changed = False
         if self._replay_needed:
-            for res in sorted(self._replay_needed, key=lambda r: intervalSecOf(r) or 0):
+            # 外→内重放：上级笔先重建，下级 _resync_bis 里的锁定端点才是新鲜的
+            for res in sorted(self._replay_needed, key=lambda r: -(intervalSecOf(r) or 0)):
                 if self._rewind_res(res):
                     changed = True
             self._replay_needed.clear()
@@ -933,7 +976,8 @@ class BacktestEngine:
 
     def run(self, to_ts=None, start_ts=None, log=None, log_every=2000,
             on_progress=None, on_signal=None, on_trade=None, on_exit=None, on_suppressed=None,
-            paused=None, stopped=None):
+            paused=None, stopped=None, journal=None, journal_symbol=None,
+            journal_strategy="chan", fast_warmup=True):
         """逐根K线重放。
 
         @param to_ts      结束时间戳（None 表示回测到最后一根）
@@ -950,7 +994,16 @@ class BacktestEngine:
         @param on_suppressed 可选：同向持仓互斥过滤的信号逐个调用 on_suppressed(s)
         @param paused     可选：threading.Event，置位时回测挂起等待（clear 后继续）
         @param stopped    可选：threading.Event，置位时提前停止并返回当前部分结果
-        @returns dict：{ signals, trades, stats, ... }，见 _finish
+        @param journal    交易日志（bt_journal.BtJournal）：None=默认新建（data/journal/
+                          NDJSON，零开销口径）；False=关闭；实例=外部注入（测试/复用）。
+                          事后用 py_chain.bt_query 零重算回答单笔「为什么」问题。
+        @param journal_symbol / journal_strategy  日志文件命名分组键（品种/策略）。
+        @param fast_warmup 预热批量热启动（默认开）：start_i 超过 RESYNC_EVERY 时
+                          先一把 _advance_cut 推进到最近重同步网格点（该点状态=
+                          batch(前缀)，与逐步路径的重同步点同口径，节拍也对齐），
+                          其后 <RESYNC_EVERY 根照旧逐步推进——行为等价由
+                          test_warmup_faststart 对拍锁定；False=旧逐根预热（对拍基准）。
+        @returns dict：{ signals, trades, stats, journal, ... }，见 _finish
         """
         log = log or (lambda *a, **k: None)
         fine = self.bars[self.fine_res]["_list"]
@@ -974,6 +1027,52 @@ class BacktestEngine:
         stats = {"steps": 0, "signals": 0, "executed": 0, "suppressed": 0, "closed": 0,
                  "long": 0, "short": 0, "markRes": {}, "strategyKeys": {}}
 
+        # 交易日志（零开销口径：事件+状态变化+拒绝去重；journal=False 关闭）。
+        # self._journal 供 _fill_pending/_collect_realtime/_rebuild_chain 等方法内部
+        # 零签名改动取用；run 结束（两条 return 路径）在 _journal_close 统一落 footer
+        # 并复位（step_to 实时路径不写日志）。
+        jr = (journal if isinstance(journal, BtJournal)
+              else BtJournal(enabled=False) if journal is False
+              else BtJournal(strategy=journal_strategy, symbol=journal_symbol))
+        self._journal = jr
+        self._entry_reject_hook = None  # 确认制 compute_entries 拒绝钩子（_rebuild_chain 消费）
+        if jr is not None and jr.enabled:
+            def _entry_reject_hook(gate, period, seg_start, skey, ctx, t):
+                jr.reject(t, gate, period, seg_start, skey, **(ctx or {}))
+            self._entry_reject_hook = _entry_reject_hook
+        if jr is not None and jr.enabled:
+            jr.header({
+                "periods": self.periods, "fineRes": self.fine_res,
+                "warmupBars": self.warmup_bars, "startTs": start_ts, "toTs": to_ts,
+                "fillMode": self.fill_mode, "signalMode": self.signal_mode,
+                "lots": self.lots, "near": self.near,
+                "slipStop": self.slip_stop, "slipFallback": self.slip_fallback,
+                "slipBe": self.slip_be, "contractMult": self.contract_mult,
+                "expectBi": self.expect_bi, "divergeConfirm": self.diverge_confirm,
+                "entryMacdShrink": self.entry_macd_shrink,
+                "stopEntryBarFloor": self.stop_entry_bar_floor,
+                "exitMinMerged": self.exit_min_merged,
+                # 实际加载数据范围（诊断数据源截断：cards 说"跑到最新"但加载层少给数据时
+                # 可直接从 header 看出，如 9-4 07:45 提前截止）
+                "nBars": {res: len(self.bars[res]["_list"]) for res in self.periods},
+                "lastBarTime": fine[-1]["time"] if len(fine) else None,
+            })
+
+        def _jr_exits(tr):
+            """把 tr.exits 中未落日志的新出场事件写 journal（_jx=已写水位）。"""
+            if jr is None or not jr.enabled:
+                return
+            ex = tr.get("exits") or []
+            jx = tr.get("_jx", 0)
+            while jx < len(ex):
+                e = ex[jx]
+                jx += 1
+                try:
+                    jr.exit_event(tr.get("tradeNo"), e, tr.get("journalId"))
+                except Exception:
+                    pass
+            tr["_jx"] = jx
+
         def _wait_if_paused():
             """paused 置位时挂起等待（同时响应 stopped 中断），供外部暂停/继续。"""
             while paused is not None and paused.is_set():
@@ -983,6 +1082,11 @@ class BacktestEngine:
             return True
 
         def _emit_signal(s):
+            if jr is not None and jr.enabled:
+                try:
+                    jr.signal(s)   # 回填 s["_jid"]，成交行经 trade.journalId 关联
+                except Exception:
+                    pass
             if on_signal:
                 try:
                     on_signal(s)
@@ -990,6 +1094,12 @@ class BacktestEngine:
                     pass
 
         def _emit_exit(tr):
+            if jr is not None and jr.enabled:
+                try:
+                    _jr_exits(tr)
+                    jr.trade_end(tr)
+                except Exception:
+                    pass
             if on_exit:
                 try:
                     on_exit(tr)
@@ -1010,20 +1120,51 @@ class BacktestEngine:
             self._rebuild_chain(include_entries=self.signal_mode != "realtime",
                                 price_arrays=price_arrays, bar_times=self._times)
 
-        # 预热阶段（warmup 之前），先把切片推进到位（仅计算，不判定进场）
-        for i in range(start_i):
+        # 预热阶段（warmup 之前），先把切片推进到位（仅计算，不判定进场）。
+        # 预热也报进度与日志（刻度统一用 end_i，进度条单调爬升不回退）——长预热
+        # （lead 天数，可达数万根）期间不再静默，避免「点了像没反应」。
+        # 批量热启动（2026-10-01）：start_i 超过 RESYNC_EVERY 时先一把 _advance_cut
+        # 推进到最近重同步网格点——该点状态=batch(前缀)，与逐步路径每 200 根的
+        # 重同步点同口径（RESYNC_EVERY 契约，test_engine_lock_parity），_advance_cut
+        # 内部自动触发 resync_all 并把 _last_resync 对齐到网格点；其后 <RESYNC_EVERY
+        # 根照旧逐步推进，重同步节拍与逐步路径完全一致。省掉逐根推进 + n/200 次
+        # 全量重同步的超线性开销（XAUUSD 60 天预热实测 335s → 0.5s，
+        # test_warmup_faststart 对拍行为逐字节一致）。
+        warm_i = 0
+        if fast_warmup and start_i >= RESYNC_EVERY:
+            warm_i = (start_i // RESYNC_EVERY) * RESYNC_EVERY
+            self._advance_cut(fine[warm_i - 1]["time"] + fine_sec)
+            if on_progress:
+                try:
+                    on_progress(warm_i, end_i)
+                except Exception:
+                    pass
+            if log:
+                log(f"预热批量推进：第 {warm_i}/{start_i} 根（{fmtT(fine[warm_i - 1]['time'])}）")
+        for i in range(warm_i, start_i):
             if stopped is not None and stopped.is_set():
                 break
             if not _wait_if_paused():
                 break
             self._advance_cut(fine[i]["time"] + fine_sec)
+            if on_progress:
+                try:
+                    on_progress(i + 1, end_i)
+                except Exception:
+                    pass
+            if log and (i + 1) % log_every == 0:
+                log(f"预热进度：第 {i + 1}/{start_i} 根（{fmtT(fine[i]['time'])}）")
         if stopped is not None and stopped.is_set():
-            return self._finish(allSignals, trades, stats)
+            result = self._finish(allSignals, trades, stats)
+            self._journal_close(jr, stats, result)
+            return result
         log(f"预热完成：最小周期 {self.fine_res} 已到第 {start_i} 根（{fmtT(fine[start_i-1]['time'])}）")
 
         # 预热后先做一次全量链路重算（含支阻位/计划/进出场），之后只在笔结构变化时重算，
         # 避免每根K线全量重算链路（O(n) 扫描）导致回测 O(n²) 卡死
         rebuild_chain()
+        if jr is not None and jr.enabled:
+            self._journal_states(jr, fine[start_i - 1]["time"] + fine_sec)
         if self.signal_mode == "realtime":
             # 当下背驰：预热完成时刻先评一次（链路状态已就绪，t=最后一根预热bar收盘）
             pending = self._collect_realtime(allSignals, stats, fine[start_i - 1]["time"] + fine_sec)
@@ -1039,6 +1180,10 @@ class BacktestEngine:
                 break
             t = fine[i + 1]["time"] if i + 1 < end_i else fine[i]["time"] + fine_sec
             changed = self._advance_cut(t)
+            if jr is not None and jr.enabled and i % 3 == 0:
+                # 每 3 拍采样一次（计划/趋势/段身份变化远稀于逐拍；--why-not 分辨率
+                # ≤3 根 fine K，实测把日志开销从 ~2% 压到 ~1.5%）
+                self._journal_states(jr, t)
             # 出场判定（统一口径：已收盘 bar 判定，成交挂起到下一根开盘执行）：
             # 用刚收盘的 fine bar（第 i 根）完整 high/low 查止损 + 当前笔快照查三档止盈
             for d in ("long", "short"):
@@ -1050,6 +1195,7 @@ class BacktestEngine:
                                       self._bis.get(pos.get("periodX")) or [],
                                       self._merged_times.get(pos.get("periodX")) or [],
                                       min_merged=self.exit_min_merged)
+                _jr_exits(pos)  # breakeven 当拍落事件；half/close/stop 挂起待下一拍成交
             if self.signal_mode == "realtime":
                 # 当下背驰：笔结构变化时重算链路（刷新①③所需的计划/支阻位缓存），
                 # 之后每根 fine 收盘都用当前增量状态（bis 已延伸到当下极值、MACD 增量）评估②
@@ -1082,6 +1228,8 @@ class BacktestEngine:
                             stats["stopped"] = stats.get("stopped", 0) + 1
                         self._rearm_fired(closed_trade)
                         _emit_exit(closed_trade)
+                    else:
+                        _jr_exits(pos)  # half 事件已落（终局未到，继续持有半仓）
                 n_trades_before = len(trades)
                 self._fill_pending(trades, pending, fine[i + 1]["open"], fine[i + 1]["time"], stats,
                                    collectT=t, open_pos=open_pos, on_suppressed=on_suppressed)
@@ -1105,7 +1253,64 @@ class BacktestEngine:
             log(f"回测完成：共 {stats['steps']} 步，信号 {stats['signals']}，成交 {stats['executed']}")
         # 收尾批量重同步：最终笔状态严格等于 batch(全前缀)（增量 wick 漂移归零）
         self.resync_all()
-        return self._finish(allSignals, trades, stats)
+        result = self._finish(allSignals, trades, stats)
+        self._journal_close(jr, stats, result)
+        return result
+
+    # ---------------- 交易日志（bt_journal 落盘钩子） ----------------
+
+    def _journal_states(self, jr, t):
+        """各周期紧凑状态行（仅变化落盘）：计划/趋势方向 + 末笔（形成段）快照。
+        「为什么某时间没开单」→ T 前最后一条 state 行给出当时各层门控状态。"""
+        try:
+            plan = self._plan or {}
+            trend = self._trend_state or {}
+            tdir = trend.get("dir") if trend else None
+            treason = (trend.get("reason") or "")[:40] if trend else ""
+            for P in self.periods:
+                bis = self._bis.get(P) or []
+                last = bis[-1] if bis else None
+                pl = plan.get(P) or {}
+                jr.state(t, P, {
+                    "planDir": pl.get("direction"),
+                    "planStrategy": pl.get("strategy"),
+                    "planReason": (pl.get("reason") or "")[:80],
+                    "trendDir": tdir, "trendReason": treason,
+                    "segStart": last.get("startTime") if last else None,
+                    "segType": last.get("type") if last else None,
+                    "segForming": bool(last.get("_forming")) if last else False,
+                    "segEnd": last.get("endTime") if last else None,
+                    "segEndPrice": last.get("endPrice") if last else None,
+                }, volatile=("segEnd", "segEndPrice"))
+        except Exception:
+            pass
+
+    def _journal_close(self, jr, stats, result):
+        """run() 两条结束路径共用的日志收尾：footer + 未平仓 trade_end + 关文件 +
+        复位 self._journal（step_to 实时路径不写日志）。"""
+        if self._journal is jr:
+            self._journal = None
+            self._entry_reject_hook = None
+        if jr is None or not jr.enabled:
+            return
+        try:
+            result["journal"] = jr.path
+            for tr in result.get("trades") or []:
+                if tr.get("state") == "open":
+                    ex = tr.get("exits") or []
+                    jx = tr.get("_jx", 0)
+                    while jx < len(ex):  # 数据末端挂起未成交的 pendingWhy 不补事件
+                        e = ex[jx]
+                        jx += 1
+                        jr.exit_event(tr.get("tradeNo"), e, tr.get("journalId"))
+                    tr["_jx"] = jx
+                    jr.trade_end(tr)   # 期末 mark-to-market（pnl 已由 _finish 结算）
+            jr.footer(stats, {"lastTime": result.get("lastTime"),
+                              "lastPrice": result.get("lastPrice")})
+        except Exception:
+            pass
+        finally:
+            jr.close()
 
     def _advance_cut(self, t):
         """把各周期切片推进到「已收盘」bar（收盘时刻 ≤ 决策时刻 t），逐根并入增量状态。
@@ -1129,6 +1334,14 @@ class BacktestEngine:
                 new_bars = self.bars[res]["_list"][old:k]
                 changed = True
                 if self._append_bars(res, new_bars):
+                    changed = True
+        # 笔结构阶段：外→内（D→240→60→15→3）——上级笔先更新，下级锁定端点
+        # （_locked_pivots_for）才与 chan-bi 逐级构建同口径；上级笔变化会经
+        # bi_inc 的锁指纹变化自动触发下级全量重建。各分支幂等：无新数据时
+        # update 被 frac_changed/_stale 门控跳过，refresh_open/延伸结果不变。
+        if changed:
+            for res in sorted(self.periods, key=lambda r: -(intervalSecOf(r) or 0)):
+                if self._rebuild_bis_inc(res):
                     changed = True
         # 周期性批量重同步：消除增量 wick 阈值漂移（见 RESYNC_EVERY），重同步点上
         # 引擎状态严格等于 batch(前缀)。链路重算由调用方按 changed=True 触发。
@@ -1262,6 +1475,8 @@ class BacktestEngine:
                 return
             srLevels = (self._sr or {}).get("merged") or []
             detectPeriods = filterDetectPeriods(self.periods)
+            # 确认制拒绝原因（交易日志）：run() 期间挂 self._entry_reject_hook；
+            # step_to 实时路径无日志（getattr 缺省 None，行为不变）
             try:
                 self._entries = compute_entries(periodBis, barsByPeriod, self._plan, srLevels,
                                                 detectPeriods=detectPeriods, near=self.near,
@@ -1269,7 +1484,8 @@ class BacktestEngine:
                                                 with_30s=any(str(p).upper() == "30S" for p in self.periods),
                                                 zs_exit_weak_ratio=self.zs_exit_weak_ratio,
                                                 trend_res=self.trend_res,
-                                                trend_state=self._trend_state)
+                                                trend_state=self._trend_state,
+                                                on_reject=getattr(self, "_entry_reject_hook", None))
             except Exception:
                 self._entries = {}
 
@@ -1354,6 +1570,12 @@ class BacktestEngine:
                 else:
                     macdTViews[res] = [m["time"] for m in macdViews[res]]
         try:
+            jr = getattr(self, "_journal", None)
+            on_reject = None
+            if jr is not None and jr.enabled:
+                def on_reject(gate, period, seg_start, skey, ctx, t):
+                    # 交易日志：各闸门拒绝（journal 内部按 (周期,策略,段,闸门) 去重）
+                    jr.reject(t, gate, period, seg_start, skey, **(ctx or {}))
             sigs = evaluateRealtimeEntries(
                 getattr(self, "_structure_bis", self._bis),
                 macdViews,
@@ -1369,6 +1591,7 @@ class BacktestEngine:
                 zsExitWeakRatio=self.zs_exit_weak_ratio,
                 trend_res=self.trend_res,
                 trend_state=self._trend_state,
+                on_reject=on_reject,
             )
         finally:
             for lst in reversed(tail_lists):
@@ -1404,10 +1627,21 @@ class BacktestEngine:
         fine = self.bars[self.fine_res]["_list"]
         fineTimes = self._times[self.fine_res]
         srAll = (self._sr or {}).get("merged") or []
+        jr = getattr(self, "_journal", None)
         for s in sorted(pending, key=lambda x: -(intervalSecOf(x.get("periodX")) or 0)):
             d = s["direction"]
             if open_pos is not None and open_pos.get(d) is not None:
                 stats["suppressed"] += 1
+                if jr is not None and jr.enabled:
+                    blk = open_pos[d]
+                    try:
+                        s["suppressedWhy"] = (
+                            f"同向互斥：已有{DIR_LABELS.get(d, d)}持仓单 #{blk.get('tradeNo')}"
+                            f"（{fmtT(blk.get('entryTime'))} @ {blk.get('entryPrice'):.2f} 进场，"
+                            f"{blk.get('strategyKey')}）未终局，本信号不成交")
+                        jr.suppressed(nextTime, s, why=s["suppressedWhy"])
+                    except Exception:
+                        pass
                 if on_suppressed:
                     try:
                         on_suppressed(s)
@@ -1435,12 +1669,25 @@ class BacktestEngine:
             # markRes 不在周期表内（异常兜底）→ atr=0 = 纯固定滑点
             atr_acc = self._atr.get(s.get("markRes"))
             mrAtr = atr_acc.value if atr_acc is not None else 0.0
-            # 止损重选也只看检测周期的支阻位（与近支阻同一口径）
+            slipStopEff = self.slip_stop + self.slip_stop_atr_k * mrAtr
+            slipFbEff = self.slip_fallback + self.slip_fallback_atr_k * mrAtr
+            # 止损重选也只看检测周期的支阻位（与近支阻同一口径）；srcInfo 记录来源
+            # （near_sr=信号近支阻沿用 / sr_pick=正确侧重选 / fallback=最大止损兜底）
             srLevels = sr_of_detect(srAll, s.get("periodX"))
+            srcInfo = {}
             stopRef = stop_ref_of(d, entryPrice, s.get("nearSr"), srLevels,
                                   slip_stop=self.slip_stop, slip_fallback=self.slip_fallback,
                                   atr=mrAtr, k_stop=self.slip_stop_atr_k,
-                                  k_fallback=self.slip_fallback_atr_k)
+                                  k_fallback=self.slip_fallback_atr_k, source_out=srcInfo)
+            src = srcInfo.get("src")
+            if src == "near_sr":
+                stopSource = (f"信号近支阻位 {srcInfo.get('srPrice'):.2f}"
+                              f"{'+' if d == 'short' else '-'}止损滑点 {slipStopEff:.2f}")
+            elif src == "sr_pick":
+                stopSource = (f"正确侧最近支阻位 {srcInfo.get('srPrice'):.2f}"
+                              f"{'+' if d == 'short' else '-'}止损滑点 {slipStopEff:.2f}")
+            else:
+                stopSource = f"最大止损兜底 进场价{'+' if d == 'short' else '-'}{slipFbEff:.2f}"
             # 保本止损位 beStop = 进场成交K线极值 ± 有效保本滑点（short: high+ / long: low−）；
             # 成交 bar 按 entryTime 定位于 fine 时间轴，取不到时兜底 进场价 ± 有效保本滑点。
             # 注意：run() 批量路径成交 bar 当拍未收盘（微前视 ≤1 根 fine bar），
@@ -1458,9 +1705,7 @@ class BacktestEngine:
             # 窗口内已收 fine bar 的极值作种子（成交发生在 entryTime 开盘，此前均已收）；
             # 时间戳均为周期整数倍（DB 已验证），barStart 直接模周期对齐。
             barStart = barEnd = extSeed = None
-            slipStopEff = self.slip_stop + self.slip_stop_atr_k * mrAtr
             # 最大止损价（硬上限）：多单止损不得低于此价、空单不得高于此价
-            slipFbEff = self.slip_fallback + self.slip_fallback_atr_k * mrAtr
             maxLoss = entryPrice + (slipFbEff if d == "short" else -slipFbEff)
             if self.stop_entry_bar_floor:
                 sec = intervalSecOf(s.get("markRes")) or 0
@@ -1475,16 +1720,30 @@ class BacktestEngine:
                     if extSeed is not None:
                         floor = (extSeed - slipStopEff) if d == "long" \
                             else (extSeed + slipStopEff)
+                        prevStop = stopRef
                         stopRef = min(stopRef, floor) if d == "long" else max(stopRef, floor)
                         # 外推后仍受最大止损约束
                         stopRef = max(stopRef, maxLoss) if d == "long" \
                             else min(stopRef, maxLoss)
+                        if stopRef != prevStop:
+                            stopSource += (f"｜进场K线极值下限 {extSeed:.2f}"
+                                           f"{'+' if d == 'short' else '-'}滑点夹紧")
+            # 进场叙事（交易日志 entryWhy）：信号→口径→止损/保本/最大止损推导全链
+            entryWhy = (
+                f"{DIR_LABELS.get(d, d)}｜{s.get('signalNote') or s.get('strategyLabel') or s.get('strategyKey')}"
+                f"｜{FILL_MODE_LABELS.get(fillMode, fillMode)}：{fmtT(entryTime)} @ {entryPrice:.2f} 进场"
+                f"｜止损位 {stopRef:.2f}（{stopSource}）"
+                f"｜保本位 beStop {beStop:.2f}（成交K线极值{'+' if d == 'short' else '-'}保本滑点 {slip_be_eff:.2f}）"
+                f"｜最大止损 {maxLoss:.2f}｜{self.lots} 手")
             trades.append({
                 "tradeNo": len(trades) + 1,
+                "journalId": s.get("_jid"),
                 "periodX": s["periodX"],
                 "markRes": s["markRes"],
                 "direction": s["direction"],
                 "strategyKey": s["strategyKey"],
+                "strategyLabel": s.get("strategyLabel"),
+                "signalNote": s.get("signalNote"),
                 "signalTime": s["time"],
                 "signalPrice": s["price"],
                 "entryTime": entryTime,
@@ -1501,6 +1760,7 @@ class BacktestEngine:
                 "mult": self.contract_mult,  # 合约乘数快照（2026-09-23）
                 # 出场状态机字段（advance_exit_decision/execute_pending_exit 增量维护）
                 "stopRef": stopRef,
+                "stopSource": stopSource,  # 止损位来源叙事（外推时由出场判定更新）
                 "beStop": beStop,
                 "maxLoss": maxLoss,  # 最大止损价；进场K线外推后夹紧用，保本后不再参与
                 # 进场K线止损下限状态（advance_exit_decision 运行极值外推用；
@@ -1509,6 +1769,7 @@ class BacktestEngine:
                 "entryBarEnd": barEnd,
                 "entryBarExt": extSeed,
                 "slipStopEff": slipStopEff,
+                "entryWhy": entryWhy,
                 "state": "open",
                 "beDone": False,
                 "halfDone": False,
@@ -1517,6 +1778,11 @@ class BacktestEngine:
             stats["executed"] += 1
             if open_pos is not None:
                 open_pos[d] = trades[-1]
+            if jr is not None and jr.enabled:
+                try:
+                    jr.fill(trades[-1])
+                except Exception:
+                    pass
 
     def _finish(self, allSignals, trades, stats):
         """整理回测结果：信号列表、成交明细、统计、时间轴、盈亏。
@@ -1569,7 +1835,8 @@ def run_backtest(bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
                  slip_be_atr_k=DEFAULT_SLIP_BE_ATR_K,
                  near=DEFAULT_NEAR, sr_kwargs=None,
                  diverge_confirm=None, expect_bi=None, module_params=None,
-                 entry_macd_shrink=None, stop_entry_bar_floor=None):
+                 entry_macd_shrink=None, stop_entry_bar_floor=None,
+                 journal=None, journal_symbol=None, fast_warmup=True):
     """便捷入口：构建引擎并运行。start_ts=交易开始时刻（None=预热 warmup_bars 根后开始，
     见 BacktestEngine.run）；fill_mode 见 BacktestEngine（anchor=锚点当拍成交，confirm=确认成交）；
     signal_mode：realtime=当下背驰（每拍评估形成中段，默认），confirm=确认制（结构变化时收集）；
@@ -1598,17 +1865,22 @@ def run_backtest(bars_by_period, periods=None, warmup_bars=DEFAULT_WARMUP_BARS,
                             module_params=module_params,
                             entry_macd_shrink=entry_macd_shrink,
                             stop_entry_bar_floor=stop_entry_bar_floor)
-    return engine.run(to_ts=to_ts, start_ts=start_ts, log=log)
+    return engine.run(to_ts=to_ts, start_ts=start_ts, log=log,
+                      journal=journal, journal_symbol=journal_symbol,
+                      fast_warmup=fast_warmup)
 
 
 def build_bis(bars_by_period, periods=None):
     """对整段数据各周期一次性重建笔（全链路/实时态使用），返回 { 周期: [bis] }。
     与 chan-bi JS 同口径：长影压平（markWickBars）后才做包含合并；ATR/MACD 用原始K线；
     未完成笔延伸用压平后K线（延伸不指向已压平的插针价）。
-    最后一笔会延伸到最新极端价（与 chan-bi JS 落盘数据一致）。"""
+    最后一笔会延伸到最新极端价（与 chan-bi JS 落盘数据一致）。
+    外→内逐级构建（D→240→60→15→3），上级笔端点经 lockedPivotsOf 锁定下级
+    （与 chan-bi lockedPivotsOf(prevBis) 同口径，与引擎增量路径一致）。"""
     periods = list(periods or DEFAULT_PERIODS)
     out = {}
-    for res in periods:
+    order = sorted(periods, key=lambda r: -(intervalSecOf(r) or 0))
+    for pi, res in enumerate(order):
         bl = sorted(bars_by_period.get(res, []) or [], key=lambda x: x["time"])
         if len(bl) < 6:
             continue
@@ -1619,8 +1891,8 @@ def build_bis(bars_by_period, periods=None):
         atr = calcATR(bl, 14)
         macd = calcMACD(bl)
         # 近等双顶/双底平台取后顶/后底：与 chan-bi 一致按 nearDoubleOn(res) 每周期开关（默认 60/240/D）
-        lower = makeBiLowerContext(res, sorted(bars_by_period.get('15', []), key=lambda b: b['time']))
-        bis = buildBi(fractals, merged, atr, macd, None, nearDoubleOn(res), lower, res)
+        locks = lockedPivotsOf(out.get(order[pi - 1])) if pi > 0 else None
+        bis = buildBi(fractals, merged, atr, macd, locks, nearDoubleOn(res), res)
         bis = fixBiExtremes(bis, merged) or bis
         bis = extendLastBi(bis, trimmed)
         if bis:

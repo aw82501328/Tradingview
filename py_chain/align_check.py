@@ -3,7 +3,7 @@
 
 同一份K线数据双侧重建笔序列，逐周期逐笔 diff，目标 0 差异：
   - py 侧：与 backtest.build_bis 同口径（markWickBars→mergeBars→findFractals→
-    buildBi(…,None,nearDoubleOn(res),lowerContext)→fixBiExtremes→extendLastBi(trimmed)）
+    buildBi(…,None,nearDoubleOn(res),res)→fixBiExtremes→extendLastBi(trimmed)）
   - JS 侧：.cursor/skills/chan-core/scripts/rebuild_bis.js（复用图表算法源 chan_core.js）
 
 用法：
@@ -27,18 +27,18 @@ FIELDS = ["type", "startIdx", "endIdx", "startTime", "endTime",
           "startPrice", "endPrice", "rawCount", "span", "gapLocked", "macdCross"]
 
 
-def py_rebuild(bl, res, lower_bars=None):
+def py_rebuild(bl, res):
     """py 侧重建（与 backtest.build_bis 完全同口径）。"""
     from .chan_core import (
         mergeBars, findFractals, markWickBars, buildBi, fixBiExtremes,
-        extendLastBi, calcATR, calcMACD, intervalSecOf, makeBiLowerContext, nearDoubleOn,
+        extendLastBi, calcATR, calcMACD, intervalSecOf, nearDoubleOn,
     )
     trimmed = markWickBars(bl)
     merged = mergeBars(trimmed)
     fractals = findFractals(merged)
     atr = calcATR(bl, 14)
     macd = calcMACD(bl)
-    bis = buildBi(fractals, merged, atr, macd, None, nearDoubleOn(res), makeBiLowerContext(res, lower_bars), res)
+    bis = buildBi(fractals, merged, atr, macd, None, nearDoubleOn(res), res)
     bis = fixBiExtremes(bis, merged) or bis
     bis = extendLastBi(bis, trimmed)
     return bis
@@ -93,7 +93,7 @@ def main(argv=None):
 
     total_diff = 0
     for res in periods:
-        py_bis = py_rebuild(data[res], res, data.get("15"))
+        py_bis = py_rebuild(data[res], res)
         js = js_bis.get(res) or []
         diffs = []
         for i in range(max(len(py_bis), len(js))):

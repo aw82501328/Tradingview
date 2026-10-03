@@ -1,3 +1,6 @@
+import os as _os
+_os.environ.setdefault("PY_CHAIN_BT_JOURNAL", "0")  # 引擎测试不落交易日志
+
 # -*- coding: utf-8 -*-
 """强分型均线V1（fxma_v1）策略引擎单测。
 
@@ -7,9 +10,11 @@
   - 注册表与引擎分发（module_registry fxma_v1 / engine_dispatch / fxma_load_periods）
   - 信号评估（_fx_collect，猴子补丁 _fx_latest_points 注入合成买卖点）：
     点→强分型→均线分离齐备才触发 / 每点一次 / crossMinPts 间距不足不出 /
-    pointValidBars 超时作废 / 反向点作废 / 类别过滤 / SMA 与 EMA 两口径
-  - 出场状态机：止损/止盈触及（下一开盘成交）、同根双触 stop 优先与 tp 口径、
-    进场K线不判出场（_evalCut 边界）
+    pointValidBars 超时作废 / pointValidPts 盘中价距超限等待（不作废，回范围可触发）/
+    反向点作废 / 类别过滤 / SMA 与 EMA 两口径
+  - 出场状态机：止损/止盈盘中触及（fine 周期粒度、按触发价即时成交）、同根双触
+    stop 优先与 tp 口径、进场前根不判出场（_evalCutFine 边界）、P≠fine 周期持仓
+    也按 fine 根判
   - 互斥：global 同向一笔 + 同拍共振取大周期；perPeriod 每周期独立
   - run()/step_to() 集成：合成K线 + 注入点 → 信号→成交→出场全链路（含 30S 周期）
 
@@ -17,13 +22,14 @@
 """
 
 import unittest
+from contextlib import ExitStack
 from unittest.mock import patch
 
 from py_chain import param_center, module_registry
 from py_chain.engine_dispatch import engine_class_of, fxma_load_periods
 from py_chain.fx_ma import (
-    FxMaEngine, MaAcc, parse_multi, fx_strategy_key, strong_fx_after,
-    FXMA_DEFAULTS, run_fxma_backtest,
+    FxMaEngine, MaAcc, parse_multi, parse_fib_levels, fx_strategy_key,
+    strong_fx_after, FXMA_DEFAULTS, run_fxma_backtest,
 )
 
 SEC3 = 180
@@ -169,6 +175,90 @@ class ParamCenterFxmaTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             FxMaEngine({"3": []}, ma_fast1=20, ma_slow1=8)  # 快线须小于慢线
 
+    def test_condition_toggle_schema_and_kwargs(self):
+        # 强分型/均线分离两个条件开关：schema 布尔 + kwargs 映射 + 引擎落属性
+        sch = param_center.schema_of("fxma")
+        self.assertEqual(sch["maOn"]["type"], "bool")
+        self.assertEqual(sch["strongFxOn"]["type"], "bool")
+        self.assertIs(sch["maOn"]["default"], True)
+        self.assertIs(sch["strongFxOn"]["default"], True)
+        self.assertIs(param_center.normalize("fxma", {"maOn": False})["maOn"], False)
+        with self.assertRaises(ValueError):
+            param_center.normalize("fxma", {"strongFxOn": "0"})  # 布尔不接受字符串
+        kw = FxMaEngine.kwargs_from_params(
+            dict(FXMA_DEFAULTS, entryRes="3", maOn=False, strongFxOn=False))
+        self.assertIs(kw["ma_on"], False)
+        self.assertIs(kw["strong_fx_on"], False)
+        eng = FxMaEngine({"3": bars_from_closes(0, [100 + i for i in range(40)])}, **kw)
+        self.assertIs(eng.ma_on, False)
+        self.assertIs(eng.strong_fx_on, False)
+
+    def test_ma_stand_schema_and_kwargs(self):
+        # 收盘站线：开关布尔 + 一类/二三类分开的均线周期（1~500）
+        sch = param_center.schema_of("fxma")
+        self.assertEqual(sch["maStandOn"]["type"], "bool")
+        self.assertIs(sch["maStandOn"]["default"], True)
+        self.assertEqual(sch["maStand1"]["type"], "int")
+        self.assertEqual((sch["maStand1"]["min"], sch["maStand1"]["max"]), (1, 500))
+        self.assertEqual(sch["maStand2"]["default"], 5)
+        self.assertEqual(param_center.normalize("fxma", {"maStand2": 30})["maStand2"], 30)
+        with self.assertRaises(ValueError):
+            param_center.normalize("fxma", {"maStand1": 0})   # 周期须 ≥1
+        with self.assertRaises(ValueError):
+            param_center.normalize("fxma", {"maStandOn": "0"})  # 布尔不接受字符串
+        kw = FxMaEngine.kwargs_from_params(
+            dict(FXMA_DEFAULTS, entryRes="3", maStandOn=False, maStand1=7, maStand2=13))
+        self.assertIs(kw["ma_stand_on"], False)
+        self.assertEqual(kw["ma_stand1"], 7)
+        self.assertEqual(kw["ma_stand2"], 13)
+        with self.assertRaises(ValueError):
+            FxMaEngine({"3": []}, entry_res="3", ma_stand1=0)  # 引擎侧同校验
+
+    def test_fib_upper_schema_and_kwargs(self):
+        # 黄金分割附近/上级同向（2026-10-03 增，默认关）：开关布尔 + 档位多选串 + 容差点数
+        sch = param_center.schema_of("fxma")
+        self.assertEqual(sch["fibNearOn"]["type"], "bool")
+        self.assertIs(sch["fibNearOn"]["default"], False)
+        self.assertEqual(sch["fibLevels"]["type"], "multi")
+        self.assertEqual(sch["fibLevels"]["default"], "0.382,0.5,0.618")
+        self.assertEqual(param_center.normalize("fxma", {"fibLevels": "0.5"})["fibLevels"], "0.5")
+        with self.assertRaises(ValueError):
+            param_center.normalize("fxma", {"fibLevels": "0.65"})   # 档位不在预设集
+        self.assertEqual(sch["fibNearPts"]["type"], "float")
+        self.assertEqual((sch["fibNearPts"]["min"], sch["fibNearPts"]["max"]), (0.0, 100.0))
+        self.assertEqual(sch["upperDirOn"]["type"], "bool")
+        self.assertIs(sch["upperDirOn"]["default"], False)
+        self.assertIs(param_center.normalize("fxma", {"fibNearOn": True})["fibNearOn"], True)
+        with self.assertRaises(ValueError):
+            param_center.normalize("fxma", {"fibNearOn": "1"})   # 布尔不接受字符串
+        with self.assertRaises(ValueError):
+            param_center.normalize("fxma", {"fibNearPts": -1})   # 点数须 ≥0
+        kw = FxMaEngine.kwargs_from_params(
+            dict(FXMA_DEFAULTS, entryRes="3", fibNearOn=True,
+                 fibLevels="0.5", fibNearPts=8.0, upperDirOn=True))
+        self.assertIs(kw["fib_near_on"], True)
+        self.assertEqual(kw["fib_near_levels"], "0.5")
+        self.assertEqual(kw["fib_near_pts"], 8.0)
+        self.assertIs(kw["upper_dir_on"], True)
+        eng = FxMaEngine({"3": bars_from_closes(0, [100 + i for i in range(40)])}, **kw)
+        self.assertEqual(eng.fib_near_levels, [0.5])
+        with self.assertRaises(ValueError):
+            FxMaEngine({"3": bars_from_closes(0, [100 + i for i in range(40)])},
+                       entry_res="3", fib_near_levels="0,1.5")  # 档位须 0<r<1
+        with self.assertRaises(ValueError):
+            FxMaEngine({"3": bars_from_closes(0, [100 + i for i in range(40)])},
+                       entry_res="3", fib_near_pts=-1)           # 容差须 ≥0
+        FxMaEngine({"3": bars_from_closes(0, [100 + i for i in range(40)])},
+                   entry_res="3", fib_near_levels="0.5")         # 合法（对照）
+
+    def test_parse_fib_levels(self):
+        self.assertEqual(parse_fib_levels("0.382,0.5,0.618"), [0.382, 0.5, 0.618])
+        self.assertEqual(parse_fib_levels("0.5,0.5"), [0.5])          # 去重
+        self.assertEqual(parse_fib_levels(["0.382", 0.5]), [0.382, 0.5])  # 序列输入
+        for bad in ("", "0", "1", "1.5", "abc"):
+            with self.assertRaises(ValueError):
+                parse_fib_levels(bad)
+
 
 class RegistryDispatchTests(unittest.TestCase):
     def test_registry_entry(self):
@@ -250,6 +340,9 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(s["periodX"], "3")
         self.assertEqual(s["price"], self.closes[-1])
         self.assertEqual(s["time"], self.t_end)
+        self.assertGreater(s["standGap"], 0)          # 默认开：收盘站上 SMA5
+        self.assertIn("站上均线", s["reason"])
+        self.assertIn("SMA5", s["signalNote"])
         # 同一点再评：每点只触发一次（fired 已落键）
         self.assertEqual(self.engine._fx_collect(st["allSignals"], st["stats"],
                                                  st["fired"], self.t_end + SEC3), [])
@@ -265,6 +358,64 @@ class CollectTests(unittest.TestCase):
         self.engine.point_valid_bars = 1
         sigs, _ = self._collect_with(self.pt)
         self.assertEqual(sigs, [])
+
+    def test_point_valid_pts_blocks_far_bar(self):
+        # 点有效期(值)：买=评估根最高价(123.2)−点价(94)=29.2 > 5 → 该拍不评估；
+        # 等待语义 → fired 不落键（区别于根数版作废）
+        self.engine.point_valid_pts = 5.0
+        sigs, st = self._collect_with(self.pt)
+        self.assertEqual(sigs, [])
+        self.assertFalse(st["fired"])
+
+    def test_point_valid_pts_wait_then_recover(self):
+        # 超距只等待不作废：阈值 29 拦下（29.2>29）后放开到 30，推进一根平盘尾K
+        # （high=123.2、drift 29.2 ≤ 30）同一点仍触发
+        closes = self.closes + [self.closes[-1]]
+        e = mk_engine(bars_from_closes(0, closes),
+                      strong_fx_on=False, ma_on=False, ma_stand_on=False,
+                      point_valid_pts=29.0)
+        for b in e.bars["3"]["_list"][:-1]:
+            e._advance_cut(b["time"] + SEC3)
+        e._fx_align()
+        st = e._fx_init_state()
+        last = e.bars["3"]["_list"][-1]
+        with patch.object(FxMaEngine, "_fx_latest_points",
+                          lambda s, P: (self.pt, None)):
+            self.assertEqual(e._fx_collect(st["allSignals"], st["stats"],
+                                           st["fired"], last["time"]), [])
+            self.assertFalse(st["fired"])
+            e.point_valid_pts = 30.0
+            e._advance_cut(last["time"] + SEC3)
+            e._fx_align()
+            sigs = e._fx_collect(st["allSignals"], st["stats"],
+                                 st["fired"], last["time"] + SEC3)
+        self.assertEqual(len(sigs), 1)
+        self.assertEqual(sigs[0]["strategyKey"], "fx2Buy")
+
+    def test_point_valid_pts_sell_side_mirror(self):
+        # 卖侧镜像：评估根最低价(95.6)距卖点最高价(128)=32.4，阈值 32 拦下；
+        # 放开到 33 后推进平盘尾K（low=95.8、drift 32.2 ≤ 33）触发 fx2Sell
+        closes = [100 + 2.0 * i for i in range(15)] + [126 - 2.0 * (i + 1) for i in range(15)]
+        closes.append(closes[-1])
+        bars = bars_from_closes(0, closes)
+        e = mk_engine(bars, strong_fx_on=False, ma_on=False, ma_stand_on=False,
+                      point_valid_pts=32.0)
+        for b in bars[:-1]:
+            e._advance_cut(b["time"] + SEC3)
+        e._fx_align()
+        pt = {"type": "2卖", "time": bars[14]["time"], "price": 128.0}
+        st = e._fx_init_state()
+        last = bars[-1]
+        with patch.object(FxMaEngine, "_fx_latest_points", lambda s, P: (None, pt)):
+            self.assertEqual(e._fx_collect(st["allSignals"], st["stats"],
+                                           st["fired"], last["time"]), [])
+            e.point_valid_pts = 33.0
+            e._advance_cut(last["time"] + SEC3)
+            e._fx_align()
+            sigs = e._fx_collect(st["allSignals"], st["stats"],
+                                 st["fired"], last["time"] + SEC3)
+        self.assertEqual(len(sigs), 1)
+        self.assertEqual(sigs[0]["strategyKey"], "fx2Sell")
 
     def test_opposite_point_invalidates(self):
         # 反向（卖点）出现在点之后 → 点作废
@@ -302,6 +453,280 @@ class CollectTests(unittest.TestCase):
             sigs = e._fx_collect(st["allSignals"], st["stats"], st["fired"], self.t_end)
         self.assertEqual(len(sigs), 1)  # EMA 口径下同样满足（反弹趋势明确）
 
+    def test_ma_off_skips_gap_condition(self):
+        # 均线分离关闭：间距阈值不可能满足（对照 test_cross_min_pts_blocks_insufficient_gap）
+        # 仍出信号；crossGap=None
+        self.engine.cross_min_pts = 1e6
+        self.engine.ma_on = False
+        sigs, _ = self._collect_with(self.pt)
+        self.assertEqual(len(sigs), 1)
+        self.assertIsNone(sigs[0]["crossGap"])
+        self.assertNotIn("均线分离", sigs[0]["signalNote"])  # 关闭的条件不进叙事
+
+    def test_strong_fx_off_skips_fx_condition(self):
+        # 纯单调上涨：点之后无底分型 → 强分型条件卡住；关闭后（均线满足）即出信号
+        closes = [100 + 2.0 * i for i in range(30)]
+        bars = bars_from_closes(0, closes)
+        pt = {"type": "2买", "time": bars[10]["time"], "price": closes[10]}
+
+        def run(e):
+            for b in bars:
+                e._advance_cut(b["time"] + SEC3)
+            e._fx_align()
+            st = e._fx_init_state()
+            with patch.object(FxMaEngine, "_fx_latest_points", lambda self, P: (pt, None)):
+                return e._fx_collect(st["allSignals"], st["stats"], st["fired"],
+                                     bars[-1]["time"] + SEC3)
+
+        self.assertEqual(run(mk_engine(bars)), [])  # 对照：强分型开（默认）→ 无信号
+        sigs = run(mk_engine(bars, strong_fx_on=False))
+        self.assertEqual(len(sigs), 1)
+        self.assertIsNone(sigs[0]["strongFxTime"])
+
+    def test_all_conditions_off_fires_on_point_alone(self):
+        # 三条件都关：均线未满周期、无分型也照常触发（点属所选类别且未失效即当拍出信号）
+        closes = [100 + 2.0 * i for i in range(6)]  # 慢线8未满
+        bars = bars_from_closes(0, closes)
+        e = mk_engine(bars, strong_fx_on=False, ma_on=False, ma_stand_on=False)
+        for b in bars:
+            e._advance_cut(b["time"] + SEC3)
+        e._fx_align()
+        pt = {"type": "2买", "time": bars[2]["time"], "price": closes[2]}
+        st = e._fx_init_state()
+        with patch.object(FxMaEngine, "_fx_latest_points", lambda self, P: (pt, None)):
+            sigs = e._fx_collect(st["allSignals"], st["stats"], st["fired"],
+                                 bars[-1]["time"] + SEC3)
+        self.assertEqual(len(sigs), 1)
+        self.assertIsNone(sigs[0]["strongFxTime"])
+        self.assertIsNone(sigs[0]["crossGap"])
+        self.assertIsNone(sigs[0]["standGap"])
+        self.assertEqual(sigs[0]["reason"], "2买")
+
+    def test_ma_stand_fail_waits_then_fires_on_recovery(self):
+        # 反弹拉开分离后急跌一根：均线分离仍成立、收盘却跌回 SMA5 下方 → 站线不满足
+        # 不出信号（点未作废）；再拉开站上后的首个收盘拍触发
+        closes = signal_bars()
+        closes += [closes[-1] - 5.0]                          # 急跌一根：收盘回到 SMA5 下方
+        closes += [closes[-1] + 2.0 * (i + 1) for i in range(8)]  # 再拉开：站上且分离重建
+        bars = bars_from_closes(0, closes)
+        e = mk_engine(bars)
+        dip_end = len(signal_bars())                          # 急跌那根下标（33）
+        pt = {"type": "2买", "time": bars[21]["time"], "price": closes[21]}
+        st = e._fx_init_state()
+        with patch.object(FxMaEngine, "_fx_latest_points", lambda self, P: (pt, None)):
+            for b in bars[:dip_end + 1]:
+                e._advance_cut(b["time"] + SEC3)
+            e._fx_align()
+            self.assertEqual(e._fx_collect(st["allSignals"], st["stats"], st["fired"],
+                                           bars[dip_end]["time"] + SEC3), [])
+            for b in bars[dip_end + 1:]:
+                e._advance_cut(b["time"] + SEC3)
+            e._fx_align()
+            sigs = e._fx_collect(st["allSignals"], st["stats"], st["fired"],
+                                 bars[-1]["time"] + SEC3)
+        self.assertEqual(len(sigs), 1)
+        self.assertGreater(sigs[0]["standGap"], 0)
+        self.assertIn("站上均线", sigs[0]["reason"])
+        self.assertIn("SMA5", sigs[0]["signalNote"])
+
+    def test_ma_stand_not_ready_blocks(self):
+        # 站线均线周期拉到不可能的大值 → 未满周期不出信号；一类用 maStand1、二三类用 maStand2
+        for pt_type, kw in (("2买", {"ma_stand2": 500}), ("1买", {"ma_stand1": 500})):
+            e = mk_engine(self.bars, **kw)
+            for b in self.bars:
+                e._advance_cut(b["time"] + SEC3)
+            e._fx_align()
+            pt = {"type": pt_type, "time": self.pt_time, "price": 100.0}
+            st = e._fx_init_state()
+            with patch.object(FxMaEngine, "_fx_latest_points", lambda self, P: (pt, None)):
+                self.assertEqual(e._fx_collect(st["allSignals"], st["stats"], st["fired"],
+                                               self.t_end), [])
+
+    def test_ma_stand_off_skips_stand_condition(self):
+        # 对照 test_ma_stand_fail_waits...：同行情在急跌拍，关闭站线条件即出信号
+        closes = signal_bars() + [signal_bars()[-1] - 5.0]
+        bars = bars_from_closes(0, closes)
+        e = mk_engine(bars, ma_stand_on=False)
+        for b in bars:
+            e._advance_cut(b["time"] + SEC3)
+        e._fx_align()
+        pt = {"type": "2买", "time": bars[21]["time"], "price": closes[21]}
+        st = e._fx_init_state()
+        with patch.object(FxMaEngine, "_fx_latest_points", lambda self, P: (pt, None)):
+            sigs = e._fx_collect(st["allSignals"], st["stats"], st["fired"],
+                                 bars[-1]["time"] + SEC3)
+        self.assertEqual(len(sigs), 1)
+        self.assertIsNone(sigs[0]["standGap"])
+        self.assertNotIn("站上均线", sigs[0]["reason"])  # 关闭的条件不进叙事
+
+    def test_ma_stand_sell_side_strict_below(self):
+        # 卖侧对称（只验站线，关强分型/分离）：收盘高于 SMA5 时不出信号（点未作废），
+        # 跌回下方后触发 fx2Sell、standGap<0
+        closes = [100 + 2.0 * i for i in range(15)] + [126 - 2.0 * (i + 1) for i in range(15)]
+        bars = bars_from_closes(0, closes)
+        e = mk_engine(bars, strong_fx_on=False, ma_on=False)
+        pt = {"type": "2卖", "time": bars[14]["time"], "price": closes[14]}
+        st = e._fx_init_state()
+        with patch.object(FxMaEngine, "_fx_latest_points", lambda self, P: (None, pt)):
+            for b in bars[:11]:
+                e._advance_cut(b["time"] + SEC3)
+            e._fx_align()
+            self.assertEqual(e._fx_collect(st["allSignals"], st["stats"], st["fired"],
+                                           bars[10]["time"] + SEC3), [])
+            for b in bars[11:]:
+                e._advance_cut(b["time"] + SEC3)
+            e._fx_align()
+            sigs = e._fx_collect(st["allSignals"], st["stats"], st["fired"],
+                                 bars[-1]["time"] + SEC3)
+        self.assertEqual(len(sigs), 1)
+        self.assertEqual(sigs[0]["strategyKey"], "fx2Sell")
+        self.assertLess(sigs[0]["standGap"], 0)
+        self.assertIn("站下均线", sigs[0]["reason"])
+
+
+class FibUpperGateTests(unittest.TestCase):
+    """④黄金分割附近 / ⑤上级周期同向 两闸门（2026-10-03 增，默认关）。
+
+    猴子补丁注入最新点（_fx_latest_points）与前一同侧点（_fx_prev_point）、
+    上级末笔方向（_fx_upper_dir）；摆动段极值取自真实K线（与引擎口径一致）。
+    """
+
+    def setUp(self):
+        self.closes = signal_bars()
+        self.bars = bars_from_closes(0, self.closes)
+        self.engine = self._engine()
+        self.pt_time = self.bars[len(self.closes) - 12]["time"]
+        self.pt = {"type": "2买", "time": self.pt_time,
+                   "price": self.closes[len(self.closes) - 12]}
+        self.t_end = self.bars[-1]["time"] + SEC3
+        # 买侧摆动段素材：前点放 bars[0]，窗 = (bars[0].time, pt_time] = bars[1..21]
+        self.buy_ext = max(b["high"] for b in self.bars[1:len(self.closes) - 11])
+
+    def _engine(self, **kw):
+        e = mk_engine(self.bars, **kw)
+        for b in self.bars:
+            e._advance_cut(b["time"] + SEC3)
+        e._fx_align()
+        return e
+
+    def _collect(self, engine, point, prev="unset", upper_dir="unset"):
+        st = engine._fx_init_state()
+        with ExitStack() as es:
+            es.enter_context(patch.object(FxMaEngine, "_fx_latest_points",
+                                          lambda self, P: (point, None)))
+            if prev != "unset":
+                es.enter_context(patch.object(FxMaEngine, "_fx_prev_point",
+                                              lambda self, P, pt, side: prev))
+            if upper_dir != "unset":
+                es.enter_context(patch.object(FxMaEngine, "_fx_upper_dir",
+                                              lambda self, P: upper_dir))
+            sigs = engine._fx_collect(st["allSignals"], st["stats"], st["fired"],
+                                      self.t_end)
+        return sigs, st
+
+    # ---------------- ④ 黄金分割附近 ----------------
+
+    def test_fib_near_in_band_fires(self):
+        # 前点价定在 0.618 回撤位正中（gap=0）→ 过闸；最近档位=0.618
+        prev = {"type": "1买", "time": self.bars[0]["time"],
+                "price": self.buy_ext - (self.buy_ext - self.pt["price"]) / 0.618}
+        sigs, _ = self._collect(self._engine(fib_near_on=True), self.pt, prev=prev)
+        self.assertEqual(len(sigs), 1)
+        self.assertAlmostEqual(sigs[0]["fibLevel"], 0.618)
+        self.assertAlmostEqual(sigs[0]["fibGap"], 0.0, places=3)
+        self.assertIn("黄金分割0.618", sigs[0]["reason"])
+        self.assertIn("黄金分割", sigs[0]["signalNote"])
+
+    def test_fib_not_near_waits_not_consumed(self):
+        # 前点 100：摆动段 22.2，最近档位(0.618)≈108.5，点价 94 距 14.5 > 5 → 拦下；
+        # 等待语义：不消费点（fired 不落键）
+        prev = {"type": "1买", "time": self.bars[0]["time"], "price": 100.0}
+        sigs, st = self._collect(self._engine(fib_near_on=True), self.pt, prev=prev)
+        self.assertEqual(sigs, [])
+        self.assertNotIn(("3", "2买", self.pt_time), st["fired"])
+
+    def test_fib_no_prev_rejects(self):
+        # 无前一同侧点（黄金分割无锚点）→ 不触发、不消费
+        sigs, st = self._collect(self._engine(fib_near_on=True), self.pt, prev=None)
+        self.assertEqual(sigs, [])
+        self.assertNotIn(("3", "2买", self.pt_time), st["fired"])
+
+    def test_fib_class1_exempt_and_off_skip(self):
+        far = {"type": "1买", "time": self.bars[0]["time"], "price": 100.0}
+        e = self._engine(fib_near_on=True, strong_fx_on=False, ma_on=False,
+                         ma_stand_on=False)
+        # 1类点豁免：摆动段同样远离档位仍触发，fib 不进叙事
+        pt1 = {"type": "1买", "time": self.pt_time, "price": self.pt["price"]}
+        sigs, _ = self._collect(e, pt1, prev=far)
+        self.assertEqual(len(sigs), 1)
+        self.assertIsNone(sigs[0]["fibLevel"])
+        # 同摆动段下 2 类点不在档位 → 拦下
+        sigs2, _ = self._collect(e, self.pt, prev=far)
+        self.assertEqual(sigs2, [])
+        # fibNearOn 关（默认）：2 类点直接放行、不进叙事
+        sigs3, _ = self._collect(self._engine(strong_fx_on=False, ma_on=False,
+                                              ma_stand_on=False), self.pt, prev=far)
+        self.assertEqual(len(sigs3), 1)
+        self.assertIsNone(sigs3[0]["fibLevel"])
+        self.assertNotIn("黄金分割", sigs3[0]["reason"])
+
+    def test_fib_sell_side_symmetric(self):
+        # 卖侧对称：前一同侧卖点价 → 其后最低价摆动，档位 L+r×(H−L)，点价=0.618 位
+        closes = [100 + 2.0 * i for i in range(15)] + [126 - 2.0 * (i + 1) for i in range(15)]
+        bars = bars_from_closes(0, closes)
+        e = mk_engine(bars, fib_near_on=True, strong_fx_on=False, ma_on=False)
+        for b in bars:
+            e._advance_cut(b["time"] + SEC3)
+        e._fx_align()
+        pt = {"type": "2卖", "time": bars[14]["time"], "price": closes[14]}
+        ext = min(b["low"] for b in bars[1:15])
+        prev = {"type": "1卖", "time": bars[0]["time"],
+                "price": ext + (pt["price"] - ext) / 0.618}
+        st = e._fx_init_state()
+        with patch.object(FxMaEngine, "_fx_latest_points", lambda self, P: (None, pt)), \
+             patch.object(FxMaEngine, "_fx_prev_point", lambda self, P, p, side: prev):
+            sigs = e._fx_collect(st["allSignals"], st["stats"], st["fired"],
+                                 bars[-1]["time"] + SEC3)
+        self.assertEqual(len(sigs), 1)
+        self.assertEqual(sigs[0]["strategyKey"], "fx2Sell")
+        self.assertAlmostEqual(sigs[0]["fibLevel"], 0.618)
+
+    # ---------------- ⑤ 上级周期同向 ----------------
+
+    def test_upper_dir_gate(self):
+        # 反向（上级当前笔 down）→ 拦下、不消费点（fired 不落键=点存活，等待上级转同向）
+        e = self._engine(upper_dir_on=True)
+        sigs, st = self._collect(e, self.pt, upper_dir="down")
+        self.assertEqual(sigs, [])
+        self.assertNotIn(("3", "2买", self.pt_time), st["fired"])
+        # 上级同向（up）的相同行情：同一点触发，证据字段/叙事齐全
+        # （同引擎二次 collect 会被 _fx_sync_ma 水位挡住，故用等价新引擎验证）
+        e2 = self._engine(upper_dir_on=True)
+        sigs2, _ = self._collect(e2, self.pt, upper_dir="up")
+        self.assertEqual(len(sigs2), 1)
+        self.assertEqual(sigs2[0]["upperDir"], "up")
+        self.assertIn("上级15同向", sigs2[0]["reason"])
+        self.assertIn("上级 15", sigs2[0]["signalNote"])
+
+    def test_upper_no_bi_rejects_and_off_skips(self):
+        e = self._engine(upper_dir_on=True)
+        sigs, st = self._collect(e, self.pt, upper_dir=None)  # 上级无笔 → 不触发
+        self.assertEqual(sigs, [])
+        self.assertNotIn(("3", "2买", self.pt_time), st["fired"])
+        # 默认关：直接放行、不进叙事
+        sigs2, _ = self._collect(self.engine, self.pt)
+        self.assertEqual(len(sigs2), 1)
+        self.assertIsNone(sigs2[0]["upperDir"])
+        self.assertNotIn("上级", sigs2[0]["reason"])
+
+    def test_fx_upper_dir_helper(self):
+        # 上级方向 = 结构笔列表末笔 type（含形成中）；无笔 None
+        e = self._engine()
+        e._structure_bis = {"15": [{"type": "down"}, {"type": "up"}]}
+        self.assertEqual(e._fx_upper_dir("3"), "up")
+        e._structure_bis = {"15": []}
+        self.assertIsNone(e._fx_upper_dir("3"))
+
 
 # ============================================================
 # 出场状态机
@@ -316,7 +741,7 @@ def mk_pos(direction, entry, stop_pts=10.0, tp_pts=30.0, periodX="3", cut=0, **e
         "lots": 1, "mult": 1.0,
         "stopRef": entry + stop_pts if short else entry - stop_pts,
         "tpRef": entry - tp_pts if short else entry + tp_pts,
-        "state": "open", "exits": [], "_evalCut": cut, **extra,
+        "state": "open", "exits": [], "_evalCutFine": cut, **extra,
     }
 
 
@@ -327,75 +752,94 @@ class ExitTests(unittest.TestCase):
         e._advance_cut(bars[-1]["time"] + SEC3)
         return e, bars
 
-    def test_long_stop_hit_fills_next_open(self):
-        # 多单 100：止损 90 / 止盈 130；随后一根 long 下破 90 → 挂起，下一开盘成交
-        closes = [100.0] * 5 + [95.0, 89.0]      # 第7根 low<90 触发止损
-        e, bars = self._engine_with_tail(closes)
-        pos = mk_pos("long", 100.0, cut=len(closes) - 1)
+    def _check(self, e, direction, closes, **extra):
+        """cut 指到末根前 → _fx_check_exits 只评末根（盘中触价即成交口径）。"""
+        pos = mk_pos(direction, 100.0, cut=len(closes) - 1, **extra)
         st = e._fx_init_state()
-        st["open_pos"]["long"] = pos
-        e._fx_check_exits(st["open_pos"])
-        self.assertEqual(pos["pendingExit"], "stop")
-        # 下一拍：新 bar（回补一根）开盘价成交
-        nxt = bar(bars[-1]["time"] + SEC3, 88.0, 89.0, 87.0, 88.5)
-        e.bars["3"]["_list"].append(nxt)
-        e._times["3"].append(nxt["time"])
-        out = {"signals": [], "fills": [], "exits": [], "suppressed": []}
-        e._advance_cut(nxt["time"] + SEC3)
-        e._fx_tick(st, nxt["time"] + SEC3, nxt, out)
-        self.assertEqual(len(out["exits"]), 1)
-        tr = out["exits"][0]
+        st["open_pos"][direction] = pos
+        stats = {"closed": 0, "stopped": 0}
+        return pos, st, stats, e._fx_check_exits(st["open_pos"], stats)
+
+    def test_long_stop_hit_fills_at_trigger_price(self):
+        # 多单 100：止损 90 / 止盈 130；末根 low 88.6 ≤ 90 → 即时按止损价 90 成交
+        closes = [100.0] * 5 + [95.0, 89.0]
+        e, bars = self._engine_with_tail(closes)
+        pos, st, stats, exits = self._check(e, "long", closes)
+        self.assertEqual(len(exits), 1)
+        tr = exits[0]
         self.assertEqual(tr["exitType"], "stop")
-        self.assertEqual(tr["exitPrice"], nxt["open"])      # 下一根开盘成交
-        self.assertAlmostEqual(tr["pnl"], (88.0 - 100.0) * 1 * 1.0)
+        self.assertEqual(tr["exitPrice"], 90.0)           # 触发价成交（=stopRef）
+        self.assertEqual(tr["exitTime"], bars[-1]["time"])  # 触发根时间
+        self.assertAlmostEqual(tr["pnl"], (90.0 - 100.0) * 1 * 1.0)
         self.assertEqual(tr["state"], "closed")
-        self.assertIsNone(st["open_pos"]["long"])           # 互斥解锁
+        self.assertIsNone(st["open_pos"]["long"])          # 互斥即时解锁
+        self.assertEqual(stats["closed"], 1)
+        self.assertEqual(stats["stopped"], 1)
+        self.assertIn("盘中触发", tr["exitWhy"])
 
     def test_long_take_profit(self):
-        closes = [100.0] * 5 + [120.0, 131.5]   # 第7根 high>130 触发止盈
-        e, bars = self._engine_with_tail(closes)
-        pos = mk_pos("long", 100.0, cut=len(closes) - 1)
-        st = e._fx_init_state()
-        st["open_pos"]["long"] = pos
-        e._fx_check_exits(st["open_pos"])
-        self.assertEqual(pos["pendingExit"], "takeProfit")
+        # 末根 high 131.7 ≥ 130 → 即时按止盈价 130 成交
+        closes = [100.0] * 5 + [120.0, 131.5]
+        e, _ = self._engine_with_tail(closes)
+        _pos, _st, _stats, exits = self._check(e, "long", closes)
+        self.assertEqual(len(exits), 1)
+        tr = exits[0]
+        self.assertEqual(tr["exitType"], "takeProfit")
+        self.assertEqual(tr["exitPrice"], 130.0)
+        self.assertAlmostEqual(tr["pnl"], (130.0 - 100.0) * 1 * 1.0)
 
     def test_same_bar_both_priority(self):
-        # 单根大振幅K同时触及止损(90下方)与止盈(130上方)：默认 stop；sameBarPriority=tp → takeProfit
-        # （bars_from_closes 方向影线构造不出双触形态，手工造最后一根：开100 高132 低88 收99）
+        # 单根大振幅K盘中同时触及止损(90下方)与止盈(130上方)：默认 stop@90；tp 优先 → takeProfit@130
         head = bars_from_closes(0, [100.0] * 5)
         wild = bar(head[-1]["time"] + SEC3, 100.0, 132.0, 88.0, 99.0)
-        def mk_bars():
-            return head + [dict(wild)]
-        def mk_pending(priority):
-            e = mk_engine(mk_bars(), same_bar_priority=priority)
+        def mk_exit(priority):
+            e = mk_engine(head + [dict(wild)], same_bar_priority=priority)
             e._advance_cut(wild["time"] + SEC3)
-            pos = mk_pos("long", 100.0, cut=len(head))  # 持仓已评到 wild 之前
+            pos = mk_pos("long", 100.0, cut=len(head))
             st = e._fx_init_state()
             st["open_pos"]["long"] = pos
-            e._fx_check_exits(st["open_pos"])
-            return pos
-        self.assertEqual(mk_pending("stop")["pendingExit"], "stop")
-        self.assertEqual(mk_pending("tp")["pendingExit"], "takeProfit")
+            return e._fx_check_exits(st["open_pos"], {"closed": 0})[0]
+        self.assertEqual(mk_exit("stop")["exitType"], "stop")
+        self.assertEqual(mk_exit("stop")["exitPrice"], 90.0)
+        self.assertEqual(mk_exit("tp")["exitType"], "takeProfit")
+        self.assertEqual(mk_exit("tp")["exitPrice"], 130.0)
 
     def test_entry_bar_not_evaluated(self):
-        # _evalCut=进场时 cut：进场那根（历史）不参与出场判定
+        # _evalCutFine=进场时 cut：进场前的历史根不参与出场判定
         closes = [100.0] * 3 + [85.0]           # 末根（=进场前一根）下破止损
         e, _ = self._engine_with_tail(closes)
         pos = mk_pos("long", 100.0, cut=len(closes))   # 进场时已含末根
         st = e._fx_init_state()
         st["open_pos"]["long"] = pos
-        e._fx_check_exits(st["open_pos"])
-        self.assertIsNone(pos.get("pendingExit"))
+        exits = e._fx_check_exits(st["open_pos"], {"closed": 0})
+        self.assertEqual(exits, [])
+        self.assertIsNone(pos.get("exitType"))
 
     def test_short_side_mirror(self):
-        closes = [100.0] * 5 + [105.0, 111.0]   # 空单 100：止损 110 盘中击穿
+        closes = [100.0] * 5 + [105.0, 111.0]   # 空单 100：止损 110 盘中击穿 → @110 成交
         e, _ = self._engine_with_tail(closes)
-        pos = mk_pos("short", 100.0, cut=len(closes) - 1)
+        _pos, _st, _stats, exits = self._check(e, "short", closes)
+        self.assertEqual(len(exits), 1)
+        tr = exits[0]
+        self.assertEqual(tr["exitType"], "stop")
+        self.assertEqual(tr["exitPrice"], 110.0)
+        self.assertAlmostEqual(tr["pnl"], (110.0 - 100.0) * -1 * 1.0)
+
+    def test_period15_position_exits_on_fine_bars(self):
+        # P=15 持仓同样按 fine=3 根判盘中触发（3m 根下破即成交，不等 15m 收盘确认）
+        closes = [100.0] * 5 + [95.0, 89.0]
+        bars = bars_from_closes(0, closes)
+        e = FxMaEngine({"3": bars}, entry_res="3,15")    # fine=3、持仓 periodX=15
+        self.assertEqual(e.fine_res, "3")
+        e._advance_cut(bars[-1]["time"] + SEC3)
+        pos = mk_pos("long", 100.0, periodX="15", cut=len(closes) - 1)
         st = e._fx_init_state()
-        st["open_pos"]["short"] = pos
-        e._fx_check_exits(st["open_pos"])
-        self.assertEqual(pos["pendingExit"], "stop")
+        st["open_pos"]["long"] = pos
+        exits = e._fx_check_exits(st["open_pos"], {"closed": 0})
+        self.assertEqual(len(exits), 1)
+        self.assertEqual(exits[0]["exitType"], "stop")
+        self.assertEqual(exits[0]["exitPrice"], 90.0)
+        self.assertEqual(exits[0]["exitTime"], bars[-1]["time"])
 
 
 # ============================================================
@@ -474,6 +918,11 @@ class RunIntegrationTests(unittest.TestCase):
                        if b["time"] == tr["signalTime"])
         self.assertEqual(tr["entryTime"], tr["signalTime"])
         self.assertEqual(tr["entryPrice"], e.bars["3"]["_list"][sig_idx]["open"])
+        # 出场口径：盘中触及 → 成交价 = 对应触发价（止损 stopRef / 止盈 tpRef）
+        for t in trades:
+            if t.get("exitType"):
+                self.assertAlmostEqual(
+                    t["exitPrice"], t["stopRef"] if t["exitType"] == "stop" else t["tpRef"])
         # 集合口径
         self.assertIn("signals", result)
         self.assertEqual(result["stats"]["executed"], len(

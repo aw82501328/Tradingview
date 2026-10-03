@@ -98,6 +98,19 @@
   .sym-tabs { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   .sym-tab { padding: 2px 12px; font-size: 12px; border-radius: 999px; color: var(--muted); }
   .sym-tab.active { color: var(--text); border-color: var(--accent); background: #16202f; }
+  /* 回测策略TAB（多策略并行，2026-10-02）：每策略一张卡，TAB 切换显示；
+     运行中/暂停/失败以左侧状态点标识，运行中带呼吸动画 */
+  #bt-tabs { margin-bottom: 10px; }
+  .bt-tab { display: inline-flex; align-items: center; gap: 6px; }
+  .bt-tab .bt-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--card-2);
+    border: 1px solid var(--border); flex: none;
+  }
+  .bt-tab.bt-tab-running .bt-dot { background: var(--accent); border-color: var(--accent); animation: bt-pulse 1.6s ease infinite; }
+  .bt-tab.bt-tab-paused .bt-dot { background: var(--warn); border-color: var(--warn); }
+  .bt-tab.bt-tab-error .bt-dot { background: var(--buy); border-color: var(--buy); }
+  .bt-tab.bt-tab-done .bt-dot { background: var(--ok); border-color: var(--ok); }
+  @keyframes bt-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
   .log-box {
     background: #0b0d11; border: 1px solid var(--border); border-radius: 6px;
     padding: 8px; font-family: Consolas, monospace; font-size: 11px;
@@ -239,11 +252,12 @@
 </head>
 <body>
 <h1>三模式控制台 <a href="/sr.html" style="float:right;font-size:14px;color:var(--accent);text-decoration:none;">支阻位参数调试 →</a></h1>
-<div class="sub">全量回测（纯后台） · K线回放 · 实时监控 — 同一时间最多运行一种；进场信号实时记录到下方表格</div>
+<div class="sub">全量回测（纯后台 · 按策略分TAB可多策略同时运行互不干扰） · K线回放 · 实时监控 — 回放/实时与其余任务互斥；进场信号实时记录到下方表格</div>
 
 <nav id="mode-nav" class="mode-nav" aria-label="回测与监控功能"></nav>
+<nav id="bt-tabs" class="sym-tabs" aria-label="回测策略（每策略独立TAB，可并行运行）" hidden></nav>
 <div class="grid single-mode" id="cards"></div>
-<p class="sub">记录和汇总仅属于当前功能。标记操作使用当前功能全部记录；绘制会替换共享 TD 图表上的对应标记，删除标记作用于共享图表。</p>
+<p class="sub">记录和汇总仅属于当前功能与当前策略TAB。标记操作使用当前功能全部记录；绘制会替换共享 TD 图表上的对应标记，删除标记作用于共享图表。</p>
 
 <!-- 记录区 TAB：进场信号记录（三模式共用）/ 历史回测方案（仅全量回测）/ 典型案例（仅全量回测），切换显示不堆叠 -->
 <div class="table-wrap">
@@ -344,7 +358,6 @@
         <option value="信号">信号</option>
         <option value="持仓中">持仓中</option>
         <option value="已平仓">已平仓</option>
-        <option value="同向过滤">同向过滤</option>
       </select>
       <span id="count" style="color:var(--muted);font-size:12px;margin-right:10px;">共 0 条</span>
       <span style="color:var(--muted);font-size:12px;">做多</span>
@@ -395,7 +408,15 @@ const PERIOD_OPTIONS = ['D', '240', '60', '15', '3'];
 // 回放/实时沿用单选下拉（选项同源，去硬编码）
 const SYMBOL_OPTIONS = ['OANDA:XAUUSD', 'OANDA:XAGUSD', 'FX:NAS100', 'TVC:USOIL', 'BITSTAMP:BTCUSD'];
 
-const state = { active: null, modes: {} };
+// ---------- 全量回测 · 策略TAB（多策略并行，2026-10-02） ----------
+// 每策略一张独立卡片（参数/进度/日志/批量表/保存按钮），同一时间可多策略并行运行，
+// 信号行按行内 strategy 字段隔离到各自 TAB；init 时从 /analysis-catalog.json 动态拉取。
+let BT_STRATEGIES = [];               // [{id, name}]（catalog 同源；拉取失败回落内置）
+const BT_STRATEGY_FALLBACK = [{ id: 'chan_v1', name: '缠论V1' }];
+let curBtTab = 'chan_v1';             // 当前显示的回测策略 TAB
+const btRowStrategy = r => r.strategy || 'chan_v1';   // 旧行无 strategy 字段回落默认策略
+
+const state = { active: null, modes: {}, bt: {} };
 let sigRows = [];
 const validMode = mode => MODES.some(m=>m.id===mode);
 let selectedMode = new URLSearchParams(location.search).get('mode');
@@ -409,14 +430,25 @@ const locateMessages = {backtest:'',replay:'',live:''};
 let locatePending = null;
 let locatePoll = null;
 function reportModes(){
-  if(parent!==window)parent.postMessage({type:'modes-status',modes:Object.fromEntries(MODES.map(m=>[m.id,state.modes[m.id]?.state||'idle']))},location.origin);
+  if(parent!==window)parent.postMessage({type:'modes-status',modes:Object.fromEntries(MODES.map(m=>{
+    let st='idle';
+    if(m.id==='backtest'){
+      // 聚合：任一策略 running→running；否则任一 paused→paused；否则当前TAB状态
+      const ws=Object.values(state.bt);
+      st=ws.some(w=>w?.state==='running')?'running':ws.some(w=>w?.state==='paused')?'paused':(state.bt[curBtTab]?.state||'idle');
+    } else st=state.modes[m.id]?.state||'idle';
+    return [m.id,st];
+  }))},location.origin);
 }
 function selectMode(mode){
   if(!validMode(mode))return;
   modeFilters[selectedMode]=sigFilterCurrent();
   selectedMode=mode;
   sigFilterApply(modeFilters[mode]);
-  MODES.forEach(m=>el('card-'+m.id).hidden=m.id!==mode);
+  // 卡片显隐：replay/live 直接切；backtest = 策略TAB条 + 当前策略卡（每策略一卡）
+  MODES.forEach(m=>{ if(m.id!=='backtest') el('card-'+m.id).hidden = m.id!==mode; });
+  el('bt-tabs').hidden = mode!=='backtest';
+  if(mode==='backtest') showBtTab();
   // 历史方案 / 典型案例 TAB 只属于全量回测；切到回放/实时时隐藏并回到信号表
   el('tab-btn-bt').hidden = mode !== 'backtest';
   el('tab-btn-errors').hidden = mode !== 'backtest';
@@ -425,11 +457,36 @@ function selectMode(mode){
   document.querySelector('h1').firstChild.textContent=modeName(mode)+' ';
   renderTable();
 }
+// 策略TAB切换：显示对应卡片、品种页签回落、信号表按策略过滤重渲染
+function selectBtTab(sid){
+  if(!BT_STRATEGIES.some(s=>s.id===sid)||sid===curBtTab)return;
+  curBtTab=sid;
+  symTabSel=null;           // 品种页签按新策略的行/批量重算
+  showBtTab();
+  renderTable();
+  updateMarkButtons();
+}
+function showBtTab(){
+  BT_STRATEGIES.forEach(s=>{ const c=el(`card-bt-${s.id}`); if(c)c.hidden=s.id!==curBtTab; });
+  renderBtTabs();
+}
+function renderBtTabs(){
+  const host=el('bt-tabs');
+  if(!host||host.hidden)return;
+  host.innerHTML=BT_STRATEGIES.map(s=>{
+    const st=state.bt[s.id]?.state;
+    const cls=st==='running'?' bt-tab-running':st==='paused'?' bt-tab-paused':st==='error'?' bt-tab-error':st==='done'?' bt-tab-done':'';
+    const label=st==='running'?' · 运行中':st==='paused'?' · 已暂停':st==='error'?' · 失败':'';
+    return `<button type="button" class="sym-tab bt-tab${s.id===curBtTab?' active':''}${cls}" data-bt-tab="${escAttr(s.id)}"
+      title="${escAttr(s.name)} · 独立参数与运行状态，多策略可同时启动互不干扰">${esc(s.name)}<span class="bt-dot"></span>${label}</button>`;
+  }).join('');
+}
 window.addEventListener('message',e=>{
   if(e.origin!==location.origin||e.source!==parent||e.data?.type!=='select-mode')return;
   selectMode(e.data.mode);
 });
-let logs = { backtest: [], replay: [], live: [] };
+let logs = { replay: [], live: [] };       // 回放/实时卡片日志（回测日志按策略分桶见 btLogs）
+const btLogs = {};                          // 策略id → 日志数组（每策略卡片独立日志框）
 let markBusy = false;   // 标记操作（画/删）进行中
 let markWatchdog = null; // 标记操作兜底复位定时器（SSE mark_done 丢失/线程异常时避免永久灰置）
 
@@ -461,7 +518,9 @@ function updateMarkButtons() {
   el('btn-mark-clear').disabled = busy || isAnyModeRunning();
 }
 function isAnyModeRunning() {
-  return Object.values(state.modes).some(w => ['running', 'paused'].includes(w.state));
+  // 多策略并行：任一回测策略在跑即算占用（标记/定位仍与运行互斥，口径与旧单回测一致）
+  return ['replay', 'live'].some(m => ['running', 'paused'].includes(state.modes[m]?.state))
+    || Object.values(state.bt).some(w => ['running', 'paused'].includes(w?.state));
 }
 
 // 本地日历日 YYYY-MM-DD（全量回测结束日期默认当日）
@@ -472,9 +531,12 @@ function todayYmd() {
 }
 
 // ---------- 卡片渲染 ----------
+// m = { id: DOM 前缀（replay/live=模式名；回测=`bt-<策略id>`）, mode: 逻辑模式,
+//       name, desc }——回测每策略一卡（多策略并行），策略不进卡内下拉（TAB即策略）
 function buildCard(m) {
+  const isBt = m.mode === 'backtest';
   // 定位后保留K线：三模式卡共用一份定义，与明细页共享 localStorage 持久化（bt_common.js）。
-  // 三卡同时渲染故用 class 定位（重复 id 非法），cfg:false 保持不进回测参数表单。
+  // 多卡同时渲染故用 class 定位（重复 id 非法），cfg:false 保持不进回测参数表单。
   const locateField = { k: 'locate-after-bars', cls: 'locate-after-bars', label: '定位后保留K线',
     type: 'number', def: String(LOCATE_AFTER_BARS_DEFAULT), cfg: false, min: 0, step: 1,
     title: '点击信号行在图上定位时，出场（无出场则进场）之后再显示的K线根数；设置会记住并在控制台/明细页共用，出场后实际K线不足N根时显示到最新一根' };
@@ -508,7 +570,7 @@ function buildCard(m) {
   </div></div>`;
   // 回测卡品种多选（2026-09-23 批量并行）：勾 1 个 = 原单品种行为（后端折叠回 symbol）；
   // 勾多个 = 批量并行（每品种一个子进程，仅本地数据存储）。回放/实时沿用单选。
-  const symbolsHtml = m.id === 'backtest'
+  const symbolsHtml = isBt
     ? `<div class="field"><label>品种</label><div class="ms" data-ms="symbols">
       <button type="button" class="ms-toggle" data-ms-toggle aria-expanded="false" title="勾选一个或多个品种；多个=批量并行回测（仅本地数据存储）">
         <span class="ms-value">${SYMBOL_OPTIONS[0]}</span><span class="ms-caret">▾</span>
@@ -520,16 +582,19 @@ function buildCard(m) {
     </div></div>`
     : `<div class="field"><label>品种</label><select data-cfg="symbol">${SYMBOL_OPTIONS.map(s =>
         `<option>${s}</option>`).join('')}</select></div>`;
+  // 交易策略下拉仅回放/实时卡（回测卡=策略TAB，collectCfg 时注入 cfg.strategy）；
+  // 与工作台、MT5 实盘同一注册表口径（loadStrategyOptions 动态渲染选项）
+  const strategyHtml = isBt ? '' : `<div class="field"><label>交易策略</label><select data-cfg="strategy">
+    <option value="chan_v1" selected>缠论V1</option>
+  </select></div>`;
   rows.push(`<div class="row">
-    <div class="field"><label>交易策略</label><select data-cfg="strategy">
-      <option value="chan_v1" selected>缠论V1</option>
-    </select></div>
+    ${strategyHtml}
     ${symbolsHtml}
     ${periodsHtml}
-    <div class="field"><label>${m.id === 'backtest' ? '起始日期（开始交易）' : '起始日期'}</label><input type="date" data-cfg="from" value="2026-07-02"></div>
-    ${m.id === 'backtest' ? `<div class="field"><label>结束日期（默认当日，空=到最新）</label><input type="date" data-cfg="to" value="${todayYmd()}"></div>` : ''}
+    <div class="field"><label>${isBt ? '起始日期（开始交易）' : '起始日期'}</label><input type="date" data-cfg="from" value="2026-07-02"></div>
+    ${isBt ? `<div class="field"><label>结束日期（默认当日，空=到最新）</label><input type="date" data-cfg="to" value="${todayYmd()}"></div>` : ''}
   </div>`);
-  const extraHtml = (extras[m.id] || []).map(f => {
+  const extraHtml = (extras[m.mode] || []).map(f => {
     const attr = f.cfg === false
       ? (f.cls ? `class="${f.cls}"` : `id="${f.k}"`)
       : `data-cfg="${f.k}"`;
@@ -541,7 +606,7 @@ function buildCard(m) {
     return `<div class="field"><label${f.title ? ` title="${f.title}"` : ''}>${f.label}</label>${ctrl}</div>`;
   }).join('');
   // 回测卡片：数据源三选，默认 store=本地SQLite存储（无需 TradingView）；回放/实时沿用缓存开关
-  const sourceField = m.id === 'backtest'
+  const sourceField = isBt
     ? `<div class="field"><label>数据源</label><select data-cfg="data_source">
          <option value="store" selected>本地数据存储（无需TV，默认）</option>
          <option value="live">实时拉取（CDP）</option>
@@ -553,22 +618,22 @@ function buildCard(m) {
     <div class="field"><label>30秒级别</label><select data-cfg="with_30s"><option value="false">关闭</option><option value="true">开启（仅作背驰级别，时间轴仍为3m；30S数据量大，回测明显慢于关闭时）</option></select></div>
   </div>`);
   return `
-  <div class="card" id="card-${m.id}">
+  <div class="card" id="card-${m.id}"${isBt ? ' hidden' : ''}>
     <h2><span>${m.name}</span><span class="badge" id="badge-${m.id}">idle</span></h2>
     <div style="font-size:11px;color:var(--muted);">${m.desc}</div>
     <div class="mode-fields">${rows.join('')}</div>
     <div class="progress"><div id="bar-${m.id}"></div></div>
     <div class="progress-label" id="plabel-${m.id}"></div>
-    ${m.id === 'backtest' ? '<div id="bt-batch" class="bt-batch" hidden></div>' : ''}
+    ${isBt ? `<div id="bt-batch-${m.id}" class="bt-batch" hidden></div>` : ''}
     <div class="log-box" id="log-${m.id}"></div>
     <div class="btn-row">
       <button class="start" id="btn-start-${m.id}">启动</button>
       <button id="btn-pause-${m.id}" disabled>暂停</button>
       <button id="btn-resume-${m.id}" disabled>继续</button>
       <button class="danger" id="btn-stop-${m.id}" disabled>停止</button>
-      ${m.id === 'backtest' ? `
-      <button id="btn-bt-save" disabled title="把最近一次完成的全量回测（参数+本轮信号+固化汇总）保存为历史方案；多品种批量=保存当前页签品种">保存方案</button>
-      <button id="btn-bt-save-all" hidden title="多品种批量一键保存：每个完成品种自动各存一条方案（名称自动带品种）">全部保存</button>` : ''}
+      ${isBt ? `
+      <button id="btn-bt-save-${m.id}" disabled title="把该策略最近一次完成的全量回测（参数+本轮信号+固化汇总）保存为历史方案；多品种批量=保存当前页签品种">保存方案</button>
+      <button id="btn-bt-save-all-${m.id}" hidden title="多品种批量一键保存：每个完成品种自动各存一条方案（名称自动带品种）">全部保存</button>` : ''}
     </div>
   </div>`;
 }
@@ -579,7 +644,7 @@ function modeName(id) { return MODES.find(m => m.id === id)?.name || id; }
 function signalDirectionKey(r) {
   return r.trendReason ? (r.direction === 'short' ? '空' : '多') : signalDirectionName(r);
 }
-// 当前回测大图：本轮全部 backtest 行（不受筛选），回放/实时隐藏
+// 当前回测大图：本轮全部 backtest 行（不受筛选，仅当前策略TAB），回放/实时隐藏
 let equityRedrawTimer = null;
 function scheduleLiveEquity() {
   clearTimeout(equityRedrawTimer);
@@ -593,10 +658,11 @@ function renderLiveEquity() {
   }
   // 多品种批量：跟随品种页签（多品种混合资金曲线口径混乱）；单品种时页签隐藏=全部
   const fs = currentSymFilter();
-  const pts = equityPoints(sigRows.filter(r => r.mode === 'backtest' && (!fs || r.symbol === fs)));
+  const pts = equityPoints(sigRows.filter(r => r.mode === 'backtest'
+    && btRowStrategy(r) === curBtTab && (!fs || r.symbol === fs)));
   if (!pts.length) { host.hidden = true; host.innerHTML = ''; return; }
   drawEquityChart(host, [{ name: '本轮回测', points: pts }], {
-    height: 280, title: '资金曲线', note: '出场盈亏累加（含半平）；品种页签生效，状态/策略/方向筛选不影响',
+    height: 280, title: '资金曲线', note: '出场盈亏累加（含半平）；策略/品种页签生效，状态/策略/方向筛选不影响',
   });
 }
 // 状态/策略/方向过滤器：状态 '' = 全部；策略/方向为多选下拉，不勾选 = 全部
@@ -625,9 +691,11 @@ function filteredRows() {
   const f = el('filter-status').value;
   const st = sigFilterValues('strategy');
   const dir = sigFilterValues('direction');
-  // 品种页签仅对回测行生效（多品种批量跑完后切换查看；回放/实时不受影响）
+  // 品种页签仅对回测行生效（多品种批量跑完后切换查看；回放/实时不受影响）；
+  // 回测行再按当前策略TAB隔离（多策略并行，旧行无 strategy 字段回落默认策略）
   const fs = selectedMode === 'backtest' ? currentSymFilter() : '';
   return sigRows.filter(r=>r.mode===selectedMode
+    &&(selectedMode!=='backtest'||btRowStrategy(r)===curBtTab)
     &&(!f||r.status===f)
     &&(!st.length||st.includes(r.strategyKey))
     &&(!dir.length||dir.includes(signalDirectionKey(r)))
@@ -645,7 +713,7 @@ function summaryStats(rows) {
   // 已平仓平均盈利 / 平均亏损绝对值；保本单和持仓浮盈不参与。
   const avgWin = win.length ? win.reduce((s, r) => s + r.pnl, 0) / win.length : 0;
   const avgLoss = lose.length ? -lose.reduce((s, r) => s + r.pnl, 0) / lose.length : 0;
-  const ex = { stopBe: 0, stopSr: 0, close: 0, half: 0 };
+  const ex = { stopBe: 0, stopSr: 0, close: 0, half: 0, stop: 0, takeProfit: 0 };
   for (const r of rows) {
     if (r.exitType && r.exitType in ex) ex[r.exitType]++;
     ex.half += (r.exits || []).filter(e => e.type === 'half').length;
@@ -675,7 +743,19 @@ function summaryHtml(s, opts = {}) {
     const maxRF = Math.max(Math.abs(realized), Math.abs(floating), Math.abs(total), 0);
     const avgWin = num(s.avg_win), avgLoss = num(s.avg_loss);
     const maxAvg = Math.max(avgWin, avgLoss);
-    const exitN = num(ex.stopBe) + num(ex.stopSr) + num(ex.close);
+    // 出场分布：缠论V1 三类 + fxma 两类（同一方案只会命中其中一组，0 值类不进环形图）
+    const exitN = num(ex.stopBe) + num(ex.stopSr) + num(ex.close) + num(ex.stop) + num(ex.takeProfit);
+    const exitCats = [
+      { n: num(ex.stopBe), color: '#5a8de6', label: '保损' },
+      { n: num(ex.stopSr), color: '#c8742a', label: '止损' },
+      { n: num(ex.close), color: '#8f6ce8', label: '全平' },
+      { n: num(ex.takeProfit), color: '#3aa981', label: '止盈' },
+      { n: num(ex.stop), color: '#9a6b2f', label: '固定止损' },
+    ];
+    const exitLegend = `保损 ${num(ex.stopBe)} · 止损 ${num(ex.stopSr)} · 全平 ${num(ex.close)}`
+      + (ex.takeProfit ? ` · 止盈 ${num(ex.takeProfit)}` : '')
+      + (ex.stop ? ` · 固定止损 ${num(ex.stop)}` : '')
+      + (ex.half ? ` · 半平 ${num(ex.half)}` : '');
     const tile = (label, value, graph, legend) =>
       `<div class="sum-tile"><span class="sum-label">${label}</span><span class="sum-value">${value}</span><span class="sum-graph">${graph}</span>${legend ? `<span class="sum-legend">${legend}</span>` : ''}</div>`;
     const pairBar = (label, val, txt, color) => `
@@ -700,12 +780,8 @@ function summaryHtml(s, opts = {}) {
         ], s.win_rate != null ? s.win_rate + '%' : '—', '胜率'),
         `盈 ${win} · 保本 ${be} · 亏 ${lose} · 共 ${closed}`),
       donutTile('出场分布',
-        donutHtml([
-          { n: num(ex.stopBe), color: '#5a8de6', label: '保损' },
-          { n: num(ex.stopSr), color: '#c8742a', label: '止损' },
-          { n: num(ex.close), color: '#8f6ce8', label: '全平' },
-        ], String(exitN), '次出场'),
-        `保损 ${num(ex.stopBe)} · 止损 ${num(ex.stopSr)} · 全平 ${num(ex.close)}${ex.half ? ' · 半平 ' + num(ex.half) : ''}`),
+        donutHtml(exitCats, String(exitN), '次出场'),
+        exitLegend),
     ].join('');
   }
   const parts = [
@@ -714,7 +790,10 @@ function summaryHtml(s, opts = {}) {
     `已平仓盈亏 <b class="${cls(s.realized)}">${fmtV(s.realized)}</b>`,
     `浮盈 <b class="${cls(s.floating)}">${fmtV(s.floating)}</b>`,
     `合计 <b class="${cls(total)}">${fmtV(total)}</b>`,
-    `出场：保损 ${s.exits.stopBe} · 止损 ${s.exits.stopSr} · 全平 ${s.exits.close}${s.exits.half ? ' · 半平 ' + s.exits.half : ''}`,
+    `出场：保损 ${s.exits.stopBe} · 止损 ${s.exits.stopSr} · 全平 ${s.exits.close}`
+      + (s.exits.takeProfit ? ` · 止盈 ${s.exits.takeProfit}` : '')
+      + (s.exits.stop ? ` · 固定止损 ${s.exits.stop}` : '')
+      + (s.exits.half ? ` · 半平 ${s.exits.half}` : ''),
   ];
   return parts.map(p => `<span>${p}</span>`).join('');
 }
@@ -722,11 +801,13 @@ function renderSummary(rows) {
   el('pnl-summary').innerHTML = summaryHtml(summaryStats(rows));
 }
 // # 列显示序号：当前会话内该模式记录的到达顺序（1 起，清空表格/重新启动回测后重新从 1 计）；
-// 内部 id 不变，定位与方案保存仍按 id 精确匹配。不在当前会话的行（如弹窗快照）退回内部 id。
+// 回测模式按策略TAB分别计数（与可见表格一致）；内部 id 不变，定位与方案保存仍按 id
+// 精确匹配。不在当前会话的行（如弹窗快照）退回内部 id。
 function displayNo(row) {
   let n = 0;
   for (const r of sigRows) {
     if (r.mode !== row.mode) continue;
+    if (r.mode === 'backtest' && btRowStrategy(r) !== btRowStrategy(row)) continue;
     n++;
     if (r.id === row.id) return n;
   }
@@ -761,15 +842,17 @@ function renderTable() {
       return sort === 'ascending' ? aValue - bValue : bValue - aValue;
     });
   }
-  // 品种角标：回测行出现 >1 个品种且当前是「全部」混合视图时在策略列标注行所属品种
+  // 品种角标：当前策略TAB的回测行出现 >1 个品种且当前是「全部」混合视图时在策略列标注行所属品种
   const showSym = !currentSymFilter() && new Set(
-    sigRows.filter(r => r.mode === 'backtest').map(r => r.symbol)).size > 1;
+    sigRows.filter(r => r.mode === 'backtest' && btRowStrategy(r) === curBtTab)
+      .map(r => r.symbol)).size > 1;
   el('sig-body').innerHTML = signalRowsHtml(rows, {
     selectedId: selectedSignal[selectedMode],
     noOf: displayNo,
     showSym,
   });
-  const modeCount=sigRows.filter(r=>r.mode===selectedMode).length;
+  const modeCount=sigRows.filter(r=>r.mode===selectedMode
+    &&(selectedMode!=='backtest'||btRowStrategy(r)===curBtTab)).length;
   el('count').textContent = rows.length === modeCount
     ? `共 ${modeCount} 条`
     : `筛选 ${rows.length} / 共 ${modeCount} 条`;
@@ -903,43 +986,64 @@ function bindSignalRows() {
 }
 
 // ---------- 状态更新 ----------
-function setBadge(m, s) {
-  const b = el(`badge-${m}`);
+// cid = 卡片 DOM 前缀（replay/live=模式名；回测=`bt-<策略id>`）；
+// logicalMode = 互斥口径的模式名——回测各策略卡同为 backtest，策略间不互斥（可并行启动）
+function setBadge(cid, s, logicalMode) {
+  const b = el(`badge-${cid}`);
+  if (!b) return;
   b.textContent = s;
   b.className = 'badge' + (s === 'running' || s === 'done' ? ' running'
     : s === 'paused' ? ' paused' : s === 'error' ? ' error' : '');
   const running = ['running', 'paused'].includes(s);
-  el(`btn-start-${m}`).disabled = running || (state.active && state.active !== m);
-  el(`btn-pause-${m}`).disabled = s !== 'running';
-  el(`btn-resume-${m}`).disabled = s !== 'paused';
-  el(`btn-stop-${m}`).disabled = !running;
-  if (state.active && state.active !== m) {
-    el(`btn-start-${m}`).disabled = true;
-  }
-  if (m === 'backtest') updateBtSaveButton();
+  el(`btn-start-${cid}`).disabled = running || (state.active && state.active !== logicalMode);
+  el(`btn-pause-${cid}`).disabled = s !== 'running';
+  el(`btn-resume-${cid}`).disabled = s !== 'paused';
+  el(`btn-stop-${cid}`).disabled = !running;
+  if (cid.startsWith('bt-')) updateBtSaveButton();
 }
 
 function applyStatus(status) {
   state.active = status.active;
   for (const [m, w] of Object.entries(status.modes)) {
+    if (m === 'backtest') continue;   // 聚合形状仅作兼容（旧前端/父页徽标）；逐策略在 backtests
     if (!state.modes[m]) state.modes[m] = {};
     state.modes[m] = w;
-    setBadge(m, w.state);
+    setBadge(m, w.state, m);
     if (w.error) addLog(m, `错误：${w.error}`);
     const bar = el(`bar-${m}`);
     const p = w.progress || {};
     if (p.pct != null) { bar.style.width = p.pct + '%'; el(`plabel-${m}`).textContent = `${p.current}/${p.total} (${p.pct}%)`; }
     else { bar.style.width = w.state === 'running' ? '100%' : '0%'; el(`plabel-${m}`).textContent = ''; }
-    if (m === 'backtest') renderBtBatch();   // 批量并行进度表（init/刷新恢复；单品种 batch=null → 隐藏）
   }
+  // 多策略并行：逐策略回测 Worker 状态 → 各自 TAB 卡片
+  for (const [sid, w] of Object.entries(status.backtests || {})) applyBtStatus(sid, w);
   updateMarkButtons();
+}
+
+// 单个策略回测状态 → 该策略卡片（徽标/进度/错误/批量表/保存按钮/TAB状态点）
+function applyBtStatus(sid, w) {
+  if (!BT_STRATEGIES.some(s => s.id === sid)) return;
+  state.bt[sid] = w;
+  const cid = `bt-${sid}`;
+  setBadge(cid, w.state, 'backtest');
+  if (w.error) addBtLog(sid, `错误：${w.error}`);
+  const bar = el(`bar-${cid}`);
+  if (bar) {
+    const p = w.progress || {};
+    const pl = el(`plabel-${cid}`);
+    if (p.pct != null) { bar.style.width = p.pct + '%'; pl.textContent = `${p.current}/${p.total} (${p.pct}%)`; }
+    else { bar.style.width = w.state === 'running' ? '100%' : '0%'; pl.textContent = ''; }
+  }
+  renderBtTabs();
+  renderBtBatch();
+  updateBtSaveButton();
 }
 
 // ---------- 多品种批量并行（回测）：每品种进度表 + 品种筛选 ----------
 function renderBtBatch() {
-  const host = el('bt-batch');
+  const host = el(`bt-batch-bt-${curBtTab}`);
   if (!host) return;
-  const batch = state.modes.backtest?.batch;
+  const batch = state.bt[curBtTab]?.batch;
   if (!batch || !Object.keys(batch).length) { host.hidden = true; host.innerHTML = ''; return; }
   host.hidden = false;
   host.innerHTML = Object.entries(batch).map(([sym, st]) => {
@@ -958,15 +1062,18 @@ function renderBtBatch() {
 // 品种页签（记录区顶部，多品种批量回测）：>1 个品种时显示，**默认选中第一个品种**
 // （不默认混合「全部」）；表格/汇总/资金曲线随页签切换，「保存方案」存当前品种。
 // symTabSel：null=未选（刷新/新一轮批量后回落到第一个品种）；''=「全部」；其余=品种。
-// 顺序优先取批量勾选顺序（batch 键序），否则按行首次出现顺序。
+// 顺序优先取批量勾选顺序（batch 键序），否则按行首次出现顺序；
+// 多策略并行（2026-10-02）：品种页签跟随当前策略TAB（批量/行均按策略过滤）。
 let symTabSel = null;
 let _symTabsSig = '';
 function currentSymFilter() { return symTabSel || ''; }
 function refreshSymTabs() {
   const host = el('sym-tabs');
   if (!host) return;
-  const batchSyms = Object.keys(state.modes.backtest?.batch || []);
-  const rowSyms = [...new Set(sigRows.filter(r => r.mode === 'backtest' && r.symbol).map(r => r.symbol))];
+  const batchSyms = Object.keys(state.bt[curBtTab]?.batch || {});
+  const rowSyms = [...new Set(sigRows
+    .filter(r => r.mode === 'backtest' && btRowStrategy(r) === curBtTab && r.symbol)
+    .map(r => r.symbol))];
   const syms = batchSyms.length > 1 ? batchSyms : rowSyms;
   if (syms.length <= 1) {           // 单品种/无行：隐藏页签、清选择（=不过滤）
     host.hidden = true; symTabSel = null; _symTabsSig = ''; return;
@@ -988,6 +1095,16 @@ function addLog(m, msg) {
   box.textContent = logs[m].join('\n');
   box.scrollTop = box.scrollHeight;
 }
+// 回测日志按策略路由（多策略并行：各自卡片的日志框互不混写）
+function addBtLog(sid, msg) {
+  if (!BT_STRATEGIES.some(s => s.id === sid)) return;
+  (btLogs[sid] = btLogs[sid] || []).push(msg);
+  if (btLogs[sid].length > 200) btLogs[sid].shift();
+  const box = el(`log-bt-${sid}`);
+  if (!box) return;
+  box.textContent = btLogs[sid].join('\n');
+  box.scrollTop = box.scrollHeight;
+}
 
 // ---------- 控制调用 ----------
 async function api(path, body, reqOpts = {}) {
@@ -1004,13 +1121,13 @@ async function api(path, body, reqOpts = {}) {
   return data;
 }
 
-function collectCfg(m) {
+function collectCfg(cid, mode) {
   const cfg = {};
-  document.querySelectorAll(`#card-${m} [data-cfg]`).forEach(inp => {
+  document.querySelectorAll(`#card-${cid} [data-cfg]`).forEach(inp => {
     const v = inp.value;
     cfg[inp.dataset.cfg] = v === 'true' ? true : v === 'false' ? false : v;
   });
-  if (m === 'backtest') {
+  if (mode === 'backtest') {
     cfg.signal_mode = 'realtime';
     // data_source 三选映射回后端旧语义：cache → use_cache=true（store/live 走新字段）
     cfg.use_cache = (cfg.data_source === 'cache');
@@ -1025,22 +1142,33 @@ function collectCfg(m) {
 // ---------- 策略下拉（与工作台 catalog 同源动态渲染）+ 策略专属字段显隐 ----------
 // 非缠论V1策略隐藏其不消费的通用字段（后端按策略自行推导，参数在参数中心该策略页签按品种设置）：
 // fxma_v1：周期（取数周期由参数中心 entryRes 推导）、30秒级别开关、预热根数（用默认）
+// 回放/实时卡仍用卡内策略下拉驱动；回测卡=策略TAB，按各卡策略直接应用
 const STRATEGY_FIELD_HIDE = {
   fxma_v1: ['periods', 'with_30s', 'warmup'],
 };
+function applyStrategyHide(card, strategyId) {
+  const hide = STRATEGY_FIELD_HIDE[strategyId] || [];
+  const fields = [
+    card.querySelector('.f-periods'),
+    card.querySelector('[data-cfg="with_30s"]')?.closest('.field'),
+    card.querySelector('[data-cfg="warmup"]')?.closest('.field'),
+  ];
+  ['periods', 'with_30s', 'warmup'].forEach((key, i) => {
+    if (fields[i]) fields[i].style.display = hide.includes(key) ? 'none' : '';
+  });
+}
 function applyStrategyFields() {
   document.querySelectorAll('[data-cfg="strategy"]').forEach(sel => {
     const card = sel.closest('.card');
     if (!card) return;
-    const hide = STRATEGY_FIELD_HIDE[sel.value] || [];
-    const fields = [
-      card.querySelector('.f-periods'),
-      card.querySelector('[data-cfg="with_30s"]')?.closest('.field'),
-      card.querySelector('[data-cfg="warmup"]')?.closest('.field'),
-    ];
-    ['periods', 'with_30s', 'warmup'].forEach((key, i) => {
-      if (fields[i]) fields[i].style.display = hide.includes(key) ? 'none' : '';
-    });
+    applyStrategyHide(card, sel.value);
+  });
+}
+// 回测每策略卡：字段显隐按该卡策略固定应用（无卡内下拉）
+function applyBtCardFields() {
+  BT_STRATEGIES.forEach(s => {
+    const card = el(`card-bt-${s.id}`);
+    if (card) applyStrategyHide(card, s.id);
   });
 }
 async function loadStrategyOptions() {
@@ -1078,46 +1206,78 @@ function closeAllMsPanels(except) {
   });
 }
 
-// 回测卡：勾选 >1 个品种时禁用不可并行的数据源（live/cache）并回落 store。
+// 回测卡（每策略一卡）：勾选 >1 个品种时禁用不可并行的数据源（live/cache）并回落 store。
 // 提示性联动；服务端 normalize_cfg 硬校验兜底
 function toggleBtSourceOptions() {
-  const card = el('card-backtest');
-  const sel = card?.querySelector('[data-cfg="data_source"]');
-  if (!sel) return;
-  const n = String(card.querySelector('[data-cfg="symbols"]')?.value || '')
-    .split(',').map(s => s.trim()).filter(Boolean).length;
-  [...sel.options].forEach(o => { if (o.value !== 'store') o.disabled = n > 1; });
-  if (n > 1 && sel.value !== 'store') sel.value = 'store';
+  for (const s of BT_STRATEGIES) {
+    const card = el(`card-bt-${s.id}`);
+    const sel = card?.querySelector('[data-cfg="data_source"]');
+    if (!sel) continue;
+    const n = String(card.querySelector('[data-cfg="symbols"]')?.value || '')
+      .split(',').map(x => x.trim()).filter(Boolean).length;
+    [...sel.options].forEach(o => { if (o.value !== 'store') o.disabled = n > 1; });
+    if (n > 1 && sel.value !== 'store') sel.value = 'store';
+  }
 }
 
 // ---------- 绑定 ----------
-// 清空指定功能的信号记录：服务端删除 + 本地过滤；历史方案不受影响
-async function clearModeRows(mode) {
-  const r = await api('/api/signals/clear', { mode });
-  if (r) sigRows = sigRows.filter(row => row.mode !== mode);
+// 清空指定功能的信号记录：服务端删除 + 本地过滤；历史方案不受影响。
+// backtest 模式带 strategy（多策略并行：只清当前策略TAB的行，另一策略照常运行/展示）
+async function clearModeRows(mode, strategy) {
+  const body = { mode };
+  if (mode === 'backtest' && strategy) body.strategy = strategy;
+  const r = await api('/api/signals/clear', body);
+  if (r) sigRows = sigRows.filter(row => row.mode !== mode
+    || (mode === 'backtest' && !!strategy && btRowStrategy(row) !== strategy));
   renderTable();
 }
 function bindCard(m) {
   el(`btn-start-${m}`).onclick = async () => {
-    const cfg = collectCfg(m);
+    const cfg = collectCfg(m, m);
     if (!cfg.periods.length) { alert('请至少选择一个周期'); return; }
-    if (m === 'backtest') {
-      // 品种多选：空 → 拒绝；>1 个 → 仅本地数据存储（cache 单品种文件/live 共享图表不可并行）
-      cfg.symbols = String(cfg.symbols || '').split(',').map(s => s.trim()).filter(Boolean);
-      if (!cfg.symbols.length) { alert('请至少选择一个品种'); return; }
-      if (cfg.symbols.length > 1 && cfg.data_source !== 'store') {
-        alert('多品种批量回测仅支持数据源=本地数据存储（store）');
-        return;
-      }
-      // 全量回测启动前自动清空本轮信号表格，避免新旧行混在一起
-      await clearModeRows('backtest');
-    }
     const r = await api(`/api/${m}/start`, { cfg });
     if (r) { addLog(m, '启动请求已发送'); }
   };
   el(`btn-pause-${m}`).onclick = () => api(`/api/${m}/pause`);
   el(`btn-resume-${m}`).onclick = () => api(`/api/${m}/resume`);
   el(`btn-stop-${m}`).onclick = () => api(`/api/${m}/stop`);
+}
+// 回测卡绑定（每策略一卡）：启动注入 cfg.strategy=该TAB；启停/暂停路由带 strategy；
+// 启动前只清本策略信号行（并行策略互不影响）；批量进度表行点击 → 品种页签
+function bindBtCard(sid) {
+  const cid = `bt-${sid}`;
+  el(`btn-start-${cid}`).onclick = async () => {
+    const cfg = collectCfg(cid, 'backtest');
+    cfg.strategy = sid;
+    if (!cfg.periods.length && !STRATEGY_FIELD_HIDE[sid]?.includes('periods')) { alert('请至少选择一个周期'); return; }
+    // 品种多选：空 → 拒绝；>1 个 → 仅本地数据存储（cache 单品种文件/live 共享图表不可并行）
+    cfg.symbols = String(cfg.symbols || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (!cfg.symbols.length) { alert('请至少选择一个品种'); return; }
+    if (cfg.symbols.length > 1 && cfg.data_source !== 'store') {
+      alert('多品种批量回测仅支持数据源=本地数据存储（store）');
+      return;
+    }
+    // 启动前自动清空本策略本轮信号表格，避免新旧行混在一起（另一策略TAB不受影响）
+    await clearModeRows('backtest', sid);
+    const r = await api('/api/backtest/start', { cfg, strategy: sid });
+    if (r) { addBtLog(sid, '启动请求已发送'); }
+  };
+  el(`btn-pause-${cid}`).onclick = () => api('/api/backtest/pause', { strategy: sid });
+  el(`btn-resume-${cid}`).onclick = () => api('/api/backtest/resume', { strategy: sid });
+  el(`btn-stop-${cid}`).onclick = () => api('/api/backtest/stop', { strategy: sid });
+  el(`btn-bt-save-${cid}`).onclick = saveBtRun;
+  el(`btn-bt-save-all-${cid}`).onclick = saveAllBtRuns;
+  // 批量进度表行点击 → 切到该品种页签并滚动到记录区（页签可见时生效）
+  el(`bt-batch-${cid}`)?.addEventListener('click', e => {
+    const row = e.target.closest('.bt-batch-row[data-sym]');
+    if (!row) return;
+    const host = el('sym-tabs');
+    if (!host || host.hidden) return;
+    symTabSel = row.dataset.sym;
+    showRecordTab('signals');
+    renderTable();
+    document.getElementById('record-signals')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
 }
 
 // ---------- SSE ----------
@@ -1131,6 +1291,11 @@ function connectSSE() {
     const d = JSON.parse(e.data);
     // 守卫：只认三模式自身的 status（其他模块如 data 拉取可能占用 active，但不发本事件）
     if (!MODES.some(x => x.id === d.mode)) return;
+    if (d.mode === 'backtest') {
+      // 多策略并行：回测 status 带策略 id → 路由到该策略卡片（active 聚合由后端 init 刷新）
+      if (d.strategy) applyBtStatus(d.strategy, { ...(state.bt[d.strategy] || {}), state: d.state });
+      return;
+    }
     applyStatus({ active: state.active, modes: { [d.mode]: { ...state.modes[d.mode], state: d.state } } });
   });
   es.addEventListener('log', e => {
@@ -1141,6 +1306,10 @@ function connectSSE() {
     }
     // 守卫：支阻调试页（mode=sr）的日志/进度不发到三模式控制台页
     if (d.mode !== 'backtest' && d.mode !== 'replay' && d.mode !== 'live') return;
+    if (d.mode === 'backtest') {
+      if (d.strategy) addBtLog(d.strategy, d.msg);   // 每策略卡片独立日志框
+      return;
+    }
     addLog(d.mode, d.msg);
   });
   es.addEventListener('mark_done', e => {
@@ -1156,6 +1325,12 @@ function connectSSE() {
   });
   es.addEventListener('signal', e => {
     const d = JSON.parse(e.data);
+    // 同向互斥过滤的信号不留在列表里：后端剔除行后只推 remove（行 id）
+    if (d.remove != null) {
+      const i = sigRows.findIndex(r => r.id === d.remove);
+      if (i >= 0) { sigRows.splice(i, 1); renderTable(); }
+      return;
+    }
     const row = d.row;
     const idx = sigRows.findIndex(r => r.id === row.id);
     if (idx >= 0) sigRows[idx] = row; else sigRows.push(row);
@@ -1164,22 +1339,43 @@ function connectSSE() {
   es.addEventListener('progress', e => {
     const d = JSON.parse(e.data);
     if (!MODES.some(x => x.id === d.mode)) return;  // 守卫：非本页模式的进度忽略
+    if (d.mode === 'backtest') {
+      if (!d.strategy) return;
+      const w = state.bt[d.strategy] = state.bt[d.strategy] || {};
+      w.progress = { current: d.current, total: d.total, pct: d.pct };
+      if (d.strategy === curBtTab) {
+        const bar = el(`bar-bt-${d.strategy}`);
+        if (bar && d.pct != null) {
+          bar.style.width = d.pct + '%';
+          el(`plabel-bt-${d.strategy}`).textContent = `${d.current}/${d.total} (${d.pct}%)`;
+        }
+      }
+      return;
+    }
     if (!state.modes[d.mode]) state.modes[d.mode] = {};
     state.modes[d.mode].progress = { current: d.current, total: d.total, pct: d.pct };
     const bar = el(`bar-${d.mode}`);
     if (d.pct != null) { bar.style.width = d.pct + '%'; el(`plabel-${d.mode}`).textContent = `${d.current}/${d.total} (${d.pct}%)`; }
   });
-  // 多品种批量并行：单品种进度/状态行（仅回测页监听；总进度条仍走 progress 事件）
+  // 多品种批量并行：单品种进度/状态行（仅回测页监听；总进度条仍走 progress 事件）；
+  // 多策略并行：事件带策略 id → 记入该策略的批量表，只有当前TAB才重绘DOM
   es.addEventListener('bt_symbol', e => {
     const d = JSON.parse(e.data);
     if (d.mode !== 'backtest' || !d.symbol) return;
-    if (!state.modes.backtest) state.modes.backtest = {};
-    const batch = state.modes.backtest.batch = state.modes.backtest.batch || {};
+    const sid = d.strategy || 'chan_v1';
+    const w = state.bt[sid] = state.bt[sid] || {};
+    const batch = w.batch = w.batch || {};
     batch[d.symbol] = { state: d.state, current: d.current, total: d.total,
                         pct: d.pct, error: d.error, stats: d.stats, duration: d.duration };
-    renderBtBatch();
+    if (sid === curBtTab) renderBtBatch();
   });
-  es.addEventListener('signals_cleared', e => { const d=JSON.parse(e.data);sigRows=d.mode?sigRows.filter(r=>r.mode!==d.mode):[];renderTable(); });
+  es.addEventListener('signals_cleared', e => {
+    const d = JSON.parse(e.data);
+    // 多策略并行：回测清除带策略 → 只删该策略行（另策略TAB照常展示）
+    sigRows = d.mode ? sigRows.filter(r => r.mode !== d.mode
+      || (d.mode === 'backtest' && d.strategy && btRowStrategy(r) !== d.strategy)) : [];
+    renderTable();
+  });
 }
 
 // ---------- 历史回测方案（仅全量回测：保存/列表/明细/对比/载参数） ----------
@@ -1187,18 +1383,19 @@ let btRuns = [];                 // 列表缓存（/api/bt/runs，不含信号�
 const btCompareSel = new Set();  // 对比勾选的方案 id
 let btRunsPnlSort = 'none';      // 方案列表合计盈亏：none / descending / ascending
 
-// 保存按钮：仅最近一次回测结束（done/stopped）且信号表有回测行时可点；
+// 保存按钮（每策略一卡）：仅该策略最近一次回测结束（done/stopped）且信号表有该策略行时可点；
 // 实际可保存性（本轮是否有新增行）由后端在保存时校验
 function updateBtSaveButton() {
-  const btn = el('btn-bt-save');
+  const btn = el(`btn-bt-save-bt-${curBtTab}`);
   if (!btn) return;
-  const st = state.modes.backtest?.state;
-  const ready = ['done', 'stopped'].includes(st) && sigRows.some(r => r.mode === 'backtest');
+  const st = state.bt[curBtTab]?.state;
+  const ready = ['done', 'stopped'].includes(st)
+    && sigRows.some(r => r.mode === 'backtest' && btRowStrategy(r) === curBtTab);
   btn.disabled = !ready;
   // 「全部保存」：仅多品种批量跑完出现（一键每品种各存一条）
-  const all = el('btn-bt-save-all');
+  const all = el(`btn-bt-save-all-bt-${curBtTab}`);
   if (all) {
-    const show = Object.keys(state.modes.backtest?.batch || {}).length > 1 && ready;
+    const show = Object.keys(state.bt[curBtTab]?.batch || {}).length > 1 && ready;
     all.hidden = !show;
     all.disabled = !show;
   }
@@ -1207,8 +1404,8 @@ function updateBtSaveButton() {
 // 表单默认名与服务端 default_name 同式：品种 + 起始日期（→结束日期，有则） + 保存时刻。
 // 品种来源：批量 → 当前页签品种（默认已选中第一个品种）；单品种 → 表单唯一勾选值
 function btDefaultName() {
-  const card = el('card-backtest');
-  const batch = state.modes.backtest?.batch || {};
+  const card = el(`card-bt-${curBtTab}`);
+  const batch = state.bt[curBtTab]?.batch || {};
   const sym = currentSymFilter() || Object.keys(batch)[0]
     || String(card.querySelector('[data-cfg="symbols"]')?.value || '')
       .split(',').map(s => s.trim()).filter(Boolean)[0] || '';
@@ -1221,9 +1418,10 @@ function btDefaultName() {
 }
 
 async function saveBtRun() {
-  if (el('btn-bt-save').disabled) return;
+  if (el(`btn-bt-save-bt-${curBtTab}`)?.disabled) return;
+  const sid = curBtTab;   // 保存目标=当前策略TAB（多策略并行：互不串轮）
   // 多品种批量：保存当前页签品种（「全部」时提示先选品种）；单品种：不传 symbol 走原路径
-  const batchKeys = Object.keys(state.modes.backtest?.batch || {});
+  const batchKeys = Object.keys(state.bt[sid]?.batch || {});
   const fs = currentSymFilter();
   if (batchKeys.length > 1 && !fs) {
     alert('多品种批量回测：请先在记录区顶部点选要保存的品种页签（当前为「全部」）');
@@ -1231,7 +1429,7 @@ async function saveBtRun() {
   }
   const name = prompt('方案名称（参数 + 本轮信号记录 + 汇总将一起保存）：', btDefaultName());
   if (name === null) return;
-  const r = await api('/api/bt/runs/save', { name: name.trim(), symbol: fs || undefined });
+  const r = await api('/api/bt/runs/save', { name: name.trim(), symbol: fs || undefined, strategy: sid });
   if (r) {
     showRecordTab('bt');            // 保存成功后切到历史方案 TAB 直见结果（内部已刷新列表）
   }
@@ -1239,12 +1437,13 @@ async function saveBtRun() {
 
 // 一键全存（多品种批量）：每个完成品种自动各存一条方案（名称自动带品种）
 async function saveAllBtRuns() {
-  if (el('btn-bt-save-all')?.disabled) return;
-  const batch = state.modes.backtest?.batch || {};
+  const sid = curBtTab;
+  if (el(`btn-bt-save-all-bt-${sid}`)?.disabled) return;
+  const batch = state.bt[sid]?.batch || {};
   const n = Object.keys(batch).filter(s => ['done', 'stopped'].includes(batch[s]?.state)).length;
   if (!n) { alert('没有可保存的品种结果'); return; }
   if (!confirm(`将按品种保存 ${n} 条方案（名称自动带品种），继续？`)) return;
-  const r = await api('/api/bt/runs/save_all', {});
+  const r = await api('/api/bt/runs/save_all', { strategy: sid });
   if (!r) return;
   const parts = [`已保存 ${r.saved.length} 条`];
   if (r.skipped?.length) parts.push(`跳过 ${r.skipped.length} 个：` + r.skipped.map(s => `${s.symbol}（${s.reason}）`).join('；'));
@@ -1388,7 +1587,10 @@ const BT_METRICS = [
   ['浮盈', s => `<span class="${pnlClass(s.floating)}">${fmtPnlText(s.floating)}</span>`],
   ['合计', s => `<b class="${pnlClass(s.total)}">${fmtPnlText(s.total)}</b>`],
   ['运行时长', s => fmtDuration(s.duration_sec)],
-  ['出场分布', s => `保损 ${s.exits?.stopBe ?? 0} · 止损 ${s.exits?.stopSr ?? 0} · 全平 ${s.exits?.close ?? 0}${s.exits?.half ? ' · 半平 ' + s.exits.half : ''}`],
+  ['出场分布', s => `保损 ${s.exits?.stopBe ?? 0} · 止损 ${s.exits?.stopSr ?? 0} · 全平 ${s.exits?.close ?? 0}`
+    + (s.exits?.takeProfit ? ` · 止盈 ${s.exits.takeProfit}` : '')
+    + (s.exits?.stop ? ` · 固定止损 ${s.exits.stop}` : '')
+    + (s.exits?.half ? ` · 半平 ${s.exits.half}` : '')],
   ['信号总数', s => s.rows_total ?? '-'],
   ['未成交信号', s => s.cnt_signal ?? '-'],
   ['持仓中', s => s.cnt_open ?? '-'],
@@ -1471,9 +1673,14 @@ async function fillCompareEquity(runs, host) {
 }
 
 // ---------- 载参数：collectCfg 的逆映射（只回填表单，不自动启动） ----------
+// 多策略并行：方案 cfg.strategy 决定回填到哪个策略TAB（未知/缺失回落当前TAB）
 function loadBtCfg(run) {
   const cfg = run.cfg || {};
-  const card = el('card-backtest');
+  const sid = BT_STRATEGIES.some(s => s.id === cfg.strategy) ? cfg.strategy : curBtTab;
+  if (cfg.strategy && sid !== cfg.strategy) addBtLog(sid, `方案策略 ${cfg.strategy} 不在当前策略列表，回填到本TAB`);
+  selectMode('backtest');
+  selectBtTab(sid);
+  const card = el(`card-bt-${sid}`);
   card.querySelectorAll('[data-cfg]').forEach(inp => {
     const k = inp.dataset.cfg;
     // periods/with_30s 由 periods 推导；symbols 由 symbol/symbols 专门回填（多选面板）
@@ -1499,7 +1706,7 @@ function loadBtCfg(run) {
   card.querySelector('[data-cfg="with_30s"]').value = String(periods.includes('30S'));
   // 结束日期显式清空/回填：旧方案 cfg 无 to 键，通用循环会跳过——不清空则上次手填值残留、悄悄截断复现回测
   card.querySelector('[data-cfg="to"]').value = cfg.to || '';
-  addLog('backtest', `已载入方案参数：${run.name}（未自动启动，确认后点「启动」）`);
+  addBtLog(sid, `已载入方案参数：${run.name}（未自动启动，确认后点「启动」）`);
 }
 
 async function renameBtRun(run) {
@@ -1520,8 +1727,7 @@ async function deleteBtRun(run) {
 }
 
 function bindBtRuns() {
-  el('btn-bt-save').onclick = saveBtRun;
-  el('btn-bt-save-all').onclick = saveAllBtRuns;
+  // 保存/全部保存按钮在每策略卡上（bindBtCard 绑定，作用于当前策略TAB）
   el('btn-bt-refresh').onclick = refreshBtRuns;
   el('btn-bt-compare').onclick = () => {
     const v = el('bt-compare-view');
@@ -1689,8 +1895,8 @@ function bindBtErrors() {
 // 支阻预设下拉已移除（2026-09-29 模块分层二轮）：支阻参数统一在「参数配置 → 支阻位」
 // 经方案列表单选生效（复制入品种桶），回测按品种读参数中心桶，不再单独选预设。
 
-// 品种下拉（三张卡共用 data-cfg="symbol"）：选项 = 静态默认 ∪ 基础数据已入库品种，
-// 与基础数据页 refreshFetchSymbol 同口径（去重、保留当前选择）
+// 品种下拉（回放/实时卡 data-cfg="symbol"；回测卡为多选面板）：选项 = 静态默认 ∪
+// 基础数据已入库品种，与基础数据页 refreshFetchSymbol 同口径（去重、保留当前选择）
 async function loadStoreSymbols() {
   try {
     const s = await fetch('/api/data/stats').then(x => x.json());
@@ -1704,12 +1910,32 @@ async function loadStoreSymbols() {
   } catch (e) { /* /api/data/stats 拉取失败：保留静态默认选项 */ }
 }
 
+// 策略清单（回测策略TAB）：catalog 同源；拉取失败回落内置缠论V1 单策略
+async function loadBtStrategies() {
+  try {
+    const c = await (await fetch('/analysis-catalog.json')).json();
+    const list = (c.strategies || []).map(s => ({ id: s.id, name: s.name }));
+    if (list.length) BT_STRATEGIES = list;
+  } catch { /* catalog 不可用 → 回落内置 */ }
+  if (!BT_STRATEGIES.length) BT_STRATEGIES = BT_STRATEGY_FALLBACK.slice();
+  if (!BT_STRATEGIES.some(s => s.id === curBtTab)) curBtTab = BT_STRATEGIES[0].id;
+}
+
 async function init() {
-  el('cards').innerHTML = MODES.map(buildCard).join('');
-  applyStoredAfterBars();   // 定位后保留K线：回填持久值并挂同步监听（三卡+明细页共用）
+  await loadBtStrategies();   // 回测卡=策略TAB，须先有策略清单再建卡
+  el('cards').innerHTML =
+    MODES.filter(m => m.id !== 'backtest')
+      .map(m => buildCard({ ...m, mode: m.id })).join('')
+    + BT_STRATEGIES.map(s => buildCard({
+        id: `bt-${s.id}`, mode: 'backtest', name: `全量回测 · ${s.name}`,
+        desc: '当下背驰 · 纯后台逐根推进 · 多策略TAB可同时运行互不干扰',
+      })).join('');
+  applyStoredAfterBars();   // 定位后保留K线：回填持久值并挂同步监听（各卡+明细页共用）
   bindLocateAfterBars();
-  MODES.forEach(m => bindCard(m.id));
-  // 策略下拉：catalog 同源动态渲染 + 切换时显隐策略不消费的字段
+  MODES.filter(m => m.id !== 'backtest').forEach(m => bindCard(m.id));
+  BT_STRATEGIES.forEach(s => bindBtCard(s.id));
+  applyBtCardFields();      // 回测卡策略专属字段显隐（fxma 隐藏周期/30秒/预热）
+  // 策略下拉（回放/实时）：catalog 同源动态渲染 + 切换时显隐策略不消费的字段
   document.addEventListener('change', e => {
     if (e.target.matches?.('[data-cfg="strategy"]')) applyStrategyFields();
   });
@@ -1738,25 +1964,20 @@ async function init() {
   loadStoreSymbols();
   el('mode-nav').onclick=e=>{const b=e.target.closest('[data-mode]');if(b)selectMode(b.dataset.mode)};
   if(parent!==window)parent.postMessage({type:'modes-ready'},location.origin);
-  el('btn-clear').onclick = () => clearModeRows(selectedMode);
+  // 清空表格：回测=当前策略TAB的行（多策略并行互不影响）；回放/实时=该模式全部
+  el('btn-clear').onclick = () => clearModeRows(selectedMode, selectedMode === 'backtest' ? curBtTab : undefined);
   el('filter-status').onchange = () => renderTable();
+  // 回测策略TAB：点击切换卡片与信号行过滤
+  el('bt-tabs').addEventListener('click', e => {
+    const b = e.target.closest('[data-bt-tab]');
+    if (b) selectBtTab(b.dataset.btTab);
+  });
   // 品种页签（多品种批量回测）：点击切换 → 表格/汇总/资金曲线/保存品种随之切换
   el('sym-tabs').addEventListener('click', e => {
     const b = e.target.closest('.sym-tab');
     if (!b) return;
     symTabSel = b.dataset.sym;
     renderTable();
-  });
-  // 批量进度表行点击 → 切到该品种页签并滚动到记录区（页签可见时生效）
-  el('bt-batch')?.addEventListener('click', e => {
-    const row = e.target.closest('.bt-batch-row[data-sym]');
-    if (!row) return;
-    const host = el('sym-tabs');
-    if (!host || host.hidden) return;
-    symTabSel = row.dataset.sym;
-    showRecordTab('signals');
-    renderTable();
-    document.getElementById('record-signals')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
   toggleBtSourceOptions();
   // 策略/方向多选过滤：勾选变化 → 更新按钮文案与当前模式的筛选记忆 → 重渲染
@@ -1781,7 +2002,10 @@ async function init() {
     startMarkWatchdog();
     const colors = { buy: el('mark-color-buy').value, sell: el('mark-color-sell').value,
                      exit: el('mark-color-exit').value };
-    const r = await api('/api/marks/draw', { colors,mode:selectedMode });
+    // 回测模式只标记当前策略TAB的行（多策略并行口径）
+    const body = { colors, mode: selectedMode };
+    if (selectedMode === 'backtest') body.strategy = curBtTab;
+    const r = await api('/api/marks/draw', body);
     if (!r) { markBusy = false; stopMarkWatchdog(); updateMarkButtons(); setMarkStatus('标记请求失败', true); }
   };
   el('btn-sr-draw').onclick = async () => {
@@ -1790,7 +2014,9 @@ async function init() {
     updateMarkButtons();
     setMarkStatus('支阻标记中...');
     startMarkWatchdog();
-    const r = await api('/api/marks/sr_draw', { mode:selectedMode, colors: { sr: el('mark-color-sr').value } });
+    const body = { mode: selectedMode, colors: { sr: el('mark-color-sr').value } };
+    if (selectedMode === 'backtest') body.strategy = curBtTab;
+    const r = await api('/api/marks/sr_draw', body);
     if (!r) { markBusy = false; stopMarkWatchdog(); updateMarkButtons(); setMarkStatus('支阻标记请求失败', true); }
   };
   el('btn-mark-clear').onclick = async () => {

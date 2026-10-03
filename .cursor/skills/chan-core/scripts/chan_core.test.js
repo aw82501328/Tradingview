@@ -669,7 +669,7 @@ describe("biMacdMetrics 笔区间 MACD 指标", () => {
   });
 });
 
-describe("isBiDiverge MACD 背驰判定（OR 关系）", () => {
+describe("isBiDiverge MACD 背驰判定（2026-10-01 起双判据 AND：面积+DIF；时长不可比时 DIF 单判据兜底）", () => {
   test("底背驰：绿柱面积变小 → true", () => {
     const bi = { type: "down", startTime: 2000, endTime: 3000 };
     const refer = { type: "down", startTime: 1000, endTime: 1500 };
@@ -680,14 +680,25 @@ describe("isBiDiverge MACD 背驰判定（OR 关系）", () => {
     assert.equal(core.isBiDiverge(bi, refer, macdArr), true);
   });
 
-  test("底背驰：黄白线低点抬高 → true（面积未变小）", () => {
+  test("底背驰：仅 DIF 抬高、面积未变小（时长可比）→ false", () => {
     const bi = { type: "down", startTime: 2000, endTime: 3000 };
     const refer = { type: "down", startTime: 1000, endTime: 1500 };
     const macdArr = [
       { time: 1000, macd: -2, dif: 1 }, { time: 1500, macd: -2, dif: 1 },
       { time: 2000, macd: -2, dif: 3 }, { time: 3000, macd: -2, dif: 3 },
     ];
-    // 面积相等但 difLow 抬高（1→3）
+    // 时长比 2≤3（面积可比）；面积相等（未变小）且 difLow 抬高 → 双判据需同时成立 → false
+    assert.equal(core.isBiDiverge(bi, refer, macdArr), false);
+  });
+
+  test("底背驰：时长比>3（面积不计入）→ DIF 单判据兜底 → true", () => {
+    const bi = { type: "down", startTime: 2000, endTime: 3000 };
+    const refer = { type: "down", startTime: 1000, endTime: 1250 };
+    const macdArr = [
+      { time: 1000, macd: -2, dif: 1 }, { time: 1250, macd: -2, dif: 1 },
+      { time: 2000, macd: -2, dif: 3 }, { time: 3000, macd: -2, dif: 3 },
+    ];
+    // 时长比 1000/250=4>3 → 面积不计入；仅 difLow 抬高（1→3）即成立
     assert.equal(core.isBiDiverge(bi, refer, macdArr), true);
   });
 
@@ -1039,5 +1050,84 @@ describe("MACD replacement preserves both endpoint extremes", () => {
       [[1788954300,1788957000],[1788957000,1788960600],[1788960600,1788966900]]);
     assert.equal(recent[0].macdCross, true);
     assert.equal(recent[1].endPrice, 4434.175);
+  });
+});
+
+// 参数页总开关（2026-10-02）：关闭时功能整体停用，与 py_chain/chan_core.py 同口径
+describe("参数页总开关 wickMarkOn / wideBarOn", () => {
+  const spiky = () => [
+    bar(1, 100, 90, 95), bar(2, 120, 90.5, 96), bar(3, 110, 90, 100),
+    bar(4, 100, 70, 96), bar(5, 99, 92, 93),
+  ];
+
+  test("wickMarkOn=false 时 markWickBars 原样浅拷贝返回", () => {
+    const bars = spiky();
+    assert.equal(core.markWickBars(bars)[1].high, 96);  // 默认开：长上影压平
+    const saved = core.CHAN_CFG.wickMarkOn;
+    try {
+      core.CHAN_CFG.wickMarkOn = false;
+      const off = core.markWickBars(bars);
+      bars.forEach((src, i) => {
+        assert.equal(off[i].high, src.high);
+        assert.equal(off[i].low, src.low);
+        for (const k of ["_topCand", "_preHigh", "_origLow", "_origLowTime", "_preLow"]) {
+          assert.equal(k in off[i], false);
+        }
+      });
+      assert.notEqual(off[0], bars[0]);  // 仍是新数组，不污染原始K线
+    } finally {
+      core.CHAN_CFG.wickMarkOn = saved;
+    }
+    assert.equal(core.markWickBars(bars)[1].high, 96);
+  });
+
+  // wickMinRange 前提（2026-10-02，默认 15，与 py_chain/test_chan_core_rules.py 同口径）：
+  // 整根价差（高-低）须 > 该值才判插针压平；0=不限（回退旧口径）
+  test("wickMinRange：价差 ≤ 下限的插针不压平，0=不限", () => {
+    assert.equal(core.CHAN_CFG.wickMinRange, 15);
+    const big = [bar(1, 110, 100, 105), bar(2, 122, 98, 101), bar(3, 115, 99, 112)];
+    assert.equal(core.markWickBars(big)[1].high, 101);  // amp=24 > 15：压平
+    const small = [bar(1, 55, 50, 52.5), bar(2, 61, 49, 51), bar(3, 57.5, 49.5, 56)];
+    const out = core.markWickBars(small);               // amp=12 ≤ 15：不压平
+    assert.equal(out[1].high, 61);
+    assert.equal("_preHigh" in out[1], false);
+    const saved = core.CHAN_CFG.wickMinRange;
+    try {
+      core.CHAN_CFG.wickMinRange = 0;
+      assert.equal(core.markWickBars(small)[1].high, 51);  // 0=不限：恢复压平
+    } finally {
+      core.CHAN_CFG.wickMinRange = saved;
+    }
+  });
+
+  // wickMinLen 绝对长度下限（2026-10-02 起为具体数值，默认 0.5；原 wickAtrK×ATR 口径废除），
+  // 与 py_chain/test_chan_core_rules.py test_wick_min_len_absolute 同口径
+  test("wickMinLen：影线长度 < 下限不压平（具体数值口径）", () => {
+    assert.equal(core.CHAN_CFG.wickMinLen, 0.5);
+    const bars = [bar(1, 110, 100, 105), bar(2, 125, 100, 101), bar(3, 115, 101, 112)];
+    assert.equal(core.markWickBars(bars)[1].high, 101);  // 上影 24 ≥ 0.5：压平
+    const saved = core.CHAN_CFG.wickMinLen;
+    try {
+      core.CHAN_CFG.wickMinLen = 30;
+      const out = core.markWickBars(bars);               // 24 < 30：不压平
+      assert.equal(out[1].high, 125);
+      assert.equal("_preHigh" in out[1], false);
+    } finally {
+      core.CHAN_CFG.wickMinLen = saved;
+    }
+  });
+
+  test("wideBarOn=false 时 wideBarPointsOf 一律 0", () => {
+    for (const res of ["3", "15", "60", "240", "D"]) assert.equal(core.wideBarPointsOf(res), 30);
+    const saved = core.CHAN_CFG.wideBarOn;
+    try {
+      core.CHAN_CFG.wideBarOn = false;
+      for (const res of ["3", "15", "60", "240", "D", 180, 86400]) {
+        assert.equal(core.wideBarPointsOf(res), 0);
+      }
+    } finally {
+      core.CHAN_CFG.wideBarOn = saved;
+    }
+    assert.equal(core.wideBarPointsOf("3"), 30);
   });
 });

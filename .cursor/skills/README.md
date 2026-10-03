@@ -34,7 +34,7 @@ Python 侧对应：`py_chain/sr_flip.py` / `sr_service.py`（支阻）、`py_cha
 
 | 技能 | 职责 | 脚本 |
 | --- | --- | --- |
-| fxma-entry | 标记进出场（缠论买卖点 + 强分型 + 均线分离 + 固定点数止损止盈；落盘 `fxma_<品种>.json`；无支阻/计划步骤，参数中心 `fxma` 模块按品种管理） | `fxma-entry/scripts/fxma_entry.js` |
+| fxma-entry | 标记进出场（缠论买卖点 + 强分型 + 均线分离 + 收盘站线 + 可选黄金分割附近/上级周期同向（默认关） + 固定点数止损止盈；落盘 `fxma_<品种>.json`；无支阻/计划步骤，参数中心 `fxma` 模块按品种管理） | `fxma-entry/scripts/fxma_entry.js` |
 
 Python 侧对应：`py_chain/fx_ma.py`（`FxMaEngine`，step_to 接口同 chan）+ `py_chain/engine_dispatch.py`
 （回测/回放/监控 Worker、bt_batch 与 `live_trader._build_engine` 共用分发点）。规则全文见

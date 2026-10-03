@@ -1,3 +1,6 @@
+import os as _os
+_os.environ.setdefault("PY_CHAIN_BT_JOURNAL", "0")  # 引擎测试不落交易日志
+
 # -*- coding: utf-8 -*-
 """M1/M2 进场背驰扩展单测（SPEC_divergence_fallback）。
 

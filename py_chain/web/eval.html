@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EVAL 评估 · 成笔用例与基线</title>
+<style>
+:root{color-scheme:dark;--bg:#10151e;--panel:#19212e;--card-2:#131c29;--line:#2c384a;--border:var(--line);--text:#e7edf7;--muted:#99a9c0;--blue:#8eb7ff;--primary:#5086e5;--ok:#92d1b4;--warn:#f0b90b}
+*{box-sizing:border-box}
+body{margin:0 auto;padding:22px 26px 60px;max-width:1420px;background:var(--bg);color:var(--text);font:14px/1.65 "Segoe UI","Microsoft YaHei",sans-serif}
+body.embedded{padding:18px 22px 50px}
+body.embedded .hero{display:none}
+button,input,select{font:inherit}
+button{cursor:pointer}button:disabled{opacity:.45;cursor:default}
+h1{font-size:24px;margin:0 0 4px;letter-spacing:.5px}
+h2{font-size:16px;margin:0}
+h3{font-size:13px;margin:0 0 8px}
+p{margin:8px 0 14px}
+.muted{color:var(--muted)}.caption{font-size:12px;color:var(--muted)}
+.hero{margin:6px 0 18px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin-bottom:18px}
+.panel-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+.row{display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap}
+label{display:block;font-size:12px;color:var(--muted)}
+input,select{display:block;background:#101823;border:1px solid #3c4d65;color:var(--text);border-radius:6px;padding:7px 10px;margin-top:4px}
+input[type=checkbox]{display:inline;margin:0}
+.btn{border:1px solid #3c4d65;background:#243247;color:var(--text);border-radius:6px;padding:7px 14px}
+.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+.btn.mini{padding:3px 9px;font-size:12px;border-radius:5px}
+.badge{font-size:11px;padding:2px 8px;border-radius:10px;background:#27364c;color:#b8d3ff;white-space:nowrap}
+.badge.pass{background:#0d3b31;color:var(--ok)}
+.badge.fail{background:#3b1717;color:#ff8a8a}
+.badge.drift{background:#3b3222;color:var(--warn)}
+.src-line{background:var(--card-2);border:1px solid var(--line);border-radius:7px;padding:9px 13px;font-size:12.5px;color:#b5c2d5;margin-bottom:14px}
+.src-line b{color:#cfe0f8;font-weight:600}
+.src-line.warn{background:#3b3222;color:#e7c688;border-color:#5a4d2e}
+.hint{font-size:12px;color:var(--muted);margin:12px 0 0}
+.table-wrap{overflow:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td,th{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--muted);font-size:12px;font-weight:400}
+tr:last-child td{border-bottom:0}
+.select-bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;background:var(--card-2);border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin-top:14px}
+.select-bar b{color:#cfe0f8}
+.select-bar input{margin-top:0;min-width:240px;flex:0 1 300px}
+.note{border-left:3px solid #729ee8;background:#1e3049;padding:11px 14px;margin-top:14px;font-size:12.5px;color:#bed0ea}
+.bar{height:8px;background:#131c29;border:1px solid var(--line);border-radius:6px;overflow:hidden;margin:6px 0 4px}
+.bar-fill{height:100%;width:0;background:var(--primary);transition:width .4s}
+.summary-row{display:flex;gap:18px;align-items:center;flex-wrap:wrap;font-size:13px;margin:4px 0 10px}
+.bl-group-title{display:flex;gap:10px;align-items:center;margin:16px 0 4px;font-size:13.5px;font-weight:600;color:#cfe0f8;white-space:nowrap}
+.case-row{cursor:pointer}
+.case-row:hover{background:#1c2735}
+.err-text{color:#ff8a8a;font-size:12px;white-space:normal}
+.case-detail{background:#121a26;border:1px solid var(--line);border-top:0;padding:16px 18px;margin:0 0 4px}
+.diff-section{margin-bottom:16px}
+.diff-table td,.diff-table th{padding:6px 10px;font-size:12.5px}
+.only-a{color:#ff9d9d}.only-b{color:#8fd6ff}
+.chg{color:#ff8a8a;font-weight:600}
+.pair-table td,.pair-table th{padding:6px 10px;font-size:12.5px;font-family:Consolas,Menlo,monospace;white-space:nowrap}
+.arrow-up{color:#089981}.arrow-down{color:#f23645}
+.toast{position:fixed;bottom:24px;right:24px;max-width:460px;background:#294260;border:1px solid #6889b5;border-radius:9px;padding:13px 18px;z-index:9;box-shadow:0 8px 32px #0006;font-size:13px}
+[hidden]{display:none!important}
+@media(max-width:900px){body{padding:14px}.pair-table{font-size:11px}}
+</style>
+</head>
+<body>
+<div class="hero">
+  <h1>EVAL 评估</h1>
+  <p class="muted">按周期快照成笔用例 → 多选建立基线（冻结期望笔结果）→ 画笔逻辑调整后跑基线回归，逐用例看通过/差异。</p>
+</div>
+
+<!-- 1 新增用例 -->
+<section class="panel">
+  <div class="panel-head"><h2>① 新增用例</h2><span class="caption">一键从本地K线缓存快照，不手工录入</span></div>
+  <div class="src-line" id="srcLine">正在读取本地K线缓存…</div>
+  <div class="row">
+    <label>用例名称<input id="caseName" placeholder="如：3分钟·近等双顶场景" style="min-width:240px"></label>
+    <label>品种（随本地缓存）<input id="caseSymbol" readonly placeholder="—"></label>
+    <label>周期<select id="caseRes"></select></label>
+    <label>起始时间（可选，截断各周期）<input type="datetime-local" id="caseFrom"></label>
+    <label>结束时间（可选，截断各周期）<input type="datetime-local" id="caseTo"></label>
+    <button class="btn primary" id="createCaseBtn" onclick="act(createCase)">创建用例</button>
+  </div>
+  <p class="hint">起止时间把各周期K线截断到该区间（按K线开盘时刻计，边界含当根）；<b>所选周期</b>截断后至少 50 根才可建用例——选「全部周期」则 5 个周期都要满足，选单一周期只看该周期（如选 3 分钟时 D 根数少不拦）。截断后前段笔与全量图可能不同，属正常。品种取自本地缓存当前品种（换品种请到「基础数据」页拉取后回此快照）；不填结束时间即快照到缓存最新一根。用例只存输入（K线 + 当时画笔参数快照），笔的<b>期望值在建立基线时才冻结</b>。</p>
+</section>
+
+<!-- 2 用例列表 -->
+<section class="panel">
+  <div class="panel-head"><h2>② 用例列表</h2><span class="caption" id="caseCount"></span></div>
+  <div class="table-wrap" id="caseTableWrap"></div>
+  <div class="select-bar">
+    <span>已选 <b id="selCount">0</b> 个用例</span>
+    <input id="blName" placeholder="基线名称，如：画笔规则 v4 基线">
+    <button class="btn primary" id="createBlBtn" onclick="act(createBaseline)">以选中用例建立基线</button>
+    <span class="caption">期望值冻结在基线内，同批用例可建多个基线做改动前后 A/B</span>
+  </div>
+</section>
+
+<!-- 3 基线列表 -->
+<section class="panel">
+  <div class="panel-head"><h2>③ 基线列表</h2><button class="btn" id="runAllBtn" onclick="act(runAll)">▶ 跑全部基线</button></div>
+  <div class="table-wrap" id="blTableWrap"></div>
+  <p class="hint">「更新期望」＝用当前逻辑重新冻结基线内所有笔与买卖点结果（逻辑有意变更后使用）；「运行」＝用当前逻辑重算并与冻结期望比对（Python build_bis + compute_all_marks，笔 11 字段、买卖点 6 字段逐位）。</p>
+</section>
+
+<!-- 4 运行结果 -->
+<section class="panel">
+  <div class="panel-head"><h2 id="resultTitle">④ 运行结果</h2><span class="caption" id="runMeta"></span></div>
+  <div id="runBody"><p class="muted">尚未运行。点击基线的「运行」或「▶ 跑全部基线」。</p></div>
+</section>
+
+<div class="toast" id="toast" hidden></div>
+
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtT=t=>t?new Date(typeof t==='number'?t*1000:t).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'—';
+const fmtFull=t=>t?new Date(typeof t==='number'?t*1000:t).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}):'—';
+const num=v=>typeof v==='number'?v.toLocaleString('zh-CN'):esc(v);
+const MARK_FIELDS=new Set(['rawCount','span','gapLocked','macdCross']);
+const PERIOD_ORDER=['D','240','60','15','3'];
+
+let barsInfo=null, cases=[], baselines=[], runState=null, pollTimer=null, toastTimer;
+
+async function api(path,body){
+  const r=await fetch('/api/eval/'+path, body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  let d;try{d=await r.json()}catch{throw Error('服务响应异常（'+r.status+'）')}
+  if(!r.ok||d.ok===false)throw Error(d.error||'请求失败');
+  return d;
+}
+function toast(t){$('toast').textContent=t;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,5000)}
+async function act(fn){try{await fn()}catch(e){toast(e.message)}}
+
+/* ---------- 数据加载与渲染 ---------- */
+async function loadBarsInfo(){
+  barsInfo=await api('bars-info');
+  const line=$('srcLine');
+  if(!barsInfo.available){
+    line.className='src-line warn';
+    line.textContent='本地K线缓存不可用（'+esc(barsInfo.path)+'）。请先到「基础数据」页拉取各周期K线，再回本页建用例。';
+    $('createCaseBtn').disabled=true;
+    return;
+  }
+  const per=Object.entries(barsInfo.periods||{}).map(([r,v])=>`${r} ${num(v.count)} 根`).join(' · ');
+  const last=Math.max(...Object.values(barsInfo.periods||{}).map(v=>v.last||0));
+  line.className='src-line';
+  line.innerHTML='K线来源：<b>本地缓存 bars_all_tf.json</b> · 品种 <b>'+esc(barsInfo.symbol||'—')+'</b> · '+esc(per)+' · 截止 <b>'+fmtFull(last)+'</b>';
+  const sel=$('caseRes');
+  sel.innerHTML='<option value="ALL">全部周期</option>'+PERIOD_ORDER.filter(r=>barsInfo.periods[r]).map(r=>`<option value="${r}">${r}</option>`).join('');
+  $('caseSymbol').value=barsInfo.symbol||'—';
+}
+async function loadCases(){
+  cases=(await api('cases')).cases;
+  $('caseCount').textContent=cases.length+' 个用例 · 勾选多个建立基线';
+  const rows=cases.map(c=>{
+    const counts=c.barCounts||{};
+    const kc=c.res==='ALL'?Object.keys(counts).length+' 周期':`${esc(c.res)}：${num(counts[c.res]??0)} 根`;
+    const range=c.fromTs||c.toTs?`<span class="badge">${c.fromTs?fmtT(c.fromTs):'头'} → ${c.toTs?fmtT(c.toTs):'尾'}</span>`:'全量';
+    const bad=c.snapshotOk===false?' <span class="badge fail">快照缺失</span>':'';
+    return `<tr><td><input type="checkbox" class="case-cb" data-id="${esc(c.id)}"></td>
+      <td>${esc(c.name)}${bad}</td><td>${esc(c.res)}</td><td>${esc(c.symbol||'—')}</td>
+      <td>${kc}</td><td>${range}</td><td>${fmtT(c.createdAt)}</td>
+      <td><button class="btn mini" data-del-case="${esc(c.id)}">删除</button></td></tr>`;
+  });
+  $('caseTableWrap').innerHTML=rows.length
+    ?`<table><thead><tr><th></th><th>名称</th><th>周期</th><th>品种</th><th>K线数</th><th>范围</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${rows.join('')}</tbody></table>`
+    :'<p class="muted">还没有用例。在上方填名称、选周期（可选起始时间）创建第一个。</p>';
+  refreshSel();
+}
+async function loadBaselines(){
+  baselines=(await api('baselines')).baselines;
+  const rows=baselines.map(b=>{
+    const lr=b.lastRun?`<span class="badge ${lrCls(b)}">通过 ${b.lastRun.pass}/${b.lastRun.total}</span> · ${fmtT(b.lastRun.at)}`:'—';
+    return `<tr><td>${esc(b.name)}</td><td>${b.caseIds.length}</td><td>${fmtT(b.updatedAt||b.createdAt)}</td><td>${lr}</td>
+      <td><button class="btn mini" data-detail="${esc(b.id)}">明细</button>
+          <button class="btn mini primary" data-run="${esc(b.id)}">运行</button>
+          <button class="btn mini" data-refresh="${esc(b.id)}">更新期望</button>
+          <button class="btn mini" data-rename="${esc(b.id)}" data-name="${esc(b.name)}">重命名</button>
+          <button class="btn mini" data-del-bl="${esc(b.id)}">删除</button></td></tr>`;
+  });
+  $('blTableWrap').innerHTML=rows.length
+    ?`<table><thead><tr><th>名称</th><th>用例数</th><th>期望冻结时间</th><th>最近运行</th><th>操作</th></tr></thead><tbody>${rows.join('')}</tbody></table>`
+    :'<p class="muted">还没有基线。在上方用例列表勾选多个用例后建立。</p>';
+  $('runAllBtn').disabled=!baselines.length;
+}
+function lrCls(b){return b.lastRun&&b.lastRun.pass===b.lastRun.total?'pass':'fail'}
+
+/* ---------- 运行状态 ---------- */
+async function refreshRunState(then){
+  runState=await api('run-state');
+  renderResults();
+  if(runState.state==='running')schedulePoll();
+  else if(pollTimer){clearInterval(pollTimer);pollTimer=null;await loadBaselines()}
+  if(then)await then();
+}
+function schedulePoll(){
+  if(pollTimer)return;
+  pollTimer=setInterval(()=>act(async()=>await refreshRunState()),1500);
+}
+
+/* ---------- 结果渲染 ---------- */
+function biText(x){return x?`<span class="arrow-${x.type}">${x.type==='up'?'↑':'↓'}</span> ${x.startPrice} → ${x.endPrice} · ${fmtT(x.startTime)} → ${fmtT(x.endTime)}`:'—'}
+function fieldVal(f,v){
+  if(v===null||v===undefined)return esc(v??'');
+  if(f==='startTime'||f==='endTime')return fmtT(v);
+  if(typeof v==='boolean')return v?'true':'false';
+  return esc(v);
+}
+function marksDetailHtml(mk){
+  const byBi=new Map();
+  (mk.diffs||[]).forEach(d=>{const a=byBi.get(d.bi)||[];a.push(d.field);byBi.set(d.bi,a)});
+  const strip=[...byBi.entries()].map(([bi,fs])=>`<div style="margin:2px 0"><span class="badge fail">#${bi+1}</span> <span style="font-family:Consolas,Menlo,monospace">${fs.map(esc).join('、')}</span></div>`).join('');
+  const capped=(mk.nDiffs||0)>(mk.diffs||[]).length;
+  const rows=(mk.context&&mk.context.rows)||[];
+  const pair=rows.length
+    ?`<table class="pair-table"><thead><tr><th>点#</th><th>基线（冻结期望）</th><th>当前（本次重算）</th></tr></thead><tbody>${rows.map(r=>{
+        const n=(r.idxA!=null?r.idxA:r.idxB)+1;
+        const MF=['label','time','price','rawTime','rawPrice','color'];
+        const diff=r.a&&r.b&&MF.some(f=>r.a[f]!==r.b[f]);
+        const single=(r.a?1:0)+(r.b?1:0)===1;
+        const mark=diff||single?' style="background:#26180f"':'';
+        return `<tr${mark}><td>#${n}</td><td>${r.a?markText(r.a):'<span class="muted">（无）</span>'}</td><td>${r.b?markText(r.b):(r.a?'<span class="only-b">（当前新增）</span>':'—')}</td></tr>`}).join('')}</tbody></table>`
+    :'<p class="muted" style="margin:4px 0">无对照窗口</p>';
+  return `<div class="diff-section"><h3>差异点清单（哪几个点有问题）</h3>${strip||'<p class="muted" style="margin:4px 0">无</p>'}${capped?`<p class="caption">共 ${mk.nDiffs} 条字段差异，仅列前 ${(mk.diffs||[]).length} 条</p>`:''}</div>
+    <div class="diff-section"><h3>点对照（首差异前后，黄底行含差异；按原时间对齐）</h3>${pair}</div>`;
+}
+function markText(m){
+  if(!m)return '—';
+  const isBuy=String(m.label||'').endsWith('买');
+  return `<span class="arrow-${isBuy?'up':'down'}">${isBuy?'↑':'↓'}</span>${esc(m.label)} <b>${esc(m.rawPrice)}</b> · ${fmtT(m.rawTime)}${m.color==='#089981'?' <span class="badge pass">共振</span>':''}`;
+}
+function diffDetailHtml(det){
+  const struct=[],mark=[];
+  (det.diffs||[]).forEach(d=>(MARK_FIELDS.has(d.field)?mark:struct).push(d));
+  // 差异笔清单：按笔号聚合字段，直接回答"哪几笔有问题"
+  const byBi=new Map();
+  (det.diffs||[]).forEach(d=>{const a=byBi.get(d.bi)||[];a.push(d.field);byBi.set(d.bi,a)});
+  const strip=[...byBi.entries()].map(([bi,fs])=>`<div style="margin:2px 0"><span class="badge fail">#${bi+1}</span> <span style="font-family:Consolas,Menlo,monospace">${fs.map(esc).join('、')}</span></div>`).join('');
+  const capped=(det.nDiffs||0)>(det.diffs||[]).length;
+  const list=`<div class="diff-section"><h3>差异笔清单（哪几笔有问题）</h3>${strip||'<p class="muted" style="margin:4px 0">无</p>'}${capped?`<p class="caption">共 ${det.nDiffs} 条字段差异，仅列前 ${(det.diffs||[]).length} 条</p>`:''}</div>`;
+  const tbl=items=>items.length
+    ?`<table class="diff-table"><thead><tr><th>笔#</th><th>字段</th><th>基线值</th><th>当前值</th></tr></thead><tbody>${items.map(d=>`<tr><td>#${d.bi+1}</td><td>${esc(d.field)}</td><td>${fieldVal(d.field,d.expected)}</td><td class="chg">${fieldVal(d.field,d.actual)}</td></tr>`).join('')}</tbody></table>`
+    :'<p class="muted" style="margin:4px 0">无</p>';
+  const rows=(det.context&&det.context.rows)||[];
+  const pair=rows.length
+    ?`<table class="pair-table"><thead><tr><th>笔#</th><th>基线（冻结期望）</th><th>当前（本次重算）</th></tr></thead><tbody>${rows.map(r=>{
+        const n=(r.idxA!=null?r.idxA:r.idxB)+1;
+        const diff=r.a&&r.b&&['type','startTime','endTime','startPrice','endPrice','rawCount','span','gapLocked','macdCross','startIdx','endIdx'].some(f=>r.a[f]!==r.b[f]);
+        const single=(r.a?1:0)+(r.b?1:0)===1;
+        const mark=diff||single?' style="background:#26180f"':'';
+        return `<tr${mark}><td>#${n}</td><td>${r.a?biText(r.a):'<span class="muted">（无）</span>'}</td><td>${r.b?biText(r.b):(r.a?'<span class="only-b">（当前新增）</span>':'—')}</td></tr>`}).join('')}</tbody></table>`
+    :'<p class="muted" style="margin:4px 0">无对照窗口</p>';
+  const marksHtml=det.marks===null||det.marks===undefined
+    ?'<p class="hint">该基线为旧版（未冻结买卖点期望），本次仅比对笔；对其「更新期望」一次即可补上买卖点。</p>'
+    :marksDetailHtml(det.marks);
+  return `${list}<div class="diff-section"><h3>笔对照（首差异前后，黄底行含差异）</h3>${pair}</div>
+    <div class="diff-section"><h3>结构差异（方向 / 端点 / 时间）</h3>${tbl(struct)}</div>
+    <div class="diff-section"><h3>标记差异（rawCount / span / gapLocked / macdCross）</h3>${tbl(mark)}</div>
+    ${det.marks===undefined?'':`<div style="border-top:1px solid var(--line);margin-top:4px"></div>${marksHtml}`}`;
+}
+function renderResults(){
+  const body=$('runBody'),meta=$('runMeta'),title=$('resultTitle');
+  if(!runState||runState.state==='idle'){body.innerHTML='<p class="muted">尚未运行。点击基线的「运行」或「▶ 跑全部基线」。</p>';meta.textContent='';return}
+  const items=runState.items||[];
+  if(runState.state==='running'){
+    const done=items.filter(i=>i.state!=='pending'&&i.state!=='running').length;
+    const pct=items.length?done/items.length*100:0;
+    body.innerHTML=`<div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div><p class="caption">${done} / ${items.length} 用例 · 正在重算（Python build_bis）…</p>`;
+    meta.textContent=runState.mode==='freeze'?('冻结期望 · '+esc(runState.freezeName||'')):'运行基线';
+    title.textContent='④ 运行结果';
+    return;
+  }
+  const mode=runState.mode;
+  const isRun=mode==='run';
+  const okCount=items.filter(i=>i.ok).length;
+  let html=`<div class="summary-row">`+(isRun
+    ?`<span class="badge ${okCount===items.length?'pass':'fail'}">通过 ${okCount} / ${items.length}</span><span class="muted">比对口径：11 字段逐笔（align_check 同款）· 引擎 Python build_bis</span>`
+    :`<span class="badge pass">期望已冻结 · ${items.length} 用例</span><span class="muted">基线「${esc(runState.freezeName||'')}」已用当前逻辑冻结笔 + 买卖点期望</span>${runState.baselineId?`<button class="btn mini" data-detail="${esc(runState.baselineId)}">查看冻结明细</button>`:''}`)+`</div>`;
+  // 按基线分组
+  const groups=[];
+  for(const it of items){
+    let g=groups.find(g=>g.key===it.baselineId);
+    if(!g){g={key:it.baselineId,name:it.baselineName,items:[]};groups.push(g)}
+    g.items.push(it);
+  }
+  for(const g of groups){
+    const gOk=g.items.filter(i=>i.ok).length;
+    html+=`<div class="bl-group-title">${esc(g.name||g.key)} ${isRun?`<span class="badge ${gOk===g.items.length?'pass':'fail'}">${gOk}/${g.items.length}</span>`:''}</div>
+      <div class="table-wrap"><table><thead><tr><th>用例</th><th>周期</th>${isRun?'<th>期望笔数</th><th>实际笔数</th><th>笔首差异</th>':'<th>笔数</th>'}<th>买卖点</th><th>状态</th></tr></thead><tbody>`;
+    g.items.forEach((it,ki)=>{
+      if(it.state==='error'){
+        html+=`<tr><td>${esc(it.caseName||it.caseId)}</td><td>${esc(it.res||'')}</td><td colspan="5" class="err-text">✗ ${esc(it.error||'计算失败')}</td></tr>`;
+        return;
+      }
+      const det=it.details||{};
+      const resList=Object.keys(det).sort((a,b)=>PERIOD_ORDER.indexOf(a)-PERIOD_ORDER.indexOf(b));
+      resList.forEach((res,ri)=>{
+        const d=det[res]||{};
+        const fail=isRun&&!d.ok;
+        const m=d.marks;
+        const mCell=isRun
+          ?(m===undefined?'<td class="muted">—</td>'
+            :m===null?'<td class="muted" title="旧基线未冻结买卖点，仅比对笔">—·旧</td>'
+            :(m.ok?`<td><span class="badge pass">✓ ${m.nActual}</span></td>`
+                  :`<td><span class="badge fail">✗ #${(m.firstDiff??0)+1}</span> <span class="caption">${m.nActual}/${m.nExpected}</span></td>`))
+          :`<td>${num(d.nMarks??0)}</td>`;
+        html+=`<tr class="${fail?'case-row':''}" data-item="${ki}" data-res="${res}">
+          <td>${ri===0?esc(it.caseName||it.caseId):''}</td><td>${esc(res)}</td>
+          ${isRun?`<td>${num(d.nExpected??0)}</td><td>${d.nActual!==d.nExpected?'<span class="chg">'+num(d.nActual)+'</span>':num(d.nActual??0)}</td><td>${fail&&d.firstDiff!=null?'#'+(d.firstDiff+1):'—'}</td>`:`<td>${num(d.nActual??0)}</td>`}
+          ${mCell}
+          <td>${isRun?(d.ok?'<span class="badge pass">✓ 通过</span>':'<span class="badge fail">✗ 失败</span>'):'<span class="badge pass">已冻结</span>'}
+            ${it.drift?' <span class="badge drift" title="当前画笔/买卖点参数与建用例时不同，已按用例参数快照运行">参数漂移</span>':''}
+            ${fail?' <span class="caption">▾ 展开差异</span>':''}</td></tr>`;
+        if(fail)html+=`<tr hidden><td colspan="7" style="padding:0"><div class="case-detail">${diffDetailHtml(d)}</div></td></tr>`;
+      });
+      if(!resList.length)html+=`<tr><td>${esc(it.caseName||it.caseId)}</td><td>${esc(it.res||'')}</td><td colspan="5" class="muted">无结果</td></tr>`;
+    });
+    html+='</tbody></table></div>';
+  }
+  if(runState.error)html+=`<p class="err-text">任务错误：${esc(runState.error)}</p>`;
+  body.innerHTML=html;
+  meta.textContent=(runState.state==='error'?'出错':isRun?'运行完成':'冻结完成')
+    +(runState.finishedAt?` · ${fmtT(runState.finishedAt)}`:'')
+    +(runState.durationMs?` · 用时 ${(runState.durationMs/1000).toFixed(1)}s`:'');
+  document.querySelectorAll('.case-row').forEach(tr=>tr.addEventListener('click',()=>{
+    const next=tr.nextElementSibling;
+    if(next&&next.querySelector('.case-detail'))next.hidden=!next.hidden;
+  }));
+}
+
+/* ---------- 基线冻结明细 ---------- */
+function biRow(bi,i){
+  return `<tr><td>#${i+1}</td><td><span class="arrow-${bi.type}">${bi.type==='up'?'↑':'↓'}</span></td>
+    <td>${esc(bi.startIdx)}</td><td>${esc(bi.endIdx)}</td>
+    <td>${esc(bi.startPrice)}</td><td>${esc(bi.endPrice)}</td>
+    <td>${fmtT(bi.startTime)}</td><td>${fmtT(bi.endTime)}</td>
+    <td>${esc(bi.rawCount)}</td><td>${esc(bi.span)}</td>
+    <td>${bi.gapLocked?'✓':'·'}</td><td>${bi.macdCross?'✓':'·'}</td></tr>`;
+}
+const BI_TABLE_HEAD='<thead><tr><th>笔#</th><th>向</th><th>起#</th><th>止#</th><th>起价</th><th>止价</th><th>起时间</th><th>止时间</th><th>raw</th><th>span</th><th>GL</th><th>MC</th></tr></thead>';
+async function showBaselineDetail(id){
+  const d=await api('bl-bis?id='+encodeURIComponent(id));
+  $('resultTitle').textContent='④ 基线明细';
+  $('runMeta').textContent=`基线「${d.name}」冻结期望 · 逐笔 11 字段 · 随时可从基线列表重开`;
+  let html='';
+  for(const c of d.cases||[]){
+    const range=c.fromTs||c.toTs?`${c.fromTs?fmtT(c.fromTs):'头'} → ${c.toTs?fmtT(c.toTs):'尾'}`:'全量';
+    html+=`<div class="bl-group-title">${esc(c.caseName)} <span class="badge">${esc(c.res)}</span> <span class="caption">${esc(c.symbol||'—')} · ${range} · 冻结于 ${fmtT(c.frozenAt)}</span></div>`;
+    const resList=Object.keys(c.bis||{}).sort((a,b)=>PERIOD_ORDER.indexOf(a)-PERIOD_ORDER.indexOf(b));
+    for(const res of resList){
+      const bis=c.bis[res]||[];
+      html+=`<p class="caption" style="margin:6px 0 2px">${res} · ${bis.length} 笔</p>
+        <div class="table-wrap"><table class="pair-table">${BI_TABLE_HEAD}<tbody>${bis.map(biRow).join('')}</tbody></table></div>`;
+      const mks=(c.marks||{})[res]||[];
+      if(mks.length){
+        html+=`<p class="caption" style="margin:8px 0 2px">${res} · 买卖点 ${mks.length} 个</p>
+          <div class="table-wrap"><table class="pair-table"><thead><tr><th>点#</th><th>标记</th><th>原价</th><th>原时间</th><th>标价</th><th>标时间</th><th>共振</th></tr></thead><tbody>${mks.map((m,i)=>`<tr><td>#${i+1}</td><td>${markText(m)}</td><td>${esc(m.rawPrice)}</td><td>${fmtT(m.rawTime)}</td><td>${esc(m.price)}</td><td>${fmtT(m.time)}</td><td>${m.color==='#089981'?'✓':'·'}</td></tr>`).join('')}</tbody></table></div>`;
+      }
+    }
+    if(!resList.length)html+='<p class="muted">无冻结数据</p>';
+  }
+  $('runBody').innerHTML=(d.cases||[]).length?html:'<p class="muted">基线内没有可用用例（可能已被删除）。</p>';
+}
+
+/* ---------- 动作 ---------- */
+async function createCase(){
+  const name=$('caseName').value.trim();
+  if(!name){toast('请填写用例名称');return}
+  const from=$('caseFrom').value,to=$('caseTo').value;
+  if(from&&to&&Date.parse(to)<=Date.parse(from)){toast('结束时间须晚于起始时间');return}
+  const payload={name,res:$('caseRes').value||'ALL'};
+  if(from)payload.fromTs=Math.floor(Date.parse(from)/1000);
+  if(to)payload.toTs=Math.floor(Date.parse(to)/1000);
+  await api('create-case',payload);
+  $('caseName').value='';$('caseFrom').value='';$('caseTo').value='';
+  await loadCases();
+  toast('用例已创建（快照K线 + 画笔参数）。勾选多个用例即可建立基线。');
+}
+function refreshSel(){
+  const n=document.querySelectorAll('.case-cb:checked').length;
+  $('selCount').textContent=n;
+  $('createBlBtn').disabled=n===0;
+}
+async function createBaseline(){
+  const ids=[...document.querySelectorAll('.case-cb:checked')].map(cb=>cb.dataset.id);
+  if(!ids.length){toast('请先勾选用例');return}
+  const name=$('blName').value.trim();
+  if(!name){toast('请填写基线名称');return}
+  await api('create-baseline',{name,caseIds:ids});
+  $('blName').value='';
+  toast('正在按当前逻辑冻结期望…（任务后台运行）');
+  schedulePoll();
+  await act(async()=>await refreshRunState());
+}
+async function runBaseline(id){
+  await api('run',{baselineIds:[id]});
+  toast('基线运行中…');
+  schedulePoll();
+  await act(async()=>await refreshRunState());
+}
+async function runAll(){
+  await api('run',{baselineIds:baselines.map(b=>b.id)});
+  toast('全部基线运行中…');
+  schedulePoll();
+  await act(async()=>await refreshRunState());
+}
+async function refreshBaseline(id){
+  if(!confirm('将用当前逻辑重新冻结期望笔结果（覆盖基线内全部用例）？\n仅在画笔逻辑有意变更、且已确认新结果正确时使用。'))return;
+  await api('refresh-baseline',{id});
+  toast('正在重新冻结期望…');
+  schedulePoll();
+  await act(async()=>await refreshRunState());
+}
+async function renameBaseline(id,oldName){
+  const name=prompt('新的基线名称：',oldName);
+  if(name===null)return;
+  await api('rename-baseline',{id,name:name.trim()});
+  await loadBaselines();
+  toast('基线已重命名');
+}
+async function deleteBaseline(id){
+  if(!confirm('删除该基线（不影响用例与快照）？'))return;
+  await api('delete-baseline',{id});
+  await loadBaselines();
+  toast('基线已删除');
+}
+async function deleteCase(id){
+  if(!confirm('删除该用例？其K线快照文件保留（可能被其他用例共享）。'))return;
+  await api('delete-case',{id});
+  await loadCases();
+  toast('用例已删除');
+}
+
+/* ---------- 事件 ---------- */
+document.addEventListener('click',e=>{
+  const b=e.target.closest('button');if(!b)return;
+  if(b.dataset.delCase)act(()=>deleteCase(b.dataset.delCase));
+  if(b.dataset.detail)act(()=>showBaselineDetail(b.dataset.detail));
+  if(b.dataset.run)act(()=>runBaseline(b.dataset.run));
+  if(b.dataset.refresh)act(()=>refreshBaseline(b.dataset.refresh));
+  if(b.dataset.rename)act(()=>renameBaseline(b.dataset.rename,b.dataset.name));
+  if(b.dataset.delBl)act(()=>deleteBaseline(b.dataset.delBl));
+});
+document.addEventListener('change',e=>{if(e.target.classList.contains('case-cb'))refreshSel()});
+
+/* ---------- 启动 ---------- */
+if(new URLSearchParams(location.search).has('embed'))document.body.classList.add('embedded');
+act(async()=>{
+  await loadBarsInfo();
+  await loadCases();
+  await loadBaselines();
+  await refreshRunState();
+});
+</script>
+</body>
+</html>

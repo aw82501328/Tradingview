@@ -1,3 +1,6 @@
+import os as _os
+_os.environ.setdefault("PY_CHAIN_BT_JOURNAL", "0")  # 引擎测试不落交易日志
+
 # -*- coding: utf-8 -*-
 """震荡判定参考周期（range_res）与 2买/2卖 DIF 0 轴容差（macdZeroTol）单元测试
 （2026-09-16 最终口径：小周期只听门、参考周期及以上只作锚、rangeRes 必填；

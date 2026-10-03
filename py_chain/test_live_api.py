@@ -171,5 +171,62 @@ class TestWebappRouting(LiveApiBase):
                          {"enabled": False})
 
 
+class TestBootstrapWithoutTables(unittest.TestCase):
+    """webapp 先于 live_trader 首次运行启动：全新库无 live_* 表也不崩（自建表）。
+
+    此前 overview() 首个 load_state 即抛 no such table: live_state，请求线程
+    异常导致空响应断连，/live 页策略 TAB 与交易开关整页渲染不出来。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="live_api_boot_")
+        os.environ["LIVE_DB_PATH"] = os.path.join(self.tmp, "live.db")
+        # 关键：不调用 ensure_tables()，保持无表状态
+
+    def tearDown(self):
+        os.environ.pop("LIVE_DB_PATH", None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_overview_on_fresh_db(self):
+        d = live_api.overview()
+        self.assertTrue(d["ok"])
+        snaps = d["strategies"]
+        self.assertEqual([s["strategy"] for s in snaps],
+                         list(module_registry.strategy_ids()))
+        for s in snaps:   # 无会话 → 全部离线占位
+            self.assertFalse(s["online"])
+            self.assertEqual(s["session"], {})
+            self.assertTrue(s["trading_enabled"])
+
+    def test_post_trading_on_fresh_db(self):
+        reply = []
+        h = SimpleNamespace(path="/api/live/trading",
+                            _read_body=lambda: {"strategy": "fxma_v1",
+                                                "enabled": False},
+                            _send_json=lambda obj, code=200:
+                                reply.append((obj, code)))
+        self.assertTrue(live_api.handle(h, None, "POST"))
+        obj, code = reply[0]
+        self.assertEqual(code, 200)
+        self.assertTrue(obj["ok"])
+        self.assertEqual(
+            live_store.load_state(live_store.state_key(live_api.TRADING_KEY,
+                                                       "fxma_v1")),
+            {"enabled": False})
+
+    def test_get_overview_error_returns_503_json(self):
+        """overview 抛异常时 handle 返回 503 JSON 而非让线程断连。"""
+        reply = []
+        h = SimpleNamespace(path="/api/live/overview",
+                            _send_json=lambda obj, code=200:
+                                reply.append((obj, code)))
+        with patch.object(live_api, "overview", side_effect=RuntimeError("boom")):
+            self.assertTrue(live_api.handle(h, None, "GET"))
+        obj, code = reply[0]
+        self.assertEqual(code, 503)
+        self.assertFalse(obj["ok"])
+        self.assertIn("boom", obj["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

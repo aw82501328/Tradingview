@@ -42,6 +42,9 @@ data/bars.db
 data/bars.db-wal
 data/bars.db-shm
 
+# 回测交易日志（bt_journal NDJSON，运行产物，不入库；30天+每品种10次自动清理）
+data/journal/
+
 # 调试残留：probe/shot/截屏/中间 dump（一次性脚本与产物，不入库）
 .probe/
 _probe*.py

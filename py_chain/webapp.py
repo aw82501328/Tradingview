@@ -13,7 +13,9 @@
       → ModeWorker 后台线程（Backtest/Replay/Live）
       → SignalLog（线程安全信号表）→ SSE 广播到前端表格
 
-并发规则：三种模式同一时间最多运行一种（全局互斥），启动冲突返回 409。
+并发规则（2026-10-02 多策略并行起）：全量回测按**策略**分 Worker——不同策略可同时
+运行互不干扰（各自独立 Worker/信号行/进度/日志），同一策略仍串行；回测以外的模式
+（K线回放/实时监控/基础数据/分析）与任何运行中的任务仍全局互斥，启动冲突返回 409。
 """
 
 import argparse
@@ -40,13 +42,14 @@ from .chan_core import fmtT
 from .monitor import LiveMonitor, ReplayMonitor, clear_rt_markers
 from .marks import draw_signal_marks, draw_sr_marks, clear_signal_marks, clear_all_marks
 from . import chan_core
-from . import data_store, td_launcher, sr_service, sr_draw, sr_tune, sr_tune_api, sr_preset_excel, analysis_service, analysis_api, bt_runs, bt_errors, param_center, params_api, live_api
+from . import data_store, td_launcher, sr_service, sr_draw, sr_tune, sr_tune_api, sr_preset_excel, analysis_service, analysis_api, bt_runs, bt_errors, param_center, params_api, live_api, eval_api, eval_service
 from . import mark_entry
 from . import module_registry
 from . import engine_dispatch
 
 # ============================================================
-# 全局互斥：三种模式同一时间最多运行一种
+# 全局互斥：回测以外的模式同一时间最多运行一种；
+# 全量回测多策略并行（2026-10-02）：每个策略一个 Worker，可同时持有 backtest 模式
 # ============================================================
 _active_lock = threading.Lock()
 _active_mode = None          # 当前运行中的模式名（backtest/replay/live）或 None
@@ -54,6 +57,10 @@ _active_owner = None
 # 当前占用者不碰 TradingView（本地存储/缓存全量回测）。图表定位可与之并行。
 _active_spares_chart = False
 _service_restarting = False
+# 并行回测持有者：策略 id → 该策略运行是否不占图表。_active_mode='backtest' 期间
+# 允许多个策略共存；全部退出才释放模式锁；spares_chart 取全体交集（任一策略
+# 用 live/CDP 取数即视为占用图表，阻止定位/标记并行）。
+_bt_holders = {}
 
 
 class ChartLock:
@@ -151,6 +158,37 @@ def release_active(mode):
             _active_mode = None
             _active_owner = None
             _active_spares_chart = False
+
+
+def acquire_bt(strategy, spares_chart=False):
+    """多策略并行回测的互斥入口：同策略串行（Worker.start 已拦），不同策略可并行；
+    与回测以外的模式（replay/live/data/analysis）仍全局互斥。"""
+    global _active_mode, _active_owner, _active_spares_chart
+    with _active_lock:
+        if _service_restarting:
+            return '服务重启中'
+        if _active_mode is not None and _active_mode != 'backtest':
+            return _active_mode
+        if _marks_lock.locked():
+            return "图表操作"
+        _bt_holders[strategy] = bool(spares_chart)
+        _active_mode = 'backtest'
+        _active_owner = None   # 多持有者无单一属主；图表锁走 spares_chart 聚合口径
+        _active_spares_chart = all(_bt_holders.values())
+        return True
+
+
+def release_bt(strategy):
+    """释放一个策略的回测持有；最后一个退出才清模式锁。"""
+    global _active_mode, _active_owner, _active_spares_chart
+    with _active_lock:
+        _bt_holders.pop(strategy, None)
+        if _active_mode == 'backtest' and not _bt_holders:
+            _active_mode = None
+            _active_owner = None
+            _active_spares_chart = False
+        else:
+            _active_spares_chart = all(_bt_holders.values())
 
 
 def active_mode():
@@ -283,25 +321,38 @@ class SignalLog:
         self.lock = threading.Lock()
         self.rows = []
         self._id = 0
-        # 成交回填匹配键：(mode, symbol, signalTime, periodX, direction, strategyKey)
+        # 成交回填匹配键：(mode, strategy, symbol, signalTime, periodX, direction, strategyKey)
         # symbol 入键（2026-09-23 多品种并行回测）：不同品种同时刻同方向同策略的
-        # 信号行必须各自独立回填，否则批量并行时成交/出场会串写到别的品种行上
+        # 信号行必须各自独立回填，否则批量并行时成交/出场会串写到别的品种行上；
+        # strategy 入键（2026-10-02 多策略并行回测）：同品种同时刻的信号在
+        # 缠论V1/强分型均线V1 两个策略 TAB 下各自成行互不串写
         self._key_to_idx = {}
+        # 已判定同向互斥过滤的信号键：这些信号不进列表。缠论V1 顺序是先 append 行
+        # 下一根才判过滤（行已存在→隐藏）；fxma/live/replay 顺序是过滤回调先于
+        # on_signal（行还没建→append 时按此集合拒收）
+        self._suppressed = set()
 
     def _row_key(self, mode, s):
-        return (mode, s.get("symbol"), s.get("time") or s.get("signalTime"), s.get("periodX"),
-                s.get("direction"), s.get("strategyKey"))
+        return (mode, s.get("strategy"), s.get("symbol"), s.get("time") or s.get("signalTime"),
+                s.get("periodX"), s.get("direction"), s.get("strategyKey"))
 
-    def append_signal(self, mode, s, symbol=None):
-        """记录一条新进场信号，返回该行。"""
-        if symbol:
+    def append_signal(self, mode, s, symbol=None, strategy=None):
+        """记录一条新进场信号，返回该行；同向互斥过滤的信号返回 None（不进列表）。"""
+        if symbol or strategy:
             s = dict(s)
-            s["symbol"] = symbol    # 入键与入行同源（调用方显式 symbol 优先）
+            if symbol:
+                s["symbol"] = symbol    # 入键与入行同源（调用方显式 symbol 优先）
+            if strategy:
+                s["strategy"] = strategy  # 交易策略 id（多策略并行回测的行命名空间）
+        key = self._row_key(mode, s)
         with self.lock:
+            if key in self._suppressed:
+                return None
             self._id += 1
             row = {
                 "id": self._id,
                 "mode": mode,
+                "strategy": s.get("strategy"),
                 "symbol": symbol or s.get("symbol"),
                 "time": s.get("time") or s.get("signalTime"),
                 "direction": s.get("direction"),
@@ -339,10 +390,11 @@ class SignalLog:
             self._key_to_idx[self._row_key(mode, s)] = len(self.rows) - 1
             return row
 
-    def fill_trade(self, mode, tr, symbol=None):
+    def fill_trade(self, mode, tr, symbol=None, strategy=None):
         """回测成交时回填对应信号行的成交状态（持仓中）；找不到则追加一行记录。"""
-        key = (mode, symbol or tr.get("symbol"), tr.get("signalTime"), tr.get("periodX"),
-               tr.get("direction"), tr.get("strategyKey"))
+        if strategy and not tr.get("strategy"):
+            tr = dict(tr, strategy=strategy)
+        key = self._row_key_fill(mode, tr, symbol)
         with self.lock:
             idx = self._key_to_idx.get(key)
             if idx is None:
@@ -350,6 +402,7 @@ class SignalLog:
                 row = {
                     "id": self._id,
                     "mode": mode,
+                    "strategy": strategy or tr.get("strategy"),
                     "symbol": symbol or tr.get("symbol"),
                     "time": tr.get("signalTime"),
                     "direction": tr.get("direction"),
@@ -393,10 +446,18 @@ class SignalLog:
             row["pnl"] = tr.get("pnl")
             return row
 
-    def fill_exit(self, mode, tr, symbol=None):
+    def _row_key_fill(self, mode, tr, symbol):
+        """成交/出场回填的匹配键（tr 缺 strategy 时用调用方显式值补齐）。"""
+        s = dict(tr)
+        if symbol:
+            s["symbol"] = symbol
+        return self._row_key(mode, s)
+
+    def fill_exit(self, mode, tr, symbol=None, strategy=None):
         """持仓终局（止损/保本止损/全平）时回填出场信息（状态→已平仓）。"""
-        key = (mode, symbol or tr.get("symbol"), tr.get("signalTime"), tr.get("periodX"),
-               tr.get("direction"), tr.get("strategyKey"))
+        if strategy and not tr.get("strategy"):
+            tr = dict(tr, strategy=strategy)
+        key = self._row_key_fill(mode, tr, symbol)
         with self.lock:
             idx = self._key_to_idx.get(key)
             if idx is None:
@@ -411,23 +472,37 @@ class SignalLog:
             row["pnl"] = tr.get("pnl")
             return row
 
-    def fill_suppressed(self, mode, s, symbol=None):
-        """同向持仓互斥过滤的信号：状态→同向过滤（保留行，不画箭头）。"""
-        if symbol:
+    def fill_suppressed(self, mode, s, symbol=None, strategy=None):
+        """同向持仓互斥过滤的信号：行从列表剔除（墓碑隐藏，不进任何读取口径）。
+
+        过滤信号没有成交，不留在进场信号记录里。先记键再找行：缠论V1 行已存在
+        → 隐藏并返回行（上层推 remove 让前端删行）；fxma/live/replay 行还没建
+        （过滤回调先于 on_signal）→ 仅记键，随后的 append_signal 按键拒收。
+        行对象留在 rows 原位仅作占位（保证 _key_to_idx 的下标不因删除而错位），
+        list/snapshot/get 均跳过。
+        """
+        if symbol or strategy:
             s = dict(s)
-            s["symbol"] = symbol
+            if symbol:
+                s["symbol"] = symbol
+            if strategy:
+                s["strategy"] = strategy
         key = self._row_key(mode, s)
         with self.lock:
-            idx = self._key_to_idx.get(key)
+            self._suppressed.add(key)
+            idx = self._key_to_idx.pop(key, None)
             if idx is None:
                 return None
             row = self.rows[idx]
             row["status"] = "同向过滤"
+            row["hidden"] = True
             return row
 
-    def list(self, limit=None, mode=None):
+    def list(self, limit=None, mode=None, strategy=None):
         with self.lock:
-            rows = [r for r in self.rows if mode is None or r.get("mode") == mode]
+            rows = [r for r in self.rows
+                    if not r.get("hidden") and (mode is None or r.get("mode") == mode)
+                    and (strategy is None or r.get("strategy") == strategy)]
         if limit:
             rows = rows[-int(limit):]
         return rows
@@ -437,21 +512,44 @@ class SignalLog:
         with self.lock:
             return self._id
 
-    def snapshot(self, mode, min_id=0):
-        """深拷贝指定模式 id>min_id 的行（回测方案保存用，避免持引用序列化）。"""
+    def snapshot(self, mode, min_id=0, strategy=None):
+        """深拷贝指定模式 id>min_id 的行（回测方案保存用，避免持引用序列化）。
+        strategy：多策略并行回测时只快照该策略的行（互不混入另一策略的本轮新增）。"""
         with self.lock:
             return copy.deepcopy([r for r in self.rows
-                                  if r.get("mode") == mode and r.get("id", 0) > min_id])
+                                  if not r.get("hidden")
+                                  and r.get("mode") == mode and r.get("id", 0) > min_id
+                                  and (strategy is None or r.get("strategy") == strategy)])
 
     def get(self, row_id, mode):
         with self.lock:
-            return next((dict(r) for r in self.rows if r['id'] == row_id and r['mode'] == mode), None)
+            return next((dict(r) for r in self.rows
+                         if r['id'] == row_id and r['mode'] == mode and not r.get("hidden")),
+                        None)
 
-    def clear(self, mode=None):
+    def clear(self, mode=None, strategy=None):
+        """删除记录；mode=None 清全部；mode+strategy 限定（多策略并行回测只清本策略行，
+        另一策略 TAB 的行与运行不受影响）。"""
         with self.lock:
             n = len(self.rows)
-            self.rows = [r for r in self.rows if mode is not None and r.get("mode") != mode]
-            self._key_to_idx = {self._row_key(r["mode"], r): i for i, r in enumerate(self.rows)}
+            if mode is None:
+                self.rows = []
+            elif strategy is None:
+                self.rows = [r for r in self.rows if r.get("mode") != mode]
+            else:
+                self.rows = [r for r in self.rows
+                             if r.get("mode") != mode or r.get("strategy") != strategy]
+            self._key_to_idx = {self._row_key(r["mode"], r): i for i, r in enumerate(self.rows)
+                                if not r.get("hidden")}
+            # 过滤键随清空一并作废：新一轮同键信号是否被互斥过滤要重新判定，
+            # 上一轮的键残留会错误拦截本轮 append
+            if mode is None:
+                self._suppressed.clear()
+            elif strategy is None:
+                self._suppressed = {k for k in self._suppressed if k[0] != mode}
+            else:
+                self._suppressed = {k for k in self._suppressed
+                                    if k[0] != mode or k[1] != strategy}
             # Keep IDs unique for the service lifetime: an in-flight locate must
             # never match a new record created after clearing the table.
             return n - len(self.rows)
@@ -499,13 +597,15 @@ class ModeWorker:
 
     MODE = "base"
 
-    def __init__(self, signals, broadcaster, log=None):
+    def __init__(self, signals, broadcaster, log=None, strategy=None):
         self.signals = signals
         self.broadcaster = broadcaster
         self.log_fn = log or (lambda *a, **k: None)
         self.thread = None
         self.cfg = {}
         self.state = "idle"
+        # 交易策略 id（多策略并行回测的 Worker 命名空间；replay/live 启动时从 cfg 归一）
+        self.strategy = strategy
         # 本次运行开始前的信号表最大行 id：start 不清信号表（连跑多次行会混叠），
         # 保存回测方案时按 id>_row_base 过滤出"本次运行新增行"，保证 cfg 与行配对
         self._row_base = 0
@@ -522,13 +622,18 @@ class ModeWorker:
         self.duration_sec = None
 
     # ---- 日志 ----
+    # SSE 载荷带 strategy（backtest 多策略并行：前端按策略路由到各自 TAB 卡片；
+    # replay/live 行 strategy 仅入行字段供前端口径统一，不参与路由）
+    def _emit_extra(self):
+        return {"strategy": self.strategy} if self.strategy else {}
+
     def log(self, msg):
         self.log_fn(f"[{self.MODE}] {msg}")
-        self.broadcaster.emit("log", {"mode": self.MODE, "msg": str(msg)})
+        self.broadcaster.emit("log", {"mode": self.MODE, "msg": str(msg), **self._emit_extra()})
 
     def set_state(self, s):
         self.state = s
-        self.broadcaster.emit("status", {"mode": self.MODE, "state": s})
+        self.broadcaster.emit("status", {"mode": self.MODE, "state": s, **self._emit_extra()})
 
     def set_progress(self, current, total=None):
         if total:
@@ -536,14 +641,17 @@ class ModeWorker:
                              "pct": round(100.0 * current / total, 1)}
         else:
             self.progress = {"current": int(current), "total": None, "pct": None}
-        self.broadcaster.emit("progress", {"mode": self.MODE, **self.progress})
+        self.broadcaster.emit("progress", {"mode": self.MODE, **self.progress, **self._emit_extra()})
 
     # ---- 信号记录 ----
     # symbol 形参：单品种路径不传 → 用 cfg['symbol']（行为与旧键口径等价）；
     # 多品种批量并行时按消息携带的品种传入（2026-09-23）
     def _on_signal(self, s, symbol=None):
         row = self.signals.append_signal(self.MODE, s,
-                                         symbol=symbol or self.cfg.get('symbol'))
+                                         symbol=symbol or self.cfg.get('symbol'),
+                                         strategy=self.strategy)
+        if row is None:   # 同向互斥过滤的信号：不进列表、不广播（fxma/live 顺序）
+            return
         self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
         d = "做多" if s.get("direction") == "long" else "做空"
         tag = f"[{symbol}] " if symbol and (self.cfg or {}).get("symbols") else ""
@@ -552,13 +660,15 @@ class ModeWorker:
 
     def _on_trade(self, tr, symbol=None):
         row = self.signals.fill_trade(self.MODE, tr,
-                                      symbol=symbol or self.cfg.get('symbol'))
+                                      symbol=symbol or self.cfg.get('symbol'),
+                                      strategy=self.strategy)
         self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
 
     def _on_exit(self, tr, symbol=None):
         """持仓终局（止损/保本止损/全平）：行状态→已平仓并推送。"""
         row = self.signals.fill_exit(self.MODE, tr,
-                                     symbol=symbol or self.cfg.get('symbol'))
+                                     symbol=symbol or self.cfg.get('symbol'),
+                                     strategy=self.strategy)
         if row is not None:
             self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
             name = {"stopSr": "支阻位止损", "stopBe": "保本止损", "close": "全平"}.get(
@@ -568,17 +678,34 @@ class ModeWorker:
                      f"@ {tr.get('exitPrice')}（盈亏 {tr.get('pnl', 0):.2f}）")
 
     def _on_suppressed(self, s, symbol=None):
-        """同向持仓互斥过滤的信号：行状态→同向过滤。"""
+        """同向持仓互斥过滤的信号：行从信号列表剔除（前端同步删行）。"""
         row = self.signals.fill_suppressed(self.MODE, s,
-                                           symbol=symbol or self.cfg.get('symbol'))
+                                           symbol=symbol or self.cfg.get('symbol'),
+                                           strategy=self.strategy)
         if row is not None:
-            self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
+            self.broadcaster.emit("signal", {"mode": self.MODE, "remove": row["id"]})
 
     # ---- 控制 ----
+    # 模式锁钩子：默认全局单锁；BacktestWorker 覆写为按策略的多持有者锁
+    def _acquire_mode(self, cfg):
+        return acquire_active(self.MODE, spares_chart=self.spares_chart(cfg))
+
+    def _release_mode(self):
+        release_active(self.MODE)
+
     def start(self, cfg):
         if self.thread and self.thread.is_alive():
-            return {"ok": False, "error": f"{self.MODE} 已在运行"}
-        holder = acquire_active(self.MODE, spares_chart=self.spares_chart(cfg))
+            label = f"{self.MODE}（策略 {self.strategy}）" if self.strategy else self.MODE
+            return {"ok": False, "error": f"{label} 已在运行"}
+        try:
+            sid = module_registry.normalize_strategy(cfg.get("strategy"))
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        if self.MODE == "backtest" and self.strategy is not None and sid != self.strategy:
+            return {"ok": False,
+                    "error": f"策略不匹配：该 Worker 属于 {self.strategy}，cfg 为 {sid}"}
+        self.strategy = sid
+        holder = self._acquire_mode(cfg)
         if holder is not True:
             return {"ok": False, "error": f"当前有 {holder} 模式运行中，请先停止"}
         self.cfg = dict(cfg)
@@ -622,7 +749,7 @@ class ModeWorker:
             self.ended_at = time.time()
             if self.started_at is not None:
                 self.duration_sec = round(self.ended_at - self.started_at, 1)
-            release_active(self.MODE)
+            self._release_mode()
             if self.monitor is not None:
                 try:
                     self.monitor.restore_chart()
@@ -640,14 +767,28 @@ class ModeWorker:
 
     def status(self):
         return {"mode": self.MODE, "state": self.state,
+                "strategy": self.strategy,
                 "error": self.error, "progress": self.progress,
                 "batch": self.batch}
 
 
 class BacktestWorker(ModeWorker):
-    """全量回测（纯后台）：BacktestEngine.run() 逐根推进，进度/信号/成交实时推送。"""
+    """全量回测（纯后台）：BacktestEngine.run() 逐根推进，进度/信号/成交实时推送。
+
+    多策略并行（2026-10-02）：每策略一个 Worker 实例（ControlApp.bt_workers），
+    同策略串行、跨策略并行；信号行经 SignalLog 的 strategy 命名空间隔离。"""
 
     MODE = "backtest"
+
+    def __init__(self, signals, broadcaster, log=None, strategy=None):
+        super().__init__(signals, broadcaster, log=log,
+                         strategy=strategy or module_registry.DEFAULT_STRATEGY)
+
+    def _acquire_mode(self, cfg):
+        return acquire_bt(self.strategy, spares_chart=self.spares_chart(cfg))
+
+    def _release_mode(self):
+        release_bt(self.strategy)
 
     def spares_chart(self, cfg):
         """本地存储/缓存回测只读库，不连 CDP，图表可同时点行定位。
@@ -800,7 +941,11 @@ class BacktestWorker(ModeWorker):
             on_suppressed=self._on_suppressed,
             paused=self._pause_evt,
             stopped=self._stop_evt,
+            journal_symbol=cfg.get("symbol"),
         )
+        if result.get("journal"):
+            cfg["journal"] = result["journal"]   # bt_runs 保存快照随带日志路径
+            self.log(f"交易日志：{result['journal']}（bt_query 零重算查询单笔原因）")
         if self._stop_evt.is_set():
             self.set_state("stopped")
         else:
@@ -857,8 +1002,19 @@ class BacktestWorker(ModeWorker):
         engine = engine_dispatch.engine_class_of("fxma_v1")(bars, **kw)
         self.log(f"回测开始（强分型均线V1：周期 {','.join(engine.entry_res)}，"
                  f"类别 {','.join(str(c) for c in sorted(engine.point_classes))}，"
-                 f"{engine.ma_type} {engine.ma_fast1}/{engine.ma_slow1}+{engine.ma_fast2}/{engine.ma_slow2}，"
-                 f"分离≥{engine.cross_min_pts}点，止损{engine.stop_pts}/止盈{engine.tp_pts}点，"
+                 f"强分型{'开' if engine.strong_fx_on else '关'}，"
+                 f"均线分离{'开' if engine.ma_on else '关'}"
+                 + (f"（{engine.ma_type} {engine.ma_fast1}/{engine.ma_slow1}"
+                    f"+{engine.ma_fast2}/{engine.ma_slow2}，"
+                    f"分离≥{engine.cross_min_pts}点）" if engine.ma_on else "")
+                 + f"，收盘站线{'开' if engine.ma_stand_on else '关'}"
+                 + (f"（{engine.ma_type}{engine.ma_stand1}/{engine.ma_stand2}）"
+                    if engine.ma_stand_on else "")
+                 + f"，黄金分割附近{'开' if engine.fib_near_on else '关'}"
+                 + (f"（{','.join(str(r) for r in engine.fib_near_levels)}"
+                    f"±{engine.fib_near_pts}点）" if engine.fib_near_on else "")
+                 + f"，上级同向{'开' if engine.upper_dir_on else '关'}"
+                 + f"，止损{engine.stop_pts}/止盈{engine.tp_pts}点，"
                  f"互斥 {engine.mutex_scope}，最小周期 {engine.fine_res}）...")
         result = engine.run(
             start_ts=start_ts,
@@ -870,7 +1026,11 @@ class BacktestWorker(ModeWorker):
             on_suppressed=self._on_suppressed,
             paused=self._pause_evt,
             stopped=self._stop_evt,
+            journal_symbol=cfg.get("symbol"),
         )
+        if result.get("journal"):
+            cfg["journal"] = result["journal"]   # bt_runs 保存快照随带日志路径
+            self.log(f"交易日志：{result['journal']}（bt_query 零重算查询单笔原因）")
         if self._stop_evt.is_set():
             self.set_state("stopped")
         else:
@@ -982,7 +1142,7 @@ class BacktestWorker(ModeWorker):
     def _emit_batch_row(self, sym):
         st = dict(self.batch[sym])
         st["symbol"] = sym
-        self.broadcaster.emit("bt_symbol", {"mode": self.MODE, **st})
+        self.broadcaster.emit("bt_symbol", {"mode": self.MODE, **st, **self._emit_extra()})
 
     def _dispatch_batch_msg(self, msg):
         """处理一条子进程消息；品种终结（done/error）时返回 symbol，否则 None。"""
@@ -1260,10 +1420,16 @@ class ControlApp:
         self.broadcaster = Broadcaster()
         self.locator = LocateManager(self.signals, _marks_lock, self.broadcaster.emit)
         self.workers = {
-            "backtest": BacktestWorker(self.signals, self.broadcaster),
+            "backtest": None,   # 多策略并行（2026-10-02）：见 self.bt_workers；占位保序
             "replay": ReplayWorker(self.signals, self.broadcaster),
             "live": LiveWorker(self.signals, self.broadcaster),
         }
+        # 全量回测按策略分 Worker：不同策略可同时运行互不干扰（同策略串行）。
+        # workers["backtest"] 指默认策略 Worker，兼容旧调用方（bt_runs/_td_launch_compat）
+        self.bt_workers = {sid: BacktestWorker(self.signals, self.broadcaster, strategy=sid)
+                           for sid in module_registry.strategy_ids()}
+        self.workers["backtest"] = self.bt_workers.get(
+            module_registry.DEFAULT_STRATEGY) or next(iter(self.bt_workers.values()))
         # 支阻位调试模块：最近一次计算结果槽（cfg 快照 / computed_at / result / meta）
         self.sr = {"cfg": None, "computed_at": None, "result": None, "meta": None}
         # 全量回测历史方案存储（bt_runs/bt_signals 表，建在基础数据库 bars.db 里）
@@ -1279,20 +1445,24 @@ class ControlApp:
         # 参数中心：启动时恢复拼合后的 CHAN_CFG（画笔/买卖点/进出场；进程内全局生效；
         # zs/plan 在每次任务启动时读取，无需预热应用）
         chan_core.apply_cfg(param_center.chan_cfg_effective())
+        # EVAL评估：成笔用例快照 + 基线回归（data/eval/；画笔逻辑调整后跑基线比对）
+        self.eval = eval_service.EvalManager()
 
     def _td_launch_compat(self, owner):
         """TD启动与当前互斥占用者能否并行：仅本地数据源（store=SQLite、cache=JSON，
         多品种批量已被 normalize_cfg 强制 store，天然覆盖）回测不连CDP不碰TD；
         live源/回放/实时/基础数据/图表操作仍互斥。数据源口径与 BacktestWorker._run
-        的 src 表达式保持一致。"""
+        的 src 表达式保持一致；多策略并行时要求全部运行中的策略 Worker 均 store/cache。"""
         if active_mode() != "backtest":
             return False
-        w = self.workers["backtest"]
-        if w.thread is not None and not w.thread.is_alive():
-            return True   # 回测线程已结束（锁即将释放），无实际并行冲突
-        cfg = w.cfg or {}
-        src = cfg.get("data_source") or ("cache" if cfg.get("use_cache") else "live")
-        return src in ("store", "cache")
+        for w in self.bt_workers.values():
+            if w.thread is None or not w.thread.is_alive():
+                continue    # 已结束/未启动的策略不参与判断
+            cfg = w.cfg or {}
+            src = cfg.get("data_source") or ("cache" if cfg.get("use_cache") else "live")
+            if src not in ("store", "cache"):
+                return False
+        return True
 
     def publish_analysis_sr(self, cfg, result, meta):
         with _sr_result_lock:
@@ -1561,13 +1731,42 @@ class ControlApp:
                 out["start_ts"] = out.get("from_ts", 0)
         return out
 
+    def _bt_status(self):
+        """聚合全部策略回测 Worker 为旧单 Worker 形状（status().modes.backtest）：
+        任一 running→running；否则任一 paused→paused；否则取最近结束的非 idle 状态；
+        进度/错误取该代表 Worker；batch 合并各策略（品种页签兼容口径）。"""
+        ws = list(self.bt_workers.values())
+        active = [w for w in ws if w.state in ("running", "paused")]
+        rep = None
+        if active:
+            rep = next((w for w in active if w.state == "running"), active[0])
+        else:
+            ended = [w for w in ws if w.ended_at is not None]
+            rep = max(ended, key=lambda w: w.ended_at) if ended else None
+        if rep is None:
+            return {"mode": "backtest", "state": "idle", "strategy": None,
+                    "error": None, "progress": {"current": 0, "total": 0, "pct": 0},
+                    "batch": None}
+        batch = {}
+        for w in ws:
+            if isinstance(w.batch, dict):
+                batch.update(w.batch)
+        out = {"mode": "backtest", "state": rep.state, "strategy": rep.strategy,
+               "error": rep.error, "progress": rep.progress, "batch": batch or None}
+        return out
+
     def status(self):
         with _sr_busy_lock:
             busy = _sr_busy
+        modes = {name: w.status() for name, w in self.workers.items()
+                 if name != "backtest"}
+        modes["backtest"] = self._bt_status()
         base = {
             "service": self.service.status() if self.service else None,
             "active": active_mode(),
-            "modes": {name: w.status() for name, w in self.workers.items()},
+            "modes": modes,
+            # 多策略并行：逐策略 Worker 状态（前端策略TAB按此渲染；键=策略 id）
+            "backtests": {sid: w.status() for sid, w in self.bt_workers.items()},
             "analysis": self.analysis.snapshot(),
         }
         try:
@@ -1665,6 +1864,8 @@ def make_handler(app):
                 return
             if bt_errors.handle(self, app, "GET"):
                 return
+            if eval_api.handle(self, app, "GET"):
+                return
             if self._tune("GET"):
                 return
             if path in ("/sr-tune.js", "/sr-tune.css"):
@@ -1689,6 +1890,9 @@ def make_handler(app):
                 return
             if path == "/params" or path == "/params.html":
                 self._serve_file("params.html", "text/html; charset=utf-8")
+                return
+            if path == "/eval" or path == "/eval.html":
+                self._serve_file("eval.html", "text/html; charset=utf-8")
                 return
             if path == "/api/status":
                 self._send_json(app.status())
@@ -1819,6 +2023,8 @@ def make_handler(app):
                 return
             if bt_errors.handle(self, app, "POST"):
                 return
+            if eval_api.handle(self, app, "POST"):
+                return
             if self._tune("POST"):
                 return
             if path == '/api/signals/locate':
@@ -1880,9 +2086,20 @@ def make_handler(app):
                     self._send_json({"ok": False, "error": "无效的mode"}, 400)
                     return
                 selected_mode = body.get("mode")
+                # 多策略并行回测：clear/标记只作用于 body.strategy 的行（缺省=全部，兼容旧调用）
+                selected_strategy = None
+                if selected_mode == "backtest" and body.get("strategy"):
+                    try:
+                        selected_strategy = module_registry.normalize_strategy(body["strategy"])
+                    except ValueError as e:
+                        self._send_json({"ok": False, "error": str(e)}, 400)
+                        return
             if path == "/api/signals/clear":
-                n = app.signals.clear(selected_mode)
-                app.broadcaster.emit("signals_cleared", {"n": n, "mode": selected_mode})
+                n = app.signals.clear(selected_mode, strategy=selected_strategy)
+                payload = {"n": n, "mode": selected_mode}
+                if selected_strategy:
+                    payload["strategy"] = selected_strategy
+                app.broadcaster.emit("signals_cleared", payload)
                 self._send_json({"ok": True, "cleared": n})
                 return
             if path == "/api/marks/draw":
@@ -1891,7 +2108,7 @@ def make_handler(app):
                     self._send_json({"ok": False, "error": err}, 409)
                     return
                 colors = body.get("colors") or {}
-                rows = app.signals.list(None, mode=selected_mode)
+                rows = app.signals.list(None, mode=selected_mode, strategy=selected_strategy)
                 if not rows:
                     self._send_json({"ok": False, "error": "信号列表为空，无可标记的进场点"})
                     return
@@ -1926,7 +2143,7 @@ def make_handler(app):
                     self._send_json({"ok": False, "error": err}, 409)
                     return
                 colors = body.get("colors") or {}
-                rows = app.signals.list(None, mode=selected_mode)
+                rows = app.signals.list(None, mode=selected_mode, strategy=selected_strategy)
                 if not rows:
                     self._send_json({"ok": False, "error": "信号列表为空，无可标记的支阻位"}, 409)
                     return
@@ -2306,8 +2523,23 @@ def make_handler(app):
             parts = [p for p in path.split("/") if p]
             if len(parts) == 3 and parts[0] == "api" and parts[1] in app.workers:
                 mode, action = parts[1], parts[2]
-                worker = app.workers[mode]
                 body = self._read_body()
+                worker = app.workers[mode]
+                if mode == "backtest":
+                    # 多策略并行：按 body.strategy 路由到对应策略的 Worker
+                    # （start 时 body.strategy 缺省则取 cfg.strategy；pause/stop 缺省=默认策略）
+                    raw_strategy = body.get("strategy")
+                    if raw_strategy is None and action == "start":
+                        raw_strategy = (body.get("cfg") or {}).get("strategy")
+                    try:
+                        sid = module_registry.normalize_strategy(raw_strategy)
+                    except ValueError as e:
+                        self._send_json({"ok": False, "error": str(e)}, 400)
+                        return
+                    worker = app.bt_workers.get(sid)
+                    if worker is None:
+                        self._send_json({"ok": False, "error": f"策略 {sid} 没有回测 Worker"}, 400)
+                        return
                 if action == "start":
                     cfg = body.get("cfg") or body
                     try:
@@ -2315,6 +2547,8 @@ def make_handler(app):
                     except ValueError as e:   # 日期等配置非法：拒绝启动
                         self._send_json({"ok": False, "error": str(e)}, 400)
                         return
+                    if mode == "backtest":
+                        cfg["strategy"] = worker.strategy   # 路由键即策略，防内外不一致
                     r = worker.start(cfg)
                 elif action == "pause":
                     r = worker.pause()
@@ -2517,17 +2751,20 @@ def main(argv=None):
     def shutdown_service():
         app.analysis.close()
         app.sr_tune.stop_event.set()
-        for worker in app.workers.values():
+        # 全部 Worker（replay/live + 每策略回测）一起停；workers["backtest"] 即默认策略
+        all_workers = {id(w): w for w in
+                       (*app.workers.values(), *app.bt_workers.values())}
+        for worker in all_workers.values():
             worker._stop_evt.set()
         deadline = time.monotonic() + 9
-        threads = [w.thread for w in app.workers.values()] + [app.analysis.thread, app.sr_tune.thread]
+        threads = [w.thread for w in all_workers.values()] + [app.analysis.thread, app.sr_tune.thread]
         for thread in threads:
             if thread and thread.is_alive():
                 thread.join(max(0, deadline - time.monotonic()))
         server.shutdown()
     app.service = RestartManager(args.host, args.port, shutdown_service)
     print(f"三模式 Web 控制台已启动：http://{args.host}:{args.port}")
-    print("三种模式同一时间最多运行一种；Ctrl+C 退出。")
+    print("全量回测多策略可并行（每策略独立TAB）；回放/实时与其余任务互斥。Ctrl+C 退出。")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

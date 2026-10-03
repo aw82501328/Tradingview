@@ -1,3 +1,6 @@
+import os as _os
+_os.environ.setdefault("PY_CHAIN_BT_JOURNAL", "0")  # 引擎测试不落交易日志
+
 # -*- coding: utf-8 -*-
 """run(start_ts) 交易开始时刻口径单元测试（SPEC §2.1.7，2026-09-15）
 

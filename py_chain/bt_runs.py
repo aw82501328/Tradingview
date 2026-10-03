@@ -155,7 +155,8 @@ def compute_summary(rows):
     # 已平仓平均盈利 / 平均亏损绝对值；保本单和持仓浮盈不参与
     avg_win = sum(r["pnl"] for r in win) / n_win if n_win else 0.0
     avg_loss = -sum(r["pnl"] for r in lose) / n_lose if n_lose else 0.0
-    exits = {"stopBe": 0, "stopSr": 0, "close": 0, "half": 0}
+    # 出场类型计数：缠论V1 stopSr/stopBe/close + fxma stop/takeProfit（half 单列）
+    exits = {"stopBe": 0, "stopSr": 0, "close": 0, "half": 0, "stop": 0, "takeProfit": 0}
     counts = {s: 0 for s in _STATUSES}
     for r in rows:
         if r.get("exitType") in exits:
@@ -496,13 +497,30 @@ class BtRunStore:
 # ============================================================
 # HTTP 适配（仿 analysis_api.handle：路径前缀命中即处理并返回 True）
 # ============================================================
+def _bt_worker_of(app, body):
+    """按 body.strategy（缺省=默认策略）取回测 Worker（多策略并行，2026-10-02）；
+    策略 id 未知 → 400；app 无 bt_workers（旧测试桩）→ 退回 workers["backtest"]。"""
+    from . import module_registry
+    try:
+        sid = module_registry.normalize_strategy(body.get("strategy"))
+    except ValueError as e:
+        raise _HttpError(str(e), 400)
+    workers = getattr(app, "bt_workers", None)
+    worker = (workers or {}).get(sid)
+    if worker is None:
+        if workers is not None:
+            raise _HttpError(f"策略 {sid} 没有回测 Worker", 400)
+        worker = app.workers["backtest"]
+    return worker
+
+
 def _save_one(app, worker, sym, name=None):
     """保存一个品种的当前回测结果（_save_current 单存与 _save_all 全存共用）。
     sym=None → 单品种整存（旧行为）；否则行按 symbol 过滤、cfg 注入该品种
     （default_name/汇总/亏损归因均读 cfg["symbol"]）、耗时用该品种自身墙钟。
     无行抛 ValueError；重名抛 _HttpError(409)。"""
     cfg = worker.cfg
-    rows = app.signals.snapshot("backtest", worker._row_base)
+    rows = app.signals.snapshot("backtest", worker._row_base, strategy=worker.strategy)
     if sym:
         rows = [r for r in rows if r.get("symbol") == sym]
     if not rows:
@@ -530,7 +548,7 @@ def _save_one(app, worker, sym, name=None):
             duration_sec=duration)
     except sqlite3.IntegrityError:
         raise _HttpError(f"方案名已存在：{name}", 409)
-    app.broadcaster.emit("log", {"mode": "backtest",
+    app.broadcaster.emit("log", {"mode": "backtest", "strategy": worker.strategy,
                                  "msg": f"已保存回测方案：{name}（{len(rows)} 条信号）"})
     return {"run": meta, "name": name, "rows": len(rows)}
 
@@ -538,8 +556,9 @@ def _save_one(app, worker, sym, name=None):
 def _save_current(app, body):
     """保存最近一次完成的全量回测：worker.cfg + 本次运行新增的信号行快照。
     多品种批量（cfg.symbols，2026-09-23）：body.symbol 指定品种——信号行按 symbol
-    过滤、cfg 注入该品种。"""
-    worker = app.workers["backtest"]
+    过滤、cfg 注入该品种。多策略并行（2026-10-02）：body.strategy 路由到该策略
+    的 Worker（行快照只含该策略本轮新增）。"""
+    worker = _bt_worker_of(app, body)
     if worker.state in ("running", "paused"):
         raise _HttpError("回测进行中，请等其完成或停止后再保存", 409)
     if not worker.cfg:
@@ -560,8 +579,9 @@ def _save_current(app, body):
 def _save_all(app, body):
     """多品种批量回测一键全存（2026-09-23）：每个已完成品种自动各存一条方案，
     名称自动带品种（default_name 含品种+窗口+时刻，互不重名）。
-    skipped/error/无行品种跳过；重名品种失败不影响其余。单品种运行 → 400。"""
-    worker = app.workers["backtest"]
+    skipped/error/无行品种跳过；重名品种失败不影响其余。单品种运行 → 400。
+    多策略并行（2026-10-02）：body.strategy 路由到该策略的 Worker。"""
+    worker = _bt_worker_of(app, body)
     if worker.state in ("running", "paused"):
         raise _HttpError("回测进行中，请等其完成或停止后再保存", 409)
     if not worker.cfg:

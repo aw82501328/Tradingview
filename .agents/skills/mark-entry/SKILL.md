@@ -51,6 +51,8 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=1.
 ```
 
 > `--from` 起始日期应与画笔/支阻位/交易计划时一致。
+> 小周期数据窗口与画笔同源：参数中心「基础组件 → 画笔」的「小周期绘制窗口」（`windowDays3/15/30S`），
+> 手动调用时若参数中心有自定义值应加 `--chan-cfg=` 透传（导出方式见 chan-bi SKILL）。
 
 ### 参数说明
 

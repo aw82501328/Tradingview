@@ -40,11 +40,26 @@ from datetime import datetime
 
 CHAN_CFG = {
     "gapFilter": 1.0,  # 跳空独立成笔阈值：相邻K线缺口 >= gapFilter*ATR 时强制独立成笔
+    # ---- 长影线修复（markWickBars：冲高/探底插针压平 + 端点候选价；关=整体停用）----
+    "wickMarkOn": True,
     "wickRatio": 0.70,  # 长影剔除：影线占整根K线振幅的比例阈值（>= 时视为冲高/探底插针）
-    "wickAtrK": 0.5,    # 长影剔除：影线绝对长度下限 = wickAtrK * ATR（窄幅小K线免疫）
+    "wickMinLen": 0.5,  # 长影剔除：影线绝对长度下限（2026-10-02 起为具体数值，品种报价
+                        # 单位价差，如黄金 0.5=0.5 美元；原 wickAtrK×TR均值系数口径废除）
+    "wickMinRange": 15.0,  # 长影剔除前提（2026-10-02）：整根K线价差（最高-最低）须 > 该值
+                           # 才判插针压平（品种报价单位绝对价差；窄幅K线即使占比/长度达标也不
+                           # 处理）。0=不限价差（回退旧口径）
+    # 分型邻侧影线真实价（2026-10-02，默认关=现行行为）：开启后 fractalAt 的左右邻
+    # 比较用压平前真实影线价——高点取 max(high, _wickHigh)、低点取 min(low, _origLow)。
+    # 动机：邻K长上影被 markWickBars 压平后会误杀中间分型（60m 2026-09-29 04:00 底
+    # 4111.52 被 06:00 压平上影 4121.69 卡掉高点侧，差 2.00，近等双底候选直接不存在）。
+    # 中心K仍用压平结构价（压平语义不变），只修邻侧；不含压平K的块零影响。
+    "fractalSideRealWick": False,
     # 顶底分形不能包含（单根长K豁免）：该周期单根K线振幅（高-低）≥ 对应点数时，
-    # 不参与分型终点侧三根的反向贯穿检查。按周期取值（wideBarPointsOf）；0=该周期不豁免。
+    # 不参与分型终点侧三根的反向贯穿检查（证据为实体极值 bodyTop/bodyBottom，
+    # 影线刺穿不算，2026-10-01 起）。按周期取值（wideBarPointsOf）；0=该周期不豁免。
+    # wideBarOn=False 时所有周期一律不豁免（wideBarPointsOf 直接返回 0）。
     # 日线/4小时/1小时/15分钟/3分钟默认均为 30 点。
+    "wideBarOn": True,
     "wideBarPointsD": 30.0,
     "wideBarPoints240": 30.0,
     "wideBarPoints60": 30.0,
@@ -52,12 +67,11 @@ CHAN_CFG = {
     "wideBarPoints3": 30.0,
     "divergeDurRatio": 3,  # 背驰面积判据的时长可比上限：面积Σ=柱高×K线根数、与区间时长线性相关，
                            # 两段时长比 > 该值时不具可比性，面积项不计入背驰（只用 DIF/柱高判据）
-    "nearDoubleAtrK": 0.3,  # 近等双顶/双底平台取后顶/后底：价差与回调深度的 ATR 系数（价差只比实体）
-    "nearDoublePct": 0.001,  # 近等双顶/双底平台取后顶/后底：价差下限（价格比例，与 ATR 项取 max）
-    "nearDoubleFixed": 0.0,  # 近等双顶/双底固定容差项（品种报价单位的绝对价差，如黄金 0.1=0.1 美元）；
-                             # thr = max(ATR项, 比例项, 该项)（并集取最大、只增不减），0=不启用
-    "nearDoubleLowerRelax": 1.5,  # 仅60m：15m双动能确认的容差倍数
-    "nearDoubleLowerRatio": 0.5,  # 柱峰值和DIF幅度均不超过前段50%
+    "nearDoubleFixed": 2.0,  # 近等双顶/双底固定容差（品种报价单位的绝对价差，如黄金 2.0=2 美元）；
+                             # thr = 该值（2026-10-02 起取消 ATR 项/价格比例项/15m双动能确认）。
+                             # 比较顺序：先影线（更极端直接替换后移），影线不满足再比实体——
+                             # 后实体不低于前实体直接后移，更低则差 ≤ 该值才后移；
+                             # 中间真实回调深度闸门、反弹不成笔分支同用该值
     # ---- 近等双顶每周期开关（2026-09-25 参数化；此前硬编码仅 ≥1h 开启，默认=现行行为）----
     # 开启该周期「近等双顶/双底平台取后顶/后底」；gating 统一走 nearDoubleOn(res)，
     # 五周期之外（30S/5/30/W 等）一律不开启。3m/15m 默认开（2026-09-28 参数页已改值收成默认）。
@@ -69,6 +83,15 @@ CHAN_CFG = {
     # 近等后顶/后底（反弹不成笔）取后：阶段二「间隔不足→回溯替换」分支的扩展，详见该分支注释。
     # 关闭后仅 k.locked（上级笔端点，区间套强制落地）路径仍生效。
     "nearDoubleRebound": True,
+    # 近等取后让位锁定（2026-10-02，默认关=现行行为）：锁定端点（上级笔端点，区间套强制
+    # 对齐）唯一允许的移动方式 = 近等双顶/双底平台取后（biStep 同类型分支锁定提前 return
+    # 处放行 tryNearEqualSameType，全部闸门照常）。动机：60m 9-28 22:00 底 4110.87 被
+    # 240m 端点锁定，9-29 04:00 近等双底后底（4111.52，15m 二次背驰转折）取后被拦。
+    # 代价：开启后下级端点可能不再与上级端点重合（区间套一致性让位于平台取后），
+    # 历史上被锁定的近等平台都会取后（15m 落点最多），回测基线不可比。
+    # 全周期统一，各周期还需 nearDouble3/15/60/240/D 开启；60m 的 04:00 型案例还需
+    # fractalSideRealWick（邻侧压平影线不再误杀分型）。
+    "nearDoubleShiftLocked": False,
     # ---- 进场背驰「近等双底二底」扩展（SPEC_divergence_fallback，2026-09-11）----
     # 全量回测对比（XAUUSD 7-20~9-11）：baseline PF 1.78/+483 → M1+rearm PF 2.19/+863，
     # 8-7 08:45 型二底由回退候选捕获（+280.5）；代价为再进场磨损簇（8-14 四连小止损 -68）。
@@ -108,6 +131,14 @@ CHAN_CFG = {
                                    # （O=bin首开/H-L=运行极值/C=最新收）临时注入链路（不落盘）。默认开
     "pointEnoughForming": True,    # C-2 成笔可能够笔：形成中段承载买卖点的 enough 计数只数
                                    # 到极值块（反向确认后的K不属于本段；进行中K仅延伸时计入）。默认开
+    # ---- 小周期绘制/加载窗口（2026-10-02 参数化，由 chan-bi/mark-buy-sell/mark-entry 三个
+    # JS 脚本消费：DRAW_WINDOW_DAYS 改由此构造；Python 引擎不读，apply_cfg 收下闲置）----
+    # 3分钟/15分钟/30秒 只画（并只加载）最近 N 天；60m/240m/D 不限、从 --from 全量。
+    # 动机：避免小周期从起始日期全量画笔过密，及 3m 为覆盖起始日期加载数月历史超时。
+    # 值 0 = 该周期不限窗口（仅手动 --chan-cfg 可传 0；参数页 min=1）。
+    "windowDays3": 15,
+    "windowDays15": 30,
+    "windowDays30S": 3,
     "debug": False,    # 调试打印（buildBi / 买卖点识别过程）
 }
 
@@ -167,7 +198,9 @@ def active_overrides():
 def markWickBars(rawBars):
     """长影线处理（冲高插针，压平 + 端点候选价），与 JS markWickBars 逐行为对齐：
 
-    影线占比 >= wickRatio 且 >= wickAtrK*稳定ATR 的长上影K线一律压平 high 至实体顶
+    前提：整根K线价差（high-low）> wickMinRange（绝对价差，窄幅K线整体不判插针）。
+    影线占比 >= wickRatio 且影线长度 >= wickMinLen（绝对长度下限，2026-10-02 起为具体
+    数值，原 wickAtrK×稳定ATR 系数口径废除）的长上影K线一律压平 high 至实体顶
     （保持历史验收的合并/笔结构——避免影线价参与合并改变结构或污染笔区间），但：
     若该 bar 的 low 不低于左右相邻原始K线低点（压平会消灭一个本可成立的顶分型中心），
     记 `_topCand = 原 high`——findFractals 在该 bar（或其合并 bar）成为顶分型中心时
@@ -176,28 +209,21 @@ def markWickBars(rawBars):
     长下影（探底插针）：low 压平至实体底（结构/区间竞争保持压平语义），压平前把原低
     记入 `_origLow`/`_origLowTime`，经 mergeBars 传播，由 fixBiExtremes 恢复为更低的
     真实笔底端点（只进端点恢复通道，不进 rawLow/rawHigh——跳空检测保持压平语义）。
-    ATR 用全窗口 TR 均值（而非 calcATR 的尾部 14 根——局部行情急涨会使 ATR 数倍放大，
-    长影下限随之漂移，剔除结果随行情抖动）。
+    ATR 基准已废除（2026-10-02）：长度下限 wickMinLen 为具体数值，不再随行情波动漂移。
     不原地修改，返回处理后的新数组。
     """
+    if not CHAN_CFG.get("wickMarkOn", True):
+        return [dict(bar) for bar in rawBars]
     ratio = CHAN_CFG["wickRatio"]
     n = len(rawBars)
-    avg_atr = 0.0
-    if n > 1:
-        s = 0.0
-        for i in range(1, n):
-            h = rawBars[i]["high"]
-            l = rawBars[i]["low"]
-            pc = rawBars[i - 1]["close"]
-            s += max(h - l, abs(h - pc), abs(l - pc))
-        avg_atr = s / (n - 1)
-    min_wick = avg_atr * CHAN_CFG["wickAtrK"]
+    min_wick = CHAN_CFG.get("wickMinLen", 0.5)
+    min_range = CHAN_CFG.get("wickMinRange", 0.0)
     out = []
     for idx in range(n):
         bar = rawBars[idx]
         b = dict(bar)
         amp = b["high"] - b["low"]
-        if amp > 0:
+        if amp > min_range:
             body_top = max(b["open"], b["close"])
             body_bottom = min(b["open"], b["close"])
             upper = b["high"] - body_top
@@ -210,11 +236,16 @@ def markWickBars(rawBars):
                 if prev_ is not None and next_ is not None and \
                         b["low"] >= prev_["low"] and b["low"] >= next_["low"]:
                     b["_topCand"] = b["high"]
+                # 包含判断仍用压平前的真实高点，避免压平造出原本不存在的包含
+                b["_preHigh"] = b["high"]
                 b["high"] = body_top
             elif lower >= ratio * amp and lower >= min_wick:
                 # 长下影（探底插针）：low 压平至实体底；原低记入 _origLow（端点恢复通道）
                 b["_origLow"] = b["low"]
                 b["_origLowTime"] = b["time"]
+                # 包含判断仍用压平前的真实低点（如 15m 9-30 20:15 低 4182.89
+                # 低于 20:00 低 4185.16，两根没有包含，不能因压平并进 20:00）
+                b["_preLow"] = b["low"]
                 b["low"] = body_bottom
         out.append(b)
     return out
@@ -223,6 +254,30 @@ def markWickBars(rawBars):
 # ============================================================
 # 1. 包含关系处理（合并K线）
 # ============================================================
+
+
+def _contain_high(bar):
+    """包含判断用的高点：长上影压平前的真实高点，未压平则用 high。"""
+    v = bar.get("_preHigh")
+    return bar["high"] if v is None else v
+
+
+def _contain_low(bar):
+    """包含判断用的低点：长下影压平前的真实低点，未压平则用 low。"""
+    v = bar.get("_preLow")
+    return bar["low"] if v is None else v
+
+
+def _side_high(bar):
+    """分型邻侧比较用高点（fractalSideRealWick）：含块内被压平的上影真实高点 _wickHigh。"""
+    v = bar.get("_wickHigh")
+    return bar["high"] if v is None else max(bar["high"], v)
+
+
+def _side_low(bar):
+    """分型邻侧比较用低点（fractalSideRealWick）：含块内被压平的下影真实低点 _origLow。"""
+    v = bar.get("_origLow")
+    return bar["low"] if v is None else min(bar["low"], v)
 
 
 def _absorb_body(m, bar):
@@ -254,12 +309,20 @@ def _mergeStep(merged, direction, bar):
         m["rawLow"] = bar["low"]
         m["rawHighTime"] = bar["time"]
         m["rawLowTime"] = bar["time"]
+        if bar.get("_preHigh") is not None:
+            m["_wickHigh"] = bar["_preHigh"]
         _absorb_body(m, bar)
         merged.append(m)
         return merged, direction
     last = merged[-1]
-    containUp = bar["high"] >= last["high"] and bar["low"] <= last["low"]
-    containDown = bar["high"] <= last["high"] and bar["low"] >= last["low"]
+    # 包含看压平前的真实高低。合并一旦发生，合成K的高低改用高高/低低的结果，
+    # 清掉 _preHigh/_preLow，后续相邻K不再拿影线极值去判包含。
+    last_high = _contain_high(last)
+    last_low = _contain_low(last)
+    bar_high = _contain_high(bar)
+    bar_low = _contain_low(bar)
+    containUp = bar_high >= last_high and bar_low <= last_low
+    containDown = bar_high <= last_high and bar_low >= last_low
     hasContain = containUp or containDown
     if hasContain:
         d = direction
@@ -275,9 +338,26 @@ def _mergeStep(merged, direction, bar):
                 last["low"] = bar["low"]
                 last["lowTime"] = bar["time"]
         else:
-            if bar["high"] < last["high"]:
-                last["high"] = bar["high"]
-                last["highTime"] = bar["time"]
+            # 向下合并取标准低低（2026-10-01 起）：高点按「压平前真实高点」取较小者。
+            # 两侧都未压平时即 orthodox 低低（如 10-1 04:45+06:00 取 4159.77，
+            # 06:00 的 4160.615 不再像旧 hiKeep 那样抬升块高点压制 04:30 顶分型）。
+            # 块内含长影压平K（结构高点低于自身真实高点 _preHigh）且新K真实高点更高时，
+            # 结构高点不能低于两者的真实较小值——否则真实高点从结构消失、分型判定
+            # 失真（例：60m 9-21 18:00 上影压平到 4345.73，19:00 真实高点 4371.11
+            # 不能被吃掉，块高点取真实较小值 4356.77，与完全不压平的低低一致；
+            # 17:00 底分型 4354.93 < 4356.77 得以存活）。
+            rl = _contain_high(last)
+            rb = _contain_high(bar)
+            if rb < rl:
+                if bar["high"] < last["high"]:
+                    last["high"] = bar["high"]
+                    last["highTime"] = bar["time"]
+            elif rb > rl and last["high"] < rl:
+                if rb > last["high"]:
+                    last["high"] = rl
+                    # 真实较小值来自块内压平K：时间用该块原raw高点的K线时间（精确
+                    # 端点时间由 rawHighTime/_topCand 通道在 fixBiExtremes 修正）
+                    last["highTime"] = last.get("rawHighTime", last["time"])
             if bar["low"] < last["low"]:
                 last["low"] = bar["low"]
                 last["lowTime"] = bar["time"]
@@ -304,9 +384,18 @@ def _mergeStep(merged, direction, bar):
         if ol is not None and (last.get("_origLow") is None or ol < last["_origLow"]):
             last["_origLow"] = ol
             last["_origLowTime"] = bar.get("_origLowTime", bar["time"])
+        # 冲高插针真高（_wickHigh）随覆盖范围传播：markWickBars 压平长上影前的真实
+        # 高点（_preHigh，块级旁路字段）。fractalSideRealWick 开启时分型邻侧比较用
+        # max(high, _wickHigh)——被压平的邻侧上影不再误杀中间分型。只进邻侧比较通道，
+        # 不写入 rawHigh/high——合并结构与跳空检测保持压平语义（与 _origLow 同模式）。
+        wh = bar.get("_preHigh")
+        if wh is not None and wh > last.get("_wickHigh", float("-inf")):
+            last["_wickHigh"] = wh
         last["_rawCount"] += 1
         last["time"] = bar["time"]
         _absorb_body(last, bar)
+        last.pop("_preHigh", None)
+        last.pop("_preLow", None)
         direction = d
     else:
         direction = 1 if bar["high"] > last["high"] else -1
@@ -319,6 +408,8 @@ def _mergeStep(merged, direction, bar):
         m["rawLow"] = bar["low"]
         m["rawHighTime"] = bar["time"]
         m["rawLowTime"] = bar["time"]
+        if bar.get("_preHigh") is not None:
+            m["_wickHigh"] = bar["_preHigh"]
         _absorb_body(m, bar)
         merged.append(m)
     return merged, direction
@@ -343,13 +434,23 @@ def fractalAt(merged, i):
 
     顶分型端点价：覆盖范围内若含「可成顶分型的长影 bar」（markWickBars _topCand），
     顶分型价用其影线价——结构保持压平版，影线价只在该 bar 成为分型中心端点时生效；
-    端点时间用影线价所在原始K线时间（_topCandTime，缺省回落 highTime）。"""
+    端点时间用影线价所在原始K线时间（_topCandTime，缺省回落 highTime）。
+
+    fractalSideRealWick（默认关）：左右邻的比较价改用压平前真实影线价
+    （_side_high/_side_low——被 markWickBars 压平的邻侧上/下影不再误杀中间分型，
+    如 60m 2026-09-29 04:00 底 4111.52 被 06:00 压平上影 4121.69 卡掉高点侧）；
+    中心K仍用压平结构价，压平语义不变。"""
     if i < 1 or i >= len(merged) - 1:
         return None
     prev = merged[i - 1]
     cur = merged[i]
     nxt = merged[i + 1]
-    if cur["high"] > prev["high"] and cur["high"] > nxt["high"] and cur["low"] > prev["low"] and cur["low"] > nxt["low"]:
+    if CHAN_CFG.get("fractalSideRealWick", False):
+        ph, pl = _side_high(prev), _side_low(prev)
+        nh, nl = _side_high(nxt), _side_low(nxt)
+    else:
+        ph, pl, nh, nl = prev["high"], prev["low"], nxt["high"], nxt["low"]
+    if cur["high"] > ph and cur["high"] > nh and cur["low"] > pl and cur["low"] > nl:
         use_cand = cur.get("_topCand") is not None and cur["_topCand"] > cur["high"]
         return {
             "mergedIdx": i, "type": "top",
@@ -357,7 +458,7 @@ def fractalAt(merged, i):
             "low": cur["low"],
             "time": cur["_topCandTime"] if (use_cand and cur.get("_topCandTime") is not None) else cur["highTime"],
         }
-    if cur["low"] < prev["low"] and cur["low"] < nxt["low"] and cur["high"] < prev["high"] and cur["high"] < nxt["high"]:
+    if cur["low"] < pl and cur["low"] < nl and cur["high"] < ph and cur["high"] < nh:
         return {"mergedIdx": i, "type": "bottom", "high": cur["high"], "low": cur["low"], "time": cur["lowTime"]}
     return None
 
@@ -492,7 +593,7 @@ def lowerStrokePack(res, periodBis, barsByPeriod, macdByPeriod=None, timesByPeri
             "macd": macd, "times": times}
 
 
-def buildStructureContext(bis, bars, barSec, tCut=None, merged=None, fractals=None, lowerContext=None, lowerStroke=None,
+def buildStructureContext(bis, bars, barSec, tCut=None, merged=None, fractals=None, lowerStroke=None,
                           rawTimes=None, mergedTimes=None):
     """Pure closed-prefix structure: confirmed strokes + at most one prospective leg.
 
@@ -513,7 +614,7 @@ def buildStructureContext(bis, bars, barSec, tCut=None, merged=None, fractals=No
         merged = mergeBars(markWickBars(raw))
         fractals = findFractals(merged)
         _res = {180: "3", 900: "15", 3600: "60", 14400: "240", 86400: "D"}.get(barSec)
-        known = buildBi(fractals, merged, calcATR(raw), calcMACD(raw), None, nearDoubleOn(barSec), lowerContext, _res)
+        known = buildBi(fractals, merged, calcATR(raw), calcMACD(raw), None, nearDoubleOn(barSec), _res)
         known = fixBiExtremes(known, merged) or known
         known = extendLastBi(known, markWickBars(raw))
     if merged is None:
@@ -617,9 +718,6 @@ def structurePeriods(periodBis, barsByPeriod, tCut=None, mergedByPeriod=None,
             # barsByPeriod 同源等长；未传则各消费点回退现算，与旧行为一致
             ctx = buildStructureContext(bis, raw, intervalSecOf(res), tCut,
                                         (mergedByPeriod or {}).get(res), (fractalsByPeriod or {}).get(res),
-                                        makeBiLowerContext(res, barsByPeriod.get("15") or [], tCut,
-                                                           macd=(macdByPeriod or {}).get("15"),
-                                                           times=(timesByPeriod or {}).get("15")) if str(res) == "60" else None,
                                         lowerStrokePack(res, computed, barsByPeriod,
                                                         macdByPeriod, timesByPeriod),
                                         rawTimes=(timesByPeriod or {}).get(res),
@@ -701,61 +799,6 @@ def hasGapBetween(merged, aIdx, bIdx, atr, gapFilter):
 # ============================================================
 
 
-def makeBiLowerContext(res, bars, cutoff=float('inf'), macd=None, times=None):
-    if str(res) != '60' or not bars:
-        return None
-    values = calcMACD(bars) if macd is None else macd
-    if len(values) != len(bars):
-        return None
-    if macd is None:
-        # values 由本函数对同一 bars 现算，时间天然对齐，无需逐根校验
-        pass
-    elif values[-1].get('time') != bars[-1]['time'] or \
-            not isinstance(values[-1].get('macd'), (int, float)):
-        # 外部传入（引擎增量累加器）：受信输入只做 O(1) 对齐防错位——长度已验，
-        # 末根时间一致即无平移；逐根全量校验（原 O(n) 生成器）只对外部不明来源才有意义，
-        # 引擎累加器与 bars 同源维护（_append_bars/_rewind_res 同步增删），不存在中间错位
-        return None
-    # times 同为受信直通（与 bars 同源的时间轴，免每调用 O(n) 重建）
-    timesArr = [b['time'] for b in bars] if times is None or len(times) != len(bars) else times
-    return dict(res='60', bars=bars, times=timesArr, macd=values, cutoff=cutoff)
-
-
-def lowerEndpointWeaker(old, end, fractals, context):
-    """近等端点补充确认，不修改买卖点的创新极值背驰定义。"""
-    if not context or context['res'] != '60' or not context['bars']:
-        return False
-    bars, times, macd, cutoff = (context[k] for k in ('bars', 'times', 'macd', 'cutoff'))
-
-    def before(f):
-        return next((x for x in reversed(fractals)
-                     if x['mergedIdx'] < f['mergedIdx'] and x['type'] != f['type']), None)
-
-    def exact(f):
-        if not f or not times or times[0] > f['time']:
-            return None
-        field = 'high' if f['type'] == 'top' else 'low'
-        i = bisect.bisect_left(times, f['time'])
-        while i < len(times) and times[i] < f['time'] + 3600:
-            if times[i] + 900 > cutoff:
-                break
-            if abs(bars[i][field] - f[field]) <= 0.001:
-                return times[i]
-            i += 1
-        return None
-
-    t = [exact(before(old)), exact(old), exact(before(end)), exact(end)]
-    if any(x is None for x in t) or t[0] >= t[1] or t[2] >= t[3]:
-        return False
-    a = biMacdMetrics(dict(startTime=t[0], endTime=t[1]), macd)
-    b = biMacdMetrics(dict(startTime=t[2], endTime=t[3]), macd)
-    top = end['type'] == 'top'
-    peak, dif, sign = ('redMax', 'difHigh', 1) if top else ('greenMax', 'difLow', -1)
-    ratio = CHAN_CFG['nearDoubleLowerRatio']
-    return bool(a and b and a[peak] > 0 and b[peak] > 0 and a[dif] * sign > 0 and b[dif] * sign > 0
-                and b[peak] <= a[peak] * ratio and abs(b[dif]) <= abs(a[dif]) * ratio)
-
-
 def _stkCons(k, prev):
     """阶段二结果的不可变栈节点 (elem, prev, depth)；空栈为 None。
     旧节点永不改动 → 任一位置的栈头即该位置快照（增量续算的基础）。"""
@@ -797,21 +840,20 @@ def biSeqStep(seq, f):
 class BiBuildCtx:
     """笔构建阶段二的规则上下文（buildBi 批量与 bi_inc 增量共用同一规则源）。
 
-    merged/atr/macdArr/lockedPivots/nearDouble/lowerContext 与 buildBi 形参同义。
+    merged/atr/macdArr/lockedPivots/nearDouble 与 buildBi 形参同义。
     gapDiffs：可选的逐对跳空差值表（下标 p → (nextLow-curHigh, curLow-nextHigh)，
     raw 口径），提供时 gapBetween 只扫描 [a,b) 区间而不建全量计数前缀——增量路径
     专用，判定谓词与批量口径逐对一致（块一旦不是末块即不可变，差值与全量构建
     时计算的相同）。rawCounter：可选的 (a,b)→原始K线数回调（前缀和 O(1) 查询）。"""
 
     def __init__(self, merged, atr, macdArr, lockedPivots=None, nearDouble=False,
-                 lowerContext=None, fractals=None, gapDiffs=None, rawCounter=None,
+                 fractals=None, gapDiffs=None, rawCounter=None,
                  res=None):
         self.merged = merged
         self.atr = atr
         self.macdArr = macdArr
         self.lockedPivots = lockedPivots
         self.nearDouble = nearDouble
-        self.lowerContext = lowerContext
         self.fractals = fractals
         self.gapDiffs = gapDiffs
         self.rawCounter = rawCounter
@@ -879,9 +921,10 @@ class BiBuildCtx:
         # 起点侧：与段同侧的两根（下跌笔顶起点取 [中心, 右] 的最低——不用左 bar，否则
         #   主升前夜/起涨点的旧低点会错误抬高"必须跌破"的阈值，误杀后续健康反弹；
         #   上涨笔底起点对称取 [左, 中心] 的最高）。
-        # 终点侧：分型自身三根范围（防反向吞没）：下跌笔的底分型三根K线最高价不得涨回
-        #   起点顶价之上（顶后崩盘 bar 跌回起点之下 = 中继弱反弹，不成笔；中心 bar 的
-        #   崩盘低点可能被包含合并抬高，须依赖三根中的右 bar 提供证据）；上涨笔对称。
+        # 终点侧：分型自身三根范围（防反向吞没，实体口径）：下跌笔的底分型三根K线
+        #   实体最高价不得涨回起点顶价之上——影线刺穿不算（2026-10-01 起；顶后崩盘
+        #   bar 跌回起点之下 = 中继弱反弹，不成笔；中心 bar 的崩盘低点可能被包含合并
+        #   抬高，须依赖三根中的右 bar 提供证据）；上涨笔对称。
         merged = self.merged
         i = a["mergedIdx"]
         j = b["mergedIdx"]
@@ -902,8 +945,13 @@ class BiBuildCtx:
         return True
 
     def _endSideExtremes(self, j):
-        """终点分型三根的最低/最高。振幅 ≥ 本周期单根长K豁免点数的K线跳过。
+        """终点分形三根的实体极值（bodyBottom/bodyTop）。
 
+        反向贯穿证据用实体口径（2026-10-01 起）：影线刺穿起点极值不算——
+        如 10-1 09:00 长阳高点 4161.385 刺穿 04:30 顶 4160.41，但实体顶
+        4159.67 未越过，插针不构成"涨回起点之上"的转势证据。实体字段缺失时
+        回退 open/close（与 _nearBodyPx 同源），再缺失回退影线。
+        振幅 ≥ 本周期单根长K豁免点数的K线（影线振幅口径，不变）跳过。
         三根都被豁免时返回 (None, None)，调用方视为终点侧不构成反向贯穿。
         """
         merged = self.merged
@@ -914,8 +962,14 @@ class BiBuildCtx:
             m = merged[idx]
             if skip and (m["high"] - m["low"]) >= thr:
                 continue
-            lows.append(m["low"])
-            highs.append(m["high"])
+            bt = m.get("bodyTop")
+            if bt is None and m.get("open") is not None and m.get("close") is not None:
+                bt = max(m["open"], m["close"])
+            bb = m.get("bodyBottom")
+            if bb is None and m.get("open") is not None and m.get("close") is not None:
+                bb = min(m["open"], m["close"])
+            highs.append(bt if bt is not None else m["high"])
+            lows.append(bb if bb is not None else m["low"])
         if not lows:
             return None, None
         return min(lows), max(highs)
@@ -944,6 +998,44 @@ def _pair_forms_bi(ctx, a, b):
     return False
 
 
+def _near_equal_shift_falsified(ctx, origin, prev, k):
+    """近等后移腿终局守卫（2026-09-30，与 JS chan-core 对齐）：近等后移断言
+    「last→k 这条腿终结于 k、中间反弹不成笔」。该断言被后续数据否定时不应提交：
+    若 k 被更极端同类型分型突破，且被弹出的反弹段（本段结构极值 anchor→区间实际
+    最优反向极值 best→突破点 k2）本可构成两笔有效笔，则拒绝合并——prev/last 留在
+    序列里，正确结构由标准成笔规则自然长出。判据与 shiftBreakRestore 的补回条件
+    同源（可证成笔才拦），已被市场走势消化的历史合并不受影响。"""
+    start_idx = origin["mergedIdx"] if origin else prev["mergedIdx"]
+    anchor = prev
+    for f in ctx.fractals:
+        if f["mergedIdx"] <= start_idx or f["mergedIdx"] >= k["mergedIdx"] or f["type"] != k["type"]:
+            continue
+        if (f["low"] < anchor["low"]) if k["type"] == "bottom" else (f["high"] > anchor["high"]):
+            anchor = f
+    tries = 0
+    for k2 in ctx.fractals:
+        if k2["mergedIdx"] <= k["mergedIdx"] or k2["type"] != k["type"]:
+            continue
+        if not ((k2["low"] < k["low"]) if k["type"] == "bottom" else (k2["high"] > k["high"])):
+            continue
+        tries += 1
+        if tries > 8:
+            break  # 突破点只看近处，防长程扫描
+        best = None
+        for f in ctx.fractals:
+            if f["mergedIdx"] <= anchor["mergedIdx"] or f["mergedIdx"] >= k2["mergedIdx"] or f["type"] == k["type"]:
+                continue
+            if best is None or ((f["high"] > best["high"]) if f["type"] == "top" else (f["low"] < best["low"])):
+                best = f
+        if best is not None and _pair_forms_bi(ctx, anchor, best) and _pair_forms_bi(ctx, best, k2):
+            if CHAN_CFG["debug"]:
+                print(f"[阶段二] 腿终局守卫拦截: {'顶' if k['type'] == 'top' else '底'}@{k['mergedIdx']}"
+                      f"被 {'顶' if k2['type'] == 'top' else '底'}@{k2['mergedIdx']} 突破且 "
+                      f"{anchor['mergedIdx']}→{best['mergedIdx']}→{k2['mergedIdx']} 可成两笔，反弹是真实笔，不取后")
+            return True
+    return False
+
+
 def _nearBodyPx(merged, idx, is_top):
     """近等容差用的实体价：顶 = 覆盖范围内 max(open, close)，底 = min(open, close)。
     不读 high/low 影线。没有实体字段则返回 None，近等不成立。"""
@@ -964,7 +1056,10 @@ def _nearBodyPx(merged, idx, is_top):
 def tryNearEqualSameType(ctx, last, head, k):
     """同类型近等取后。成功返回新 head，否则 None。
 
-    价差只比实体（bodyTop/bodyBottom）；中间真实回调仍用高低点。
+    先影线后实体（2026-10-02）：影线更极端的直接后移在 biStep 同类型分支
+    （更极端替换）已做，本函数处理影线不满足后的实体比较——后实体
+    （bodyTop/bodyBottom）不低于前实体直接后移，更低则差 ≤ nearDoubleFixed
+    才后移；中间真实回调仍用高低点。
     k 可以是已确认分型，也可以是未等右邻收盘的末根合并K。
     """
     if head is None or not ctx.nearDouble or last is None:
@@ -977,18 +1072,20 @@ def tryNearEqualSameType(ctx, last, head, k):
     if k.get("mergedIdx") == last.get("mergedIdx"):
         return None
     is_top = k["type"] == "top"
+    # 先影线后实体：后影线已更极端（>= / <=）时由同类型分支的更极端替换处理，
+    # 不走实体近等——避免给已被影线替换的端点补 nearDouble 单跳封顶，
+    # 挡住后续真正的近等后移（例：8-7 00:00 底 4223.505 影线更极端已替换，
+    # 若再标 nearDouble 会挡住 08:00 后底 4229.875 的近等后移）。
+    if (is_top and k["high"] >= last["high"]) or (not is_top and k["low"] <= last["low"]):
+        return None
     ref_price = _nearBodyPx(ctx.merged, last.get("mergedIdx"), is_top)
     new_price = _nearBodyPx(ctx.merged, k.get("mergedIdx"), is_top)
     if ref_price is None or new_price is None:
         return None
-    atr = ctx.atr or 0
-    thr = max(atr * CHAN_CFG["nearDoubleAtrK"], abs(ref_price) * CHAN_CFG["nearDoublePct"],
-              CHAN_CFG["nearDoubleFixed"])
+    thr = CHAN_CFG["nearDoubleFixed"]
     diff = (ref_price - new_price) if is_top else (new_price - ref_price)
     fractals = ctx.fractals or []
-    lower_confirmed = (diff > thr and diff <= thr * CHAN_CFG["nearDoubleLowerRelax"]
-                       and lowerEndpointWeaker(last, k, fractals, ctx.lowerContext))
-    if not (diff >= 0 and (diff <= thr or lower_confirmed)):
+    if diff > thr:
         return None
     pull, cnt = False, 0
     chain = [last]
@@ -1014,9 +1111,11 @@ def tryNearEqualSameType(ctx, last, head, k):
     if CHAN_CFG["debug"]:
         print(f"[阶段二] 近等双顶/双底平台取后: {k['type']}@{last['mergedIdx']}({ref_price}) -> "
               f"{k['type']}@{k['mergedIdx']}({k['high'] if is_top else k['low']}) "
-              f"（实体差 {diff:.2f} ≤ {thr * (CHAN_CFG['nearDoubleLowerRelax'] if lower_confirmed else 1):.2f}"
-              f"{'，15m双动能确认' if lower_confirmed else ''}，两顶间无相接成笔）")
+              f"（实体差 {diff:.2f} ≤ {thr:.2f}，两顶间无相接成笔）")
     k["nearDouble"] = True  # 单跳封顶
+    # 取后可证伪回退锚（2026-10-01）：后移端点使后续反向分型间隔不足连不上、
+    # 而原端点可与其成笔时回退（见 biStep 间隔不足分支的平台取后回退）。
+    k["_platAnchor"] = last
     return _stkCons(k, head[1])
 
 
@@ -1085,7 +1184,15 @@ def biStep(ctx, head, k):
     last = head[0]
     if k["type"] == last["type"]:
         if last.get("locked", False):
-            # locked 端点（上级笔端点，区间套强制对齐）不可被同类型分型替换
+            # locked 端点（上级笔端点，区间套强制对齐）不可被同类型分型替换——
+            # 唯一例外（nearDoubleShiftLocked，2026-10-02）：近等双顶/双底平台取后
+            # （闸门照常：影线不更极端才比实体、差≤nearDoubleFixed、回调够深、无相接
+            # 成笔、单跳封顶）。例：60m 9-28 22:00 锁定底 4110.87 让位 9-29 04:00
+            # 近等后底 4111.52（15m 二次背驰转折）。更极端替换等其余锁定拦截不变。
+            if CHAN_CFG.get("nearDoubleShiftLocked", False):
+                shifted = tryNearEqualSameType(ctx, last, head, k)
+                if shifted is not None:
+                    return shifted
             return head
         if not last.get("gapLocked", False):
             more = (k["high"] >= last["high"]) if k["type"] == "top" else (k["low"] <= last["low"])
@@ -1188,6 +1295,33 @@ def biStep(ctx, head, k):
             k["macdRaw"] = ctx.countRawBetween(last["mergedIdx"], k["mergedIdx"])
             return _stkCons(k, head)                  # result.append(k)
         else:
+            # 平台取后可证伪回退（2026-10-01，与 _shiftBreakRestore 同哲学：断言让位于
+            # 可证结构，优先于 moreExtreme 顶替/近等后移执行）：近等平台取后把端点后移到
+            # last，若随后反向分型 k 与 last 间隔不足连不上、而原端点 _platAnchor 与 k
+            # 能成笔（含间隔/笔内极值/范围脱离全套判据），说明「两底/两顶近等取哪个
+            # 无所谓」的断言被否定——回退原端点并接入 k。例：15m 10-1 02:00 底近等
+            # 后移到 03:0 后，04:30 顶只剩 4 根合并K（04:00 长下影压平使包含链多并
+            # 一块），02:00→04:30 有 7 根可成笔。
+            _plat_anchor = last.get("_platAnchor")
+            if _plat_anchor is not None and not last.get("locked", False) \
+                    and _pair_forms_bi(ctx, _plat_anchor, k):
+                # 起点侧极值守卫（双向）：回退生成的笔，其起点也必须是区间极值——
+                # 起点之后、k 之前藏着比起点更极端的同向极值（如 60m 9-18 04:00 底
+                # 4340.655 上方有 07:00 低点 4339.72）说明原端点不是该段真实转折，
+                # 不回退，维持取后，等待更极端分型按标准路径替换。
+                _start_clear = True
+                for _i in range(_plat_anchor["mergedIdx"] + 1, k["mergedIdx"]):
+                    _m = ctx.merged[_i]
+                    if (_plat_anchor["type"] == "bottom" and _m["low"] < _plat_anchor["low"]) or \
+                            (_plat_anchor["type"] == "top" and _m["high"] > _plat_anchor["high"]):
+                        _start_clear = False
+                        break
+                if _start_clear:
+                    if CHAN_CFG["debug"]:
+                        print(f"[阶段二] 平台取后回退: {'底' if last['type']=='bottom' else '顶'}@{last['mergedIdx']}"
+                              f" -> 原{'底' if _plat_anchor['type']=='bottom' else '顶'}@{_plat_anchor['mergedIdx']}，接入 "
+                              f"{'顶' if k['type']=='top' else '底'}@{k['mergedIdx']}")
+                    return _stkCons(k, _stkCons(_plat_anchor, head[1]))
             if _stkLen(head) >= 2 and head[1][0]["type"] == k["type"]:
                 prev = head[1][0]
                 moreExtreme = k["high"] >= prev["high"] if k["type"] == "top" else k["low"] <= prev["low"]
@@ -1200,6 +1334,8 @@ def biStep(ctx, head, k):
                 #   → 前顶有效，保留，不能被更高顶作废（如已走出有效下跌笔后，
                 #   更高顶无法与右侧成笔，应作废的是新顶而非前顶）；
                 #   仅当 prev→last 不构成有效笔时，更极端的 k 才能顶替 prev。
+                #   例外：k.locked（上级笔端点）且更极端、与 last 间隔不足无法自成笔时，仍顶替 prev 落地
+                #   （区间套锁定端点阶段二不可吞）。prev.locked / last.locked 仍不让位。
                 prev_last_valid_bi = gapPrevLast >= 4 and \
                     ctx.noMoreExtremeInside(prev, last) and ctx.fractalRangeClear(prev, last)
                 # 最小间隔脆弱笔例外：prev→last 虽构成有效笔，但间隔恰为最小值（4，
@@ -1221,8 +1357,10 @@ def biStep(ctx, head, k):
                               f"允许被 {'顶' if k['type']=='top' else '底'}@{k['mergedIdx']} 顶替")
                 # 近等后顶/后底（反弹不成笔）取后（2026-09-26，与 JS chan-core 对齐）：本分支
                 # 前提即 last→k 反弹/回撤腿 gap<4 本身不成笔（拆不出独立反弹笔）。若 k 与 prev
-                # 近等（差 ≤ thr，仅60m可经 15m 双动能确认放宽至 1.5×thr）且 prev→last 是 ≥thr
-                # 的真实回调，则 prev 让位、端点后移到 k——「回调够深、反弹太短」的走势终完美
+                # 近等（先影线后实体：影线更极端时走 moreExtreme 顶替或 prev 受有效笔保护，
+                # 影线不满足才比实体——后实体不低于前实体直接取后，更低则差 ≤ thr=nearDoubleFixed）
+                # 且 prev→last 是 ≥thr 的真实回调，则 prev 让位、端点后移到 k——
+                # 「回调够深、反弹太短」的走势终完美
                 # （例：60m 2026-09-18 15:00 顶 4399.67 → 底 4342.73(22:00+8，与23:00包含合并)
                 # → 9-19 01:00 顶 4397.05，反弹腿仅 3 根合并K；与平台取后顶（同类型分支）互补，
                 # 平台场景两顶间分型间隔全 <4）。权限：k.locked（上级笔端点）任何周期生效——
@@ -1242,37 +1380,42 @@ def biStep(ctx, head, k):
                         thr_r = None
                         diff_r = None
                     else:
-                        thr_r = max(ctx.atr * CHAN_CFG["nearDoubleAtrK"],
-                                    abs(ref_price_r) * CHAN_CFG["nearDoublePct"],
-                                    CHAN_CFG["nearDoubleFixed"])
+                        thr_r = CHAN_CFG["nearDoubleFixed"]
                         diff_r = (ref_price_r - new_price_r) if is_top_r else (new_price_r - ref_price_r)
                     pulled_r = thr_r is not None and ((prev["high"] - last["low"]) >= thr_r if k["type"] == "top"
                                 else (last["high"] - prev["low"]) >= thr_r)
-                    lower_confirmed_r = (thr_r is not None and diff_r > thr_r
-                                         and diff_r <= thr_r * CHAN_CFG["nearDoubleLowerRelax"]
-                                         and lowerEndpointWeaker(prev, k, ctx.fractals, ctx.lowerContext))
-                    if thr_r is not None and diff_r >= 0 and (diff_r <= thr_r or lower_confirmed_r) and pulled_r \
+                    if thr_r is not None and not moreExtreme and diff_r <= thr_r and pulled_r \
+                            and (k.get("locked", False)
+                                 or not _near_equal_shift_falsified(
+                                     ctx, head[1][1][0] if _stkLen(head) >= 3 else None, prev, k)) \
                             and (k.get("locked", False)
                                  or (ctx.nearDouble and CHAN_CFG["nearDoubleRebound"])):
                         near_equal_shift = True
-                if (moreExtreme and (not prev_last_valid_bi or fragile_minimal)) or near_equal_shift:
+                if (moreExtreme and (not prev_last_valid_bi or fragile_minimal or k.get("locked", False))) or near_equal_shift:
                     # 回溯替换保护（区间套一致性）：当 last 比更早的同类型分型 result[-3] 更极端时，
                     # last 是笔内真实转折点（如插针低点/插针高点），不能无条件 pop 掉——吞掉会导致
                     # 该笔内部藏着更极值（违反笔内极值原则），且本级别笔端点与上级周期（区间套）不重合。
                     # 此时保留 last 取代 result[-3]，prev 被更高顶/更低底突破而作废移除，
                     # k 与 last 间隔不足、暂不接入，等待后续满足最小间隔的分型成笔。
+                    # k.locked 不走本保护：上级锁定端点必须落地，不能被保护丢掉。
                     if _stkLen(head) >= 3:
                         prev3 = head[1][1][0]
                         last_is_deeper = (
                             (k["type"] == "top" and last["low"] < prev3["low"])
                             or (k["type"] == "bottom" and last["high"] > prev3["high"])
                         )
-                        if last_is_deeper and not prev.get("locked", False) and not prev3.get("locked", False):
+                        if last_is_deeper and not prev.get("locked", False) and not prev3.get("locked", False) \
+                                and not k.get("locked", False):
                             if CHAN_CFG["debug"]:
                                 print(f"[阶段二] 回溯替换保护: {'顶' if last['type']=='top' else '底'}@{last['mergedIdx']} 比 "
                                       f"{'顶' if prev3['type']=='top' else '底'}@{prev3['mergedIdx']} 更极端，保留 last 为端点，作废 prev，暂不接入 k")
                             return _stkCons(last, head[1][1][1])   # result[-3]=last; pop(); pop()
                     if not last.get("locked", False) and not prev.get("locked", False):
+                        if k.get("locked", False) and moreExtreme and prev_last_valid_bi and CHAN_CFG["debug"]:
+                            print(f"[阶段二] 锁定端点落地: {'顶' if k['type']=='top' else '底'}@{k['mergedIdx']}"
+                                  f"({k['high'] if k['type']=='top' else k['low']}) 顶替已成笔的 "
+                                  f"{'顶' if prev['type']=='top' else '底'}@{prev['mergedIdx']}，去掉 "
+                                  f"{'顶' if last['type']=='top' else '底'}@{last['mergedIdx']}")
                         if near_equal_shift:
                             k["nearDouble"] = True  # 单跳封顶：被近等后移的端点不允许二次后移
                             # 记下被替换的端点和被弹出的转折，供后续分型破坏时补回笔
@@ -1310,14 +1453,62 @@ def biPair(a, b, merged, ctx=None):
     }
 
 
-def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False, lowerContext=None, res=None):
+def lockedPivotsOf(prev_bis):
+    """上级笔端点 → 区间套锁定端点集（与 JS lockedPivotsOf 对齐）。
+    上级每笔的起点/终点都是明确极值（顶/底），下级必须复现。空表返回 None。"""
+    if not prev_bis:
+        return None
+    arr = []
+    for b in prev_bis:
+        if b["type"] == "up":
+            arr.append({"dir": "bottom", "price": b["startPrice"]})
+            arr.append({"dir": "top", "price": b["endPrice"]})
+        else:
+            arr.append({"dir": "top", "price": b["startPrice"]})
+            arr.append({"dir": "bottom", "price": b["endPrice"]})
+    return arr
+
+
+# 阶段二重放在分型 dict 上派生的一次性旗标（重放前须重置，见 resetBiFlags）
+_REPLAY_FLAGS = ("locked", "gapLocked", "nearDouble", "macdCross", "macdRaw",
+                 "_platAnchor", "_shiftAnchor", "_shiftMid", "_openEndpoint")
+
+
+def resetBiFlags(seq, start=0):
+    """清除分型 dict 上由阶段二重放派生的一次性旗标（2026-10-03 修复）。
+
+    批量管线（buildBi）每次用新建分型，天然干净；增量链路（BiIncBuilder/updateFractalsTail）
+    跨拍复用同一批 dict，上一拍重放留下的残留（尤其 locked——_markLockedPivots 只置不清，
+    上级端点延伸漂移后旧锁残留）会改变本拍重放的折叠结果，使增量笔结构与批量口径漂移、
+    产出假买卖点（实证：XAUUSD 8-25 02:00 假 2卖@01:45）。重放/重建前必须重置；
+    locked 随后由 _markLockedPivots 按当前 lockedPivots 重标。start 之前为冻结前缀，
+    其旗标由冻结时的等价重放派生，保持不动。"""
+    for f in seq[start:]:
+        for key in _REPLAY_FLAGS:
+            if key in f:
+                del f[key]
+
+
+def _markLockedPivots(seq, locked_pivots, start=0):
+    """在阶段一序列 seq[start:] 上标记与上级端点方向/价格一致的分型（容差 0.001），
+    与 buildBi 的区间套锁定标记同口径（bi_inc 增量路径对新折叠元素调用）。"""
+    if not locked_pivots:
+        return
+    for f in seq[start:]:
+        p = f["high"] if f["type"] == "top" else f["low"]
+        for lp in locked_pivots:
+            if lp["dir"] == f["type"] and abs(lp["price"] - p) <= 0.001:
+                f["locked"] = True
+                break
+
+
+def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False, res=None):
     """笔构建。与 JS 版 buildBi 对齐。lockedPivots 为上级笔端点（区间套强制对齐，优先级最高）；
     nearDouble=True 时启用「近等双顶/双底平台取后顶/后底」（≥60m 周期由调用方开启）。
-    lowerContext 为可选15分钟上下文，仅60m补充分支使用；缺省时沿用原阈值。
     res 为周期码（按 wideBarPointsOf 取该周期单根长K豁免点数）；缺省不豁免，与旧调用一致。
     内部经 biSeqStep/biStep/biPair 单步组合（与 bi_inc 增量构建器共用规则源）。"""
     ctx = BiBuildCtx(merged, atr, macdArr, lockedPivots=lockedPivots,
-                     nearDouble=nearDouble, lowerContext=lowerContext, fractals=fractals,
+                     nearDouble=nearDouble, fractals=fractals,
                      res=res)
 
     # 阶段一：严格交替分型序列
@@ -1325,15 +1516,15 @@ def buildBi(fractals, merged, atr, macdArr, lockedPivots=None, nearDouble=False,
     for f in fractals:
         biSeqStep(seq, f)
 
+    # 重放旗标去污染（2026-10-03）：调用方可能传入跨拍复用的持久分型 dict（引擎
+    # _build_bis 重同步路径）——上一轮构建留下的 locked/nearDouble 等残留会改变本轮
+    # 折叠结果；新建分型（常规调用/测试）此步为空操作。锁定标记随后按当前入参重标。
+    resetBiFlags(seq)
+
     # 区间套强制对齐（优先级最高）：上级笔端点（lockedPivots）必须在下级笔中被保留为端点，
     # 不能被阶段二的任何「移除中间分型」逻辑吞掉。在阶段一序列上标记与上级端点方向/价格一致的分型。
     if lockedPivots:
-        for f in seq:
-            p = f["high"] if f["type"] == "top" else f["low"]
-            for lp in lockedPivots:
-                if lp["dir"] == f["type"] and abs(lp["price"] - p) <= 0.001:
-                    f["locked"] = True
-                    break
+        _markLockedPivots(seq, lockedPivots)
 
     if CHAN_CFG["debug"]:
         def ft(s):
@@ -1895,21 +2086,22 @@ def _areaDurComparable(a, b):
 
 
 def isBiDiverge(bi, refer, macdArr):
-    """MACD 背驰判定（OR 关系，满足其一即算背驰，与 JS 一致）：
-    底背驰（对应一买，下跌笔）：绿柱面积变小 或 黄白线低点抬高 或 绿柱最大高度变小；
-    顶背驰（对应一卖，上涨笔）：红柱面积变小 或 黄白线高点变低 或 红柱最大高度变小。
-    面积两项受 _areaDurComparable 时长门约束（两段时长不可比时仅用 DIF/柱高判据）。"""
+    """MACD 背驰判定（2026-10-01 起双判据 AND，与 JS 一致）：
+    底背驰（对应一买，下跌笔）：黄白线低点抬高 且（时长可比时）绿柱面积变小；
+    顶背驰（对应一卖，上涨笔）：黄白线高点变低 且（时长可比时）红柱面积变小。
+    面积受 _areaDurComparable 时长门约束：两段时长不可比时面积不计入，DIF 单判据兜底。
+    （旧口径为 面积/DIF/单根最大柱高 三项 OR 任一命中——柱高项已废除并收紧为 AND。）"""
     cur = biMacdMetrics(bi, macdArr)
     ref = biMacdMetrics(refer, macdArr)
     if cur is None or ref is None:
         return False
     if bi["type"] == "down":
-        return ((_areaDurComparable(bi, refer) and cur["greenArea"] < ref["greenArea"])
-                or cur["difLow"] > ref["difLow"]
-                or cur["greenMax"] < ref["greenMax"])
-    return ((_areaDurComparable(bi, refer) and cur["redArea"] < ref["redArea"])
-            or cur["difHigh"] < ref["difHigh"]
-            or cur["redMax"] < ref["redMax"])
+        if not cur["difLow"] > ref["difLow"]:
+            return False
+        return (not _areaDurComparable(bi, refer)) or cur["greenArea"] < ref["greenArea"]
+    if not cur["difHigh"] < ref["difHigh"]:
+        return False
+    return (not _areaDurComparable(bi, refer)) or cur["redArea"] < ref["redArea"]
 
 
 # ============================================================
@@ -2086,6 +2278,8 @@ def wideBarPointsOf(res):
     单根K线振幅 ≥ 返回值时，不参与分型终点侧三根的反向贯穿检查。
     res 接受周期码（'3'/'15'/'60'/'240'/'D'，含 1H/4H/1D 别名）或 barSec 秒数 int。
     未列周期、缺省、或配置为 0 时返回 0（不豁免）。"""
+    if not CHAN_CFG.get("wideBarOn", True):
+        return 0.0
     if res is None or isinstance(res, bool):
         return 0.0
     sec = res if isinstance(res, int) else intervalSecOf(res)
@@ -2504,6 +2698,7 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
     类2买：2买后更高抬高且落在中枢 [zd-class2ZsTol, zg]；无中枢不标。
     3买/类3买/4买/类4买：离 zg 后回踩 > zg-thirdZsTol；同段按顺序全部标出；无中枢不标。
     1买逻辑不变。
+    返回按 time 升序（稳定排序；同刻保持识别序 2/类2→1买→3/4类，尾点=时间最新）。
     """
     bis = pointEligibleBis(bis)
     knownUpper = confirmedStructureBis(upperBis)
@@ -2671,11 +2866,14 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
             third_out.append({"type": _leave_point_type(k, False),
                               "time": v["time"], "price": v["price"]})
     _append_third_points(points, third_out, _LEAVE_BUY, "类2买")
+    points.sort(key=lambda p: p["time"])  # 时间升序稳定排序；同刻保持识别序（2/类2→1买→3/4类）
     return points
 
 
 def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.0, cache=None):
-    """卖点识别（与买点对称）：2卖不依赖中枢；类2/3/类3/4/类4 依赖中枢。"""
+    """卖点识别（与买点对称）：2卖不依赖中枢；类2/3/类3/4/类4 依赖中枢。
+    返回按 time 升序（稳定排序；同刻保持识别序 2/类2→1卖→3/4类，尾点=时间最新）。
+    """
     bis = pointEligibleBis(bis)
     knownUpper = confirmedStructureBis(upperBis)
     if len(bis) < 3:
@@ -2865,6 +3063,7 @@ def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0
             third_out.append({"type": _leave_point_type(k, True),
                               "time": v["time"], "price": v["price"]})
     _append_third_points(points, third_out, _LEAVE_SELL, "类2卖")
+    points.sort(key=lambda p: p["time"])  # 时间升序稳定排序；同刻保持识别序（2/类2→1卖→3/4类）
     return points
 
 

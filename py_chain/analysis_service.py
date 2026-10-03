@@ -18,8 +18,8 @@ from . import sr_service, sr_draw, param_center, module_registry
 from .monitor import replay_started
 
 ROOT = Path(__file__).resolve().parent.parent
-# 流程顺序与依赖来自模块分层注册表：基础公用组件（bi/zs/points/sr）+ 默认策略
-# （缠论V1：plan→entry）。按 cfg["strategy"] 运行的入口见 dependency_order/start。
+# 流程顺序与依赖来自模块分层注册表。工作台「更新全部」(step=all) 只跑
+# 基础组件 01/02/03（bi/zs/points）；单模块仍按依赖补齐。
 ORDER = module_registry.order_of()
 DEPENDENCIES = module_registry.dependencies_of()
 SCRIPTS = {"bi": ("chan-bi", "chan_bi"), "points": ("mark-buy-sell", "mark_buy_sell"),
@@ -45,8 +45,9 @@ def atomic_json(path, data):
 def dependency_order(step, strategy=None):
     order = module_registry.order_of(strategy)
     deps = module_registry.dependencies_of(strategy)
+    # 更新全部：只跑基础结构 01 画笔、02 画中枢、03 标记买卖点
     if step == "all":
-        return order[:]
+        return list(module_registry.BASE_STAGES)
     if step not in deps:
         raise ValueError("未知分析模块")
     found = set()
@@ -223,7 +224,7 @@ class AnalysisManager:
             if self.thread and self.thread.is_alive():
                 return {"ok": False, "error": "分析任务正在运行"}
             self.configure(self.cfg)
-            # 阶段列表按当前策略取（"all" = 基础组件 + 该策略步骤；未知模块 ValueError）
+            # "all" = 01/02/03 基础组件；单模块按依赖补齐（未知模块 ValueError）
             stages = dependency_order(step, self.cfg.get("strategy"))
             holder = self.acquire("analysis")
             if holder is not True:
@@ -337,6 +338,37 @@ class AnalysisManager:
                     self.next_at = time.time() + self.cfg["intervalMinutes"] * 60
                 self._changed()
 
+    def _prefetch_ref_bars(self, cfg, log):
+        """画笔前置：3m 校准基准深历史缺段时用回放深拉补库（与 WEB 基础数据页同路径）。
+
+        15m 笔的端点校准依赖 3m K线；TV 图表 3m 深度仅约 2 个月，更早历史由
+        chan_bi.js 从 bars.db（回放深拉库）拼接。库缺段时在此自动补拉——会切图表
+        周期并进出回放，必须在画笔子进程启动前串行完成（子进程运行期禁止回放态）。
+        预取失败不阻断画笔（退化为图表深度内校准，由脚本如实提示）。
+        """
+        try:
+            from . import data_store
+            from .main import parse_from
+            from_ts = parse_from(cfg.get("from") or "")
+            if not from_ts:
+                return
+            win15 = int(param_center.chan_cfg_effective(cfg["symbol"]).get("windowDays15") or 0)
+            need = max(from_ts, int(time.time() - win15 * 86400)) if win15 > 0 else from_ts
+            segs = data_store.missing_segments(cfg["symbol"], "3", need)
+            if not segs:
+                return
+            gaps = "、".join(
+                f"{dt.datetime.fromtimestamp(s, dt.timezone.utc):%m-%d}~"
+                f"{dt.datetime.fromtimestamp(e, dt.timezone.utc):%m-%d}"
+                for s, e in segs[:5])
+            log(f"3m 校准基准缺 {len(segs)} 段（{gaps}{'…' if len(segs) > 5 else ''}），回放深拉补库（与基础数据页同路径）…")
+            data_store.fetch_and_store(cfg["symbol"], ["3"], need, mode="auto", log=log)
+            left = data_store.missing_segments(cfg["symbol"], "3", need)
+            log("3m 校准基准补库完成" if not left
+                else f"3m 校准基准补库后仍有 {len(left)} 段缺口（数据源可能到头），画笔继续")
+        except Exception as exc:
+            log(f"3m 校准基准预取失败（{exc}），继续画笔（更早端点将不做低级别校准）")
+
     def _execute_stage(self, stage, cfg, folder, log):
         key = symbol_key(cfg["symbol"])
         if stage == "sr":
@@ -355,6 +387,8 @@ class AnalysisManager:
                         "generatedAt": dt.datetime.now(dt.timezone.utc).isoformat(), **result})
             self.publish_sr(sr_cfg, result, meta)
             return {"count": len(result["merged"]), "drawing": draw, "meta": meta}
+        if stage == "bi":
+            self._prefetch_ref_bars(cfg, log)
         skill, script = SCRIPTS[stage]
         report = folder / (stage + "_report.json")
         env = {**os.environ, "CHAN_TARGET": cfg["targetId"], "CHAN_SYMBOL": cfg["symbol"],
@@ -412,14 +446,26 @@ class AnalysisManager:
             fx = pm["fxma"]
             command.append("--entry-res=" + str(fx.get("entryRes", "3,15,60")))
             command.append("--point-classes=" + str(fx.get("pointClasses", "1,2,3")))
+            # 条件开关：True→1 / False→0（JS 侧 "0" 为关，缺省开）
+            command.append("--ma-on=" + ("1" if fx.get("maOn", True) else "0"))
             command.append("--ma-type=" + str(fx.get("maType", "SMA")))
             command.append("--ma-fast-1=" + str(fx.get("maFast1", 8)))
             command.append("--ma-slow-1=" + str(fx.get("maSlow1", 20)))
             command.append("--ma-fast-2=" + str(fx.get("maFast2", 5)))
             command.append("--ma-slow-2=" + str(fx.get("maSlow2", 8)))
             command.append("--cross-min-pts=" + str(fx.get("crossMinPts", 2.0)))
+            command.append("--ma-stand-on=" + ("1" if fx.get("maStandOn", True) else "0"))
+            command.append("--ma-stand-1=" + str(fx.get("maStand1", 5)))
+            command.append("--ma-stand-2=" + str(fx.get("maStand2", 5)))
+            # 新条件开关（JS 侧 "1"=开、缺省关；显式传 0 亦为关）
+            command.append("--fib-near-on=" + ("1" if fx.get("fibNearOn", False) else "0"))
+            command.append("--fib-levels=" + str(fx.get("fibLevels", "0.382,0.5,0.618")))
+            command.append("--fib-near-pts=" + str(fx.get("fibNearPts", 5.0)))
+            command.append("--upper-dir-on=" + ("1" if fx.get("upperDirOn", False) else "0"))
+            command.append("--strong-fx-on=" + ("1" if fx.get("strongFxOn", True) else "0"))
             command.append("--strong-fx-min-pts=" + str(fx.get("strongFxMinPts", 0.0)))
             command.append("--point-valid-bars=" + str(fx.get("pointValidBars", 0)))
+            command.append("--point-valid-pts=" + str(fx.get("pointValidPts", 0)))
             command.append("--stop-pts=" + str(fx.get("stopPts", 10.0)))
             command.append("--tp-pts=" + str(fx.get("tpPts", 30.0)))
             command.append("--same-bar-priority=" + str(fx.get("sameBarPriority", "stop")))

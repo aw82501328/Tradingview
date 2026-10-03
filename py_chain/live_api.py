@@ -73,6 +73,7 @@ def _strategy_snapshot(sid):
 
 def overview():
     """多策略实盘状态快照列表（live_trader 可能不在运行：heartbeat 超时即离线）。"""
+    live_store.ensure_tables()   # webapp 可能先于 live_trader 首次运行启动（幂等）
     return {"ok": True,
             "strategies": [_strategy_snapshot(sid)
                            for sid in module_registry.strategy_ids()]}
@@ -81,6 +82,7 @@ def overview():
 def set_trading(strategy_id, enabled):
     """写页面交易开关 kv + 审计事件（进程离线时也照记，恢复后生效）。"""
     sid = module_registry.normalize_strategy(strategy_id)   # 未知 → ValueError → 400
+    live_store.ensure_tables()
     live_store.save_state(live_store.state_key(TRADING_KEY, sid),
                           {"enabled": bool(enabled)})
     session = live_store.load_state(live_store.state_key("session", sid)) or {}
@@ -95,7 +97,10 @@ def handle(handler, app, method):
     path = handler.path.split("?", 1)[0]
     if method == "GET":
         if path == "/api/live/overview":
-            handler._send_json(overview())
+            try:
+                handler._send_json(overview())
+            except Exception as exc:   # 不让请求线程异常以空响应断连
+                handler._send_json({"ok": False, "error": str(exc)}, 503)
             return True
         if path in ("/live", "/live.html"):
             handler._serve_file("live.html", "text/html; charset=utf-8")

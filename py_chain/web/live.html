@@ -32,6 +32,7 @@
   .tgl-btn.start { background: #0d3b31; border-color: #1d5c4c; color: #7fe0b0; }
   .tgl-btn:disabled { opacity: .5; cursor: default; }
   .pend { font-size: 11px; color: #f0b90b; margin-left: 8px; margin-bottom: 8px; }
+  .loaderr { font-size: 12px; color: #e0938f; padding: 8px 2px; align-self: center; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
           gap: 10px; margin-bottom: 20px; }
   .stat { background: var(--card); border: 1px solid var(--border);
@@ -181,10 +182,20 @@ async function toggleTrading() {
   render(current());
 }
 
+function renderLoadError(msg) {
+  document.getElementById('strategy-tabs').innerHTML =
+    `<span class="loaderr">${esc(msg)}</span>`;
+  document.getElementById('trade-ctl').innerHTML = '';
+}
+
 async function refresh() {
   let d;
   try { d = await (await fetch('/api/live/overview')).json(); }
-  catch (e) { return; }
+  catch (e) { renderLoadError('实盘状态加载失败（服务不可达）'); return; }
+  if (!d || !d.ok) {
+    renderLoadError('实盘状态加载失败：' + (d && d.error ? d.error : '未知错误'));
+    return;
+  }
   strategies = d.strategies || [];
   if (!strategies.length) return;
   if (!strategies.some(s => s.strategy === active)) active = strategies[0].strategy;

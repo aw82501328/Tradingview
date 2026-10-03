@@ -5,7 +5,7 @@ const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].find(m=>m[1].
 const common = fs.readFileSync('py_chain/web/bt_common.js', 'utf8');
 const nodes = new Map();
 const node = id => {
-  if (!nodes.has(id)) nodes.set(id, {value:'', textContent:'', innerHTML:'', style:{}, hidden:false, setAttribute(){}, getAttribute:()=>null, querySelector:()=>({textContent:''}), querySelectorAll:()=>[]});
+  if (!nodes.has(id)) nodes.set(id, {value:'', textContent:'', innerHTML:'', style:{}, hidden:false, setAttribute(){}, getAttribute:()=>null, addEventListener(){}, querySelector:()=>({textContent:''}), querySelectorAll:()=>[]});
   return nodes.get(id);
 };
 let resolvePost, calls = [], job = {jobId:'job-1',id:2,mode:'backtest',state:'running'};

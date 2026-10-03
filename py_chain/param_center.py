@@ -4,7 +4,8 @@
 模块清单（与 web/params.html 页签一一对应，顺序对齐工作台流程；归属两大类见
 module_registry——基础公用组件 vs 交易策略，2026-09-29 模块分层）：
   【基础公用组件】
-  chan   画笔（成笔相关 CHAN_CFG 子集；内部 id 仍为 chan，避免改 API / 落盘键）
+  chan   画笔（成笔相关 CHAN_CFG 子集 + 小周期绘制窗口 windowDays*；内部 id 仍为 chan，
+         避免改 API / 落盘键）
   zs     画中枢（各周期是否绘制、每周期最近保留个数）
   points 标记买卖点（邻近合并/保留数/中枢容差 + divergeDurRatio）
   【交易策略 · 缠论V1（chan_v1；策略页签组，未来新策略在此追加）】
@@ -14,8 +15,8 @@ module_registry——基础公用组件 vs 交易策略，2026-09-29 模块分�
   plan   交易计划（震荡判定阈值 RANGE_DEFAULTS + 顺势参考周期 trendRes）
   entry  标记进出场（near/lots/slip_* 与出场门槛 + 进场扩展 CHAN_CFG）
   【交易策略 · 强分型均线V1（fxma_v1；引擎 fx_ma.FxMaEngine，与缠论V1并行）】
-  fxma   强分型均线V1（进出场周期/买卖点类别多选 + 均线对 + 强分型落差 + 点有效期 +
-         止盈止损点数 + 互斥范围；spec 第4位 "multi" = 多选逗号串类型）
+  fxma   强分型均线V1（进出场周期/买卖点类别多选 + 强分型/均线分离条件开关 + 均线对 +
+         强分型落差 + 点有效期 + 止盈止损点数 + 互斥范围；spec 第4位 "multi" = 多选逗号串类型）
 
 存储 web/module_params.json：
   PARAM_MODULES → **只存与代码默认不同的键（overrides-only）**，按五品种分桶；
@@ -44,6 +45,9 @@ from .fx_ma import FXMA_DEFAULTS, ENTRY_RES_OPTIONS as FXMA_RES_OPTIONS
 
 # 持久化文件（原子写：tempfile + os.replace，与 webapp._presets_save 同模式）
 PARAMS_FILE = os.path.join(os.path.dirname(__file__), "web", "module_params.json")
+# 模块加载时实际使用的参数存储路径（导出隔离守卫：测试把 PARAMS_FILE 重定向到
+# 临时存储时不写真实导出目录，防止临时桶覆盖画笔读取的 chan_cfg_<品种>.json）
+_DEFAULT_PARAMS_FILE = os.path.abspath(PARAMS_FILE)
 _lock = threading.Lock()
 
 # 画中枢默认：与历史 CLI 一致，默认只画 1 小时；每周期最近保留个数
@@ -57,13 +61,14 @@ ZS_DEFAULTS = {
 
 # CHAN_CFG 键按工作台步骤归属（算法默认值仍在 chan_core.CHAN_CFG_DEFAULTS）
 CHAN_BI_KEYS = (
-    "gapFilter", "wickRatio", "wickAtrK",
+    "gapFilter", "wickMarkOn", "wickRatio", "wickMinLen", "wickMinRange", "fractalSideRealWick",
+    "wideBarOn",
     "wideBarPointsD", "wideBarPoints240", "wideBarPoints60", "wideBarPoints15", "wideBarPoints3",
-    "nearDoubleAtrK", "nearDoublePct", "nearDoubleFixed",
-    "nearDoubleLowerRelax", "nearDoubleLowerRatio",
+    "nearDoubleFixed",
     "nearDouble3", "nearDouble15", "nearDouble60", "nearDouble240", "nearDoubleD",
+    "nearDoubleShiftLocked",
     "synthIntrabarBars", "pointEnoughForming",
-    "debug",
+    "windowDays3", "windowDays15", "windowDays30S",
 )
 POINTS_CHAN_KEYS = ("divergeDurRatio", "anchorUndecidedSkip", "anchorUndecidedMinBars")
 ENTRY_CHAN_KEYS = (
@@ -88,8 +93,29 @@ PARAM_MODULES = {
         "title": "画笔",
         "params": {
             "gapFilter": ("跳空成笔阈值", "相邻K线缺口 ≥ 该值×ATR 时强制独立成笔", 0.0, 5.0),
+            "wickMarkOn": ("长影线修复",
+                           "长影线插针压平与端点候选价（_topCand/_origLow）总开关。"
+                           "关闭后完全不做长影线处理，比例阈值与长度下限不再生效", None, None),
             "wickRatio": ("长影线比例阈值", "影线占整根K线振幅 ≥ 该比例视为插针（不参与区间竞争）", 0.0, 1.0),
-            "wickAtrK": ("长影线长度下限", "影线绝对长度下限 = 该值×TR均值（窄幅小K线免疫）", 0.0, 5.0),
+            "wickMinLen": ("长影线长度下限",
+                           "影线绝对长度下限（2026-10-02 起为具体数值，品种报价单位价差，"
+                           "如黄金 0.5=0.5 美元；原 wickAtrK×TR均值系数口径废除）："
+                           "影线长度 ≥ 该值才判插针", 0.0, 500.0),
+            "wickMinRange": ("长影线最小价差",
+                             "长影线修复前提约束：整根K线价差（最高-最低）须大于该值（品种报价单位"
+                             "绝对价差）才判插针压平——窄幅K线即使影线占比/长度达标也不处理。"
+                             "0 = 不限价差", 0.0, 500.0),
+            "fractalSideRealWick": ("分型邻侧影线真实价",
+                                    "分型左右邻的比较用压平前真实影线价（高点 max(high,_wickHigh)、"
+                                    "低点 min(low,_origLow)），被压平的邻侧上/下影不再误杀中间分型"
+                                    "（如 60m 9-29 04:00 底 4111.52 被 06:00 压平上影卡掉高点侧，"
+                                    "近等双底候选直接不存在）；中心K仍用压平结构价。默认关；"
+                                    "开后历史段结构重排（五周期笔数约 +2.6%~4.4%），回测基线不可比；"
+                                    "注：区间套锁定（上级笔端点）优先于近等后移，上级已定的端点"
+                                    "不因此开关移动", None, None),
+            "wideBarOn": ("单根长K豁免开关",
+                          "「顶底分形不能包含」单根长K豁免总开关。关闭后所有周期一律不豁免"
+                          "（各周期点数不再生效）", None, None),
             "wideBarPointsD": ("日线",
                                "日线：单根K线振幅（最高-最低）≥ 该点数时，不参与分型终点侧三根的反向贯穿检查。0 表示不豁免",
                                0.0, 500.0),
@@ -105,19 +131,12 @@ PARAM_MODULES = {
             "wideBarPoints3": ("3分钟",
                                "3分钟：单根K线振幅（最高-最低）≥ 该点数时，不参与分型终点侧三根的反向贯穿检查。0 表示不豁免",
                                0.0, 500.0),
-            "nearDoubleAtrK": ("近等双顶容差ATR",
-                               "近等双顶/双底平台价差容差（×ATR）。"
-                               "容差只比实体，不比影线。", 0.0, 5.0),
-            "nearDoublePct": ("近等双顶价差比例",
-                              "近等双顶/双底价差下限（价格比例）。"
-                              "容差只比实体，不比影线。", 0.0, 0.05),
             "nearDoubleFixed": ("近等双顶固定容差",
-                                "固定价差容差（品种报价单位绝对价差，如黄金 0.1=0.1 美元）；"
-                                "总容差 = max(ATR×容差ATR, 价格×价差比例, 该值)——并集取最大、"
-                                "只增不减；0=不启用（默认，与原行为一致）。"
-                                "容差只比实体，不比影线。", 0.0, None),
-            "nearDoubleLowerRelax": ("60m双动能容差倍数", "仅60m：15m双动能确认时近等容差放宽倍数", 1.0, 10.0),
-            "nearDoubleLowerRatio": ("15m动能衰减比例", "15m柱峰值与DIF幅度须衰减至前段该比例以内", 0.0, 1.0),
+                                "固定价差容差（品种报价单位绝对价差，如黄金 2.0=2 美元）；"
+                                "总容差 = 该值（2026-10-02 起取消 ATR 项/价格比例项/15m双动能确认）。"
+                                "比较顺序：先影线（更极端直接后移），影线不满足比实体——"
+                                "后实体不低于前实体直接后移，更低则差≤该值才后移；"
+                                "中间真实回调深度闸门同用该值。默认 2.0。", 0.0, None),
             "nearDouble3": ("近等双顶·3分钟",
                             "3分钟笔是否启用「近等双顶/双底平台取后顶/后底」（默认开）。"
                             "末根不等顶分型确认即可后移；", None, None),
@@ -125,7 +144,7 @@ PARAM_MODULES = {
                              "15分钟笔是否启用（默认开）。"
                              "末根不等顶分型确认即可后移；", None, None),
             "nearDouble60": ("近等双顶·1小时",
-                             "1小时笔是否启用（默认开；价差超阈值时可由15m双动能补充确认）。"
+                             "1小时笔是否启用（默认开）。"
                              "末根不等顶分型确认即可后移；", None, None),
             "nearDouble240": ("近等双顶·4小时",
                               "4小时笔是否启用（默认开）。"
@@ -133,6 +152,15 @@ PARAM_MODULES = {
             "nearDoubleD": ("近等双顶·日线",
                             "日线笔是否启用（默认开）。"
                             "末根不等顶分型确认即可后移；", None, None),
+            "nearDoubleShiftLocked": ("近等取后让位锁定",
+                                      "锁定端点（上级笔端点，区间套强制对齐）唯一允许的移动方式"
+                                      "=近等双顶/双底平台取后（闸门照常：影线不更极端才比实体、"
+                                      "差≤容差、回调够深、无相接成笔）。全周期统一，各周期还需"
+                                      "近等双顶开关开启；1小时 9-29 04:00 型案例还需「分型邻侧影线"
+                                      "真实价」。动机：平台双底+下级二次背驰时端点取后底"
+                                      "（60m 9-28 22:00 锁定底 4110.87 让位 04:00 后底 4111.52）。"
+                                      "代价：开启后下级端点可能不再与上级端点重合，历史锁定近等"
+                                      "平台重排，回测基线不可比。默认关", None, None),
             "synthIntrabarBars": ("盘中合成K（15m/1h/4h）",
                                   "回测每拍用3分钟已收K聚合15m/1h/4h进行中K（O=bin首开、"
                                   "H/L=运行极值、C=最新收）临时注入链路——高周期结构盘中"
@@ -141,7 +169,16 @@ PARAM_MODULES = {
                                    "形成中段承载买卖点的够笔计数只数到极值块——反向确认"
                                    "（首根抬低点/抬高点K）后的K不属于本段不计入（默认开；"
                                    "关掉则数到当下）", None, None),
-            "debug": ("调试打印", "buildBi/买卖点识别过程打印", None, None),
+            "windowDays3": ("绘制窗口·3分钟",
+                            "3分钟周期只绘制（并只加载）最近 N 天的笔，窗口起点=最新K线时间"
+                            "往前推 N 天；避免全量画笔过密与 3m 深历史加载超时。"
+                            "1小时/4小时/日线不受限，从起始日期全量绘制", 1, 365),
+            "windowDays15": ("绘制窗口·15分钟",
+                             "15分钟周期只绘制最近 N 天的笔（取数仍全量供上级校准，"
+                             "仅绘制过滤受窗口控制）", 1, 365),
+            "windowDays30S": ("绘制窗口·30秒",
+                              "30秒级别（--with-30s，只计算落盘不绘制）只取最近 N 天，"
+                              "供「以下级别背驰」检测；密度是3分钟的6倍，窗口宜小", 1, 365),
         },
     },
     "zs": {
@@ -247,6 +284,8 @@ PARAM_MODULES = {
                          FXMA_RES_OPTIONS, "multi"),
             "pointClasses": ("买卖点类别", "只交易所选类别的缠论买卖点：1买/1卖→1类，2买/类2买（卖侧对称）→2类，3买/类3买→3类；4类不交易",
                              ("1", "2", "3"), "multi"),
+            "maOn": ("均线分离条件", "开启=信号须均线快线与慢线分离≥确认点数（均线对与点数见下方参数）；"
+                                  "关闭=跳过均线分离条件，买卖点+强分型齐备即可触发", None, None),
             "maType": ("均线类型", "收盘价简单/指数均线（按进出场周期K线计算）", ("SMA", "EMA"), None),
             "maFast1": ("一类点快线", "1类买卖点用的均线对（快线周期）", 1, 500),
             "maSlow1": ("一类点慢线", "1类买卖点用的均线对（慢线周期）", 2, 500),
@@ -254,13 +293,29 @@ PARAM_MODULES = {
             "maSlow2": ("二三类点慢线", "2/3类买卖点共用的均线对（慢线周期）", 2, 500),
             "crossMinPts": ("均线上下穿确认点数", "交叉成立须快线与慢线间距≥该点数（如8均线下穿20均线2个点=快线低于慢线≥2点）；0=任意落差",
                             0.0, 100.0),
+            "maStandOn": ("收盘站线条件", "开启=出信号评估拍收盘价须在站线均线的正确一侧——买点站上（严格大于）、卖点站下（严格小于），均线周期按类别取下两条；"
+                                      "关闭=跳过站线条件", None, None),
+            "maStand1": ("一类点站线均线", "1类买卖点站线判定的均线周期（SMA/EMA 同均线类型，按进出场周期收盘价）", 1, 500),
+            "maStand2": ("二三类点站线均线", "2/3类买卖点站线判定的均线周期（口径同上）", 1, 500),
+            "fibNearOn": ("黄金分割附近条件", "开启=2/3类买卖点价格须落在黄金分割回撤档位附近（仅2/3类点，1类点豁免）：摆动段=前一同侧买卖点价格→其后至本点前的本周期K线极值，本点价格距任一档位≤容差点数；"
+                                       "关闭=跳过该条件", None, None),
+            "fibLevels": ("黄金分割档位", "回撤比例多选（各档 0<r<1）：本点价格靠近任一所选档位即通过，引擎按逗号串解析", ("0.236", "0.382", "0.5", "0.618", "0.786"), "multi"),
+            "fibNearPts": ("黄金分割容差(点)", "本点价格与最近档位价位的绝对价差上限（点）", 0.0, 100.0),
+            "upperDirOn": ("上级周期同向条件", "开启=进出场周期的上级周期（30S→3→15→60→240）当前笔方向须与信号同向（买=上涨笔/卖=下跌笔，全部类别生效）；"
+                                      "关闭=跳过该条件", None, None),
+            "strongFxOn": ("强分型条件", "开启=买卖点之后须出现强分型（实体落差见下条）才可触发；"
+                                    "关闭=跳过强分型条件，买卖点+均线分离齐备即可触发；"
+                                    "与均线分离都关=买卖点属所选类别且未失效当拍收盘即触发", None, None),
             "strongFxMinPts": ("强分型实体最小落差", "0=现口径（顶分型右肩收盘<左肩开盘即可）；>0 时须至少低/高该点数才算强分型",
                                0.0, 100.0),
             "pointValidBars": ("点有效期(根)", "买卖点出现后，强分型+均线分离须在 N 根K线内齐备，超时该点作废；0=不限（直到反向点出现）",
                                0, 1000),
-            "stopPts": ("止损点数", "多：进场价−N；空：进场价+N（绝对点数，收盘确认触及后下一根开盘成交）", 0.1, 1000.0),
-            "tpPts": ("止盈点数", "多：进场价+N；空：进场价−N（绝对点数）", 0.1, 1000.0),
-            "sameBarPriority": ("同根双触优先级", "同一根K线同时触及止损与止盈时按哪个成交（stop=保守）", ("stop", "tp"), None),
+            "pointValidPts": ("点有效期(值)", "评估K线盘中价距点极值的最大距离（买：最高价−买点最低价；卖：卖点最高价−最低价），"
+                                       "超距该拍不评估、等待价格回到范围内（点不作废）；0=不限",
+                              0.0, 10000.0),
+            "stopPts": ("止损点数", "多：进场价−N；空：进场价+N（绝对点数）。最小周期K线盘中价触及即按该止损价成交（与实盘 MT5 SL 同口径，不等收盘确认）", 0.1, 1000.0),
+            "tpPts": ("止盈点数", "多：进场价+N；空：进场价−N（绝对点数）。盘中价触及即按该止盈价成交（同止损口径）", 0.1, 1000.0),
+            "sameBarPriority": ("同根双触优先级", "同一根最小周期K线盘中同时触及止损与止盈时按哪个成交（stop=保守）", ("stop", "tp"), None),
             "mutexScope": ("同向互斥范围", "global=同向全局一笔未终局持仓（同缠论V1）；perPeriod=每个进出场周期独立互斥",
                            ("global", "perPeriod"), None),
             "lots": ("默认开仓手数", "回测卡/实盘配置显式指定手数时以配置为准；盈亏 = 价差 × 方向 × 手数 × 合约乘数(1手=0.01标准手)",
@@ -764,6 +819,51 @@ def chan_cfg_effective(symbol=None):
     return cfg
 
 
+# 画笔参数中心导出目录（chan_bi.js 启动时自动读取，实现「参数中心=画笔参数唯一配置点」）
+_CHAN_CFG_EXPORT_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".cursor", "cache")
+
+
+def _export_chan_cfg_files():
+    """把各品种有效 CHAN_CFG 导出到 .cursor/cache/chan_cfg_<品种>.json。
+
+    chan/points/entry 任一模块保存后调用：有 override 桶的品种各写一份
+    chan_cfg_effective(<sid>)；桶清空的品种同步删除导出文件（防陈旧值）。
+    画笔脚本（chan_bi.js）未显式传 --chan-cfg 时按当前品种自动读取——参数
+    统一在参数中心调，无需命令行。非五品种无桶 → 无文件 → 画笔用代码默认
+    （与 chan_cfg_effective「未列品种走默认」语义一致）。导出失败不阻断保存。"""
+    if os.path.abspath(PARAMS_FILE) != _DEFAULT_PARAMS_FILE:
+        return  # 存储被测试重定向：跳过真实导出，防临时桶污染画笔配置
+    overrides = _load()
+    sids = set()
+    for mod in CHAN_CFG_MODULES:
+        by = overrides.get(mod) or {}
+        sids.update(sid for sid, ov in by.items() if isinstance(ov, dict) and ov)
+    try:
+        os.makedirs(_CHAN_CFG_EXPORT_DIR, exist_ok=True)
+        for name in os.listdir(_CHAN_CFG_EXPORT_DIR):
+            if name.startswith("chan_cfg_") and name.endswith(".json"):
+                sid = name[len("chan_cfg_"):-len(".json")]
+                if sid not in sids:
+                    try:
+                        os.unlink(os.path.join(_CHAN_CFG_EXPORT_DIR, name))
+                    except OSError:
+                        pass
+        for sid in sorted(sids):
+            payload = {
+                "symbol": sid,
+                "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "cfg": chan_cfg_effective(sid),
+            }
+            fp = os.path.join(_CHAN_CFG_EXPORT_DIR, "chan_cfg_%s.json" % sid)
+            tmp = fp + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2, allow_nan=False)
+            os.replace(tmp, fp)
+    except OSError:
+        pass
+
+
 def effective_sr(symbol=None):
     """支阻位有效 cfg：有存量返回整份；空 symbol=黄金页；未列品种 / 无存量 → SR_DEFAULTS。
 
@@ -948,6 +1048,7 @@ def update(module, cfg, symbol=None):
         _save(overrides, saved_at)
     if module in CHAN_CFG_MODULES:
         chan_core.apply_cfg(chan_cfg_effective(symbol))
+        _export_chan_cfg_files()
     return effective(module, symbol)
 
 
@@ -974,6 +1075,7 @@ def reset(module, symbol=None):
         _save(overrides, saved_at)
     if module in CHAN_CFG_MODULES:
         chan_core.apply_cfg(chan_cfg_effective(symbol))
+        _export_chan_cfg_files()
     return effective(module, symbol)
 
 

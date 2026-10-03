@@ -829,7 +829,6 @@ async function main() {
         : null;
       structuredBis[res] = core.buildStructureContext(
         bisCache.periods[res] || [], d.bars, intervalSecOf(res), nowCut, null, null,
-        res === "60" ? core.makeBiLowerContext(res, (bisCache.bars || {})["15"] || [], nowCut) : null,
         lowerStroke).bis;
     }
 

@@ -1,3 +1,6 @@
+import os as _os
+_os.environ.setdefault("PY_CHAIN_BT_JOURNAL", "0")  # 引擎测试不落交易日志
+
 # -*- coding: utf-8 -*-
 """出场规则单元测试（出场阶梯重构 2026-09-09，对应 mark-entry SPEC §2.4）
 

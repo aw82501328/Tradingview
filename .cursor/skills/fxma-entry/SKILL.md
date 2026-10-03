@@ -1,6 +1,6 @@
 ---
 name: fxma-entry
-description: Mark Strong-Fractal-Moving-Average V1 (强分型均线V1, fxma_v1) entry/exit signals on the TradingView Desktop chart via CDP. The second strategy running in parallel with 缠论V1. Signal = selected-class Chan buy/sell points (1买/1卖→class 1, 2买/类2买 & sell mirror→class 2, 3买/类3买→class 3, class 4 excluded) on each selected entry timeframe (30S/3m/15m/1h, multi-select) + strong fractal after the point (entity-only: bottom = right-shoulder close above left-shoulder open, top mirrored, gap ≥ strongFxMinPts) + MA separation at close (class 1 uses maFast1/maSlow1, classes 2/3 use maFast2/maSlow2; fast above slow ≥ crossMinPts for buys / below for sells). Fill at next bar open of the same timeframe; stop = entry ∓ stopPts / take-profit = entry ± tpPts (absolute points, close-confirm then next-open fill, same-bar double-touch per sameBarPriority). Mutual exclusion global or per-period (mutexScope). Long = red up arrow, short = green down arrow; exits = yellow arrows titled EXIT_FX_<timeframe>. Requires chan-bi stroke data (bis_<symbol>.json); 30S strokes need --with-30s on the bi stage.
+description: Mark Strong-Fractal-Moving-Average V1 (强分型均线V1, fxma_v1) entry/exit signals on the TradingView Desktop chart via CDP. The second strategy running in parallel with 缠论V1. Signal = selected-class Chan buy/sell points (1买/1卖→class 1, 2买/类2买 & sell mirror→class 2, 3买/类3买→class 3, class 4 excluded) on each selected entry timeframe (30S/3m/15m/1h, multi-select) + strong fractal after the point (entity-only: bottom = right-shoulder close above left-shoulder open, top mirrored, gap ≥ strongFxMinPts) + MA separation at close (class 1 uses maFast1/maSlow1, classes 2/3 use maFast2/maSlow2; fast above slow ≥ crossMinPts for buys / below for sells) + close standing on the stand MA (class 1 uses maStand1, classes 2/3 use maStand2; buy close strictly above / sell strictly below, maStandOn toggles) + optional fib-near gate (fibNearOn, default off; classes 2/3 only: point price within fibNearPts absolute points of any fibLevels retracement of the swing from the previous same-side point price to the real-bar extreme before this point) + optional upper-timeframe alignment (upperDirOn, default off; the current upper bi of 30S→3→15→60→240 must point the same way as the signal). Fill at next bar open of the same timeframe; stop = entry ∓ stopPts / take-profit = entry ± tpPts (absolute points, intrabar touch fills at the trigger price, same-bar double-touch per sameBarPriority). Mutual exclusion global or per-period (mutexScope). Long = red up arrow, short = green down arrow; exits = yellow arrows titled EXIT_FX_<timeframe>. Requires chan-bi stroke data (bis_<symbol>.json); 30S strokes need --with-30s on the bi stage.
 disable-model-invocation: true
 ---
 
@@ -35,14 +35,29 @@ disable-model-invocation: true
 3. **均线分离**：按类别选均线对——1类 `maFast1/maSlow1`（默认 8/20）、2/3类
    `maFast2/maSlow2`（默认 5/8）；当拍收盘 快线高于慢线≥`crossMinPts`（买）/
    低于慢线≥`crossMinPts`（卖）；
-4. **时窗**：`pointValidBars` 根内齐备（0=不限）；每个买卖点只触发一次。
+4. **收盘站线**：按类别选站线均线周期——1类 `maStand1`、2/3类 `maStand2`
+   （默认均 5，SMA/EMA 同 `maType`）；当拍收盘价 买点须严格站上该均线、
+   卖点须严格站下（对称）；`maStandOn`=关 跳过本条件；
+5. **黄金分割附近**（`fibNearOn`，**默认关**；仅 2/3 类点，1 类点豁免）：摆动段 =
+   前一同侧买卖点价格 → 其后至本点前（时间窗 (前点, 本点]）的 P 周期真实K线极值
+   （买取最高价/卖取最低价），按 `fibLevels`（默认 0.382,0.5,0.618）算回撤位
+   （买 H−r×(H−L) / 卖 L+r×(H−L)），本点价格须落在任一档位 ±`fibNearPts`
+   （绝对点数，默认 5）内；无前一同侧点或摆动段退化（≤0）不触发；
+6. **上级周期同向**（`upperDirOn`，**默认关**；全部类别）：上级周期
+   （30S→3→15→60→240）当前笔方向须与信号同向（买=上涨笔/卖=下跌笔）；
+   上级无笔不触发；
+7. **有效期**：`pointValidBars` 根内齐备（0=不限，超时作废）；`pointValidPts`
+   盘中价距点极值上限（买=评估根最高价−买点最低价、卖=卖点最高价−评估根最低价；
+   0=不限）——超距只跳过该拍、点保持存活（等待语义），价格回到范围内仍可触发；
+   每个买卖点只触发一次。
 
 ## 成交与出场
 
 - 成交 = 触发拍下一根 P 周期K线开盘价；
 - 止损 = 进场价 ∓ `stopPts`（默认10点）、止盈 = 进场价 ± `tpPts`（默认30点，绝对价差）；
-- 出场 = 已收K线触及价位 → 收盘确认后下一根 P 开盘成交；同根双触按 `sameBarPriority`
-  （默认止损优先）；期末未触发按最新收盘 mark-to-market；
+- 出场 = 盘中触价即按触发价成交（与实盘 MT5 SL/TP 同口径：不等收盘确认、不等下一开盘，
+  进场那根收盘后即判）；同根双触按 `sameBarPriority`（默认止损优先）；
+  期末未触发按最新收盘 mark-to-market；
 - 互斥：`mutexScope` = global（同向全局一笔，同缠论V1）/ perPeriod（每周期独立）；
   同拍多周期同向共振取最大周期一条。
 
@@ -52,7 +67,9 @@ disable-model-invocation: true
 node .cursor/skills/fxma-entry/scripts/fxma_entry.js --from=2026-08-01 \
   --entry-res=3,15,60 --point-classes=1,2,3 --ma-type=SMA \
   --ma-fast-1=8 --ma-slow-1=20 --ma-fast-2=5 --ma-slow-2=8 \
-  --cross-min-pts=2 --strong-fx-min-pts=0 --point-valid-bars=0 \
+  --cross-min-pts=2 --ma-stand-on=1 --ma-stand-1=5 --ma-stand-2=5 \
+  --fib-near-on=0 --fib-levels=0.382,0.5,0.618 --fib-near-pts=5 \
+  --upper-dir-on=0 --strong-fx-min-pts=0 --point-valid-bars=0 --point-valid-pts=0 \
   --stop-pts=10 --tp-pts=30 --same-bar-priority=stop --mutex-scope=global --lots=4
 ```
 

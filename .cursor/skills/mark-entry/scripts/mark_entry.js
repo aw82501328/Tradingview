@@ -1188,11 +1188,15 @@ async function main() {
     // 使 3 分钟状态的「以下级别背驰」可以落到 30S 上。
     const ALL_RES = ["D", "240", "60", "15", "3", ...(WITH_30S ? ["30S"] : [])]
       .filter(r => periodBis[r] && periodBis[r].length > 0);
-    // 小周期数据窗口（与 chan-bi/mark-buy-sell 的 DRAW_WINDOW_DAYS 一致）：
-    // 3分钟只取最近 15 天、15分钟最近 30 天、30秒（--with-30s）最近 3 天。
+    // 小周期数据窗口：默认 3分钟15天、15分钟30天、30秒3天，天数来自参数中心
+    // CHAN_CFG.windowDays*（--chan-cfg 已在脚本头部合并进 core.CHAN_CFG），
+    // 与 chan-bi/mark-buy-sell 同源同值；值 0 = 不限窗口。
     // 笔数据（bis）本身就只含这些窗口（chan-bi 窗口过滤后落盘），K线/MACD 取同窗口即对齐；
     // 不加窗口会把 3m 历史往回加载到 --from（数月、数万根），TV 加载不到该深度导致周期被跳过。
-    const DRAW_WINDOW_DAYS = { "3": 15, "15": 30, "30S": 3 };
+    const DRAW_WINDOW_DAYS = {};
+    if (core.CHAN_CFG.windowDays3 > 0) DRAW_WINDOW_DAYS["3"] = core.CHAN_CFG.windowDays3;
+    if (core.CHAN_CFG.windowDays15 > 0) DRAW_WINDOW_DAYS["15"] = core.CHAN_CFG.windowDays15;
+    if (core.CHAN_CFG.windowDays30S > 0) DRAW_WINDOW_DAYS["30S"] = core.CHAN_CFG.windowDays30S;
     const periodData = {};
     const fetched = {};
     let loadRes = originalRes;
@@ -1220,7 +1224,7 @@ async function main() {
       const lowerStroke = (lower && structuredBis[lower] && (barsByPeriod[lower] || []).length)
         ? { bis: structuredBis[lower], bars: barsByPeriod[lower], barSec: intervalSecOf(lower) }
         : null;
-      const structure = core.buildStructureContext(periodBis[res], d.bars, intervalSecOf(res), cutoff, null, null, res === "60" ? core.makeBiLowerContext(res, (bisData.bars || {})["15"] || [], cutoff) : null, lowerStroke);
+      const structure = core.buildStructureContext(periodBis[res], d.bars, intervalSecOf(res), cutoff, null, null, lowerStroke);
       structuredBis[res] = structure.bis;
       const closedBars = d.bars.filter(b => b.time + intervalSecOf(res) <= cutoff);
       periodData[res] = {

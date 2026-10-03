@@ -77,13 +77,36 @@ class TestMarkWickBars(unittest.TestCase):
         self.assertEqual(out[1]["_origLow"], 70)
         self.assertEqual(out[1]["_origLowTime"], 2)
 
-    def test_small_bar_immune_by_min_wick(self):
-        # 影线占比达标但绝对长度极小（avgAtr 大）→ 不压平（窄幅小K线免疫）
-        big = [bar(1, 200, 80, 140), bar(2, 190, 90, 150)]
-        tiny = bar(3, 100.6, 100.0, 100.5)  # 上影 0.1，amp 0.6，占比 0.17... 构造占比达标的窄幅：
-        tiny = bar(3, 100.6, 100.0, 100.1)  # 上影 0.5 / amp 0.6 = 0.83
-        out = cc.markWickBars(big + [tiny])
-        self.assertEqual(out[2]["high"], 100.6)  # 未压平
+    def test_wick_min_len_absolute(self):
+        # wickMinLen 绝对长度下限（2026-10-02 起为具体数值，默认 0.5；原 wickAtrK×ATR 口径废除）：
+        # 影线长度 < 该值时不压平（即使占比达标、振幅过 wickMinRange 前提）
+        bars = [bar(1, 110, 100, 105), bar(2, 125, 100, 101), bar(3, 115, 101, 112)]
+        # bar2：amp=25 > 15，上影 24/25=0.96 ≥ 0.70 → 默认 wickMinLen=0.5 时压平
+        self.assertEqual(cc.CHAN_CFG_DEFAULTS["wickMinLen"], 0.5)
+        self.assertEqual(cc.markWickBars(bars)[1]["high"], 101)
+        try:
+            cc.apply_cfg({"wickMinLen": 30})
+            self.assertEqual(cc.markWickBars(bars)[1]["high"], 125)  # 24 < 30 → 不压平
+            self.assertNotIn("_preHigh", cc.markWickBars(bars)[1])
+        finally:
+            cc.reset_cfg()
+
+    def test_min_range_gate(self):
+        # wickMinRange 前提（2026-10-02，默认 15）：整根价差（高-低）须 > 该值才判插针压平
+        self.assertEqual(cc.CHAN_CFG_DEFAULTS["wickMinRange"], 15.0)
+        big = [bar(1, 110, 100, 105), bar(2, 122, 98, 101), bar(3, 115, 99, 112)]
+        # bar2 amp=24 > 15，上影 21/24=0.875 ≥ 0.70 且 ≥ minWick → 压平
+        self.assertEqual(cc.markWickBars(big)[1]["high"], 101)
+        small = [bar(1, 55, 50, 52.5), bar(2, 61, 49, 51), bar(3, 57.5, 49.5, 56)]
+        # 同构缩半：amp=12 ≤ 15 → 不压平（占比 0.83 / minWick 均达标，仅前提不过）
+        out = cc.markWickBars(small)
+        self.assertEqual(out[1]["high"], 61)
+        self.assertNotIn("_preHigh", out[1])
+        try:
+            cc.apply_cfg({"wickMinRange": 0})
+            self.assertEqual(cc.markWickBars(small)[1]["high"], 51)  # 0=不限，回退旧口径
+        finally:
+            cc.reset_cfg()
 
 
 class TestMergePropagation(unittest.TestCase):
@@ -99,12 +122,13 @@ class TestMergePropagation(unittest.TestCase):
         cands = [m for m in merged if m.get("_topCand") is not None]
         self.assertTrue(cands, "合并后 _topCand 应传播")
         self.assertEqual(cands[0]["_topCand"], 120)
-        self.assertEqual(cands[0]["_topCandTime"], 2)
-        # _origLow 同理：bar2 长下影 _origLow=60，bar3 包含合并进同一合并bar
+        # 真实高点 120 与左右没有包含，bar2 独立成块；未再合并时端点时间用 highTime
+        self.assertEqual(cands[0].get("_topCandTime", cands[0]["highTime"]), 2)
+        # _origLow 同理：bar2 真实低点 60 包住 bar1，包含合并后原低仍在
         bars2 = [
             bar(1, 100, 90, 95),
             bar(2, 100, 60, 96),   # 长下影 _origLow=60
-            bar(3, 99, 92, 93),    # 与 bar2' 包含合并
+            bar(3, 99, 92, 93),    # 真实低点 92 低于合并后的低点，不再并入
         ]
         merged2 = cc.mergeBars(cc.markWickBars(bars2))
         lows = [m for m in merged2 if m.get("_origLow") is not None]
@@ -147,9 +171,21 @@ class TestFractalRangeClearBidirectional(unittest.TestCase):
         self.assertEqual(bis[0]["endPrice"], 80)
 
     def test_reverse_engulfing_bottom_rejected(self):
-        # 底分型右 bar 冲高破起点顶（endHigh=102 > 100）→ 顶后崩盘反向吞没，下跌笔不成立
-        bis = build(self._base_bars(end_high=102))
+        # 底分型右 bar「实体」冲高破起点顶（bodyTop=103 > 100）→ 顶后崩盘反向吞没，下跌笔不成立
+        # （2026-10-01 起反向贯穿证据为实体口径：开盘/收盘越过起点顶才算吞没）
+        pierce = dict(sbar(6, 103, 83), open=101, close=103)
+        bis = build(self._base_bars(end_high=103)[:-1] + [pierce])
         self.assertEqual(bis, [])
+
+    def test_wick_pierce_above_start_top_passes(self):
+        # 底分型右 bar 仅影线刺穿起点顶（high=102 > 100 但实体顶 92.5 < 100）
+        # → 影线插针不构成反向贯穿证据，下跌笔成立（例：15m 10-1 09:00 长阳
+        # 高 4161.385 刺穿 04:30 顶 4160.41 但实体顶 4159.67 未越过）
+        bis = build(self._base_bars(end_high=102))
+        self.assertEqual(len(bis), 1)
+        self.assertEqual(bis[0]["type"], "down")
+        self.assertEqual(bis[0]["startPrice"], 100)
+        self.assertEqual(bis[0]["endPrice"], 80)
 
 
 def _fragile_bars(fall_lows):
@@ -274,10 +310,59 @@ class TestMacdReplacementExtremes(unittest.TestCase):
         cc.fixBiExtremes(bis, merged)
         self.assert_structure(bis, merged)
         recent = [b for b in bis if 1788954300 <= b["startTime"] < 1788966900]
+        # 22:15、23:15 的真实低点低于前一根，不再因长下影压平被包含。
+        # 下跌笔从 19:45 延伸到 23:15 的真实低点 4375.155。
         self.assertEqual([(b["startTime"], b["endTime"]) for b in recent],
-                         [(1788954300,1788957000),(1788957000,1788960600),(1788960600,1788966900)])
+                         [(1788954300, 1788966900)])
         self.assertTrue(recent[0]["macdCross"])
-        self.assertEqual(recent[1]["endPrice"], 4434.175)
+        self.assertEqual(recent[0]["endPrice"], 4375.155)
+
+
+class TestMasterSwitches(unittest.TestCase):
+    """参数页总开关（2026-10-02）：wickMarkOn / wideBarOn 关闭时功能整体停用。"""
+
+    def _spiky(self):
+        # 长上影 + 长下影各一根（默认参数下都会被压平）
+        return [bar(1, 100, 90, 95), bar(2, 120, 90.5, 96), bar(3, 110, 90, 100),
+                bar(4, 100, 70, 96), bar(5, 99, 92, 93)]
+
+    def test_wick_mark_on_off_disables_processing(self):
+        bars = self._spiky()
+        on = cc.markWickBars(bars)
+        self.assertEqual(on[1]["high"], 96)      # 默认开：长上影压平
+        self.assertEqual(on[3]["low"], 96)       # 默认开：长下影压平
+        try:
+            cc.apply_cfg({"wickMarkOn": False})
+            off = cc.markWickBars(bars)
+            for i, src in enumerate(bars):
+                self.assertEqual(off[i]["high"], src["high"])
+                self.assertEqual(off[i]["low"], src["low"])
+                for k in ("_topCand", "_preHigh", "_origLow", "_origLowTime", "_preLow"):
+                    self.assertNotIn(k, off[i])
+            # 输出仍是浅拷贝新数组，不污染原始K线
+            self.assertIsNot(off[0], bars[0])
+        finally:
+            cc.reset_cfg()
+        self.assertEqual(cc.markWickBars(bars)[1]["high"], 96)
+
+    def test_wide_bar_on_off_gates_points(self):
+        # 默认开：五周期 30 点
+        for res in ("3", "15", "60", "240", "D"):
+            self.assertEqual(cc.wideBarPointsOf(res), 30.0)
+        try:
+            cc.apply_cfg({"wideBarOn": False})
+            for res in ("3", "15", "60", "240", "D", 180, 86400):
+                self.assertEqual(cc.wideBarPointsOf(res), 0.0)
+        finally:
+            cc.reset_cfg()
+        self.assertEqual(cc.wideBarPointsOf("3"), 30.0)
+        # 总开关与各周期点数独立：单周期 0 仍是不豁免
+        try:
+            cc.apply_cfg({"wideBarPoints15": 0.0})
+            self.assertEqual(cc.wideBarPointsOf("15"), 0.0)
+            self.assertEqual(cc.wideBarPointsOf("60"), 30.0)
+        finally:
+            cc.reset_cfg()
 
 
 if __name__ == "__main__":

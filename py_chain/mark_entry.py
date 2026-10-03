@@ -22,7 +22,7 @@ import bisect
 
 from .chan_core import (
     calcATR, calcMACD, isBiDiverge, lowerResOf, buildZSByUpper, buildZS, intervalSecOf,
-    CHAN_CFG, biMacdMetrics, _areaDurComparable,
+    fmtT, CHAN_CFG, biMacdMetrics, _areaDurComparable,
     mergeBars, markWickBars, mergedSegmentCount, structurePeriods, pointEligibleBis,
 )
 from .trading_plan import TREND_RES, trend_state_of
@@ -707,6 +707,17 @@ def nearSr(price, srLevels, nearTol):
     return best
 
 
+def nearest_sr(price, srLevels):
+    """最近的支阻位（不限方向/阈值——拒绝日志「距支阻位 X 超过 near Y」叙事用）。
+    @returns (price, dist) 或 None（无支阻位）"""
+    best = None
+    for sr in (srLevels or []):
+        d = abs(sr["price"] - price)
+        if best is None or d < best[1]:
+            best = (sr["price"], d)
+    return best
+
+
 def strategyExtraOk(key, bis, upperBis, macdArr, barSec, zs_exit_weak_ratio=ZS_EXIT_WEAK_RATIO):
     """各策略专属条件（原 evaluateEntry 第 2 步抽取为独立函数，确认制/当下制共用）。
     zs_exit_weak_ratio：出中枢力度衰减比例（参数中心可调，默认 ZS_EXIT_WEAK_RATIO）。
@@ -812,8 +823,9 @@ def _nearEqualTol(periodData, res, referPrice):
 
 
 def _biDivergeStrictAll(bi, refer, macdArr):
-    """M2 近等带内护栏：背驰三判据 AND（isBiDiverge 为 OR）——近等（未严格创新极值）
-    的候选要求动能全面衰竭，防普通双底误判为背驰。"""
+    """M2 近等带内护栏：背驰判据 AND（isBiDiverge 2026-10-01 起为 DIF+面积 AND，
+    此护栏在其之上再加柱高项）——近等（未严格创新极值）的候选要求动能全面衰竭，
+    防普通双底误判为背驰。"""
     cur = biMacdMetrics(bi, macdArr)
     ref = biMacdMetrics(refer, macdArr)
     if cur is None or ref is None:
@@ -829,29 +841,34 @@ def _biDivergeStrictAll(bi, refer, macdArr):
 
 def _evalRealtimeNode(periodData, node, wantDir, tCut, periodTimes, minBars):
     """对下沉链单个节点（某级形成中段）评当下背驰候选（原停止级逻辑的逐级抽出版）。
-    @returns None 或 { res, point:{time,price,direction}, segStart, nearEqual? }"""
+    @returns (候选或None, 拒绝代码或None, 拒绝ctx)——候选命中时 (cand, None, None)；
+    拒绝代码见 bt_journal.GATE_LABELS（交易日志「为什么没开单」叙事源）。"""
     res, F, parentBi = node["res"], node["F"], node["parentBi"]
     pd = periodData.get(res) or {}
     bis = pd.get("bis") or []
     if len(bis) < 2:
-        return None  # 需有参照笔
+        return None, "few_bis", {"res": res, "n": len(bis), "segStart": F.get("startTime")}
     wantType = "down" if wantDir == "long" else "up"
     if F["type"] != wantType:
-        return None
+        return None, "wrong_type", {"res": res, "type": F["type"], "want": wantType,
+                                    "segStart": F.get("startTime")}
     times = (periodTimes or {}).get(res)
     if not times:
         times = [b["time"] for b in (pd.get("bars") or [])]
-    if mergedSegmentCount(_mergedFor(pd, res, tCut), F["startTime"], intervalSecOf(res)) < minBars:
-        return None  # 段太短（微回调/微反弹），不算够笔
+    cnt = mergedSegmentCount(_mergedFor(pd, res, tCut), F["startTime"], intervalSecOf(res))
+    if cnt < minBars:
+        return None, "seg_short", {"res": res, "count": cnt, "need": minBars,
+                                   "segStart": F.get("startTime")}
     # 参照笔：向前最近同向已完成笔（不含形成中段），跳过幅度不足的次级别回调；
     # 规则 2：参照须与 F 同处上级笔内部（更早的参照只会更靠外，直接无效）；
     # B 开关（divergeReferByZs）：中枢内部段不参与比较，参照回退到入中枢段
     refer = pickDivergeRefer(bis, F, intervalSecOf(res), parentBi=parentBi)
     if refer is None:
-        return None
+        return None, "no_refer", {"res": res, "segStart": F.get("startTime")}
     strictNew = F["endPrice"] < refer["endPrice"] if wantDir == "long" \
         else F["endPrice"] > refer["endPrice"]
     madeNew = strictNew
+    tol = 0.0
     if not madeNew:
         # M2 近等容差（默认关）：做多 F 略高于参照低点（F ≥ 参照，gap = F − 参照 ∈ [0, tol]）；
         # 做空对称（F 略低于参照高点）。近等二底/二顶不创新极值但动能衰竭的形态。
@@ -861,31 +878,33 @@ def _evalRealtimeNode(periodData, node, wantDir, tCut, periodTimes, minBars):
                 else (refer["endPrice"] - F["endPrice"])
             madeNew = 0 <= gap <= tol
     if not madeNew:
-        return None
+        return None, "no_new_extreme", {
+            "res": res, "extreme": F["endPrice"], "refExtreme": refer["endPrice"],
+            "tol": tol, "refTime": refer.get("endTime"), "segStart": F.get("startTime")}
     # 当下对比 MACD：窗口取 [refer.startTime, F.endTime] 的切片（避免全量数组线性扫）
     macdArr = pd.get("macdArr") or []
     macdT = pd.get("macdTimes") or [m["time"] for m in macdArr]
     if not macdT:
-        return None
+        return None, "macd_no_diverge", {"res": res, "segStart": F.get("startTime")}
     lo = bisect.bisect_left(macdT, refer["startTime"])
     hi = bisect.bisect_right(macdT, F["endTime"])
     if not isBiDiverge(F, refer, macdArr[lo:hi]):
-        return None
+        return None, "macd_no_diverge", {"res": res, "segStart": F.get("startTime")}
     if not strictNew and not _biDivergeStrictAll(F, refer, macdArr[lo:hi]):
-        return None  # 近等带内护栏：三判据 AND
+        return None, "near_equal_strict_fail", {"res": res, "segStart": F.get("startTime")}
     out = {"res": res,
            "point": {"time": F["endTime"], "price": F["endPrice"],
                      "direction": wantDir},
            "segStart": F["startTime"]}
     if not strictNew:
         out["nearEqual"] = True
-    return out
+    return out, None, None
 
 
 def realtimeLowerDiverge(periodData, X, wantDir, tCut,
                           periodTimes=None, minBars=REALTIME_MIN_BARS,
                           divergeConfirm=None, expectBiEnabled=None,
-                          entryMacdShrink=None):
+                          entryMacdShrink=None, reasons_out=None):
     """当下背驰（区间套下沉版，每根 fine 收盘调用）。
 
     形成中段 = 笔列表最后一笔——回测引擎的增量状态已用 extendLastBiFrom
@@ -909,17 +928,22 @@ def realtimeLowerDiverge(periodData, X, wantDir, tCut,
       - 创新低/新高：段当前极值 < refer.endPrice（多）/ > refer.endPrice（空）；
         M2 近等容差（nearEqualAtrK/nearEqualPct，默认关）放宽为 nearTol 带内，
         且近等带内要求三判据 AND（_biDivergeStrictAll），候选带 nearEqual=True；
-      - isBiDiverge（当下对比）：绿柱面积变小 或 DIF低点抬高 或 绿柱最大高度变小（OR）。
+      - isBiDiverge（当下对比，2026-10-01 起双判据 AND）：DIF低点抬高（多）/DIF高点变低（空）
+        且（时长可比时）绿柱/红柱面积变小；时长比>3 时面积不计入，DIF 单判据兜底。
     参照笔 = 向前最近同向**已完成**笔（跳过幅度 < 当前段 50% 的次级别回调），
     且必须与候选段同处其所属上级笔内部（规则 2）——参照跨上级笔边界则候选无效。
 
     @param periodTimes   各周期K线时间数组（升序，二分用）；缺省时从 periodData[res].bars 现建
+    @param reasons_out   可选 list：无候选时逐因append {"gate", "segStart", **ctx}
+                         （交易日志拒绝叙事；None=不收集，热路径零开销）
     @returns 候选列表（≤1 条）[ { res, point:{time,price,direction}, segStart, fallback?, nearEqual? } ]
     """
     nodes = _sinkChainRealtimeNodes(periodData, X, wantDir, tCut=tCut,
                                     periodTimes=periodTimes,
                                     expectBiEnabled=expectBiEnabled)
     if not nodes or len(nodes) < 2:
+        if reasons_out is not None:
+            reasons_out.append({"gate": "sink_chain_short"})
         return []  # 链不通 / 停止级=检测周期自身 → 无严格更低级别背驰，不产信号
     if divergeConfirm is None:
         divergeConfirm = bool(CHAN_CFG.get("divergeConfirm"))
@@ -928,29 +952,42 @@ def realtimeLowerDiverge(periodData, X, wantDir, tCut,
     last = len(nodes) - 1
     order = range(last, 0, -1) if CHAN_CFG.get("sinkFallback") else [last]
     for depth in order:  # 停止级优先；M1 开启时逐级向粗回退（不含 X 自身）
-        cand = _evalRealtimeNode(periodData, nodes[depth], wantDir, tCut,
-                                 periodTimes, minBars)
-        if cand is not None:
-            # M4 分型确认进场（页面可选，默认当下）：极值K线的右邻K收盘（分型可见最早
-            # 时刻的代理，未做合并包含严格校验）后本拍才出信号 → 下一根 fine 开盘成交。
-            # 段延伸（极值后移）时确认时钟自动重置。
-            if divergeConfirm:
-                confirmAt = cand["point"]["time"] + 2 * (intervalSecOf(cand["res"]) or 0)
-                if tCut < confirmAt:
-                    return []
-            # 进场MACD柱缩闸（CHAN_CFG.entryMacdShrink，2026-09-23）：背驰级别最近两根
-            # 已收K线的柱状体（|macd|）变小才出信号——动能仍在放大时不进场，等收缩确认。
-            # 上一根=决策拍最近已收的背驰级别K线（macdArr 仅含已收K线，无前视）；
-            # 闸未过不消耗段去重键（fired.add 只在真正发出处），下一拍自动重评；
-            # 不足两根无从判定 → 拦截（保守）。
-            if entryMacdShrink:
-                arr = (periodData.get(cand["res"]) or {}).get("macdArr") or []
-                if (len(arr) < 2
-                        or not abs(arr[-1]["macd"]) < abs(arr[-2]["macd"])):
-                    return []
-            if depth < last:
-                cand["fallback"] = True  # 非停止级命中 = 回退候选
-            return [cand]
+        cand, code, rctx = _evalRealtimeNode(periodData, nodes[depth], wantDir, tCut,
+                                             periodTimes, minBars)
+        if cand is None:
+            if reasons_out is not None:
+                reasons_out.append({"gate": code, **(rctx or {})})
+            continue
+        # M4 分型确认进场（页面可选，默认当下）：极值K线的右邻K收盘（分型可见最早
+        # 时刻的代理，未做合并包含严格校验）后本拍才出信号 → 下一根 fine 开盘成交。
+        # 段延伸（极值后移）时确认时钟自动重置。
+        if divergeConfirm:
+            confirmAt = cand["point"]["time"] + 2 * (intervalSecOf(cand["res"]) or 0)
+            if tCut < confirmAt:
+                if reasons_out is not None:
+                    reasons_out.append({"gate": "diverge_confirm_wait",
+                                        "confirmAt": confirmAt,
+                                        "res": cand["res"], "segStart": cand["segStart"]})
+                return []
+        # 进场MACD柱缩闸（CHAN_CFG.entryMacdShrink，2026-09-23）：背驰级别最近两根
+        # 已收K线的柱状体（|macd|）变小才出信号——动能仍在放大时不进场，等收缩确认。
+        # 上一根=决策拍最近已收的背驰级别K线（macdArr 仅含已收K线，无前视）；
+        # 闸未过不消耗段去重键（fired.add 只在真正发出处），下一拍自动重评；
+        # 不足两根无从判定 → 拦截（保守）。
+        if entryMacdShrink:
+            arr = (periodData.get(cand["res"]) or {}).get("macdArr") or []
+            if (len(arr) < 2
+                    or not abs(arr[-1]["macd"]) < abs(arr[-2]["macd"])):
+                if reasons_out is not None:
+                    reasons_out.append({
+                        "gate": "macd_shrink_gate",
+                        "last": round(abs(arr[-1]["macd"]), 4) if len(arr) >= 1 else None,
+                        "prev": round(abs(arr[-2]["macd"]), 4) if len(arr) >= 2 else None,
+                        "res": cand["res"], "segStart": cand["segStart"]})
+                return []
+        if depth < last:
+            cand["fallback"] = True  # 非停止级命中 = 回退候选
+        return [cand]
     return []
 
 
@@ -960,7 +997,7 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
                             expectBiEnabled=None, realtimeMinBars=None,
                             zsExitWeakRatio=None, trend_res=None, trend_state=None,
                             periodMerged=None, periodBars=None, firedIndex=None,
-                            entryMacdShrink=None):
+                            entryMacdShrink=None, on_reject=None):
     """当下模式进场评估（每根 fine 收盘调用，信号无需等反向笔确认）。
 
     三条件与确认制同构，差异只在"何时评"与"②用什么评"：
@@ -994,9 +1031,13 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
     @param trend_state       参考周期方向状态（trend_state_of 结果）。本函数无 bars
                              入参、无法自行计算，须由调用方传入（回测引擎在链路重算拍
                              算好复用；None = 不过滤，仅保留检测周期剔除）。
+    @param on_reject         可选 on_reject(gate, period, seg_start, strategy_key, ctx, t)：
+                             每个静默 continue 闸门处上报（交易日志「为什么没开单」；
+                             ctx 为结构化数字，bt_journal 按 (周期,策略,段,闸门) 去重落盘，
+                             热路径只多一次调用+小 dict 构造）。
     @returns 新信号列表（flat），每项含 { periodX, markRes, time, price, direction,
-             strategyKey, nearSr, planDirection, realtime:True, segStart,
-             fallback?, nearEqual?, expectBi, trendDirection?, trendReason? }
+             strategyKey, strategyLabel, signalNote, nearSr, planDirection, realtime:True,
+             segStart, fallback?, nearEqual?, expectBi, trendDirection?, trendReason? }
     """
     fired = fired if fired is not None else set()
     # 出场参数（参数中心可调；None → 模块常量默认）
@@ -1034,25 +1075,40 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
     trend_dir = (trend_state or {}).get("dir") if trend_res else None
     trend_reason = (trend_state or {}).get("reason", "") if trend_res else ""
     for X in (detectPeriods or []):
+        def _rej(gate, seg_start=None, skey=None, ctx=None):
+            if on_reject is not None:
+                try:
+                    on_reject(gate, X, seg_start, skey, ctx or {}, tCut)
+                except Exception:
+                    pass
         pd = periodData.get(X)
         if pd is None:
             continue
         if trend_sec and (intervalSecOf(X) or 0) >= trend_sec:
+            _rej("res_ge_trend", ctx={"res": X, "trendRes": trend_res})
             continue  # 顺势参考周期及以上不作检测周期（只作方向锚，结构性剔除）
         plan = (planPeriods or {}).get(X)
         planStrategy = plan.get("strategy") if plan else None
         if not planStrategy or plan.get("direction") == "观望":
+            _rej("plan_watch", ctx={"planDir": (plan or {}).get("direction"),
+                                    "planStrategy": planStrategy,
+                                    "reason": (plan or {}).get("reason")})
             continue
         strategy = entryStrategyOf(planStrategy)
         if strategy is None:
+            _rej("no_strategy_map", ctx={"planStrategy": planStrategy})
             continue
         if trend_dir and trend_dir != strategy["direction"]:
+            _rej("trend_filter", ctx={"trendDir": trend_dir,
+                                      "need": strategy["direction"],
+                                      "trendReason": trend_reason})
             continue  # 逆参考周期方向的信号跳过（顺势过滤）
         key = strategy["key"]
         direction = strategy["direction"]
         wantType = "up" if direction == "short" else "down"  # 空头等反弹(up)，多头等回调(down)
         bis = pd["bis"]
         if not bis:
+            _rej("no_bis", skey=key)
             continue
         times = (periodTimes or {}).get(X) or [b["time"] for b in (pd.get("bars") or [])]
         # ① 够笔（当下制）：最后一笔=形成中段，方向匹配 + 段长门槛；
@@ -1066,25 +1122,36 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
         if forming:
             enabled = CHAN_CFG.get("expectBiEnough") if expectBiEnabled is None else expectBiEnabled
             if not enabled or bis[-1]["type"] != wantType:
+                _rej("forming_wrong_type", skey=key,
+                     ctx={"lastType": bis[-1]["type"], "want": wantType})
                 continue
             segStart = bis[-1]["startTime"]
-            if mergedSegmentCount(merged, segStart, intervalSecOf(X)) < int(CHAN_CFG.get("expectBiMinBars", 5) or 5):
+            eCnt = mergedSegmentCount(merged, segStart, intervalSecOf(X))
+            eNeed = int(CHAN_CFG.get("expectBiMinBars", 5) or 5)
+            if eCnt < eNeed:
+                _rej("expect_min_bars", seg_start=segStart, skey=key,
+                     ctx={"count": eCnt, "need": eNeed})
                 continue
         elif expectBi:
             if not counterMoveQualifies(times, bis[-1], tCut, enabled=expectBiEnabled,
                                         merged=merged, barSec=intervalSecOf(X)):
+                _rej("counter_move_fail", seg_start=bis[-1]["endTime"], skey=key)
                 continue
             segStart = bis[-1]["endTime"]
         else:
             segStart = bis[-1]["startTime"]
-        if mergedSegmentCount(merged, segStart, intervalSecOf(X)) < min_bars:
+        mCnt = mergedSegmentCount(merged, segStart, intervalSecOf(X))
+        if mCnt < min_bars:
+            _rej("min_bars", seg_start=segStart, skey=key, ctx={"count": mCnt, "need": min_bars})
             continue
         # 该 (periodX, strategyKey, segStart) 已在任一 markRes 发过 → 跳过重算背驰链
         # （形成段延伸不重发；多 markRes 同段在既有口径下也只会命中一次有效进场路径）
         if firedIndex is not None:
             if (X, key, segStart) in firedIndex:
+                _rej("fired_dedup", seg_start=segStart, skey=key)
                 continue
         elif any(f[0] == X and f[1] == key and f[3] == segStart for f in fired):
+            _rej("fired_dedup", seg_start=segStart, skey=key)
             continue
         # 策略专属条件（与确认制共用）
         upRes = upperResOf(X)
@@ -1092,6 +1159,7 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
         extraReason = strategyExtraOk(key, bis, upperBis, pd["macdArr"], intervalSecOf(X),
                                       zs_ratio)
         if extraReason is not None:
+            _rej("strategy_extra", seg_start=segStart, skey=key, ctx={"reason": extraReason})
             continue
         # ② 当下背驰 + ③ 支阻位附近（候选级别从大到小，命中即出）
         # 注意循环变量用 hit：near 是本函数参数（绝对价差），曾用 near 接收返回 dict
@@ -1099,16 +1167,30 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
         # 支阻只取检测周期 X，背驰级别的价位不参与靠近判定
         nearTol = near  # 绝对价差（不乘 ATR，恒 > 0）
         srX = sr_of_detect(srLevels, X)
-        for c in realtimeLowerDiverge(periodData, X, direction, tCut,
-                                      periodTimes=periodTimes or {},
-                                      divergeConfirm=divergeConfirm,
-                                      expectBiEnabled=expectBiEnabled,
-                                      entryMacdShrink=entryMacdShrink):
+        rsn = [] if on_reject is not None else None
+        cands = realtimeLowerDiverge(periodData, X, direction, tCut,
+                                     periodTimes=periodTimes or {},
+                                     divergeConfirm=divergeConfirm,
+                                     expectBiEnabled=expectBiEnabled,
+                                     entryMacdShrink=entryMacdShrink,
+                                     reasons_out=rsn)
+        if not cands and rsn:
+            for r in rsn:
+                _rej(r.pop("gate"), seg_start=r.pop("segStart", None), skey=key, ctx=r)
+        for c in cands:
             fkey = (X, key, c["res"], c["segStart"])
             if fkey in fired:
+                _rej("cand_fired", seg_start=c["segStart"], skey=key,
+                     ctx={"markRes": c["res"]})
                 continue  # 该形成段已发过，段延伸不重发
             hit = nearSr(c["point"]["price"], srX, nearTol)
             if hit is None:
+                near2 = nearest_sr(c["point"]["price"], srX)
+                _rej("near_sr_fail", seg_start=c["segStart"], skey=key,
+                     ctx={"markRes": c["res"], "price": c["point"]["price"],
+                          "srPrice": near2[0] if near2 else None,
+                          "dist": round(near2[1], 4) if near2 else None,
+                          "near": nearTol})
                 continue
             fired.add(fkey)
             # 索引与 fired 只在真正发出处同步维护（预检处绝不加——会把未发段误标已发）
@@ -1121,6 +1203,12 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
                 "price": c["point"]["price"],
                 "direction": direction,
                 "strategyKey": key,
+                "strategyLabel": strategy["label"],
+                "signalNote": (
+                    f"{strategy['label']}｜检测周期 {X} 计划："
+                    f"{(plan or {}).get('reason') or plan.get('direction')}"
+                    f"｜背驰 {c['res']} @ {fmtT(c['point']['time'])} {c['point']['price']:.2f}"
+                    f"｜近支阻位 {hit['sr']['price']:.2f}｜形成段自 {fmtT(c['segStart'])}"),
                 "nearSr": hit["sr"]["price"],
                 "planDirection": plan.get("direction"),
                 "realtime": True,
@@ -1150,7 +1238,7 @@ ALL_RES_WITH_30S = ["D", "240", "60", "15", "3", "30S"]
 def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriods,
                     near=NEAR, periodMacd=None, periodAtr=None, with_30s=False,
                     zs_exit_weak_ratio=ZS_EXIT_WEAK_RATIO,
-                    trend_res=None, trend_state=None, trend_cfg=None):
+                    trend_res=None, trend_state=None, trend_cfg=None, on_reject=None):
     """逐周期判定进场状态（依赖交易计划 plan 结果）→ 生成进场信号。
 
     @param periodBis     各周期笔 { 周期: [bis] }
@@ -1172,8 +1260,12 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
     @param trend_cfg     顺势相位判定参数（plan 模块 trendRebound/reboundNearPts/
                          reboundAngleRef；缺省用 trading_plan 常量默认，仅自算
                          trend_state 路径消费）。
+    @param on_reject     可选 on_reject(gate, period, seg_start, strategy_key, ctx, t)：
+                         evaluateEntry 校验未过时上报（gate=eval_reason，ctx.reason=
+                         中文失败原因；交易日志用，与当下制同签名）。
     @returns { 标记级别: [信号...] }，信号含 { periodX, time, price, direction, strategyKey,
-             nearSr, color, markRes, planDirection, trendDirection, trendReason }
+             strategyLabel, signalNote, nearSr, color, markRes, planDirection,
+             trendDirection, trendReason }
     """
     periodBis = structurePeriods(periodBis, barsByPeriod)
     periodMacd = periodMacd or {}
@@ -1251,6 +1343,13 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
         }
         evalRes = evaluateEntry(ctx, strategy)
         if not evalRes["ok"]:
+            if on_reject is not None:
+                try:
+                    t_approx = pd["bis"][-1]["endTime"] if pd.get("bis") else None
+                    on_reject("eval_reason", res, None, strategy["key"],
+                              {"reason": evalRes.get("reason")}, t_approx)
+                except Exception:
+                    pass
             continue
         # 命中：在背驰级别标记箭头
         sig = {
@@ -1259,6 +1358,12 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
             "price": evalRes["point"]["price"],
             "direction": strategy["direction"],
             "strategyKey": strategy["key"],
+            "strategyLabel": strategy["label"],
+            "signalNote": (
+                f"{strategy['label']}｜检测周期 {res} 计划："
+                f"{(plan or {}).get('reason') or plan.get('direction')}"
+                f"｜背驰 {evalRes['markRes']} @ {fmtT(evalRes['point']['time'])} "
+                f"{evalRes['point']['price']:.2f}｜近支阻位 {evalRes['nearSr']:.2f}"),
             "nearSr": evalRes["nearSr"],
             "color": BUY_COLOR if strategy["direction"] == "long" else SELL_COLOR,
             "markRes": evalRes["markRes"],
@@ -1279,7 +1384,7 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
 
 def stop_ref_of(direction, entry_price, near_sr, sr_levels,
                 slip_stop=DEFAULT_SLIP_STOP, slip_fallback=DEFAULT_SLIP_FALLBACK,
-                atr=0.0, k_stop=0.0, k_fallback=0.0):
+                atr=0.0, k_stop=0.0, k_fallback=0.0, source_out=None):
     """方向感知的止损参考位（含滑点偏移与最大止损硬上限，返回值永不为 None）：
     short 取进场价上方最近支阻位（阻力）+ slip_stop、long 取下方最近（支撑）− slip_stop。
 
@@ -1307,6 +1412,8 @@ def stop_ref_of(direction, entry_price, near_sr, sr_levels,
     max_loss = entry_price + (slip_fallback if is_short else -slip_fallback)
     if near_sr is not None and (near_sr > entry_price if is_short else near_sr < entry_price):
         ref = near_sr + slip
+        if source_out is not None:
+            source_out.update({"src": "near_sr", "srPrice": near_sr})
     else:
         best = None
         for sr in (sr_levels or []):
@@ -1318,6 +1425,10 @@ def stop_ref_of(direction, entry_price, near_sr, sr_levels,
                 if best is None or d < best[1]:
                     best = (p, d)
         ref = max_loss if best is None else best[0] + slip
+        if source_out is not None:
+            # near_sr=信号命中的近支阻位（沿用）/ sr_pick=正确侧重选位 / fallback=最大止损兜底
+            source_out.update({"src": "fallback"} if best is None
+                               else {"src": "sr_pick", "srPrice": best[0]})
     # 支阻位更远时收到最大止损价（多抬高 / 空压低）
     return min(ref, max_loss) if is_short else max(ref, max_loss)
 
@@ -1390,5 +1501,9 @@ def find_bi_event(bis, from_t, bi_type, require_post_start=False, break_prev=Fal
                 else (b["endPrice"] < bis[j]["endPrice"])
             if not broke:
                 continue
+            # 被破的前一同向笔端点（TP3a 出场叙事/日志用；增量键，既有调用者不感知）
+            return {"time": b["endTime"], "price": b["endPrice"],
+                    "startTime": b["startTime"],
+                    "refTime": bis[j]["endTime"], "refPrice": bis[j]["endPrice"]}
         return {"time": b["endTime"], "price": b["endPrice"], "startTime": b["startTime"]}
     return None

@@ -1,3 +1,6 @@
+import os as _os
+_os.environ.setdefault("PY_CHAIN_BT_JOURNAL", "0")  # 引擎测试不落交易日志
+
 # -*- coding: utf-8 -*-
 """链路缓存失效白盒测试（SPEC_backtest_perf 第四/五批收尾修复，2026-09-16）
 

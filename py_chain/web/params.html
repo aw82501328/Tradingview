@@ -60,6 +60,10 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 .prow .period-fields{display:flex;flex-wrap:wrap;gap:8px 14px}
 .prow .period-fields label{display:flex;align-items:center;gap:6px;color:var(--text);font-size:12.5px;white-space:nowrap}
 .prow .period-fields input{width:72px;text-align:right}
+/* 画笔：总开关卡（长影线修复/单根长K豁免）关闭时子参数变灰（数值仍随表单保存，只是不参与判定） */
+.prow .keep-fields{display:flex;flex-wrap:wrap;gap:8px 14px}
+.prow .keep-fields.dim{opacity:.45}
+.prow .keep-fields.dim input{pointer-events:none}
 /* 滑点行内嵌 ATR 系数小输入框（无独立参数行） */
 .prow .slip-k{display:flex;align-items:center;gap:4px;color:var(--muted);font-size:11.5px;white-space:nowrap;flex-shrink:0}
 .prow .slip-k input{width:64px;text-align:right}
@@ -138,10 +142,16 @@ const TAB_IDS = ['chan', 'zs', 'points', 'sr', 'plan', 'entry'];
 const TAB_GROUPS = [
   { id: 'base', label: '基础组件', tabs: [['chan', '画笔'], ['zs', '画中枢'], ['points', '标记买卖点']] },
   { id: 'strategy', label: '交易策略 · 缠论V1', tabs: [['sr', '支阻位'], ['plan', '交易计划'], ['entry', '标记进出场']] },
-  { id: 'fxma', label: '交易策略 · 强分型均线V1', tabs: [['fxma', '强分型均线V1']] },
+  { id: 'fxma', label: '交易策略 · 强分型均线V1', tabs: [['fxma', '强分型均线V1'], ['fxmaPos', '位置与方向']] },
 ];
 const TABS = TAB_GROUPS.flatMap(g => g.tabs);
 const GROUP_IDS = TAB_GROUPS.map(g => g.id);
+
+// fxma 双页签拆分：「位置与方向」页签只渲染这四个键（同属 fxma 模块，
+// 保存按模块合并语义只动本页键；恢复默认清整个模块桶）
+const FXMA_POS_KEYS = ['fibNearOn', 'fibLevels', 'fibNearPts', 'upperDirOn'];
+const TAB_MODULE = { fxmaPos: 'fxma' };   // 页签 id → 参数模块 id（缺省=自身）
+const tabModule = (name) => TAB_MODULE[name] || name;
 let modules = {}, active = 'chan', activeSymbol = 'XAUUSD', toastTimer;
 let activeGroup = null;   // 'base' | 'strategy' | null（全部平铺）
 const visibleTabs = () => (TAB_GROUPS.find(g => g.id === activeGroup) || { tabs: TABS }).tabs;
@@ -451,6 +461,7 @@ const CHOICE_LABELS = { trendRes: { '': '关闭', '240': '4小时', 'D': '日线
                         entryRes: { '30S': '30秒(仅回测)', '3': '3分钟', '15': '15分钟', '60': '1小时' },
                         pointClasses: { '1': '一类买卖点', '2': '二类买卖点', '3': '三类买卖点' },
                         maType: { 'SMA': '简单均线SMA', 'EMA': '指数均线EMA' },
+                        fibLevels: { '0.236': '回撤23.6%', '0.382': '回撤38.2%', '0.5': '回撤50%', '0.618': '回撤61.8%', '0.786': '回撤78.6%' },
                         sameBarPriority: { 'stop': '止损优先(保守)', 'tp': '止盈优先' },
                         mutexScope: { 'global': '全局同向一笔(同缠论V1)', 'perPeriod': '每周期独立互斥' } };
 const choiceLabel = (key, v) => (CHOICE_LABELS[key] && CHOICE_LABELS[key][v]) || v;
@@ -476,11 +487,9 @@ const ENTRY_GROUPS = [
 
 // 近等双顶规则更新句：卡片说明里用黄字标出（悬停 title 仍是纯文本）
 const PNEW_OPEN = '末根不等顶分型确认即可后移；';
-const PNEW_BODY = '容差只比实体，不比影线。';
+const PNEW_FIXED = '2026-10-02起总容差=该值（取消ATR项/价格比例项/15m双动能确认）；先影线后实体：后实体不低于前实体直接后移，更低则差≤该值才后移。';
 const PNEW_BY_KEY = {
-  nearDoubleAtrK: PNEW_BODY,
-  nearDoublePct: PNEW_BODY,
-  nearDoubleFixed: PNEW_BODY,
+  nearDoubleFixed: PNEW_FIXED,
   nearDouble3: PNEW_OPEN,
   nearDouble15: PNEW_OPEN,
   nearDouble60: PNEW_OPEN,
@@ -491,7 +500,7 @@ function descPlain(key, desc) {
   const mark = PNEW_BY_KEY[key];
   if (!mark) return desc || '';
   // 旧说明两句写在一起时，按卡片只留该留的那句
-  const text = (desc || '').replace(PNEW_OPEN + PNEW_BODY, '').replace(PNEW_OPEN, '').replace(PNEW_BODY, '');
+  const text = (desc || '').replace(PNEW_OPEN, '').replace(PNEW_FIXED, '');
   return text + mark;
 }
 function descHtml(key, desc) {
@@ -598,7 +607,35 @@ function anchorRowHtml(m) {
     </span></div>`;
 }
 
+// 画笔：「长影线修复」一张卡片：总开关 + 比例阈值/长度下限/最小价差三输入（关闭时输入变灰）
+const WICK_MASTER = 'wickMarkOn';
+const WICK_FIELDS = [
+  ['wickRatio', '比例阈值'],
+  ['wickMinLen', '长度下限'],
+  ['wickMinRange', '最小价差'],
+];
+const WICK_KEYS = new Set(WICK_FIELDS.map(([k]) => k));
+
+function wickRowHtml(m) {
+  const sw = m.schema[WICK_MASTER];
+  const isMod = [WICK_MASTER, ...WICK_KEYS].some(k => m.overrides[k] !== undefined);
+  const defText = `开关默认${sw.default ? '开' : '关'} · `
+    + WICK_FIELDS.map(([k, name]) => `${name}默认 ${m.schema[k].default}`).join(' · ');
+  const fields = WICK_FIELDS.map(([k, name]) => {
+    const spec = m.schema[k];
+    return `<label>${name}<input type="number" step="any" min="${spec.min}" max="${spec.max}" data-k="${k}" value="${m.effective[k]}" title="${spec.desc}" aria-label="${name}"></label>`;
+  }).join('');
+  return `<div class="prow span-all ${isMod ? 'mod' : ''}" title="${sw.desc}">
+    <span class="pname"><span class="plabel">${sw.label}<span class="badge">已修改</span></span>
+    <span class="pdef">${defText} · <span class="pnew">用来修复笔内的极端K线（不仅仅是高低点）</span></span></span>
+    <span class="period-fields">
+      <label><input type="checkbox" data-k="${WICK_MASTER}" ${m.effective[WICK_MASTER] ? 'checked' : ''}>开启</label>
+      <span class="keep-fields" data-keep-for="${WICK_MASTER}">${fields}</span>
+    </span></div>`;
+}
+
 // 画笔：「顶底分形不能包含（单根长K豁免）」一张卡片内放各周期点数（大→小，与画中枢周期序一致）
+const WIDE_BAR_MASTER = 'wideBarOn';
 const WIDE_BAR_PERIODS = [
   ['wideBarPointsD', '日线'],
   ['wideBarPoints240', '4小时'],
@@ -609,29 +646,70 @@ const WIDE_BAR_PERIODS = [
 const WIDE_BAR_KEYS = new Set(WIDE_BAR_PERIODS.map(([k]) => k));
 
 function wideBarRowHtml(m) {
-  const isMod = WIDE_BAR_PERIODS.some(([k]) => m.overrides[k] !== undefined);
+  const sw = m.schema[WIDE_BAR_MASTER];
+  const isMod = m.overrides[WIDE_BAR_MASTER] !== undefined
+    || WIDE_BAR_PERIODS.some(([k]) => m.overrides[k] !== undefined);
   const desc = '各周期单根K线振幅（最高-最低）≥ 该点数时，不参与分型终点侧三根的反向贯穿检查。0 表示该周期不豁免';
-  const defText = WIDE_BAR_PERIODS.map(([k, name]) => `${name} ${m.schema[k].default}`).join(' · ');
+  const defText = `开关默认${sw.default ? '开' : '关'} · `
+    + WIDE_BAR_PERIODS.map(([k, name]) => `${name} ${m.schema[k].default}`).join(' · ');
   const fields = WIDE_BAR_PERIODS.map(([k, name]) => {
     const spec = m.schema[k];
     return `<label>${name}<input type="number" step="any" min="${spec.min}" max="${spec.max}" data-k="${k}" value="${m.effective[k]}" title="${spec.desc}" aria-label="${name}单根长K豁免"></label>`;
   }).join('');
-  return `<div class="prow span-all ${isMod ? 'mod' : ''}" title="${desc}">
+  return `<div class="prow span-all ${isMod ? 'mod' : ''}" title="${sw.desc}。${desc}">
     <span class="pname"><span class="plabel">顶底分形不能包含（单根长K豁免）<span class="badge">已修改</span></span>
+    <span class="pdef">${defText} · ${desc}</span></span>
+    <span class="period-fields">
+      <label><input type="checkbox" data-k="${WIDE_BAR_MASTER}" ${m.effective[WIDE_BAR_MASTER] ? 'checked' : ''}>开启</label>
+      <span class="keep-fields" data-keep-for="${WIDE_BAR_MASTER}">${fields}</span>
+    </span></div>`;
+}
+
+// 画笔：「小周期绘制窗口」一张卡片内放各周期天数（无总开关，改值即生效）
+const WINDOW_DAYS_PERIODS = [
+  ['windowDays3', '3分钟'],
+  ['windowDays15', '15分钟'],
+  ['windowDays30S', '30秒'],
+];
+const WINDOW_DAYS_KEYS = new Set(WINDOW_DAYS_PERIODS.map(([k]) => k));
+
+function windowDaysRowHtml(m) {
+  const first = m.schema[WINDOW_DAYS_PERIODS[0][0]];
+  const isMod = WINDOW_DAYS_PERIODS.some(([k]) => m.overrides[k] !== undefined);
+  const desc = '3分钟/15分钟/30秒只绘制（并只加载）最近 N 天的笔，窗口起点=最新K线时间往前推 N 天；'
+    + '1小时/4小时/日线不受限，从起始日期全量绘制。窗口过大时 3m 深历史可能加载不到（自动跳过更早的笔）';
+  const defText = WINDOW_DAYS_PERIODS.map(([k, name]) => `${name} ${m.schema[k].default}天`).join(' · ');
+  const fields = WINDOW_DAYS_PERIODS.map(([k, name]) => {
+    const spec = m.schema[k];
+    return `<label>${name}<input type="number" step="1" min="${spec.min}" max="${spec.max}" data-k="${k}" value="${m.effective[k]}" title="${spec.desc}" aria-label="${name}绘制窗口天数"></label>`;
+  }).join('');
+  return `<div class="prow span-all ${isMod ? 'mod' : ''}" title="${first.desc}">
+    <span class="pname"><span class="plabel">小周期绘制窗口（天）<span class="badge">已修改</span></span>
     <span class="pdef">默认 ${defText} · ${desc}</span></span>
     <span class="period-fields">${fields}</span></div>`;
 }
 
+// 画笔页：小周期绘制窗口置顶；长影线/单根长K豁免各并成一张开关卡；近等双顶区上方加分组横线
+const NEAR_DOUBLE_GROUP_KEY = 'nearDoubleFixed';
+// 隐藏不展示的画笔参数（2026-10-02）：仅 UI 不出卡片，schema/保存/生效链路保留
+const CHAN_HIDDEN_KEYS = new Set(['fractalSideRealWick']);
 function chanRowsHtml(m) {
-  let html = '';
-  let placed = false;
+  let html = windowDaysRowHtml(m);  // 小周期绘制窗口置顶（2026-10-02 用户指定）
   for (const key of Object.keys(m.schema)) {
-    if (WIDE_BAR_KEYS.has(key)) {
-      if (!placed) {
-        html += wideBarRowHtml(m);
-        placed = true;
-      }
+    if (CHAN_HIDDEN_KEYS.has(key)) continue;  // 分型邻侧影线真实价：实验参数，暂不暴露
+    if (key === WICK_MASTER) {
+      html += wickRowHtml(m);
       continue;
+    }
+    if (WICK_KEYS.has(key)) continue;  // 已并入「长影线修复」卡
+    if (key === WIDE_BAR_MASTER) {
+      html += wideBarRowHtml(m);
+      continue;
+    }
+    if (WIDE_BAR_KEYS.has(key)) continue;  // 已并入「单根长K豁免」卡
+    if (WINDOW_DAYS_KEYS.has(key)) continue;  // 已置顶「小周期绘制窗口」卡
+    if (key === NEAR_DOUBLE_GROUP_KEY) {
+      html += '<div class="pgroup">近等双顶/双底（平台取后顶/后底）</div>';
     }
     html += paramRow(m, key);
   }
@@ -645,8 +723,40 @@ function pointsRowsHtml(m) {
     .join('');
 }
 
+// fxma：「点有效期」一张卡片：根数 + 价距两输入（各自独立，0=不限）
+function fxmaValidRowHtml(m) {
+  const b = m.schema.pointValidBars, p = m.schema.pointValidPts;
+  const isMod = m.overrides.pointValidBars !== undefined || m.overrides.pointValidPts !== undefined;
+  const defText = `根默认 ${b.default} · 值默认 ${p.default}`;
+  return `<div class="prow ${isMod ? 'mod' : ''}" title="${b.desc}；${p.desc}">
+    <span class="pname"><span class="plabel">点有效期<span class="badge">已修改</span></span>
+    <span class="pdef">${defText} · 根=超时作废；值=盘中价距点极值，超距等待回范围</span></span>
+    <span class="zs-side">
+      <span class="zs-keep">根
+        <input type="number" step="1" min="${b.min}" max="${b.max}" data-k="pointValidBars" value="${m.effective.pointValidBars}" aria-label="点有效期根数">
+      </span>
+      <span class="zs-keep">值
+        <input type="number" step="any" min="${p.min}" max="${p.max}" data-k="pointValidPts" value="${m.effective.pointValidPts}" aria-label="点有效期价距">
+      </span>
+    </span></div>`;
+}
+
+// fxma 主页签：点有效期双输入并一张卡，其余键按 schema 键序平铺（排除「位置与方向」页签键）
+function fxmaRowsHtml(m) {
+  let html = '';
+  for (const key of Object.keys(m.schema)) {
+    if (Object.values(SLIP_ATR_K).includes(key)) continue;
+    if (FXMA_POS_KEYS.includes(key)) continue;
+    if (key === 'pointValidBars') { html += fxmaValidRowHtml(m); continue; }
+    if (key === 'pointValidPts') continue;  // 已并入「点有效期」卡
+    html += paramRow(m, key);
+  }
+  return html;
+}
+
 function renderModule(name) {
-  const m = moduleView(name);
+  const modName = tabModule(name);
+  const m = moduleView(modName);
   if (!m || !m.schema) return;
   $('pgrid').innerHTML = name === 'zs'
     ? zsRowsHtml(m)
@@ -656,9 +766,16 @@ function renderModule(name) {
     ? entryRowsHtml(m)
     : name === 'points'
     ? pointsRowsHtml(m)
+    : name === 'fxma'
+    ? fxmaRowsHtml(m)
+    : name === 'fxmaPos'
+    // 「位置与方向」页签：只渲染拆出的四参数
+    ? FXMA_POS_KEYS.filter(k => m.schema[k]).map(k => paramRow(m, k)).join('')
     : Object.entries(m.schema)
       // 滑点 ATR 系数不独立成行：内嵌进各自滑点行（badge 在固定值或系数任一被改时亮）
-      .filter(([key]) => !Object.values(SLIP_ATR_K).includes(key))
+      // fxma 主页签：黄金分割附近/上级同向四参数已拆到「位置与方向」页签，不在此渲染
+      .filter(([key]) => !Object.values(SLIP_ATR_K).includes(key)
+                    && !(modName === 'fxma' && FXMA_POS_KEYS.includes(key)))
       .map(([key]) => paramRow(m, key))
       .join('');
   const n = Object.keys(m.overrides).length;
@@ -670,6 +787,8 @@ function renderModule(name) {
     zs: '画中枢按当前品种：各周期是否绘制、以及每周期只保留最近几个中枢。',
     entry: '标记进出场按当前品种：近支阻、手数、滑点、出场判定、进场扩展与闸门。进场扩展写入该品种 CHAN_CFG。「当下制够笔K线数」仅回测/监控引擎。有效滑点 = 固定值 + ATR系数×ATR(14)。手数口径：1手=0.01标准手。有任务运行中时会拒绝保存。',
     plan: '交易计划按当前品种：震荡阈值与顺势参考周期在工作台/回测读取；「方向相位判定」等见下方图解。',
+    fxma: '强分型均线V1按当前品种：进出场周期/买卖点类别/强分型/均线分离/收盘站线与止盈止损、互斥。点有效期=根数+价距双约束（同卡配置）。黄金分割附近与上级周期同向两条件在「位置与方向」页签。',
+    fxmaPos: '位置与方向按当前品种（属强分型均线V1）：黄金分割附近（仅2/3类点，参照前一同侧买卖点摆动段）与上级周期同向（30秒→3分钟→15分钟→1小时→4小时当前笔）两个进场条件，均默认关；开关关闭时子参数变灰（数值仍随表单保存，只是不参与信号判定）。',
   }[name] || '';
   const rules = MODULE_RULES[name];
   const rb = $('rulesBlock');
@@ -681,7 +800,9 @@ function renderModule(name) {
   }
   $('logicBlock').hidden = name !== 'plan';
   if (name === 'zs') applyZsKeepDim();
+  if (name === 'chan') applyChanMasterDim();
   if (name === 'points') applyAnchorDim();
+  if (name === 'fxma' || name === 'fxmaPos') applyFxmaDim();
   if (name === 'plan') {
     applyPlanRangeDim();
     if ($('logicDetails').open) {
@@ -693,6 +814,18 @@ function renderModule(name) {
 
 // 某周期关闭绘制时：仅「最近个数」变灰（同周期开关仍可点）
 const ZS_KEEP_PAIR = { drawD: 'keepD', draw240: 'keep240', draw60: 'keep60', draw15: 'keep15', draw3: 'keep3' };
+// 画笔：长影线修复/单根长K豁免总开关关闭时：子参数变灰（数值仍随表单保存，只是不参与判定）
+const CHAN_KEEP_MASTERS = [WICK_MASTER, WIDE_BAR_MASTER];
+function applyChanMasterDim() {
+  for (const master of CHAN_KEEP_MASTERS) {
+    const on = document.querySelector(`#pgrid [data-k="${master}"]`);
+    const wrap = document.querySelector(`#pgrid .keep-fields[data-keep-for="${master}"]`);
+    if (!on || !wrap) continue;
+    const enabled = !!on.checked;
+    wrap.classList.toggle('dim', !enabled);
+    wrap.querySelectorAll('input').forEach(inp => { inp.disabled = !enabled; });
+  }
+}
 // 未定型点不接管关闭时：定型阈值变灰（数值仍随表单保存，只是不参与判定）
 function applyAnchorDim() {
   const on = document.querySelector('#pgrid [data-k="anchorUndecidedSkip"]');
@@ -731,6 +864,29 @@ function applyPlanRangeDim() {
   }
 }
 
+// fxma 条件开关关闭时：所属参数行变灰不可改（数值仍随表单保存，只是不参与信号判定）
+const FXMA_DIM_GROUPS = [
+  ['maOn', ['maType', 'maFast1', 'maSlow1', 'maFast2', 'maSlow2', 'crossMinPts']],
+  ['maStandOn', ['maStand1', 'maStand2']],
+  ['fibNearOn', ['fibLevels', 'fibNearPts']],
+  ['upperDirOn', []],
+  ['strongFxOn', ['strongFxMinPts']],
+];
+function applyFxmaDim() {
+  for (const [swKey, keys] of FXMA_DIM_GROUPS) {
+    const on = document.querySelector(`#pgrid [data-k="${swKey}"]`);
+    if (!on) continue;
+    const enabled = !!on.checked;
+    for (const key of keys) {
+      const inp = document.querySelector(`#pgrid [data-k="${key}"]`);
+      if (!inp) continue;
+      inp.disabled = !enabled;
+      const row = inp.closest('.prow');
+      if (row) row.classList.toggle('dim', !enabled);
+    }
+  }
+}
+
 function collect(name) {
   const cfg = {};
   const multi = {};
@@ -754,7 +910,7 @@ async function refresh() {
 async function save(name) {
   if (name === 'sr') return;  // 支阻在 iframe 内保存
   const body = { cfg: collect(name), symbol: activeSymbol };
-  const r = await fetch(`/api/params/${name}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  const r = await fetch(`/api/params/${tabModule(name)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
                                                  body: JSON.stringify(body) });
   const d = await r.json();
   if (!r.ok || d.ok === false) { toast(d.error || '保存失败', true); return; }
@@ -766,11 +922,15 @@ async function save(name) {
 
 async function reset(name) {
   if (name === 'sr') return;
-  const mv = moduleView(name);
+  const modId = tabModule(name);
+  const mv = moduleView(modId);
   const modName = (TABS.find(([id]) => id === name) || [])[1] || name;
-  const hint = `恢复「${(mv && mv.label) || activeSymbol}」的「${modName}」为默认值？`;
+  // 模块被拆成多页签时，恢复默认清整个模块桶（含其他页签的修改）
+  const hint = modId !== name
+    ? `恢复「${(mv && mv.label) || activeSymbol}」整个模块（含「${modName}」在内全部页签）为默认值？`
+    : `恢复「${(mv && mv.label) || activeSymbol}」的「${modName}」为默认值？`;
   if (!window.confirm(hint)) return;
-  const r = await fetch(`/api/params/${name}/reset`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  const r = await fetch(`/api/params/${modId}/reset`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
                                                        body: JSON.stringify({ symbol: activeSymbol }) });
   const d = await r.json();
   if (!r.ok || d.ok === false) { toast(d.error || '操作失败', true); return; }
@@ -796,6 +956,11 @@ document.addEventListener('change', e => {
   if (e.target && e.target.dataset && e.target.dataset.k === 'rangeBoundOn') applyPlanRangeDim();
   if (e.target && e.target.dataset && ZS_KEEP_PAIR[e.target.dataset.k]) applyZsKeepDim();
   if (e.target && e.target.dataset && e.target.dataset.k === 'anchorUndecidedSkip') applyAnchorDim();
+  if (e.target && e.target.dataset && CHAN_KEEP_MASTERS.includes(e.target.dataset.k)) applyChanMasterDim();
+  if (e.target && e.target.dataset
+      && (e.target.dataset.k === 'maOn' || e.target.dataset.k === 'maStandOn'
+          || e.target.dataset.k === 'fibNearOn' || e.target.dataset.k === 'upperDirOn'
+          || e.target.dataset.k === 'strongFxOn')) applyFxmaDim();
 });
 $('saveBtn').onclick = () => save(active).catch(err => toast(err.message, true));
 $('resetBtn').onclick = () => reset(active).catch(err => toast(err.message, true));

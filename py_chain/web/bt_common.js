@@ -42,15 +42,20 @@ function candidateBadges(r) {
 // 出场类型：stopSr=支阻位止损（支阻位±止损滑点，再按最大止损夹紧）
 //          | stopBe=保本止损（beStop=进场K线极值±保本滑点）| close=全平（顺势=有利方向破前高/低；
 //          逆势=形成段≥5合并K）；exits 含 half=平一半（顺势形成段≥5合并K）/breakeven=保本
+//          强分型均线V1（fxma）：stop=固定点数止损 | takeProfit=固定点数止盈（盘中触价即
+//          按触发价成交，与实盘 MT5 SL/TP 同口径；名称同后端 EXIT_NAMES / bt_journal.EXIT_LABELS）
 function exitTypeName(t) {
   if (t === 'half') return '半平';
   if (t === 'stopSr') return '支阻位止损';
   if (t === 'stopBe') return '保本止损';
   if (t === 'close') return '全平';
+  if (t === 'stop') return '固定止损';
+  if (t === 'takeProfit') return '固定止盈';
   return t || '-';
 }
 function exitEventsDesc(r) {
-  const names = { breakeven: '保本', half: '半', close: '平', stopSr: '损', stopBe: '保损' };
+  const names = { breakeven: '保本', half: '半', close: '平', stopSr: '损', stopBe: '保损',
+                  stop: '固损', takeProfit: '固盈' };
   return (r.exits || []).map(e => names[e.type] || e.type).join('·') || '';
 }
 // 分批出场只拆分展示，仍按整笔交易计数、汇总和排序。

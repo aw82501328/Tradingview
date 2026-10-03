@@ -361,6 +361,26 @@ class ParamCenterTests(unittest.TestCase):
         self.assertEqual(silver["macdZeroTol"],
                          chan_core.CHAN_CFG_DEFAULTS["macdZeroTol"])
 
+    def test_chan_window_days_keys(self):
+        # 小周期绘制窗口（2026-10-02 参数化）：默认 15/30/3、范围 [1,365]、进 chan_cfg_effective
+        defaults = param_center.defaults_of("chan")
+        self.assertEqual((defaults["windowDays3"], defaults["windowDays15"],
+                          defaults["windowDays30S"]), (15, 30, 3))
+        self.assertEqual(param_center.normalize("chan", {"windowDays3": 45}),
+                         {"windowDays3": 45})
+        self.assertEqual(param_center.normalize("chan", {"windowDays15": "90"}),
+                         {"windowDays15": 90})
+        for bad in (0, 366, "abc"):
+            with self.assertRaises(ValueError):
+                param_center.normalize("chan", {"windowDays3": bad})
+        cfg = param_center.chan_cfg_effective("XAUUSD")
+        self.assertEqual((cfg["windowDays3"], cfg["windowDays15"],
+                          cfg["windowDays30S"]), (15, 30, 3))
+        param_center.update("chan", {"windowDays3": 45, "windowDays15": 90}, symbol="XAUUSD")
+        cfg = param_center.chan_cfg_effective("XAUUSD")
+        self.assertEqual((cfg["windowDays3"], cfg["windowDays15"]), (45, 90))
+        self.assertEqual(param_center.chan_cfg_effective("XAGUSD")["windowDays3"], 15)
+
     def test_sr_per_symbol_and_snapshot(self):
         # sr 按品种隔离；snapshot 含 sr.bySymbol
         param_center.update_sr("XAUUSD", {
@@ -393,6 +413,40 @@ class ParamCenterTests(unittest.TestCase):
         self.assertEqual(param_center.effective_sr("XAUUSD"),
                          param_center.SR_DEFAULTS)
         self.assertEqual(param_center.effective_sr("XAGUSD")["srTypes"], ["boll"])
+
+    def test_update_with_redirected_store_skips_real_export(self):
+        # 导出隔离守卫：PARAMS_FILE 被重定向（本 setUp 即是）时 update 不得写/删
+        # 真实导出目录 .cursor/cache/chan_cfg_*.json（画笔读取的生产文件）
+        real_dir = Path(param_center._CHAN_CFG_EXPORT_DIR)
+        before = {p.name: (p.stat().st_mtime_ns, p.read_bytes())
+                  for p in real_dir.glob("chan_cfg_*.json")} if real_dir.exists() else {}
+        param_center.update("chan", {"fractalSideRealWick": True}, "OANDA:XAUUSD")
+        after = {p.name: (p.stat().st_mtime_ns, p.read_bytes())
+                 for p in real_dir.glob("chan_cfg_*.json")} if real_dir.exists() else {}
+        self.assertEqual(after, before)
+
+    def test_export_chan_cfg_files_roundtrip(self):
+        # 导出本体：有桶品种写 chan_cfg_<sid>.json（含参数中心覆盖值），桶清空删文件
+        export_dir = Path(self.tmp.name) / "cache"
+        orig_dir = param_center._CHAN_CFG_EXPORT_DIR
+        orig_default = param_center._DEFAULT_PARAMS_FILE
+        param_center._CHAN_CFG_EXPORT_DIR = str(export_dir)
+        param_center._DEFAULT_PARAMS_FILE = param_center.PARAMS_FILE  # 守卫对临时存储放行
+        try:
+            param_center.update("chan", {"fractalSideRealWick": True}, "OANDA:XAUUSD")
+            fp = export_dir / "chan_cfg_XAUUSD.json"
+            self.assertTrue(fp.exists())
+            payload = json.loads(fp.read_text(encoding="utf-8"))
+            self.assertEqual(payload["symbol"], "XAUUSD")
+            self.assertIn("generatedAt", payload)
+            self.assertTrue(payload["cfg"]["fractalSideRealWick"])
+            self.assertEqual(payload["cfg"]["nearDoubleFixed"],
+                             chan_core.CHAN_CFG_DEFAULTS["nearDoubleFixed"])
+            param_center.reset("chan", "OANDA:XAUUSD")
+            self.assertFalse(fp.exists())  # 桶清空 → 导出文件同步删除
+        finally:
+            param_center._CHAN_CFG_EXPORT_DIR = orig_dir
+            param_center._DEFAULT_PARAMS_FILE = orig_default
 
 
 if __name__ == "__main__":

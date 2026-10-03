@@ -123,6 +123,9 @@ def _draw_after_locate(c, row, bar_time, colors=None, last_time=None):
     挡在外面，2026-09-25 真机读图实测）。
     锚点用图表里该根 bar.value[0]、lock=true；秒/毫秒两种时间各试一次。
     出场若晚于当前窗口则跳过。
+    箭头不压K线（用户规则 2026-10-02，与 marks._draw_chunk 同口径）：
+    arrow_up 锚在该根 low 下方、arrow_down 锚在 high 上方，外移量 =
+    max(本根振幅, 近邻±10根均幅) × 0.6；算不出有效外移量时回退信号价。
     """
     colors = _colors(colors)
     if row.get('status') == '同向过滤':
@@ -189,11 +192,29 @@ def _draw_after_locate(c, row, bar_time, colors=None, last_time=None):
       if(!bar)return {drawn:0,error:'no_bar'};
       const t0=bar.value[0];
       const times=t0>1e12?[t0/1000,t0]:[t0,t0*1000];
-      let price=p.price;
-      const hiP=bar.value[2],loP=bar.value[3];
-      if(typeof hiP==='number'&&typeof loP==='number'){
-        if(price>hiP)price=hiP; if(price<loP)price=loP;
+      // 锚点外移（不压K线）：先按二分定位 q 所在根，再按箭头方向放到
+      // low 下方（arrow_up）/ high 上方（arrow_down），margin=max(本根振幅,近邻±10根均幅)*0.6
+      const norm=b=>{const t0=b.value[0];return t0>1e12?t0/1000:t0;};
+      function margin4(i){
+        const hiP=bars[i].value[2],loP=bars[i].value[3];
+        let sum=0,n=0;
+        for(let k=Math.max(0,i-10);k<Math.min(bars.length,i+11);k++)
+          {sum+=bars[k].value[2]-bars[k].value[3];n++;}
+        const m=Math.max(hiP-loP,n?sum/n:0)*0.6;
+        return (isFinite(m)&&m>0)?m:null;
       }
+      function anchorOff(q,up,ref){
+        let l2=0,h2=bars.length;
+        while(l2<h2){const mid=(l2+h2)>>1;if(norm(bars[mid])<=q)l2=mid+1;else h2=mid;}
+        const i=l2-1;
+        if(i<0)return ref;
+        const m=margin4(i);
+        if(m==null)return ref;
+        const hiP=bars[i].value[2],loP=bars[i].value[3];
+        return up?loP-m:hiP+m;
+      }
+      // 进场：做多 arrow_up → low 下方；做空 arrow_down → high 上方（无有效振幅回退信号价）
+      let price=anchorOff(p.time,p.long,p.price);
       const ids=[]; let lastErr='';
       async function put(time,pr,spec){
         try{
@@ -215,8 +236,10 @@ def _draw_after_locate(c, row, bar_time, colors=None, last_time=None):
       for(const ev of p.exits){
         const es={shape:exitShape,text:ev.text,lock:true,color:p.exitColor,textColor:p.exitColor,
                   overrides:{arrowColor:p.exitColor,intervalsVisibilities:p.iv}};
+        // 出场与进场同口径外移：平多 ↓ 在 high 上方、平空 ↑ 在 low 下方
+        const pr=anchorOff(ev.time,!p.exitDown,ev.price);
         for(const t of (ev.time>1e12?[ev.time/1000,ev.time]:[ev.time,ev.time*1000])){
-          if(await put(t,ev.price,es))break;
+          if(await put(t,pr,es))break;
         }
       }
       if(p.nearSr!=null){

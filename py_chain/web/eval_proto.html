@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EVAL 评估 · 原型</title>
+<style>
+:root{color-scheme:dark;--bg:#10151e;--panel:#19212e;--card:var(--panel);--card-2:#131c29;--line:#2c384a;--border:var(--line);--text:#e7edf7;--muted:#99a9c0;--blue:#8eb7ff;--accent:var(--blue);--primary:#5086e5;--input:#101823;--control-border:#3c4d65;--button:#243247;--chip:#27364c;--ok:#92d1b4;--buy:#f23645;--sell:#089981;--warn:#f0b90b;--font:"Segoe UI","Microsoft YaHei",sans-serif}
+*{box-sizing:border-box}
+body{margin:0 auto;padding:22px 26px 60px;max-width:1420px;background:var(--bg);color:var(--text);font:14px/1.65 "Segoe UI","Microsoft YaHei",sans-serif}
+button,input,select{font:inherit}
+button{cursor:pointer}button:disabled{opacity:.45;cursor:default}
+h1{font-size:24px;margin:0 0 4px;letter-spacing:.5px}
+h2{font-size:16px;margin:0}
+h3{font-size:13px;margin:0 0 8px}
+p{margin:8px 0 14px}
+.muted{color:var(--muted)}.caption{font-size:12px;color:var(--muted)}
+.proto-banner{position:sticky;top:0;z-index:5;display:flex;gap:10px;align-items:center;background:#3b3222;color:#e7c688;border:1px solid #5a4d2e;border-radius:8px;padding:9px 14px;margin-bottom:18px;font-size:12.5px}
+.hero{margin:6px 0 18px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin-bottom:18px}
+.panel-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+.row{display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap}
+label{display:block;font-size:12px;color:var(--muted)}
+input,select{display:block;background:#101823;border:1px solid #3c4d65;color:var(--text);border-radius:6px;padding:7px 10px;margin-top:4px}
+input[type=checkbox]{display:inline;margin:0}
+.btn{border:1px solid #3c4d65;background:#243247;color:var(--text);border-radius:6px;padding:7px 14px}
+.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+.btn.mini{padding:3px 9px;font-size:12px;border-radius:5px}
+.badge{font-size:11px;padding:2px 8px;border-radius:10px;background:#27364c;color:#b8d3ff;white-space:nowrap}
+.badge.pass{background:#0d3b31;color:var(--ok)}
+.badge.fail{background:#3b1717;color:#ff8a8a}
+.badge.drift{background:#3b3222;color:var(--warn)}
+.src-line{background:var(--card-2);border:1px solid var(--line);border-radius:7px;padding:9px 13px;font-size:12.5px;color:#b5c2d5;margin-bottom:14px}
+.src-line b{color:#cfe0f8;font-weight:600}
+.hint{font-size:12px;color:var(--muted);margin:12px 0 0}
+.table-wrap{overflow:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td,th{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--muted);font-size:12px;font-weight:400}
+tr:last-child td{border-bottom:0}
+.select-bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;background:var(--card-2);border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin-top:14px}
+.select-bar b{color:#cfe0f8}
+.select-bar input{margin-top:0;min-width:260px;flex:0 1 300px}
+.note{border-left:3px solid #729ee8;background:#1e3049;padding:11px 14px;margin-top:14px;font-size:12.5px;color:#bed0ea}
+/* 运行结果 */
+.bar{height:8px;background:#131c29;border:1px solid var(--line);border-radius:6px;overflow:hidden;margin:6px 0 4px}
+.bar-fill{height:100%;width:0;background:var(--primary);transition:width .3s}
+.summary-row{display:flex;gap:18px;align-items:center;flex-wrap:wrap;font-size:13px;margin:4px 0 10px}
+.bl-group-title{display:flex;gap:10px;align-items:center;margin:16px 0 4px;font-size:13.5px;font-weight:600;color:#cfe0f8}
+.case-row{cursor:pointer}
+.case-row:hover{background:#1c2735}
+.case-row td{border-bottom:1px solid var(--line)}
+.case-detail{background:#121a26;border:1px solid var(--line);border-top:0;padding:16px 18px;margin:0 0 4px}
+.diff-section{margin-bottom:16px}
+.diff-table td,.diff-table th{padding:6px 10px;font-size:12.5px}
+.only-a{color:#ff9d9d}.only-b{color:#8fd6ff}
+.chg{color:#ff8a8a;font-weight:600}
+.pair-table td,.pair-table th{padding:6px 10px;font-size:12.5px;font-family:Consolas,Menlo,monospace;white-space:nowrap}
+.arrow-up{color:var(--sell)}.arrow-down{color:var(--buy)}
+.toast{position:fixed;bottom:24px;right:24px;max-width:420px;background:#294260;border:1px solid #6889b5;border-radius:9px;padding:13px 18px;z-index:9;box-shadow:0 8px 32px #0006;font-size:13px}
+[hidden]{display:none!important}
+@media(max-width:900px){body{padding:14px}.pair-table{font-size:11px}}
+</style>
+</head>
+<body>
+<div class="proto-banner">⚠ 静态原型 · mock 数据 · 仅演示布局与交互 —— 确认后接入 <b>/api/eval/*</b> 后端（正式页挂主导航「EVAL评估」，iframe 加载 <b>/eval.html?embed=1</b>）</div>
+
+<div class="hero">
+  <h1>EVAL 评估</h1>
+  <p class="muted">按周期快照成笔用例 → 多选建立基线（冻结期望笔结果）→ 画笔逻辑调整后跑基线回归，逐用例看通过/差异。</p>
+</div>
+
+<!-- 1 新增用例 -->
+<section class="panel">
+  <div class="panel-head"><h2>① 新增用例</h2><span class="caption">一键从本地K线缓存快照，不手工录入</span></div>
+  <div class="src-line">K线来源：<b>本地缓存 bars_all_tf.json</b> · 品种 <b>XAUUSD</b> · 3分钟 <b>20,605</b> 根 · 15分钟 6,758 · 60分钟 1,690 · 240分钟 441 · 日线 73 · 截止 <b>2026-09-30 15:00</b></div>
+  <div class="row">
+    <label>用例名称<input id="caseName" placeholder="如：3分钟·近等双顶场景" style="min-width:240px"></label>
+    <label>周期
+      <select id="caseRes">
+        <option>全部周期</option><option>3</option><option>15</option><option>60</option><option>240</option><option>D</option>
+      </select>
+    </label>
+    <label>起始时间（可选，截断各周期）<input type="datetime-local" id="caseFrom"></label>
+    <button class="btn primary" onclick="protoAction('创建用例：快照K线 + 画笔参数，用例不可变')">创建用例</button>
+  </div>
+  <p class="hint">起始时间用于把各周期K线截断到该时刻起（每周期至少 50 根，否则拒绝）；截断后前段笔与全量图可能不同，属正常。用例只存输入（K线 + 当时画笔参数快照），笔的<b>期望值在建立基线时才冻结</b>。</p>
+</section>
+
+<!-- 2 用例列表 -->
+<section class="panel">
+  <div class="panel-head"><h2>② 用例列表</h2><span class="caption">6 个用例 · 勾选多个建立基线</span></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th></th><th>名称</th><th>周期</th><th>品种</th><th>K线数</th><th>范围</th><th>创建时间</th><th>操作</th></tr></thead>
+      <tbody>
+        <tr><td><input type="checkbox" class="case-cb" checked></td><td>3分钟·近等双顶场景</td><td>3</td><td>XAUUSD</td><td>20,605</td><td>全量</td><td>09-30 16:20</td><td><button class="btn mini" onclick="protoAction('删除用例（原型演示）')">删除</button></td></tr>
+        <tr><td><input type="checkbox" class="case-cb" checked></td><td>15分钟·9月下跌段</td><td>15</td><td>XAUUSD</td><td>4,302</td><td><span class="badge">起始 09-01 起</span></td><td>09-30 16:25</td><td><button class="btn mini" onclick="protoAction('删除用例（原型演示）')">删除</button></td></tr>
+        <tr><td><input type="checkbox" class="case-cb"></td><td>60分钟·中枢震荡</td><td>60</td><td>XAUUSD</td><td>1,690</td><td>全量</td><td>09-30 16:26</td><td><button class="btn mini" onclick="protoAction('删除用例（原型演示）')">删除</button></td></tr>
+        <tr><td><input type="checkbox" class="case-cb"></td><td>240分钟·全量</td><td>240</td><td>XAUUSD</td><td>441</td><td>全量</td><td>09-30 16:27</td><td><button class="btn mini" onclick="protoAction('删除用例（原型演示）')">删除</button></td></tr>
+        <tr><td><input type="checkbox" class="case-cb"></td><td>日线·全量</td><td>D</td><td>XAUUSD</td><td>73</td><td>全量</td><td>09-30 16:28</td><td><button class="btn mini" onclick="protoAction('删除用例（原型演示）')">删除</button></td></tr>
+        <tr><td><input type="checkbox" class="case-cb"></td><td>全部周期·综合快照</td><td>全部</td><td>XAUUSD</td><td>5 周期</td><td>全量</td><td>09-30 16:30</td><td><button class="btn mini" onclick="protoAction('删除用例（原型演示）')">删除</button></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="select-bar" id="selectBar">
+    <span>已选 <b id="selCount">2</b> 个用例</span>
+    <input id="blName" placeholder="基线名称，如：画笔规则 v4 基线">
+    <button class="btn primary" onclick="protoAction('建立基线：对选中用例跑当前逻辑，冻结期望笔结果')">以选中用例建立基线</button>
+    <span class="caption">期望值冻结在基线内，同批用例可建多个基线做改动前后 A/B</span>
+  </div>
+</section>
+
+<!-- 3 基线列表 -->
+<section class="panel">
+  <div class="panel-head"><h2>③ 基线列表</h2><button class="btn" onclick="simulateRun()">▶ 跑全部基线</button></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>名称</th><th>用例数</th><th>期望冻结时间</th><th>最近运行</th><th>操作</th></tr></thead>
+      <tbody>
+        <tr><td>画笔规则 v3 基线</td><td>4</td><td>09-30 16:32</td><td><span class="badge fail">通过 2/4</span> · 10-01 09:15</td>
+          <td><button class="btn mini primary" onclick="simulateRun()">运行</button> <button class="btn mini" onclick="refreshBaseline()">更新期望</button> <button class="btn mini" onclick="protoAction('重命名（原型演示）')">重命名</button> <button class="btn mini" onclick="protoAction('删除基线（原型演示）')">删除</button></td></tr>
+        <tr><td>近等后移专项</td><td>2</td><td>09-30 16:35</td><td><span class="badge pass">通过 2/2</span> · 10-01 09:15</td>
+          <td><button class="btn mini primary" onclick="simulateRun()">运行</button> <button class="btn mini" onclick="refreshBaseline()">更新期望</button> <button class="btn mini" onclick="protoAction('重命名（原型演示）')">重命名</button> <button class="btn mini" onclick="protoAction('删除基线（原型演示）')">删除</button></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="hint">「更新期望」＝用当前逻辑重新冻结基线内所有笔结果（逻辑有意变更后使用）；「运行」＝用当前逻辑重算并与冻结期望比对。</p>
+</section>
+
+<!-- 4 运行结果 -->
+<section class="panel" id="resultPanel">
+  <div class="panel-head"><h2>④ 运行结果</h2><span class="caption" id="runMeta">2026-10-01 09:15 · 6/6 用例 · 用时 3.2s · 引擎 Python build_bis</span></div>
+  <div id="runBody"></div>
+</section>
+
+<div class="toast" id="toast" hidden></div>
+
+<script>
+'use strict';
+/* ============ mock 数据与工具 ============ */
+const FIELDS=["type","startIdx","endIdx","startTime","endTime","startPrice","endPrice","rawCount","span","gapLocked","macdCross"];
+const STRUCT=new Set(["type","startIdx","endIdx","startTime","endTime","startPrice","endPrice"]);
+const T=(d,h,m)=>Date.parse(`2026-09-${d}T${h}:${m}:00+08:00`)/1000;
+const fmtT=ts=>ts?new Date(ts*1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'—';
+const bi=(type,idx0,idx1,t0,t1,p0,p1,raw,extra={})=>({type,startIdx:idx0,endIdx:idx1,startTime:t0,endTime:t1,startPrice:p0,endPrice:p1,rawCount:raw,span:Math.abs(p1-p0),gapLocked:false,macdCross:false,...extra});
+
+/* 用例1：3分钟·近等双顶场景 —— 后移改动导致 #49 下笔延伸到后底（笔数不变，字段变） */
+const c1A=[ // 基线侧 idx42..53
+  bi('down',120,135,T(9,10,15),T(9,11,24),4478.2,4431.5,22,{macdCross:true}),
+  bi('up',135,158,T(9,11,24),T(9,13,6),4431.5,4492.8,31,{macdCross:true}),
+  bi('down',158,170,T(9,13,6),T(9,13,57),4492.8,4443.9,16),
+  bi('up',170,182,T(9,13,57),T(9,14,45),4443.9,4471.0,15),
+  bi('down',182,196,T(9,14,45),T(9,15,36),4471.0,4426.4,17,{gapLocked:true}),
+  bi('up',196,212,T(9,15,36),T(9,16,30),4426.4,4468.9,17),
+  bi('down',212,228,T(9,16,30),T(9,17,21),4468.9,4432.8,17),
+  bi('up',228,249,T(9,17,21),T(9,18,35),4432.8,4490.5,24,{macdCross:true}),
+  bi('down',249,263,T(9,18,35),T(9,19,26),4490.5,4448.1,16),
+  bi('up',263,280,T(9,19,26),T(9,20,30),4448.1,4483.6,20),
+  bi('down',280,299,T(9,20,30),T(9,21,42),4483.6,4451.2,23),
+  bi('up',299,320,T(9,21,42),T(9,22,55),4451.2,4496.7,25,{macdCross:true})
+];
+const c1B=[ // 当前侧：#48(0基) 下笔延伸到后底 4429.6@17:48，#49 起点跟随
+  ...c1A.slice(0,6),
+  bi('down',212,243,T(9,16,30),T(9,17,48),4468.9,4429.6,26,{gapLocked:true}),
+  bi('up',243,249,T(9,17,48),T(9,18,35),4429.6,4490.5,15,{macdCross:true}),
+  ...c1A.slice(8)
+];
+
+/* 用例2：15分钟·9月下跌段 —— 「不收笔」改动吞并两笔（笔数 86→84，级联） */
+const c2A=[ // 基线侧 idx8..18
+  bi('up',52,74,T(2,8,0),T(2,14,0),4410.2,4462.0,22),
+  bi('down',74,96,T(2,14,0),T(2,20,15),4462.0,4428.5,25),
+  bi('up',96,118,T(2,20,15),T(3,2,30),4428.5,4477.4,30),
+  bi('down',118,134,T(3,2,30),T(3,6,45),4477.4,4441.6,17),
+  bi('up',134,152,T(3,6,45),T(3,14,0),4441.6,4486.2,19),
+  bi('down',152,168,T(3,14,0),T(3,20,30),4486.2,4447.8,17),
+  bi('up',168,182,T(3,20,30),T(4,0,45),4447.8,4465.0,15),
+  bi('down',182,202,T(4,0,45),T(4,6,0),4465.0,4438.9,21),
+  bi('up',202,228,T(4,6,0),T(4,13,15),4438.9,4499.0,27,{macdCross:true}),
+  bi('down',228,244,T(4,13,15),T(4,19,30),4499.0,4455.3,17),
+  bi('up',244,266,T(4,19,30),T(4,23,45),4455.3,4502.8,23)
+];
+const c2B=[ // 当前侧：下笔不收、延伸吞并基线 #13/#15（少2笔）
+  ...c2A.slice(0,5),
+  bi('down',152,202,T(3,14,0),T(4,6,0),4486.2,4438.9,41),
+  ...c2A.slice(8)
+];
+
+const RUN=[
+ {baseline:'画笔规则 v3 基线',pass:2,total:4,cases:[
+  {name:'3分钟·近等双顶场景',res:'3',nExp:128,nAct:128,first:'#49',ok:false,drift:false,detail:{a:c1A,b:c1B,base:42}},
+  {name:'15分钟·9月下跌段',res:'15',nExp:86,nAct:84,first:'#13',ok:false,drift:false,detail:{a:c2A,b:c2B,base:8}},
+  {name:'240分钟·全量',res:'240',nExp:31,nAct:31,first:'—',ok:true,drift:false},
+  {name:'日线·全量',res:'D',nExp:18,nAct:18,first:'—',ok:true,drift:true}]},
+ {baseline:'近等后移专项',pass:2,total:2,cases:[
+  {name:'60分钟·中枢震荡',res:'60',nExp:52,nAct:52,first:'—',ok:true,drift:false},
+  {name:'全部周期·综合快照',res:'全部',nExp:'5周期一致',nAct:'',first:'—',ok:true,drift:false}]}
+];
+
+/* ============ 渲染 ============ */
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const arrow=t=>t==='up'?'<span class="arrow-up">↑</span>':'<span class="arrow-down">↓</span>';
+
+/* 双侧对齐：相同起止时间配对；仅一侧有时标记删除/新增；其余配对显示字段差异 */
+function alignBis(A,B){
+  const rows=[];let i=0,j=0;
+  while(i<A.length||j<B.length){
+    const a=A[i],b=B[j];
+    if(!a){rows.push({a:null,b,idxB:j});j++;continue}
+    if(!b){rows.push({a,idxA:i,b:null});i++;continue}
+    if(a.startTime===b.startTime&&a.endTime===b.endTime){rows.push({a,b,idxA:i});i++;j++}
+    else if(a.endTime<=b.startTime){rows.push({a,idxA:i,b:null});i++}
+    else if(b.endTime<=a.startTime){rows.push({a:null,b,idxB:j});j++}
+    else{rows.push({a,b,idxA:i,idxB:j});i++;j++}
+  }
+  return rows;
+}
+const biText=x=>x?`${arrow(x.type)} ${x.startPrice} → ${x.endPrice} · ${fmtT(x.startTime)} → ${fmtT(x.endTime)}`:'—';
+const cellHtml=(a,b)=>a&&b?biText(b):a?'<span class="only-a">'+biText(a)+'（基线有·当前无）</span>':'<span class="only-b">'+biText(b)+'（当前新增）</span>';
+
+function diffRows(detail){
+  const rows=alignBis(detail.a,detail.b);
+  const struct=[],mark=[];
+  const no=(r)=>r.idxA!=null?r.idxA:(r.idxB!=null?r.idxB:null);
+  for(const r of rows){
+    if(!r.a||!r.b)continue;
+    const n=no(r);
+    for(const f of FIELDS){
+      if(r.a[f]!==r.b[f]){
+        const item={bi:n,field:f,exp:r.a[f],act:r.b[f]};
+        (MARK.has(f)?mark:struct).push(item);
+      }
+    }
+  }
+  const tbl=items=>items.length?`<table class="diff-table"><thead><tr><th>笔#</th><th>字段</th><th>基线值</th><th>当前值</th></tr></thead><tbody>${items.map(d=>`<tr><td>#${d.bi+1}</td><td>${esc(d.field)}</td><td>${esc(typeof d.exp==='boolean'?(d.exp?'true':'false'):d.exp)}</td><td class="chg">${esc(typeof d.act==='boolean'?(d.act?'true':'false'):d.act)}</td></tr>`).join('')}</tbody></table>`:'<p class="muted" style="margin:4px 0">无</p>';
+  let firstHtml='';
+  const win=rows.filter(r=>(r.idxA!=null||r.idxB!=null));
+  firstHtml=`<table class="pair-table"><thead><tr><th>笔#</th><th>基线（冻结期望）</th><th>当前（本次重算）</th></tr></thead><tbody>${win.map(r=>{
+    const n=(r.idxA!=null?r.idxA:r.idxB);
+    const mark=(r.a&&r.b&&FIELDS.some(f=>r.a[f]!==r.b[f]))?' style="background:#26180f"':'';
+    return `<tr${mark}><td>#${n+1}</td><td>${cellHtml(r.a,null)}</td><td>${cellHtml(null,r.b)}</td></tr>`}).join('')}</tbody></table>`;
+  return `<div class="diff-section"><h3>笔对照（首差异前后，黄底行含字段差异）</h3>${firstHtml}</div>
+    <div class="diff-section"><h3>结构差异（方向 / 端点 / 时间）</h3>${tbl(struct)}</div>
+    <div class="diff-section"><h3>标记差异（rawCount / span / gapLocked / macdCross）</h3>${tbl(mark)}</div>`;
+}
+
+function renderResults(){
+  const total=RUN.reduce((s,g)=>s+g.total,0),pass=RUN.reduce((s,g)=>s+g.pass,0);
+  let html=`<div class="summary-row"><span class="badge ${pass===total?'pass':'fail'}">通过 ${pass} / ${total}</span><span class="muted">失败 ${total-pass} · 基线 ${RUN.length} 个 · 比对口径：11 字段逐笔（align_check 同款）</span></div>`;
+  for(const g of RUN){
+    html+=`<div class="bl-group-title">${esc(g.baseline)} <span class="badge ${g.pass===g.total?'pass':'fail'}">${g.pass}/${g.total}</span></div>
+    <div class="table-wrap"><table><thead><tr><th>用例</th><th>周期</th><th>期望笔数</th><th>实际笔数</th><th>首差异</th><th>状态</th></tr></thead><tbody>`;
+    g.cases.forEach((c,k)=>{
+      html+=`<tr class="case-row" data-open="${g.baseline}|${k}"><td>${esc(c.name)}</td><td>${esc(c.res)}</td><td>${esc(c.nExp)}</td><td>${c.nAct!==c.nExp&&c.detail?`<span class="chg">${esc(c.nAct)}</span>`:esc(c.nAct)}</td><td>${c.ok?'—':esc(c.first)}</td>
+      <td>${c.ok?'<span class="badge pass">✓ 通过</span>':'<span class="badge fail">✗ 失败</span>'}${c.drift?' <span class="badge drift" title="当前画笔参数与建用例时不同，已按用例参数快照运行">参数漂移</span>':''}${c.detail?' <span class="caption">▾ 展开差异</span>':''}</td></tr>`;
+      if(c.detail)html+=`<tr hidden><td colspan="6" style="padding:0"><div class="case-detail">${diffRows(c.detail)}</div></td></tr>`;
+    });
+    html+='</tbody></table></div>';
+  }
+  $('runBody').innerHTML=html;
+  document.querySelectorAll('.case-row').forEach(tr=>tr.addEventListener('click',()=>{
+    const next=tr.nextElementSibling;if(next&&next.querySelector('.case-detail'))next.hidden=!next.hidden;
+  }));
+}
+const $=id=>document.getElementById(id);
+let toastTimer;
+function toast(t){$('toast').textContent=t;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,4000)}
+function protoAction(msg){toast('原型演示（无后端）：'+msg)}
+function refreshBaseline(){if(confirm('将用当前逻辑重新冻结期望笔结果（覆盖基线内全部用例）？\n仅在画笔逻辑有意变更、且已确认新结果正确时使用。'))toast('原型演示：更新期望完成')}
+
+/* 勾选计数 */
+function refreshSel(){const n=document.querySelectorAll('.case-cb:checked').length;$('selCount').textContent=n;$('selectBar').querySelector('.primary').disabled=n===0}
+document.querySelectorAll('.case-cb').forEach(cb=>cb.addEventListener('change',refreshSel));
+
+/* 模拟一次运行：进度条 → 结果 */
+function simulateRun(){
+  const total=6;let n=0;
+  $('resultPanel').scrollIntoView({behavior:'smooth',block:'start'});
+  $('runMeta').textContent='运行中…';
+  $('runBody').innerHTML=`<div class="bar"><div class="bar-fill" id="bf"></div></div><p class="caption" id="bt">0 / ${total} 用例</p>`;
+  const timer=setInterval(()=>{
+    n++;
+    const bf=$('bf'),bt=$('bt');if(!bf){clearInterval(timer);return}
+    bf.style.width=(n/total*100)+'%';bt.textContent=`${n} / ${total} 用例`;
+    if(n>=total){clearInterval(timer);setTimeout(()=>{$('runMeta').textContent='刚刚 · 6/6 用例 · 用时 3.1s · 引擎 Python build_bis';renderResults();toast('运行完成：通过 4 / 6，失败 2（点击失败行展开差异明细）')},350)}
+  },280);
+}
+
+refreshSel();
+renderResults();
+</script>
+</body>
+</html>

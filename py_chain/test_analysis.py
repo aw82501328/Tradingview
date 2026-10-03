@@ -291,7 +291,8 @@ class StrategyRegistryTests(unittest.TestCase):
         from . import module_registry
         self.assertEqual(module_registry.order_of(), ORDER)
         self.assertEqual(module_registry.order_of(None), ORDER)
-        self.assertEqual(dependency_order("all"), ORDER)
+        self.assertEqual(dependency_order("all"), ["bi", "zs", "points"])
+        self.assertEqual(dependency_order("all", "fxma_v1"), ["bi", "zs", "points"])
         self.assertEqual(dependency_order("entry", "chan_v1"),
                          ["bi", "sr", "plan", "entry"])
 

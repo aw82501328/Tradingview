@@ -27,8 +27,14 @@ async function guardedCDP(options = {}) {
   const client = await CDP({...options, target, port: Number(process.env.CHAN_PORT || 9222)});
   const evaluate = client.Runtime.evaluate.bind(client.Runtime);
   client.Runtime.evaluate = async (args) => {
+    // 回放态守卫：默认任何 evaluate 在「图表处于历史回放」时立即失败（回放数据会
+    // 污染取数与计算）。唯一例外是带 /*CHAN_REPLAY_OK*/ 前缀的表达式——chan_bi.js
+    // 的「回放定位补绘」（drawClippedViaReplay）有意进入回放画超出图表深度的笔；
+    // 该流程自身的 evaluate 全部带前缀，且退出回放失败时后续无前缀 evaluate 仍会
+    // 被本守卫拦下 fail-fast，数据零污染语义不变。
+    const replayOk = String(args.expression || '').startsWith('/*CHAN_REPLAY_OK*/');
     const guard = `if (typeof TradingViewApi === 'undefined' || TradingViewApi.activeChart().symbol() !== ${JSON.stringify(symbol)}) throw new Error('ANALYSIS_TARGET_CHANGED');
-    (()=>{const ra=TradingViewApi._replayApi;const r=ra&&typeof ra.value==='function'?ra.value():ra;if(r&&typeof r.isReplayStarted==='function'){const s=r.isReplayStarted();const started=s&&typeof s.value==='function'?s.value():s;if(started===true)throw new Error('ANALYSIS_REPLAY_ACTIVE');}})();\n`;
+${replayOk ? '' : `(()=>{const ra=TradingViewApi._replayApi;const r=ra&&typeof ra.value==='function'?ra.value():ra;if(r&&typeof r.isReplayStarted==='function'){const s=r.isReplayStarted();const started=s&&typeof s.value==='function'?s.value():s;if(started===true)throw new Error('ANALYSIS_REPLAY_ACTIVE');}})();\n`}`;
     const result = await evaluate({...args, expression: guard + args.expression});
     const value = result.result?.value;
     // Downstream algorithms consume the exact OHLC snapshot that produced the

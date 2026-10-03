@@ -81,12 +81,18 @@ def run_symbol(child_cfg, symbol, msg_q, pause_evt, stop_evt):
             on_exit=lambda tr: _send(kind="exit", trade=dict(tr)),
             on_suppressed=lambda s: _send(kind="suppressed", signal=dict(s)),
             paused=pause_evt,
-            stopped=stop_evt)
+            stopped=stop_evt,
+            journal_symbol=symbol,
+            journal_strategy=("fxma" if engine_cls is not BacktestEngine else "chan"))
+        jp = result.get("journal")
+        if jp:
+            _log(f"交易日志：{jp}")
         _send(kind="done",
               stats=result.get("stats") or {},
               open=[dict(tr) for tr in result.get("trades") or []
                     if tr.get("state") != "closed"],
               stopped=stop_evt.is_set(),
-              duration=round(time.time() - t0, 1))
+              duration=round(time.time() - t0, 1),
+              journal=jp)
     except Exception as e:   # 无数据/窗口缺周期/引擎异常 → 本品种 error
         _send(kind="error", error=f"{type(e).__name__}: {e}")

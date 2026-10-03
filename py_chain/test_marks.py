@@ -95,24 +95,41 @@ class DrawChunkTests(unittest.TestCase):
 
     def test_default_bulk_args(self):
         expr = self.expr()
-        self.assertIn("text: 'ML·BUY 2663.25'", expr)
-        self.assertIn("text: 'ML·止损 2650.00'", expr)
+        self.assertIn('"text": "ML·BUY 2663.25"', expr)
+        self.assertIn('"text": "ML·止损 2650.00"', expr)
         self.assertIn('mark_list_ids', expr)
         self.assertNotIn('mark_single_ids', expr)
         # 默认（非 dual_tf）只带 markRes 单周期 IV
-        self.assertIn('minutesFrom: 3', expr)
-        self.assertNotIn('hoursFrom: 1', expr)
+        self.assertIn('"minutesFrom": 3', expr)
+        self.assertNotIn('"hoursFrom": 1', expr)
+        # 锚点外移（不压K线）：按箭头方向放到 low 下 / high 上，K线读不到时回退信号价
+        self.assertIn('anchorOff(s.time, s.shape === \'arrow_up\', s.price)', expr)
+        self.assertIn('return ref;', expr)
+
+    def test_fxma_exit_types_drawn_with_labels(self):
+        """强分型均线V1 出场（stop/takeProfit）也画箭头；breakeven 仍不画。"""
+        row = {'direction': 'long', 'price': 2663.25, 'time': 100, 'markRes': '3',
+               'exits': [{'type': 'takeProfit', 'time': 200, 'price': 2670.0},
+                         {'type': 'stop', 'time': 300, 'price': 2650.0},
+                         {'type': 'breakeven', 'time': 150, 'price': 2660.0}]}
+        client = Mock()
+        client.evaluate.return_value = ['id1', 'id2', 'id3']
+        marks._draw_chunk(client, [row], marks._colors(None))
+        expr = client.evaluate.call_args.args[0]
+        self.assertIn('"text": "ML·固定止盈 2670.00"', expr)
+        self.assertIn('"text": "ML·固定止损 2650.00"', expr)
+        self.assertNotIn('breakeven', expr)
 
     def test_dual_tf_with_single_prefix(self):
         expr = self.expr(prefix=marks.SINGLE_PREFIX, ids_key=marks.SINGLE_IDS_KEY,
                          dual_tf=True)
-        self.assertIn("text: 'ML·单BUY 2663.25'", expr)
-        self.assertIn("text: 'ML·单止损 2650.00'", expr)
+        self.assertIn('"text": "ML·单BUY 2663.25"', expr)
+        self.assertIn('"text": "ML·单止损 2650.00"', expr)
         self.assertIn('mark_single_ids', expr)
         self.assertNotIn('mark_list_ids', expr)
         # 双周期 IV 并集：分钟 3 + 小时 1 同时启用
-        self.assertIn('minutesFrom: 3, minutesTo: 3', expr)
-        self.assertIn('hoursFrom: 1, hoursTo: 1', expr)
+        self.assertIn('"minutesFrom": 3, "minutesTo": 3', expr)
+        self.assertIn('"hoursFrom": 1, "hoursTo": 1', expr)
 
 
 class DrawSrChunkTests(unittest.TestCase):
@@ -164,7 +181,7 @@ class DrawSingleMarkTests(unittest.TestCase):
         self.assertEqual(len(exprs), 4)
         self.assertIn('mark_single_ids', exprs[0])
         self.assertIn("PREFIX = 'ML·单'", exprs[0])
-        self.assertIn("text: 'ML·单BUY 2663.25'", exprs[1])
+        self.assertIn('"text": "ML·单BUY 2663.25"', exprs[1])
         self.assertIn("shape: 'horizontal_line'", exprs[2])
         self.assertIn("'ML·单SR ' + s.price.toFixed(2)", exprs[2])
         self.assertEqual(out, {'drawn': 3, 'cleared': 3})
