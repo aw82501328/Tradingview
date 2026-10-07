@@ -33,12 +33,13 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse, quote
 
-from .data_loader import CDPConfig, DEFAULT_PERIODS, DEFAULT_CDP_PORT, load_bars
+from .data_loader import CDPConfig, DEFAULT_PERIODS, DEFAULT_CDP_PORT
 from .backtest import BacktestEngine
 from .service_restart import RestartManager
 from .signal_locator import LocateManager, parse_after_bars
 from .main import parse_from
 from .chan_core import fmtT
+from .bt_journal import EXIT_LABELS
 from .monitor import LiveMonitor, ReplayMonitor, clear_rt_markers
 from .marks import draw_signal_marks, draw_sr_marks, clear_signal_marks, clear_all_marks
 from . import chan_core
@@ -48,19 +49,15 @@ from . import module_registry
 from . import engine_dispatch
 
 # ============================================================
-# 全局互斥：回测以外的模式同一时间最多运行一种；
-# 全量回测多策略并行（2026-10-02）：每个策略一个 Worker，可同时持有 backtest 模式
+# 全局互斥：回测以外的模式（replay/live/data/analysis/td-launch/sr-tune）
+# 同一时间最多运行一种。全量回测（2026-10-07 起固定本地存储）为纯后台任务：
+# 只读 SQLite 不连 CDP，不注册模式锁、不占图表，可与任何图表操作/模式并行；
+# 同策略串行由 Worker.start 兜底。
 # ============================================================
 _active_lock = threading.Lock()
-_active_mode = None          # 当前运行中的模式名（backtest/replay/live）或 None
+_active_mode = None          # 当前运行中的模式名（replay/live/data/...）或 None
 _active_owner = None
-# 当前占用者不碰 TradingView（本地存储/缓存全量回测）。图表定位可与之并行。
-_active_spares_chart = False
 _service_restarting = False
-# 并行回测持有者：策略 id → 该策略运行是否不占图表。_active_mode='backtest' 期间
-# 允许多个策略共存；全部退出才释放模式锁；spares_chart 取全体交集（任一策略
-# 用 live/CDP 取数即视为占用图表，阻止定位/标记并行）。
-_bt_holders = {}
 
 
 class ChartLock:
@@ -73,8 +70,7 @@ class ChartLock:
         with _active_lock:
             if _service_restarting:
                 return False
-            # 本地回测不连 CDP，不把图表算作被占用；实时取数/回放/监控仍独占图表
-            if (_active_mode is not None and not _active_spares_chart
+            if (_active_mode is not None
                     and _active_owner != threading.get_ident()):
                 return False
             return self._lock.acquire(blocking=False)
@@ -130,13 +126,9 @@ def _make_data_callbacks(app):
     return log, progress
 
 
-def acquire_active(mode, spares_chart=False):
-    """尝试占用模式互斥；成功返回 True，失败返回当前占用者。
-
-    spares_chart：本任务不使用 TradingView（本地存储/缓存回测），
-    运行期间允许图表点行定位与其它 CDP 操作。
-    """
-    global _active_mode, _active_owner, _active_spares_chart
+def acquire_active(mode):
+    """尝试占用模式互斥；成功返回 True，失败返回当前占用者。"""
+    global _active_mode, _active_owner
     with _active_lock:
         if _service_restarting:
             return '服务重启中'
@@ -146,49 +138,16 @@ def acquire_active(mode, spares_chart=False):
             return "图表操作"
         _active_mode = mode
         _active_owner = threading.get_ident()
-        _active_spares_chart = bool(spares_chart)
         return True
 
 
 def release_active(mode):
     """释放模式互斥（仅当占用者是自己时）。"""
-    global _active_mode, _active_owner, _active_spares_chart
+    global _active_mode, _active_owner
     with _active_lock:
         if _active_mode == mode:
             _active_mode = None
             _active_owner = None
-            _active_spares_chart = False
-
-
-def acquire_bt(strategy, spares_chart=False):
-    """多策略并行回测的互斥入口：同策略串行（Worker.start 已拦），不同策略可并行；
-    与回测以外的模式（replay/live/data/analysis）仍全局互斥。"""
-    global _active_mode, _active_owner, _active_spares_chart
-    with _active_lock:
-        if _service_restarting:
-            return '服务重启中'
-        if _active_mode is not None and _active_mode != 'backtest':
-            return _active_mode
-        if _marks_lock.locked():
-            return "图表操作"
-        _bt_holders[strategy] = bool(spares_chart)
-        _active_mode = 'backtest'
-        _active_owner = None   # 多持有者无单一属主；图表锁走 spares_chart 聚合口径
-        _active_spares_chart = all(_bt_holders.values())
-        return True
-
-
-def release_bt(strategy):
-    """释放一个策略的回测持有；最后一个退出才清模式锁。"""
-    global _active_mode, _active_owner, _active_spares_chart
-    with _active_lock:
-        _bt_holders.pop(strategy, None)
-        if _active_mode == 'backtest' and not _bt_holders:
-            _active_mode = None
-            _active_owner = None
-            _active_spares_chart = False
-        else:
-            _active_spares_chart = all(_bt_holders.values())
 
 
 def active_mode():
@@ -671,8 +630,9 @@ class ModeWorker:
                                      strategy=self.strategy)
         if row is not None:
             self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
-            name = {"stopSr": "支阻位止损", "stopBe": "保本止损", "close": "全平"}.get(
-                tr.get("exitType"), tr.get("exitType"))
+            # 出场类型中文名（单一来源 bt_journal.EXIT_LABELS：缠论V1 三码 + fxma
+            # stop/takeProfit/activeTp/trailStop；未知名回退原文）
+            name = EXIT_LABELS.get(tr.get("exitType"), tr.get("exitType"))
             tag = f"[{symbol}] " if symbol and (self.cfg or {}).get("symbols") else ""
             self.log(f"{tag}出场：{name} {fmtT(tr.get('exitTime'))} "
                      f"@ {tr.get('exitPrice')}（盈亏 {tr.get('pnl', 0):.2f}）")
@@ -686,9 +646,9 @@ class ModeWorker:
             self.broadcaster.emit("signal", {"mode": self.MODE, "remove": row["id"]})
 
     # ---- 控制 ----
-    # 模式锁钩子：默认全局单锁；BacktestWorker 覆写为按策略的多持有者锁
+    # 模式锁钩子：默认全局单锁；BacktestWorker 覆写为无锁（纯后台任务）
     def _acquire_mode(self, cfg):
-        return acquire_active(self.MODE, spares_chart=self.spares_chart(cfg))
+        return acquire_active(self.MODE)
 
     def _release_mode(self):
         release_active(self.MODE)
@@ -758,13 +718,8 @@ class ModeWorker:
             dur = f"，耗时 {self.duration_sec}s" if self.duration_sec is not None else ""
             self.log(f"已结束（state={self.state}{dur}）")
 
-    def spares_chart(self, cfg):
-        """运行期间是否不占用 TradingView。回放/实时要驱动图表，默认占用。"""
-        return False
-
     def _run(self):
         raise NotImplementedError
-
     def status(self):
         return {"mode": self.MODE, "state": self.state,
                 "strategy": self.strategy,
@@ -785,16 +740,16 @@ class BacktestWorker(ModeWorker):
                          strategy=strategy or module_registry.DEFAULT_STRATEGY)
 
     def _acquire_mode(self, cfg):
-        return acquire_bt(self.strategy, spares_chart=self.spares_chart(cfg))
+        # 回测固定本地存储（2026-10-07）：纯后台任务只读 SQLite，不连 CDP 不占图表，
+        # 不注册模式锁——标记/定位/分析/回放/实时等均可与回测并行。仅服务重启期拒绝。
+        global _service_restarting
+        with _active_lock:
+            if _service_restarting:
+                return '服务重启中'
+        return True
 
     def _release_mode(self):
-        release_bt(self.strategy)
-
-    def spares_chart(self, cfg):
-        """本地存储/缓存回测只读库，不连 CDP，图表可同时点行定位。
-        实时取数要占图表拉 K 线，仍独占。口径与 _td_launch_compat 一致。"""
-        src = cfg.get("data_source") or ("cache" if cfg.get("use_cache") else "live")
-        return src in ("store", "cache")
+        pass
 
     @staticmethod
     def _sr_preset_kwargs(cfg, periods, log=None):
@@ -899,24 +854,14 @@ class BacktestWorker(ModeWorker):
         # 结束日期：在加载层截断（含当日全天），三源一致——fine 时间轴/高周期/支阻/未平仓
         # mark-to-market（_finish 按加载末根结算）全部随之止于结束日；旧 cfg 无此键 → None=到最新
         to_ts = int(cfg.get("to_ts") or 0) or None
-        # 数据源：store=本地SQLite存储（不连CDP，TV关闭可跑）；cache=bars_all_tf.json；live=CDP实时
-        src = cfg.get("data_source") or ("cache" if cfg.get("use_cache") else "live")
+        # 数据源固定本地存储（2026-10-07）：只读 SQLite，不连 CDP，TV 关闭可跑
         if lead_days > 0:
             self.log(f"预热提前 {lead_days} 天：数据起点 {fmtT(data_from_ts)}，交易起点 {fmtT(from_ts)}")
-        if src == "store":
-            self.log(f"取数：数据源=本地存储 symbol={cfg.get('symbol')} "
-                     f"periods={periods} from_ts={data_from_ts}"
-                     f"{' to_ts=' + str(to_ts) if to_ts else ''}")
-            bars = data_store.load_store(cfg.get("symbol"), periods=periods,
-                                         from_ts=data_from_ts, to_ts=to_ts)
-        else:
-            self.log(f"取数：数据源={'本地缓存' if src == 'cache' else 'CDP实时'} "
-                     f"symbol={cfg.get('symbol')} periods={periods} "
-                     f"use_cache={cfg.get('use_cache')}"
-                     f"{' to_ts=' + str(to_ts) if to_ts else ''}")
-            bars = load_bars(periods=periods, from_ts=data_from_ts, to_ts=to_ts,
-                             use_cache=cfg.get("use_cache", False),
-                             symbol=cfg.get("symbol"), log=self.log)
+        self.log(f"取数：数据源=本地存储 symbol={cfg.get('symbol')} "
+                 f"periods={periods} from_ts={data_from_ts}"
+                 f"{' to_ts=' + str(to_ts) if to_ts else ''}")
+        bars = data_store.load_store(cfg.get("symbol"), periods=periods,
+                                     from_ts=data_from_ts, to_ts=to_ts)
         for res in periods:
             n = len(bars.get(res, []) or [])
             if n:
@@ -977,19 +922,12 @@ class BacktestWorker(ModeWorker):
         data_from_ts = max(0, from_ts - lead_days * 86400)
         start_ts = from_ts if lead_days > 0 else None
         to_ts = int(cfg.get("to_ts") or 0) or None
-        src = cfg.get("data_source") or ("cache" if cfg.get("use_cache") else "live")
         if lead_days > 0:
             self.log(f"预热提前 {lead_days} 天：数据起点 {fmtT(data_from_ts)}，交易起点 {fmtT(from_ts)}")
-        self.log(f"取数：数据源={'本地存储' if src == 'store' else '本地缓存' if src == 'cache' else 'CDP实时'} "
-                 f"symbol={cfg.get('symbol')} periods={periods}"
+        self.log(f"取数：数据源=本地存储 symbol={cfg.get('symbol')} periods={periods}"
                  f"{' to_ts=' + str(to_ts) if to_ts else ''}")
-        if src == "store":
-            bars = data_store.load_store(cfg.get("symbol"), periods=periods,
-                                         from_ts=data_from_ts, to_ts=to_ts)
-        else:
-            bars = load_bars(periods=periods, from_ts=data_from_ts, to_ts=to_ts,
-                             use_cache=cfg.get("use_cache", False),
-                             symbol=cfg.get("symbol"), log=self.log)
+        bars = data_store.load_store(cfg.get("symbol"), periods=periods,
+                                     from_ts=data_from_ts, to_ts=to_ts)
         for res in periods:
             n = len(bars.get(res, []) or [])
             if n:
@@ -1014,8 +952,11 @@ class BacktestWorker(ModeWorker):
                  + (f"（{','.join(str(r) for r in engine.fib_near_levels)}"
                     f"±{engine.fib_near_pts}点）" if engine.fib_near_on else "")
                  + f"，上级同向{'开' if engine.upper_dir_on else '关'}"
-                 + f"，止损{engine.stop_pts}/止盈{engine.tp_pts}点，"
-                 f"互斥 {engine.mutex_scope}，最小周期 {engine.fine_res}）...")
+                 + (f"，止损{engine.stop_pts}/止盈{engine.tp_pts}点（固定点数）"
+                    if engine.tp_mode == "points" else
+                    f"，止损{engine.stop_pts}点，止盈=结构组合（半仓{engine.lots / 2:g}手"
+                    f"·同粗类不叠加·容差{engine.tp_near_pts:g}·提损滑点{engine.tp_trail_slip_pts:g}）")
+                 + f"，互斥 {engine.mutex_scope}，最小周期 {engine.fine_res}）...")
         result = engine.run(
             start_ts=start_ts,
             log=self.log,
@@ -1425,7 +1366,7 @@ class ControlApp:
             "live": LiveWorker(self.signals, self.broadcaster),
         }
         # 全量回测按策略分 Worker：不同策略可同时运行互不干扰（同策略串行）。
-        # workers["backtest"] 指默认策略 Worker，兼容旧调用方（bt_runs/_td_launch_compat）
+        # workers["backtest"] 指默认策略 Worker，兼容旧调用方（bt_runs）
         self.bt_workers = {sid: BacktestWorker(self.signals, self.broadcaster, strategy=sid)
                            for sid in module_registry.strategy_ids()}
         self.workers["backtest"] = self.bt_workers.get(
@@ -1437,8 +1378,7 @@ class ControlApp:
         # 全量回测典型案例存储（bt_errors 表，同 bars.db；右击「复制并加入典型案例」留档）
         self.bt_errors = bt_errors.BtErrorStore()
         self.sr_tune = sr_tune.TuneManager(store=tune_store, emit=self.broadcaster.emit)
-        self.td_launcher = td_launcher.TDLauncher(acquire_active, release_active,
-                                                  compat=self._td_launch_compat)
+        self.td_launcher = td_launcher.TDLauncher(acquire_active, release_active)
         self.analysis = analysis_service.AnalysisManager(
             self.broadcaster.emit, acquire_active, release_active, _marks_lock,
             self.normalize_sr_cfg, self.publish_analysis_sr)
@@ -1447,22 +1387,6 @@ class ControlApp:
         chan_core.apply_cfg(param_center.chan_cfg_effective())
         # EVAL评估：成笔用例快照 + 基线回归（data/eval/；画笔逻辑调整后跑基线比对）
         self.eval = eval_service.EvalManager()
-
-    def _td_launch_compat(self, owner):
-        """TD启动与当前互斥占用者能否并行：仅本地数据源（store=SQLite、cache=JSON，
-        多品种批量已被 normalize_cfg 强制 store，天然覆盖）回测不连CDP不碰TD；
-        live源/回放/实时/基础数据/图表操作仍互斥。数据源口径与 BacktestWorker._run
-        的 src 表达式保持一致；多策略并行时要求全部运行中的策略 Worker 均 store/cache。"""
-        if active_mode() != "backtest":
-            return False
-        for w in self.bt_workers.values():
-            if w.thread is None or not w.thread.is_alive():
-                continue    # 已结束/未启动的策略不参与判断
-            cfg = w.cfg or {}
-            src = cfg.get("data_source") or ("cache" if cfg.get("use_cache") else "live")
-            if src not in ("store", "cache"):
-                return False
-        return True
 
     def publish_analysis_sr(self, cfg, result, meta):
         with _sr_result_lock:
@@ -1681,15 +1605,16 @@ class ControlApp:
         if "use_cache" in out:
             v = out["use_cache"]
             out["use_cache"] = v in (True, "true", "True", "1", 1)
-        if out.get("data_source") not in ("live", "cache", "store"):
-            out["data_source"] = "live"
+        # 数据源固定本地存储（2026-10-07）：回测只读 SQLite（TV 关闭可跑），
+        # 旧方案/旧客户端传来的 live/cache 一律归一为 store（缺数据须先在基础数据页拉取）
+        out["data_source"] = "store"
         # 交易策略（模块注册表校验；空 = 默认策略 缠论V1，未知拒绝启动）。
         # 引擎当前唯一实现，入口层只校验不分发；第二策略到来时按注册表
         # STRATEGIES[engine] 在各 Worker 构建处分发。
         out["strategy"] = module_registry.normalize_strategy(out.get("strategy"))
         # 品种多选（回测批量并行，2026-09-23）：列表或逗号串 → 去重保序；
-        # 恰 1 个 → 折叠回单品种 symbol 走原路径（行为不变）；>1 个仅支持本地数据存储
-        # （cache 是单品种 JSON、live 共享 CDP 图表均不可并行）。replay/live 不发此键。
+        # 恰 1 个 → 折叠回单品种 symbol 走原路径（行为不变）；>1 个批量路径
+        # 每品种一个子进程。replay/live 不发此键。
         if "symbols" in out:
             raw = out.get("symbols")
             if isinstance(raw, str):
@@ -1699,8 +1624,6 @@ class ControlApp:
             if not syms:
                 raise ValueError("请至少选择一个品种")
             if len(syms) > 1:
-                if out.get("data_source") != "store":
-                    raise ValueError("多品种批量回测仅支持数据源=本地数据存储（store）")
                 out["symbols"] = syms
             else:
                 out["symbol"] = syms[0]
@@ -1800,8 +1723,13 @@ def _presets_save(presets):
 
 def _params_busy(app):
     """参数中心 chan 模块保存前的忙碌检查：三模式/支阻计算/分析轮次任一运行中即拒绝
-    （CHAN_CFG 全局变更会让运行中的单次计算混用两套参数）。"""
+    （CHAN_CFG 全局变更会让运行中的单次计算混用两套参数）。
+    回测虽不占模式锁（纯后台），但批量回测各子进程逐品种读参数中心，
+    中途改参会让同批混用两套参数——任一回测策略运行中同样拒绝。"""
     if active_mode() is not None:
+        return True
+    if any(w.thread is not None and w.thread.is_alive()
+           for w in app.bt_workers.values()):
         return True
     if _sr_busy_snapshot():
         return True

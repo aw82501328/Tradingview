@@ -70,11 +70,15 @@ class TestComputeSummary(unittest.TestCase):
         self.assertEqual(s["avg_loss"], 4.0)             # |-4|/1
         self.assertEqual(s["payoff_ratio"], 2.5)
         self.assertEqual(s["exits"], {"stopBe": 2, "stopSr": 1, "close": 1, "half": 1,
-                                      "stop": 0, "takeProfit": 0})
-        # 强分型均线V1 出场类型（stop/takeProfit）单独计数
+                                      "stop": 0, "takeProfit": 0,
+                                      "activeTp": 0, "trailStop": 0})
+        # 强分型均线V1 出场类型（stop/takeProfit/activeTp/trailStop）单独计数
         fx = compute_summary([row("已平仓", pnl=3.0, exitType="takeProfit"),
                               row("已平仓", pnl=-1.0, exitType="stop")])
         self.assertEqual((fx["exits"]["takeProfit"], fx["exits"]["stop"]), (1, 1))
+        fx2 = compute_summary([row("已平仓", pnl=2.0, exitType="activeTp"),
+                               row("已平仓", pnl=1.0, exitType="trailStop")])
+        self.assertEqual((fx2["exits"]["activeTp"], fx2["exits"]["trailStop"]), (1, 1))
         self.assertEqual(s["rows_total"], 8)
         # cnt_closed 按状态计数（含 pnl=None 的异常行，5），区别于盈亏口径 closed=4
         self.assertEqual((s["cnt_signal"], s["cnt_open"], s["cnt_closed"], s["cnt_filtered"]),
@@ -91,7 +95,8 @@ class TestComputeSummary(unittest.TestCase):
                              "avg_win": 0.0, "avg_loss": 0.0, "payoff_ratio": None,
                              "realized": 0.0, "floating": 0.0, "total": 0.0,
                              "exits": {"stopBe": 0, "stopSr": 0, "close": 0, "half": 0,
-                                       "stop": 0, "takeProfit": 0},
+                                       "stop": 0, "takeProfit": 0,
+                                       "activeTp": 0, "trailStop": 0},
                              "rows_total": 0, "cnt_signal": 0, "cnt_open": 0,
                              "cnt_closed": 0, "cnt_filtered": 0, "equity": []})
 

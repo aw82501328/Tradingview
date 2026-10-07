@@ -15,7 +15,7 @@
 const { describe, test } = require("node:test");
 const assert = require("node:assert/strict");
 const { maSeries, strongFxAfter, scanPeriodSignals, applyMutexAndSimulate,
-        parseFibLevels, MODULE_OPTS } =
+        collectBiEnds, parseFibLevels, MODULE_OPTS } =
   require("./fxma_entry.js");
 
 const bar = (time, open, high, low, close) => ({ time, open, high, low, close });
@@ -194,6 +194,138 @@ describe("scanPeriodSignals + applyMutexAndSimulate", () => {
   });
 });
 
+describe("applyMutexAndSimulate · structure 组合模式（opts 注入）", () => {
+  const SEC = 180;
+  const mkBars = (closes) => {
+    const out = [];
+    let prev = closes[0];
+    for (let i = 0; i < closes.length; i++) {
+      const o = i ? prev : closes[0] - 1;
+      const c = closes[i];
+      const hi = c > o ? c + 0.2 : o + 0.2;
+      const lo = c < o ? c - 0.4 : (c > o ? o : o - 0.2);
+      out.push({ time: i * SEC, open: o, high: hi, low: lo, close: c });
+      prev = c;
+    }
+    return out;
+  };
+  const sig = (over = {}) => ({ periodX: "3", direction: "long", strategyKey: "fx2Buy",
+    pointType: "2买", pointTime: SEC, pointPrice: 100,
+    signalTime: 180, signalPrice: 100, entryIdx: 1, ...over });
+
+  test("1/2类：主动止盈半份部分平仓 + 剩余走 3买提损跟踪（trailStop）", () => {
+    // 进场@100（bars[1].open=100）：前高笔端点 130 → tpRef=130 平 1 手（半仓2的半份）；
+    // 3买@125（bars[4] 触及后 bars[5] 起生效）→ 止损上移 124；bars[6] low ≤124 → trailStop
+    const closes = [100, 101, 102, 130, 131, 128, 115, 104];
+    const bars = mkBars(closes);
+    const ends = [{ time: 0, price: 130, side: "high" }];
+    const pts = [
+      { type: "3买", time: bars[4].time, price: 125, side: "buy" },
+    ];
+    const done = applyMutexAndSimulate([sig()], { "3": bars }, 1.0,
+      { tpMode: "structure", lots: 4, tpNearPts: 0, tpTrailSlipPts: 1,
+        ptsByP: { "3": pts }, biEndsByP: { "3": ends } });
+    const t = done[0];
+    assert.equal(t.lots, 2);                       // 半仓
+    assert.equal(t.tpLots, 1);                     // 1/4 仓主动止盈
+    assert.equal(t.tpTarget.type, "前高");         // 目标=笔端点（非买卖点）
+    assert.equal(t.exits[0].type, "activeTp");     // bars[3] high 130.2 ≥ 130 → @130 平1手
+    assert.equal(Math.abs(t.exits[0].price - 130), 0);  // （tpRef 一次性已清空，验事件价）
+    assert.equal(t.exits[0].lots, 1);
+    assert.equal(t.lotsLeft, 1);
+    assert.ok(t.trailRaised);                      // 3买提损 → 止损 90→124
+    assert.equal(Math.abs(t.stopRef - 124), 0);
+    assert.equal(t.exitType, "trailStop");
+    assert.equal(Math.abs(t.exitPrice - 124), 0);
+    assert.equal(Math.abs(t.pnl - ((130 - 100) * 1 + (124 - 100) * 1)) < 1e-9, true);
+  });
+
+  test("3类：触及目标全平（activeTp 终局），不提损", () => {
+    const closes = [100, 101, 102, 130, 131, 128];
+    const bars = mkBars(closes);
+    const ends = [{ time: 0, price: 130, side: "high" }];
+    const pts = [
+      { type: "4买", time: bars[4].time, price: 125, side: "buy" },
+    ];
+    const done = applyMutexAndSimulate([sig({ pointType: "3买", strategyKey: "fx3Buy" })],
+      { "3": bars }, 1.0,
+      { tpMode: "structure", lots: 4, tpNearPts: 0, tpTrailSlipPts: 1,
+        ptsByP: { "3": pts }, biEndsByP: { "3": ends } });
+    const t = done[0];
+    assert.equal(t.tpLots, 2);                     // 3类=整笔全平
+    assert.equal(t.exitType, "activeTp");
+    assert.equal(Math.abs(t.pnl - (130 - 100) * 2), 0);
+    assert.equal(t.trailRaised, false);            // 3类不提损
+  });
+
+  test("目标取笔端点而非反向买卖点：前卖点 125 在场仍取前高 130", () => {
+    // trade#11 案例口径：卖点识别滞后，前高笔端点先可用 → 目标必须是笔端点价
+    const closes = [100, 101, 102, 130, 131, 128];
+    const bars = mkBars(closes);
+    const pts = [{ type: "1卖", time: 0, price: 125, side: "sell" }];
+    const ends = [{ time: 0, price: 130, side: "high" }];
+    const done = applyMutexAndSimulate([sig()], { "3": bars }, 1.0,
+      { tpMode: "structure", lots: 4, tpNearPts: 0,
+        ptsByP: { "3": pts }, biEndsByP: { "3": ends } });
+    const t = done[0];
+    // tpRef 触发后一次性清空 → 验 tpTarget 与事件价（非卖点 125）
+    assert.deepEqual(t.tpTarget, { type: "前高", time: 0, price: 130 });
+    assert.equal(t.exits[0].type, "activeTp");
+    assert.equal(Math.abs(t.exits[0].price - 130), 0);
+  });
+
+  test("容量制：同向两笔半仓可叠（不同粗类）、第三笔容量压制（lots=4 容量）", () => {
+    const closes = [100, 101, 102, 103, 104, 105];
+    const bars = mkBars(closes);
+    const s2 = sig({ pointType: "3买", strategyKey: "fx3Buy",
+                     signalTime: 360, entryIdx: 2 });
+    const s3 = sig({ pointType: "1买", strategyKey: "fx1Buy",
+                     signalTime: 540, entryIdx: 3 });
+    const done = applyMutexAndSimulate([sig(), s2, s3], { "3": bars }, 1.0,
+      { tpMode: "structure", lots: 4, ptsByP: { "3": [] } });
+    const filled = done.filter(x => !x.suppressed);
+    assert.equal(filled.length, 2);                // 2类+3类 两笔半仓=容量满
+    assert.equal(done.filter(x => x.suppressed).length, 1);  // 1类被容量压制
+    assert.ok(filled.every(x => x.lots === 2));
+    assert.ok(filled.every(x => x.state === "open"));  // 未触发 → 仍持仓（各占容量）
+  });
+
+  test("同粗类闸门：同类持仓中压制、不同粗类可叠", () => {
+    const closes = [100, 101, 102, 103, 104, 105];
+    const bars = mkBars(closes);
+    // 1类 @180 成交；2类 @360 不同粗类成交；1类 @540 同类压制；
+    // 类2买 @720 = 粗类2（第二笔是 2买）同类压制
+    const s1 = sig({ pointType: "1买", strategyKey: "fx1Buy" });
+    const s2 = sig({ pointType: "2买", signalTime: 360, entryIdx: 2 });
+    const s3 = sig({ pointType: "1买", strategyKey: "fx1Buy",
+                     signalTime: 540, entryIdx: 3 });
+    const s4 = sig({ pointType: "类2买", strategyKey: "fx2xBuy",
+                     signalTime: 720, entryIdx: 4 });
+    const done = applyMutexAndSimulate([s1, s2, s3, s4], { "3": bars }, 1.0,
+      { tpMode: "structure", lots: 4, ptsByP: { "3": [] } });
+    assert.equal(done[0].suppressed, undefined);   // 1类成交
+    assert.equal(done[1].suppressed, undefined);   // 2类不同粗类成交
+    assert.equal(done[2].suppressed, true);        // 1类同类压制
+    assert.equal(done[3].suppressed, true);        // 类2买=粗类2 同类压制
+  });
+});
+
+describe("collectBiEnds · 已确认笔端点流", () => {
+  test("上笔终点=前高/下笔终点=前低，升序，_forming 跳过", () => {
+    const bis = [
+      { type: "up", startTime: 100, startPrice: 90, endTime: 200, endPrice: 130 },
+      { type: "down", startTime: 200, startPrice: 130, endTime: 300, endPrice: 110 },
+      { type: "up", startTime: 300, startPrice: 110, endTime: 400,
+        endPrice: 140, _forming: true },
+    ];
+    assert.deepEqual(collectBiEnds("3", { "3": bis }), [
+      { time: 200, price: 130, side: "high" },
+      { time: 300, price: 110, side: "low" },
+    ]);
+    assert.deepEqual(collectBiEnds("3", {}), []);   // 无笔 → 空
+  });
+});
+
 describe("parseFibLevels", () => {
   test("解析/去重/非法档位", () => {
     assert.deepEqual(parseFibLevels("0.382,0.5,0.618"), [0.382, 0.5, 0.618]);
@@ -269,6 +401,21 @@ describe("scanPeriodSignals · 黄金分割附近/上级同向（opts 注入，�
     assert.equal(s2[0].upperDir, "down");
     assert.equal(scanPeriodSignals("3", bars, noneBis, "15", on).length, 0);  // 上级无笔全拦
     assert.equal(scanPeriodSignals("3", bars, noneBis, "15").length, 1);      // 默认关：放行
+  });
+
+  test("类别拆分：类2买→2x（fx2xBuy）与严格 2 分开选（与 py 侧同构）", () => {
+    // mkBis(85) 最新买点=类2买@ptTime（探查实证）；单点 fixture=2买@ptTime
+    const only2 = { ...MODULE_OPTS, pointClasses: new Set(["2"]) };
+    const only2x = { ...MODULE_OPTS, pointClasses: new Set(["2x"]) };
+    assert.equal(scanPeriodSignals("3", bars, mkBis(85), "15", only2).length, 0);      // 类2买被拦
+    const s = scanPeriodSignals("3", bars, mkBis(85), "15", only2x);
+    assert.equal(s.length, 1);
+    assert.equal(s[0].strategyKey, "fx2xBuy");
+    assert.equal(s[0].pointType, "类2买");
+    assert.equal(scanPeriodSignals("3", bars, periodBisSingle(), "15", only2x).length, 0);  // 2买被拦
+    const d = scanPeriodSignals("3", bars, mkBis(85), "15");                          // 默认全选放行
+    assert.equal(d.length, 1);
+    assert.equal(d[0].strategyKey, "fx2xBuy");
   });
 
   // 原始单点 fixture（与首组相同的 5 笔结构：单 2买@ptTime，无更早同侧点）

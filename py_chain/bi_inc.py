@@ -73,6 +73,11 @@ class BiIncBuilder:
         每周期开关的近等双顶/双底、上级笔端点区间套锁定）。
         lockedPivots 变化 → 全量重建（上级端点集变动会重标历史分型的锁定位）；
         不变时增量路径只对本次新折叠的 seq 元素补锁标记（与 buildBi 标记同口径）。
+
+        锁变化全量重建的必要性（2026-10-07 实证，勿再尝试局部化）：增量栈相对
+        batch 存在中段漂移（近等后移的腿终局守卫读后继分型、无有界回看窗，
+        冻结元素的 batch 真值可随后续数据翻转），全量重建每拍把栈拉回 batch 真值；
+        局部回退会继承漂移栈 → 输出与全量路径分叉（XAUUSD 07-03 实测 3卖→类2卖）。
         """
         nearDouble = bool(nearDouble)
         lock_key = tuple((lp["dir"], lp["price"]) for lp in (lockedPivots or ()))

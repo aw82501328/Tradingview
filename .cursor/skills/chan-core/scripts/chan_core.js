@@ -1061,12 +1061,15 @@ function fixBiExtremes(bis, merged) {
  *   中枢上沿 ZG = min(三笔高点)，中枢下沿 ZD = max(三笔低点)，ZG > ZD 时成立。
  * 中枢形成后支持延伸：后续笔与 [ZD, ZG] 有重叠则纳入中枢（GG/DD 扩展），
  * 出现离开中枢的笔时中枢结束：
- *   - 笔与中枢区间完全无重叠 → 离开；
- *   - 笔的起点在中枢区间内、终点突破中枢边界，且下一笔没有回到已纳入笔的重叠区 → 离开。
- *     下一笔重新相交则本笔只是回抽，中枢继续延伸（二卖与后面类2卖的公共重叠留在同一中枢）。
+ *   - 终点突破中枢边界即离开，起点不论（2026-10-07 起；含从中枢下方直破上沿的
+ *     穿越式离开。此前要求起点在中枢内，穿越式离开被误当延伸）；
+ *   - 笔与中枢区间完全无重叠 → 离开。
+ *     下一笔重新与已纳入笔重叠区相交则本笔只是回抽，中枢继续延伸（二卖与后面
+ *     类2卖的公共重叠留在同一中枢）。
  * biCount 包含离开笔。
  * 中枢区间 [zd, zg] 取「构成中枢的全部笔（含离开笔）的重叠部分」：
  *   ZG = min(全部笔高点)，ZD = max(全部笔低点)。
+ *   离开/回踩笔与构成笔无重叠（重叠被挤空）时，回退为不含离开笔的重叠（2026-10-07 起）。
  * 中枢水平边缘（用户规则：[进入笔最后一根K-5, 离开笔第一根K+5]）：
  *   - 左边缘 = 进入笔（三笔重叠形成中枢的第一笔 bis[i]）的终点 - 5×barSec
  *   - 右边缘 = 离开笔（bis[j]，识别出 exitTime 的笔）的起点 + 5×barSec
@@ -1117,14 +1120,13 @@ function buildZS(bis, barSec) {
         const bj = bis[j];
         const Hj = hi(bj), Lj = lo(bj);
         if (Lj <= zg && Hj >= zd) { // 与中枢区间有重叠 → 判断延伸还是离开
-          // 离开判定：起点在中枢内且终点突破边界。若下一笔回到已纳入笔的重叠区，
-          // 本笔只是回抽，继续延伸；否则中枢在本笔起点结束。
-          // 起点在中枢外的穿越笔仍算延伸。
-          const startIn = bj.startPrice >= zd - eps && bj.startPrice <= zg + eps;
+          // 离开判定：终点突破中枢边界即离开，起点不论（2026-10-07 起；此前还要求
+          // 起点在中枢内——从中枢下方直破上沿的「穿越式离开」会被误当延伸，其后悬在
+          // 中枢外的干净回踩笔（标准 3买 形态）反被记成离开笔并挤空重叠、整枢被丢弃）。
           const endBreak = bj.endPrice < zd - eps || bj.endPrice > zg + eps;
           // 下一笔又回到当前重叠区（回抽未离开）则本笔仍算延伸，
           // 使二卖与其后类2卖的公共重叠留在同一个中枢里。
-          if (startIn && endBreak && !nextBiReturns(bis, i, j, hi, lo)) {
+          if (endBreak && !nextBiReturns(bis, i, j, hi, lo)) {
             exitTime = bj.startTime; // 离开笔起点
             break;
           }
@@ -1144,11 +1146,22 @@ function buildZS(bis, barSec) {
       //   ZG = min(全部笔高点)，ZD = max(全部笔低点)。
       // 中枢上沿收敛到全部构成笔（含回抽后仍重叠的类2卖笔、以及最终离开笔）的最低高点。
       // 1小时 8-25 起：二卖 4670.83、类2卖 4643.21、类2卖 4631.98 的公共重叠上沿 = 4631.98。
+      // 离开/回踩笔与已纳入笔完全无重叠（悬在中枢外）时会把重叠挤空——回退为不含
+      // 离开笔的构成笔重叠（2026-10-07 起；此前整枢被防御性丢弃，标准 3买 的低中枢
+      // 因此消失、其后高点被误标类2买）。
       let zsZd = -Infinity, zsZg = Infinity;
       for (let k = i; k < i + biCount; k++) {
         const bk = bis[k];
         zsZd = Math.max(zsZd, lo(bk));
         zsZg = Math.min(zsZg, hi(bk));
+      }
+      if (zsZg <= zsZd && exitTime !== null) {
+        zsZd = -Infinity; zsZg = Infinity;
+        for (let k = i; k < j; k++) {
+          const bk = bis[k];
+          zsZd = Math.max(zsZd, lo(bk));
+          zsZg = Math.min(zsZg, hi(bk));
+        }
       }
       // 全部笔重叠后仍可能 zg <= zd（如笔数过多、覆盖区间收窄为空），防御性跳过
       if (zsZg <= zsZd) { i = j; continue; }

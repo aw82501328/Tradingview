@@ -445,7 +445,7 @@ class AnalysisManager:
             # 强分型均线V1：策略参数全部来自参数中心 fxma 品种桶（工作台无策略专属数字）
             fx = pm["fxma"]
             command.append("--entry-res=" + str(fx.get("entryRes", "3,15,60")))
-            command.append("--point-classes=" + str(fx.get("pointClasses", "1,2,3")))
+            command.append("--point-classes=" + str(fx.get("pointClasses", "1,2,2x,3,3x")))
             # 条件开关：True→1 / False→0（JS 侧 "0" 为关，缺省开）
             command.append("--ma-on=" + ("1" if fx.get("maOn", True) else "0"))
             command.append("--ma-type=" + str(fx.get("maType", "SMA")))
@@ -468,6 +468,9 @@ class AnalysisManager:
             command.append("--point-valid-pts=" + str(fx.get("pointValidPts", 0)))
             command.append("--stop-pts=" + str(fx.get("stopPts", 10.0)))
             command.append("--tp-pts=" + str(fx.get("tpPts", 30.0)))
+            command.append("--tp-mode=" + str(fx.get("tpMode", "points")))
+            command.append("--tp-near-pts=" + str(fx.get("tpNearPts", 0.0)))
+            command.append("--tp-trail-slip-pts=" + str(fx.get("tpTrailSlipPts", 1.0)))
             command.append("--same-bar-priority=" + str(fx.get("sameBarPriority", "stop")))
             command.append("--mutex-scope=" + str(fx.get("mutexScope", "global")))
             command.append("--lots=" + str(fx.get("lots", 4)))

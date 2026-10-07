@@ -67,6 +67,14 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 /* 滑点行内嵌 ATR 系数小输入框（无独立参数行） */
 .prow .slip-k{display:flex;align-items:center;gap:4px;color:var(--muted);font-size:11.5px;white-space:nowrap;flex-shrink:0}
 .prow .slip-k input{width:64px;text-align:right}
+/* fxma 止盈三卡：圆点单选（points=固定点数 / structure=组合模式，两张新卡共用） */
+.prow .tp-dot{width:15px;height:15px;border-radius:50%;border:2px solid #6b7a90;display:inline-block;
+  flex:none;cursor:pointer;align-self:center;background:transparent}
+.prow .tp-dot:hover{border-color:var(--accent)}
+.prow .tp-dot.on{border-color:var(--accent);background:var(--accent);box-shadow:inset 0 0 0 3px var(--card)}
+.prow.tp-card.sel{border-color:#2f5e9e}
+.prow.tp-card .tp-tag{display:inline-block;font-size:10px;color:#8fb3e8;border:1px solid #2f5e9e;
+  border-radius:8px;padding:0 6px;margin-left:6px;vertical-align:1px}
 .pfoot{display:flex;gap:10px;align-items:center;margin:14px 0 0;flex-wrap:wrap}
 .pfoot .state{color:var(--muted);font-size:11px}
 .pnote{color:var(--muted);font-size:12px;margin-top:10px;max-width:1180px}
@@ -459,11 +467,12 @@ function switchTab(name) {
 const CHOICE_LABELS = { trendRes: { '': '关闭', '240': '4小时', 'D': '日线' },
                         rangeRes: { '240': '4小时', 'D': '日线' },
                         entryRes: { '30S': '30秒(仅回测)', '3': '3分钟', '15': '15分钟', '60': '1小时' },
-                        pointClasses: { '1': '一类买卖点', '2': '二类买卖点', '3': '三类买卖点' },
+                        pointClasses: { '1': '一类买卖点', '2': '二类买卖点', '2x': '类二买卖点', '3': '三类买卖点', '3x': '类三买卖点' },
                         maType: { 'SMA': '简单均线SMA', 'EMA': '指数均线EMA' },
                         fibLevels: { '0.236': '回撤23.6%', '0.382': '回撤38.2%', '0.5': '回撤50%', '0.618': '回撤61.8%', '0.786': '回撤78.6%' },
                         sameBarPriority: { 'stop': '止损优先(保守)', 'tp': '止盈优先' },
-                        mutexScope: { 'global': '全局同向一笔(同缠论V1)', 'perPeriod': '每周期独立互斥' } };
+                        mutexScope: { 'global': '全局同向一笔(同缠论V1)', 'perPeriod': '每周期独立互斥' },
+                        tpMode: { 'points': '固定点数', 'structure': '结构组合(半仓+主动止盈+跟踪止损)' } };
 const choiceLabel = (key, v) => (CHOICE_LABELS[key] && CHOICE_LABELS[key][v]) || v;
 
 // 三滑点的 ATR 系数键（entry 模块）：系数不独立成行，内嵌进各自滑点行（2026-09-19）
@@ -741,6 +750,43 @@ function fxmaValidRowHtml(m) {
     </span></div>`;
 }
 
+// fxma 止盈三卡（单选：points=固定点数 / structure=组合模式——主动止盈+结构跟踪
+// 止损两卡共用同一选项）。圆点为样式化 span（点击写隐藏 tpMode 输入），collect
+// 按隐藏输入收集；未选中的卡内输入变灰但数值仍随表单保存（同 FXMA_DIM_GROUPS）。
+function fxmaTpRowsHtml(m) {
+  const tp = m.schema.tpPts, near = m.schema.tpNearPts, slip = m.schema.tpTrailSlipPts;
+  const mode = m.effective.tpMode;
+  const modeMod = m.overrides.tpMode !== undefined;
+  const dot = v => `<span class="tp-dot${mode === v ? ' on' : ''}" data-tpmode="${v}" role="radio"
+    aria-checked="${mode === v}" title="选为止盈方式"></span>`;
+  const num = (k, label, aria) => {
+    const s = m.schema[k];
+    return `<span class="zs-keep">${label}
+      <input type="number" step="any" min="${s.min}" max="${s.max}" data-k="${k}" value="${m.effective[k]}" aria-label="${aria}">
+    </span>`;
+  };
+  return `
+  <div class="prow tp-card${mode === 'points' ? ' sel' : ''}${(modeMod || m.overrides.tpPts !== undefined) ? ' mod' : ''}" title="${tp.desc}">
+    ${dot('points')}
+    <span class="pname"><span class="plabel">止盈点数<span class="tp-tag">固定点数</span><span class="badge">已修改</span></span>
+    <span class="pdef">默认 ${tp.default} 点 · 满仓一笔，盘中触价全平（旧行为）</span></span>
+    <span class="zs-side">${num('tpPts', '点数', '止盈点数')}</span>
+  </div>
+  <div class="prow tp-card${mode === 'structure' ? ' sel' : ''}${(modeMod || m.overrides.tpNearPts !== undefined) ? ' mod' : ''}" title="${near.desc}">
+    ${dot('structure')}
+    <span class="pname"><span class="plabel">主动止盈<span class="tp-tag">组合模式</span><span class="badge">已修改</span></span>
+    <span class="pdef">半仓开仓可叠两笔（同一粗类 1/2/3 不叠加、该类平仓后可再开）· 1/2类入场一半（1/4仓）到前高/前低主动止盈，3类入场全平；目标=入场前最近已确认笔端点（不要求已识别为买卖点；亏损侧不设）</span></span>
+    <span class="zs-side">${num('tpNearPts', '容差(点)', '到点容差')}</span>
+  </div>
+  <div class="prow tp-card${mode === 'structure' ? ' sel' : ''}${(modeMod || m.overrides.tpTrailSlipPts !== undefined) ? ' mod' : ''}" title="${slip.desc}">
+    ${dot('structure')}
+    <span class="pname"><span class="plabel">结构跟踪止损<span class="tp-tag">组合模式</span><span class="badge">已修改</span></span>
+    <span class="pdef">默认 ${slip.default} 点 · 1/2类入场另一半（1/4仓）走跟踪止损：3/类3/4/类4同向点出现止损只上移，触发平剩余全部</span></span>
+    <span class="zs-side">${num('tpTrailSlipPts', '滑点(点)', '提损滑点')}</span>
+  </div>
+  <input type="hidden" data-k="tpMode" value="${mode}">`;
+}
+
 // fxma 主页签：点有效期双输入并一张卡，其余键按 schema 键序平铺（排除「位置与方向」页签键）
 function fxmaRowsHtml(m) {
   let html = '';
@@ -749,6 +795,9 @@ function fxmaRowsHtml(m) {
     if (FXMA_POS_KEYS.includes(key)) continue;
     if (key === 'pointValidBars') { html += fxmaValidRowHtml(m); continue; }
     if (key === 'pointValidPts') continue;  // 已并入「点有效期」卡
+    if (key === 'tpPts') { html += fxmaTpRowsHtml(m); continue; }   // 止盈三卡（含新参数）
+    if (key === 'tpMode' || key === 'tpNearPts' || key === 'tpTrailSlipPts')
+      continue;  // 已并入止盈三卡
     html += paramRow(m, key);
   }
   return html;
@@ -787,7 +836,7 @@ function renderModule(name) {
     zs: '画中枢按当前品种：各周期是否绘制、以及每周期只保留最近几个中枢。',
     entry: '标记进出场按当前品种：近支阻、手数、滑点、出场判定、进场扩展与闸门。进场扩展写入该品种 CHAN_CFG。「当下制够笔K线数」仅回测/监控引擎。有效滑点 = 固定值 + ATR系数×ATR(14)。手数口径：1手=0.01标准手。有任务运行中时会拒绝保存。',
     plan: '交易计划按当前品种：震荡阈值与顺势参考周期在工作台/回测读取；「方向相位判定」等见下方图解。',
-    fxma: '强分型均线V1按当前品种：进出场周期/买卖点类别/强分型/均线分离/收盘站线与止盈止损、互斥。点有效期=根数+价距双约束（同卡配置）。黄金分割附近与上级周期同向两条件在「位置与方向」页签。',
+    fxma: '强分型均线V1按当前品种：进出场周期/买卖点类别/强分型/均线分离/收盘站线与止盈止损、互斥。止盈方式三卡单选：固定点数（满仓一笔触价全平）/ 结构组合（每笔半仓、同向容量最多两笔且同一粗类 1/2/3 持仓期间不叠加、该类平仓后可再开——1/2类一半到前一点位主动止盈+另一半走3/4类点提损跟踪，3类只主动止盈；容差与提损滑点见两张组合卡）。点有效期=根数+价距双约束（同卡配置）。黄金分割附近与上级周期同向两条件在「位置与方向」页签。',
     fxmaPos: '位置与方向按当前品种（属强分型均线V1）：黄金分割附近（仅2/3类点，参照前一同侧买卖点摆动段）与上级周期同向（30秒→3分钟→15分钟→1小时→4小时当前笔）两个进场条件，均默认关；开关关闭时子参数变灰（数值仍随表单保存，只是不参与信号判定）。',
   }[name] || '';
   const rules = MODULE_RULES[name];
@@ -885,6 +934,41 @@ function applyFxmaDim() {
       if (row) row.classList.toggle('dim', !enabled);
     }
   }
+  applyTpModeDim();
+}
+
+// fxma 止盈方式三卡：未选中的卡内输入变灰（数值仍随表单保存，只是不参与判定）
+// points→容差/滑点灰；structure→tpPts 灰（容差为 3类全平共用，保持可编辑）
+function applyTpModeDim() {
+  const holder = document.querySelector('#pgrid input[data-k="tpMode"]');
+  if (!holder) return;
+  const mode = holder.value;
+  const dimKeys = mode === 'structure' ? ['tpPts'] : ['tpNearPts', 'tpTrailSlipPts'];
+  for (const key of ['tpPts', 'tpNearPts', 'tpTrailSlipPts']) {
+    const inp = document.querySelector(`#pgrid [data-k="${key}"]`);
+    if (!inp) continue;
+    const dim = dimKeys.includes(key);
+    inp.disabled = dim;
+    const row = inp.closest('.prow');
+    if (row) row.classList.toggle('dim', dim);
+  }
+}
+
+// 止盈三卡圆点点击：切 tpMode（写隐藏输入+圆点/卡片高亮+变灰），不整页重渲染
+// （保留其他卡片未保存的编辑）
+function setTpMode(mode) {
+  const holder = document.querySelector('#pgrid input[data-k="tpMode"]');
+  if (!holder || !['points', 'structure'].includes(mode)) return;
+  holder.value = mode;
+  document.querySelectorAll('#pgrid .tp-dot').forEach(d => {
+    const on = d.dataset.tpmode === mode;
+    d.classList.toggle('on', on);
+    d.setAttribute('aria-checked', on);
+  });
+  document.querySelectorAll('#pgrid .tp-card').forEach(c => {
+    c.classList.toggle('sel', c.querySelector('.tp-dot')?.classList.contains('on'));
+  });
+  applyTpModeDim();
 }
 
 function collect(name) {
@@ -941,6 +1025,8 @@ async function reset(name) {
 }
 
 document.addEventListener('click', e => {
+  const dot = e.target.closest('.tp-dot');
+  if (dot) { setTpMode(dot.dataset.tpmode); return; }
   const b = e.target.closest('button');
   if (!b) return;
   if (b.dataset.tab) switchTab(b.dataset.tab);

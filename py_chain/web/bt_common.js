@@ -43,7 +43,8 @@ function candidateBadges(r) {
 //          | stopBe=保本止损（beStop=进场K线极值±保本滑点）| close=全平（顺势=有利方向破前高/低；
 //          逆势=形成段≥5合并K）；exits 含 half=平一半（顺势形成段≥5合并K）/breakeven=保本
 //          强分型均线V1（fxma）：stop=固定点数止损 | takeProfit=固定点数止盈（盘中触价即
-//          按触发价成交，与实盘 MT5 SL/TP 同口径；名称同后端 EXIT_NAMES / bt_journal.EXIT_LABELS）
+//          按触发价成交，与实盘 MT5 SL/TP 同口径）；structure 模式：activeTp=主动止盈 |
+//          trailStop=跟踪止损（提损后触发）（名称同后端 EXIT_NAMES / bt_journal.EXIT_LABELS）
 function exitTypeName(t) {
   if (t === 'half') return '半平';
   if (t === 'stopSr') return '支阻位止损';
@@ -51,32 +52,52 @@ function exitTypeName(t) {
   if (t === 'close') return '全平';
   if (t === 'stop') return '固定止损';
   if (t === 'takeProfit') return '固定止盈';
+  if (t === 'activeTp') return '主动止盈';
+  if (t === 'trailStop') return '跟踪止损';
   return t || '-';
 }
 function exitEventsDesc(r) {
   const names = { breakeven: '保本', half: '半', close: '平', stopSr: '损', stopBe: '保损',
-                  stop: '固损', takeProfit: '固盈' };
+                  stop: '固损', takeProfit: '固盈', activeTp: '主盈', trailStop: '跟损' };
   return (r.exits || []).map(e => names[e.type] || e.type).join('·') || '';
 }
 // 分批出场只拆分展示，仍按整笔交易计数、汇总和排序。
+// 缠论V1：首次 half 平掉原持仓一半；fxma structure：exits 带 lots 键的主动止盈
+// 事件按各自手数拆行（末位与终局 exitType 对应的 lots 事件是终局平仓，不重复拆）。
 function exitDisplayRows(r) {
   const numeric = value => value != null && Number.isFinite(Number(value)) ? Number(value) : null;
   const totalPnl = numeric(r.pnl), lots = numeric(r.lots);
   const mult = numeric(r.mult) ?? 1;   // 合约乘数快照（2026-09-23：1手=0.01标准手；旧行无此键 → 1）
   const final = {time:r.exitTime,price:r.exitPrice,type:r.exitType,
     label:r.exitType ? exitTypeName(r.exitType) : (r.state === 'open' ? '持仓中' : '-'),lots,pnl:totalPnl};
-  // 现有结算按首次 half 平掉原持仓一半；breakeven 仅移动止损，不是出场。
-  const half = (r.exits || []).find(e=>e.type === 'half');
-  if (!half) return [final];
-  const halfLots = lots == null ? null : lots / 2;
-  const entry = numeric(r.entryPrice), price = numeric(half.price);
+  const evs = r.exits || [];
+  const entry = numeric(r.entryPrice);
   const direction = r.direction === 'long' ? 1 : r.direction === 'short' ? -1 : null;
-  const halfPnl = entry == null || price == null || halfLots == null || direction == null
-    ? null : (price - entry) * direction * halfLots * mult;
-  final.lots = halfLots;
-  final.pnl = totalPnl == null || halfPnl == null ? null : totalPnl - halfPnl;
+  const partPnl = e => {
+    const p = numeric(e.price), l = numeric(e.lots);
+    return entry == null || p == null || l == null || direction == null
+      ? null : (p - entry) * direction * l * mult;
+  };
+  const half = evs.find(e => e.type === 'half');
+  if (half) {
+    const halfLots = lots == null ? null : lots / 2;
+    const halfPnl = partPnl({...half, lots: halfLots});
+    final.lots = halfLots;
+    final.pnl = totalPnl == null || halfPnl == null ? null : totalPnl - halfPnl;
+    if (!r.exitType) final.label = '剩余持仓';
+    return [{time:half.time,price:half.price,type:'half',label:'半平',lots:halfLots,pnl:halfPnl},final];
+  }
+  const isFinalEv = (e, i) => i === evs.length - 1 && r.exitType && e.type === r.exitType;
+  const parts = evs.filter((e, i) => e.lots && !isFinalEv(e, i));
+  if (!parts.length) return [final];
+  const rows = parts.map(e => ({time:e.time, price:e.price, type:e.type,
+    label:exitTypeName(e.type), lots:numeric(e.lots), pnl:partPnl(e)}));
+  const partsLots = parts.reduce((s, e) => s + (numeric(e.lots) || 0), 0);
+  const sumParts = rows.reduce((s, x) => s + (x.pnl || 0), 0);
+  final.lots = lots == null ? null : Math.max(0, lots - partsLots);
+  final.pnl = totalPnl == null ? null : totalPnl - sumParts;
   if (!r.exitType) final.label = '剩余持仓';
-  return [{time:half.time,price:half.price,type:'half',label:'半平',lots:halfLots,pnl:halfPnl},final];
+  return rows.concat([final]);
 }
 
 // 资金曲线点列：与后端 compute_equity 同口径——从 0 起步，按出场事件（含半平拆分）

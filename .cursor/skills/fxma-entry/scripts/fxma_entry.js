@@ -22,10 +22,19 @@
 //     ⑦ pointValidBars 根内齐备 + pointValidPts 盘中价距点极值上限（买=评估根最高价
 //        −买点最低价、卖=卖点最高价−评估根最低价；超距只等待不作废）→ 触发（每点一次）
 //        → 下一根 P 周期K线开盘成交（各条件开关全关=点属所选类别且未失效当拍即触发）
-//   出场：K线盘中价触及 止损(进场∓stopPts)/止盈(进场±tpPts) → 即时按该触发价成交
+//   出场：K线盘中价触及 止损(进场∓stopPts)/止盈 → 即时按该触发价成交
 //        （与实盘 MT5 SL/TP 同口径，不等收盘确认、不等下一根开盘；进场那根收盘后即判）；
 //        同根双触按 sameBarPriority（默认止损优先）；期末未触发 mark-to-market。
-//   互斥：mutexScope=global 同向全局一笔 / perPeriod 每周期独立。
+//        止盈方式 tpMode 两选一（--tp-mode=）：
+//        - points（默认）：止盈=进场±tpPts，触价全平（旧行为）；
+//        - structure：每笔开半仓（可开仓手数÷2），同向容量制叠加（最多两笔）——
+//          1/2类入场一半到前高/前低主动止盈（activeTp，目标=入场前最近已确认
+//          笔端点（多头前高/空头前低，不要求已识别为买卖点）∓tpNearPts 容差；
+//          亏损侧不设）+ 另一半走跟踪止损（新 3/类3/4/类4 同向点
+//          出现止损只上移到点价∓tpTrailSlipPts，触发记 trailStop）；
+//          3类入场只主动止盈（触及全平）。
+//   互斥/容量：points 满仓即容量（同向一笔）；structure 半仓容量（同向最多两笔）；
+//        mutexScope=global 全局同向 / perPeriod 每周期独立。
 //
 // 口径声明（与回测/实盘引擎的既有差异，同 mark-entry「工作台 vs 引擎」）：
 //   本脚本用画笔落盘的最终笔快照 + 全窗口K线（事后视角）回放评估；
@@ -61,7 +70,7 @@ const getNumArg = (name, def) => {
 
 const FROM_DATE = getStrArg("from", "");
 const ENTRY_RES = String(getStrArg("entry-res", "3,15,60")).split(",").map(s => s.trim()).filter(Boolean);
-const POINT_CLASSES = new Set(String(getStrArg("point-classes", "1,2,3")).split(",").map(s => s.trim()).filter(Boolean));
+const POINT_CLASSES = new Set(String(getStrArg("point-classes", "1,2,2x,3,3x")).split(",").map(s => s.trim()).filter(Boolean));
 const MA_ON = getStrArg("ma-on", "1") !== "0";       // 均线分离条件开关（"0"=关，缺省开）
 const MA_TYPE = String(getStrArg("ma-type", "SMA")).toUpperCase() === "EMA" ? "EMA" : "SMA";
 const MA_FAST1 = getNumArg("ma-fast-1", 8);
@@ -82,6 +91,9 @@ const POINT_VALID_BARS = Math.max(0, Math.round(getNumArg("point-valid-bars", 0)
 const POINT_VALID_PTS = Math.max(0, getNumArg("point-valid-pts", 0)); // 点有效期（值；0=不限）
 const STOP_PTS = getNumArg("stop-pts", 10.0);
 const TP_PTS = getNumArg("tp-pts", 30.0);
+const TP_MODE = String(getStrArg("tp-mode", "points")) === "structure" ? "structure" : "points";
+const TP_NEAR_PTS = Math.max(0, getNumArg("tp-near-pts", 0.0));       // 到点容差（0=精确触价）
+const TP_TRAIL_SLIP_PTS = Math.max(0, getNumArg("tp-trail-slip-pts", 1.0)); // 提损滑点
 const SAME_BAR_PRIORITY = String(getStrArg("same-bar-priority", "stop")) === "tp" ? "tp" : "stop";
 const MUTEX_SCOPE = String(getStrArg("mutex-scope", "global")) === "perPeriod" ? "perPeriod" : "global";
 const LOTS = getNumArg("lots", 4);
@@ -90,6 +102,13 @@ const POINT_CLASS = {
   "1买": 1, "1卖": 1,
   "2买": 2, "类2买": 2, "2卖": 2, "类2卖": 2,
   "3买": 3, "类3买": 3, "3卖": 3, "类3卖": 3,
+};
+// 买卖点标签 → 选择键（pointClasses 过滤与策略键粒度：类2/类3 与严格 2/3 分开选，
+// 键 2x/3x → 策略键 fx2x*/fx3x*）；键集与 POINT_CLASS 保持一致
+const POINT_SEL = {
+  "1买": "1", "1卖": "1",
+  "2买": "2", "类2买": "2x", "2卖": "2", "类2卖": "2x",
+  "3买": "3", "类3买": "3x", "3卖": "3", "类3卖": "3x",
 };
 
 // 模块级参数快照（由 CLI 常量组装）：scanPeriodSignals 缺省用它；测试可注入覆盖
@@ -101,6 +120,7 @@ const MODULE_OPTS = {
   maStandOn: MA_STAND_ON, maStand1: MA_STAND_1, maStand2: MA_STAND_2,
   fibNearOn: FIB_NEAR_ON, fibLevels: FIB_LEVELS, fibNearPts: FIB_NEAR_PTS,
   upperDirOn: UPPER_DIR_ON, pointValidBars: POINT_VALID_BARS, pointValidPts: POINT_VALID_PTS,
+  tpMode: TP_MODE, tpNearPts: TP_NEAR_PTS, tpTrailSlipPts: TP_TRAIL_SLIP_PTS,
 };
 
 const BUY_COLOR = "#F23645";
@@ -202,7 +222,8 @@ function scanPeriodSignals(P, bars, periodBis, upperRes, opts = MODULE_OPTS) {
     for (const [pt, direction, kind] of [[curBuy, "long", "bottom"], [curSell, "short", "top"]]) {
       if (!pt) continue;
       const cls = POINT_CLASS[pt.type];
-      if (cls === undefined || !opts.pointClasses.has(String(cls))) continue;
+      const sel = POINT_SEL[pt.type];
+      if (cls === undefined || !opts.pointClasses.has(sel)) continue;
       const key = `${P}|${pt.type}|${pt.time}`;
       if (fired.has(key)) continue;
       const opp = direction === "long" ? curSell : curBuy;
@@ -282,7 +303,7 @@ function scanPeriodSignals(P, bars, periodBis, upperRes, opts = MODULE_OPTS) {
       fired.add(key);
       signals.push({
         periodX: P, direction,
-        strategyKey: `fx${cls}${direction === "long" ? "Buy" : "Sell"}`,
+        strategyKey: `fx${sel}${direction === "long" ? "Buy" : "Sell"}`,
         pointType: pt.type, pointTime: pt.time, pointPrice: pt.price,
         strongFxTime: fxTime, crossGap, standGap,
         fibLevel, fibGap, upperDir,
@@ -293,55 +314,162 @@ function scanPeriodSignals(P, bars, periodBis, upperRes, opts = MODULE_OPTS) {
   return signals;
 }
 
+/** P 周期全部买卖点（含 3/4类；升序，附 side）。提损扫描/信号扫描用。 */
+function collectPeriodPoints(P, bars, periodBis, upperRes) {
+  const barSec = intervalSecOf(P) || 180;
+  const macdArr = calcMACD(bars);
+  const buys = findBuyPoints(periodBis[P] || [], periodBis[upperRes] || [], macdArr, barSec);
+  const sells = findSellPoints(periodBis[P] || [], periodBis[upperRes] || [], macdArr, barSec);
+  return [...buys.map(p => ({ ...p, side: "buy" })),
+           ...sells.map(p => ({ ...p, side: "sell" }))].sort((a, b) => a.time - b.time);
+}
+
 /**
- * 全局互斥 + 出场模拟（与引擎同口径：盘中触及触发价 → 即时按触发价成交）。
+ * P 周期已确认笔端点流（升序 {time, price, side: "high"|"low"}）。主动止盈目标位用
+ * （与引擎 _fx_prev_bi_end 对应物：上笔终点=前高、下笔终点=前低；_forming 跳过）。
+ */
+function collectBiEnds(P, periodBis) {
+  const out = [];
+  for (const b of (periodBis[P] || [])) {
+    if (b._forming) continue;
+    if (b.type === "up") out.push({ time: b.endTime, price: b.endPrice, side: "high" });
+    else if (b.type === "down") out.push({ time: b.endTime, price: b.endPrice, side: "low" });
+  }
+  return out;  // 笔升序且相邻笔共享端点 → 每端点恰一次、时间升序
+}
+
+/**
+ * 同向容量 + 出场模拟（与引擎同口径：盘中触及触发价 → 即时按触发价成交）。
+ * points：满仓=容量（同向一笔，同旧互斥）；structure：每笔半仓、同向最多两笔
+ * （容量=可开仓手数）——1/2类主动止盈+跟踪止损对半分工，3类只主动止盈。
+ * opts 可注入 tpMode/tpNearPts/tpTrailSlipPts/lots/ptsByP/biEndsByP（测试用；缺省取 CLI 常量）。
  * @returns 每个信号补齐 entryTime/entryPrice/stopRef/tpRef/exits/exitType/pnl/suppressed
  */
-function applyMutexAndSimulate(signals, barsByP, contractMult = 1.0) {
+function applyMutexAndSimulate(signals, barsByP, contractMult = 1.0, opts = {}) {
+  const o = {
+    mutexScope: opts.mutexScope ?? MUTEX_SCOPE,
+    sameBarPriority: opts.sameBarPriority ?? SAME_BAR_PRIORITY,
+    stopPts: opts.stopPts ?? STOP_PTS,
+    tpPts: opts.tpPts ?? TP_PTS,
+    tpMode: opts.tpMode ?? TP_MODE,
+    tpNearPts: opts.tpNearPts ?? TP_NEAR_PTS,
+    tpTrailSlipPts: opts.tpTrailSlipPts ?? TP_TRAIL_SLIP_PTS,
+    lots: opts.lots ?? LOTS,
+    ptsByP: opts.ptsByP ?? null,
+    biEndsByP: opts.biEndsByP ?? null,
+  };
+  const structure = o.tpMode === "structure";
+  const entryLots = structure ? o.lots / 2 : o.lots;
+  const trailTypes = new Set(["3买", "类3买", "4买", "类4买", "3卖", "类3卖", "4卖", "类4卖"]);
   const sorted = [...signals].sort((a, b) => a.signalTime - b.signalTime);
-  // 开仓占用：global 按方向 / perPeriod 按 (P,方向)；value = 终局时刻
-  const busyUntil = (P, d) => MUTEX_SCOPE === "global" ? `g|${d}` : `p|${P}|${d}`;
-  const slots = new Map();
-  const open = [];
+  // 容量作用域：global 按方向 / perPeriod 按 (P,方向)；占用 = 终局时刻晚于本信号时刻
+  const scopeKey = (P, d) => o.mutexScope === "global" ? `g|${d}` : `p|${P}|${d}`;
+  const holdingAt = (t, at) => !t.suppressed && (t.exitTime ?? Infinity) > at;
+  const done = [];
   for (const s of sorted) {
-    const k = busyUntil(s.periodX, s.direction);
-    const busy = slots.get(k) || 0;
-    if (busy > s.signalTime) { s.suppressed = true; continue; }
+    const at = s.signalTime;
+    const k = scopeKey(s.periodX, s.direction);
+    // 同粗类闸门（structure，与容量同作用域）：同粗类（1/2/3；类2/类3 归粗类）
+    // 持仓期间不开第二笔；该类前一笔终局后即可再开
+    if (structure) {
+      const cls = POINT_CLASS[s.pointType];
+      if (cls !== undefined) {
+        const sameCls = done.find(t => t._scope === k && holdingAt(t, at)
+                                       && POINT_CLASS[t.pointType] === cls);
+        if (sameCls) { s.suppressed = true; continue; }
+      }
+    }
+    const heldLots = done.filter(t => t._scope === k && holdingAt(t, at))
+                         .reduce((sum, t) => sum + (t.lots || 0), 0);
+    if (heldLots + entryLots > o.lots + 1e-9) { s.suppressed = true; continue; }
     const bars = barsByP[s.periodX] || [];
     const ei = s.entryIdx;
     if (ei <= 0 || ei >= bars.length) { s.suppressed = true; continue; } // 无下一根可成交
     const short = s.direction === "short";
     const entryPrice = bars[ei].open, entryTime = bars[ei].time;
-    const stopRef = short ? entryPrice + STOP_PTS : entryPrice - STOP_PTS;
-    const tpRef = short ? entryPrice - TP_PTS : entryPrice + TP_PTS;
     const d = short ? -1 : 1;
     s.entryTime = entryTime; s.entryPrice = entryPrice;
-    s.stopRef = stopRef; s.tpRef = tpRef; s.lots = LOTS;
-    s.exits = []; s.exitType = null; s.pnl = null;
+    s.lots = entryLots; s.lotsLeft = entryLots;
+    s.exits = []; s.exitType = null; s.pnl = null; s._scope = k;
+    s.stopRef = short ? entryPrice + o.stopPts : entryPrice - o.stopPts;
+    s.tpRef = null; s.tpLots = null; s.tpTarget = null;
+    if (!structure) {
+      s.tpRef = short ? entryPrice - o.tpPts : entryPrice + o.tpPts;
+    } else {
+      // 主动止盈目标 = 入场点前最近的已确认笔端点（多头前高/空头前低，不要求已
+      // 识别为买卖点；亏损侧/不存在 → 不设）
+      const ends = (o.biEndsByP && o.biEndsByP[s.periodX]) || [];
+      const wantSide = short ? "low" : "high";
+      let tgt = null;
+      for (const e of ends) { if (e.time >= s.pointTime) break; if (e.side === wantSide) tgt = e; }
+      if (tgt && (short ? tgt.price < entryPrice : tgt.price > entryPrice)) {
+        s.tpRef = short ? tgt.price + o.tpNearPts : tgt.price - o.tpNearPts;
+        s.tpTarget = { type: short ? "前低" : "前高", time: tgt.time, price: tgt.price };
+        s.tpLots = POINT_CLASS[s.pointType] === 3 ? entryLots : entryLots / 2;
+      }
+      s.trailRaised = false; s.trailMoves = [];
+    }
+    // 提损点流（structure 1/2类）：入场点之后同向 3/4类点，识别滞后一拍（本根先按旧止损判）
+    const trailPts = structure && POINT_CLASS[s.pointType] !== 3 && o.ptsByP
+      ? (o.ptsByP[s.periodX] || []).filter(p => trailTypes.has(p.type)
+          && p.side === (short ? "sell" : "buy") && p.time > s.pointTime)
+      : [];
+    let ti = 0;
+    const partPnl = () => s.exits.filter(e => e.lots)
+      .reduce((sum, e) => sum + (e.price - entryPrice) * d * e.lots * contractMult, 0);
     for (let j = ei; j < bars.length; j++) { // 进场那根（j===ei）收盘后即参与判定
       const b = bars[j];
-      const stopHit = short ? b.high >= stopRef : b.low <= stopRef;
-      const tpHit = short ? b.low <= tpRef : b.high >= tpRef;
-      if (!stopHit && !tpHit) continue;
-      const pick = (stopHit && tpHit)
-        ? (SAME_BAR_PRIORITY === "stop" ? "stop" : "takeProfit")
-        : (stopHit ? "stop" : "takeProfit");
-      const exitPrice = pick === "stop" ? stopRef : tpRef;
-      s.exits.push({ type: pick, time: b.time, price: exitPrice });
-      s.exitType = pick; s.exitTriggerTime = b.time;
-      s.exitTime = b.time; s.exitPrice = exitPrice;
-      s.pnl = (exitPrice - entryPrice) * d * LOTS * contractMult;
-      break;
+      const stopHit = short ? b.high >= s.stopRef : b.low <= s.stopRef;
+      const tpHit = s.tpRef !== null && (short ? b.low <= s.tpRef : b.high >= s.tpRef);
+      const pickTp = tpHit && (!stopHit || o.sameBarPriority === "tp");
+      if (pickTp) {
+        if (!structure) {
+          s.exits.push({ type: "takeProfit", time: b.time, price: s.tpRef });
+          s.exitType = "takeProfit"; s.exitTriggerTime = b.time;
+          s.exitTime = b.time; s.exitPrice = s.tpRef;
+          s.pnl = (s.tpRef - entryPrice) * d * s.lots * contractMult;
+          break;
+        }
+        // structure 主动止盈：按 tpLots 部分平仓（一次性），剩余走止损
+        const lots = Math.min(s.tpLots, s.lotsLeft);
+        s.lotsLeft = s.lotsLeft - lots;
+        s.exits.push({ type: "activeTp", time: b.time, price: s.tpRef, lots });
+        s.tpRef = null;
+        if (s.lotsLeft <= 1e-9) {  // 3类全平 / 剩余恰好平完 → 终局
+          s.exitType = "activeTp"; s.exitTriggerTime = b.time;
+          s.exitTime = b.time; s.exitPrice = s.exits[s.exits.length - 1].price;
+          s.pnl = partPnl();
+          break;
+        }
+        continue;
+      }
+      if (stopHit) {
+        const et = structure && s.trailRaised ? "trailStop" : "stop";
+        s.exits.push({ type: et, time: b.time, price: s.stopRef });
+        s.exitType = et; s.exitTriggerTime = b.time;
+        s.exitTime = b.time; s.exitPrice = s.stopRef;
+        s.pnl = partPnl() + (s.stopRef - entryPrice) * d * s.lotsLeft * contractMult;
+        break;
+      }
+      // 本根未触发 → 提损（点极值触及后下一根起按新止损判，近似引擎识别滞后）
+      while (ti < trailPts.length && trailPts[ti].time <= b.time) {
+        const q = trailPts[ti++];
+        const newStop = short ? q.price + o.tpTrailSlipPts : q.price - o.tpTrailSlipPts;
+        if (short ? newStop < s.stopRef : newStop > s.stopRef) {
+          s.stopRef = newStop; s.trailRaised = true;
+          s.trailMoves.push({ time: b.time, pointType: q.type, pointTime: q.time,
+                             pointPrice: q.price, stopTo: newStop });
+        }
+      }
     }
-    if (!s.exitType) { // 未终局 → mark-to-market（最新收盘）
+    if (!s.exitType) { // 未终局 → mark-to-market（最新收盘；部分已平按已实现+剩余浮盈）
       const last = bars[bars.length - 1];
       s.state = "open";
-      if (last) s.pnl = (last.close - entryPrice) * d * LOTS * contractMult;
+      if (last) s.pnl = partPnl() + (last.close - entryPrice) * d * s.lotsLeft * contractMult;
     } else {
       s.state = "closed";
     }
-    slots.set(k, s.exitTime || Infinity); // 占用至终局（未终局=无限占用）
-    open.push(s);
+    done.push(s);
   }
   return sorted;
 }
@@ -401,7 +529,11 @@ async function main() {
       + `，黄金分割附近${FIB_NEAR_ON ? "开" : "关"}`
       + (FIB_NEAR_ON ? `（${FIB_LEVELS.join(",")}±${FIB_NEAR_PTS}点）` : "")
       + `，上级同向${UPPER_DIR_ON ? "开" : "关"}`
-      + `，止损${STOP_PTS}/止盈${TP_PTS}点，互斥 ${MUTEX_SCOPE}`);
+      + `，止损${STOP_PTS}/止盈${TP_PTS}点`
+      + (TP_MODE === "structure"
+         ? `（止盈方式=结构组合：每笔 ${LOTS / 2} 手半仓、容差 ${TP_NEAR_PTS}、提损滑点 ${TP_TRAIL_SLIP_PTS}）`
+         : "（止盈方式=固定点数）")
+      + `，互斥 ${MUTEX_SCOPE}`);
 
     // 依赖：画笔落盘（chan-bi 产出）
     const bisFile = cacheFile("bis", SYMBOL);
@@ -488,8 +620,11 @@ async function main() {
       return null;
     };
 
-    // 逐周期：取K线 → 扫描信号
+    // 逐周期：取K线 → 扫描信号（ptsByP=全部买卖点供提损扫描；biEndsByP=已确认
+    // 笔端点流供主动止盈目标）
     const barsByP = {};
+    const ptsByP = {};
+    const biEndsByP = {};
     let allSignals = [];
     let drawRes = originalRes;
     for (const P of ENTRY_RES) {
@@ -502,20 +637,27 @@ async function main() {
         continue;
       }
       barsByP[P] = d.bars;
+      if (TP_MODE === "structure") {
+        ptsByP[P] = collectPeriodPoints(P, d.bars, periodBis, UPPER_OF[P]);
+        biEndsByP[P] = collectBiEnds(P, periodBis);
+      }
       const sigs = scanPeriodSignals(P, d.bars, periodBis, UPPER_OF[P]);
       console.log(`[周期 ${P}] ${d.bars.length} 根K线，信号 ${sigs.length} 个`
         + (WINDOW_DAYS[P] ? `（窗口最近 ${WINDOW_DAYS[P]} 天）` : ""));
       allSignals = allSignals.concat(sigs);
     }
 
-    // 全局互斥 + 出场模拟
-    allSignals = applyMutexAndSimulate(allSignals, barsByP);
+    // 同向容量 + 出场模拟
+    allSignals = applyMutexAndSimulate(allSignals, barsByP, 1.0, { ptsByP, biEndsByP });
     const filled = allSignals.filter(s => !s.suppressed);
     const suppressed = allSignals.filter(s => s.suppressed);
-    console.log(`\n成交 ${filled.length} 笔（互斥过滤 ${suppressed.length}）：`
-      + `止损 ${filled.filter(s => s.exitType === "stop").length} / `
-      + `止盈 ${filled.filter(s => s.exitType === "takeProfit").length} / `
-      + `仍持仓 ${filled.filter(s => s.state === "open").length}`);
+    const nOf = t => filled.filter(s => s.exitType === t).length;
+    console.log(`\n成交 ${filled.length} 笔（容量过滤 ${suppressed.length}）：`
+      + (TP_MODE === "structure"
+         ? `主动止盈 ${nOf("activeTp")} / 跟踪止损 ${nOf("trailStop")} / 固定止损 ${nOf("stop")}`
+             + ` / 主动止盈部分平仓 ${filled.reduce((n, s) => n + (s.exits || []).filter(e => e.type === "activeTp" && e.lots && s.exitType !== "activeTp").length, 0)}`
+         : `止损 ${nOf("stop")} / 止盈 ${nOf("takeProfit")}`)
+      + ` / 仍持仓 ${filled.filter(s => s.state === "open").length}（每笔 ${TP_MODE === "structure" ? LOTS / 2 : LOTS} 手）`);
 
     // 落盘（工作台结果缓存；回测/监控引擎结果以 py_chain 为准）
     const outFile = cacheFile("fxma", SYMBOL);
@@ -531,6 +673,7 @@ async function main() {
                 strongFxOn: STRONG_FX_ON, strongFxMinPts: STRONG_FX_MIN_PTS,
                 pointValidBars: POINT_VALID_BARS, pointValidPts: POINT_VALID_PTS,
                 stopPts: STOP_PTS, tpPts: TP_PTS,
+                tpMode: TP_MODE, tpNearPts: TP_NEAR_PTS, tpTrailSlipPts: TP_TRAIL_SLIP_PTS,
                 sameBarPriority: SAME_BAR_PRIORITY, mutexScope: MUTEX_SCOPE, lots: LOTS },
       signals: allSignals,
     }), "utf8");
@@ -599,7 +742,7 @@ async function main() {
       return r.result.value;
     };
 
-    const EXIT_LABEL = { stop: "止损", takeProfit: "止盈" };
+    const EXIT_LABEL = { stop: "止损", takeProfit: "止盈", activeTp: "主动止盈", trailStop: "跟踪止损" };
     for (const P of ENTRY_RES) {
       if (P !== drawRes) { await ensureResolution(P); drawRes = P; }
       await clearTitle(`ENTRY_FX_${P}`);
@@ -612,14 +755,17 @@ async function main() {
         color: s.direction === "long" ? BUY_COLOR : SELL_COLOR,
         text: s.strategyKey,
       }));
+      // 出场标记：逐 exits 事件（structure 部分主动止盈+终局各一个；仍持仓不画）
       const exitItems = [];
       for (const s of entries) {
-        if (!s.exitType) continue; // 仍持仓不画出场
-        exitItems.push({
-          time: s.exitTime, price: s.exitPrice,
-          shape: s.direction === "long" ? "arrow_down" : "arrow_up",
-          color: EXIT_COLOR, text: EXIT_LABEL[s.exitType] || s.exitType,
-        });
+        for (const e of (s.exits || [])) {
+          exitItems.push({
+            time: e.time, price: e.price,
+            shape: s.direction === "long" ? "arrow_down" : "arrow_up",
+            color: EXIT_COLOR,
+            text: EXIT_LABEL[e.type] || e.type,
+          });
+        }
       }
       const r1 = await drawShapes(`ENTRY_FX_${P}`, onlyThisInterval(P), entryItems);
       const r2 = exitItems.length ? await drawShapes(`EXIT_FX_${P}`, onlyThisInterval(P), exitItems) : { ok: 0 };
@@ -635,8 +781,9 @@ async function main() {
   }
 }
 
-module.exports = { maSeries, strongFxAfter, scanPeriodSignals, applyMutexAndSimulate,
-                   parseFibLevels, MODULE_OPTS, POINT_CLASS, UPPER_OF };
+module.exports = { maSeries, strongFxAfter, scanPeriodSignals, collectPeriodPoints,
+                   collectBiEnds, applyMutexAndSimulate,
+                   parseFibLevels, MODULE_OPTS, POINT_CLASS, POINT_SEL, UPPER_OF };
 
 if (require.main === module) {
   main();

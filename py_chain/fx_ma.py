@@ -29,15 +29,26 @@
   7. 所选条件齐备（strongFxOn/maOn/maStandOn/fibNearOn/upperDirOn 均可独立
      关闭；全关=点属所选类别且未失效即当拍触发）的首个收盘拍出信号（每个点只
      触发一次；pointValidBars 根内未齐备作废）→ 下一根 P 周期K线开盘价成交。
-【出场】持仓期间按引擎最小周期（fine）已收K线逐根判盘中触及：止损价=进场价∓stopPts、
-  止盈价=进场价±tpPts（绝对点数）→ 盘中触价即按该触发价即时成交（与实盘 MT5 SL/TP
-  同口径：不等收盘确认、不等下一开盘；进场那根 fine K线收盘后即参与判定）；
-  同根双触按 sameBarPriority（默认止损优先）；期末未触发按最新收盘 mark-to-market。
-【互斥】mutexScope=global：同向全局一笔未终局持仓（同缠论V1，多空并存）；
-  perPeriod：每个进出场周期各自独立互斥。同拍多周期同向共振取最大周期一条。
+【出场】持仓期间按引擎最小周期（fine）已收K线逐根判盘中触及 → 盘中触价即按该
+  触发价即时成交（与实盘 MT5 SL/TP 同口径：不等收盘确认、不等下一开盘；进场那根
+  fine K线收盘后即参与判定）；同根双触按 sameBarPriority（默认止损优先）；
+  期末未触发按最新收盘 mark-to-market。止盈方式 tpMode 两选一：
+  - points（默认）：止损价=进场价∓stopPts、止盈价=进场价±tpPts，触价全平（旧行为）；
+  - structure（结构组合）：每笔开仓=可开仓手数÷2（半仓），同向容量制叠加
+    （作用域内已开总手数+半仓 ≤ 可开仓手数，最多两笔；mutexScope 决定作用域），
+    且同粗类（1/2/3；类2/类3 归粗类 2/3）持仓期间不开第二笔、该类终局后可再开——
+    1/2类入场对半分工：主动止盈半份（目标=入场点前最近已确认笔端点价——多头前高/
+    空头前低，不要求该端点已被识别为买卖点——∓tpNearPts 容差，无有效目标则不设；
+    触价平 entryLots/2）+ 跟踪半份（初始止损=stopPts，入场后
+    新出现 3/类3/4/类4 买点（卖点镜像）→ 止损只上移到点极值价∓tpTrailSlipPts）；
+    3类入场只主动止盈（触及全平，不提损）；止损触发平剩余全部
+    （exitType：activeTp|trailStop（已提损）|stop）。
+【互斥】points：mutexScope=global 同向全局一笔（同缠论V1，多空并存）、perPeriod
+  每周期独立——满仓手数即容量，退化为容量制的单笔特例；structure：同上容量制
+  （同向最多两笔半仓）。同拍多周期同向共振按容量依次成交（大周期优先）。
 
 接口契约与 BacktestEngine 完全一致（run/step_to/append_bars），信号/成交/出场
-dict 字段同构（strategyKey=fx1Buy…fx3Sell，exitType=stop|takeProfit），
+dict 字段同构（strategyKey=fx1Buy…fx3xSell，exitType=stop|takeProfit），
 webapp 三模式与 live_trader 可零改动消费。30S 周期仅回测可用（MT5 实盘行情
 由 M1 重采样构成、无法生成 30S，live_trader.load_config 拒启含 30S 的配置）。
 
@@ -50,7 +61,8 @@ import time
 from bisect import bisect_left, bisect_right
 from collections import deque
 
-from .backtest import BacktestEngine, close_trade, DEFAULT_WARMUP_BARS
+from .backtest import (BacktestEngine, close_trade, DEFAULT_WARMUP_BARS,
+                       RESYNC_EVERY)
 from .bt_journal import BtJournal, DIR_LABELS, EXIT_LABELS as FX_EXIT_LABELS
 from .chan_core import findBuyPoints, findSellPoints, intervalSecOf, fmtT
 from .mark_entry import DEFAULT_LOTS
@@ -60,17 +72,31 @@ ENTRY_RES_OPTIONS = ("30S", "3", "15", "60")
 # 买卖点分类用上级周期（标准周期链 30S→3→15→60→240 自动推导）
 UPPER_OF = {"30S": "3", "3": "15", "15": "60", "60": "240"}
 
-# 买卖点标签 → 类别（4买/4卖/类4买/类4卖不在表内=不交易）
+# 买卖点标签 → 类别（4买/4卖/类4买/类4卖不在表内=不交易）；粗类只驱动
+# 均线对/站线/金分割豁免的 1 与非 1 之分
 POINT_CLASS = {
     "1买": 1, "1卖": 1,
     "2买": 2, "类2买": 2, "2卖": 2, "类2卖": 2,
     "3买": 3, "类3买": 3, "3卖": 3, "类3卖": 3,
 }
 
+# 买卖点标签 → 选择键（pointClasses 过滤与策略键粒度：类2/类3 与严格 2/3 分开选，
+# 键 2x/3x → 策略键 fx2x*/fx3x*）；须与 POINT_CLASS 键集保持一致
+POINT_SEL = {
+    "1买": "1", "1卖": "1",
+    "2买": "2", "类2买": "2x", "2卖": "2", "类2卖": "2x",
+    "3买": "3", "类3买": "3x", "3卖": "3", "类3卖": "3x",
+}
+
+# 结构跟踪止损的提损参照点（1/2类持仓：入场后新出现的这些同向点 → 止损上移到
+# 点极值价−滑点；4类点不交易但参与提损）
+TRAIL_POINT_TYPES = ("3买", "类3买", "4买", "类4买",
+                     "3卖", "类3卖", "4卖", "类4卖")
+
 # 参数中心 fxma 模块默认值（单一来源；param_center.defaults_of 活取）
 FXMA_DEFAULTS = {
     "entryRes": "3,15,60",          # 多选：30S/3/15/60（30S 仅回测）
-    "pointClasses": "1,2,3",        # 多选：1/2/3
+    "pointClasses": "1,2,2x,3,3x",  # 多选：1/2/2x/3/3x（2x=类2买卖、3x=类3买卖）
     "maOn": True,                   # 均线分离条件开关（False=跳过均线条件）
     "maType": "SMA",                # 枚举：SMA/EMA
     "maFast1": 8, "maSlow1": 20,    # 一类点均线对
@@ -87,16 +113,19 @@ FXMA_DEFAULTS = {
     "pointValidBars": 0,            # 点有效期（根；0=不限直到反向点）
     "pointValidPts": 0.0,           # 点有效期（值；盘中价距点极值上限，0=不限；超距等待回范围）
     "stopPts": 10.0,                # 止损点数（绝对价差；盘中触价即成交，与实盘 MT5 SL 同口径）
-    "tpPts": 30.0,                  # 止盈点数（同口径）
+    "tpPts": 30.0,                  # 止盈点数（同口径；tpMode=points 时生效）
+    "tpMode": "points",             # 止盈方式：points=固定点数满仓一笔 / structure=结构组合（半仓开仓+主动止盈+跟踪止损）
+    "tpNearPts": 0.0,               # 到点容差（点）：主动止盈价=前一点位价向入场侧偏移，0=精确触价
+    "tpTrailSlipPts": 1.0,          # 提损滑点（点）：止损上移到 3/4类点极值价再向不利侧偏移
     "sameBarPriority": "stop",      # 同根双触优先级：stop/tp
     "mutexScope": "global",         # 同向互斥范围：global/perPeriod
     "lots": 4.0,                    # 默认开仓手数（回测卡/实盘配置显式指定时以其为准）
 }
 
 
-def fx_strategy_key(cls, direction):
-    """(类别, 方向) → 策略键（信号/成交行溯源；与缠论V1 wait* 键同位消费）。"""
-    return f"fx{cls}{'Buy' if direction == 'long' else 'Sell'}"
+def fx_strategy_key(sel, direction):
+    """(选择键, 方向) → 策略键（1/2/2x/3/3x → fx1Buy…fx3xSell；与缠论V1 wait* 键同位消费）。"""
+    return f"fx{sel}{'Buy' if direction == 'long' else 'Sell'}"
 
 
 def parse_multi(value, options, name):
@@ -207,11 +236,12 @@ class FxMaEngine(BacktestEngine):
                  strong_fx_on=True, strong_fx_min_pts=0.0,
                  point_valid_bars=0, point_valid_pts=0.0,
                  stop_pts=10.0, tp_pts=30.0, same_bar_priority="stop",
+                 tp_mode="points", tp_near_pts=0.0, tp_trail_slip_pts=1.0,
                  mutex_scope="global", lots=DEFAULT_LOTS, contract_mult=1.0,
                  fill_at_open_bar=False, fine_res=None, marks_params=None):
         self.entry_res = parse_multi(entry_res, ENTRY_RES_OPTIONS, "entryRes")
-        self.point_classes = {int(c) for c in
-                              parse_multi(point_classes, ("1", "2", "3"), "pointClasses")}
+        self.point_classes = set(
+            parse_multi(point_classes, ("1", "2", "2x", "3", "3x"), "pointClasses"))
         self.ma_on = bool(ma_on)
         self.ma_type = str(ma_type).upper()
         if self.ma_type not in ("SMA", "EMA"):
@@ -245,6 +275,17 @@ class FxMaEngine(BacktestEngine):
         self.tp_pts = float(tp_pts)
         if self.stop_pts <= 0 or self.tp_pts <= 0:
             raise ValueError("stopPts/tpPts 必须为正数（绝对点数）")
+        if tp_mode not in ("points", "structure"):
+            raise ValueError(f"tpMode 须为 points/structure 之一（收到 {tp_mode!r}）")
+        self.tp_mode = tp_mode
+        self.tp_near_pts = float(tp_near_pts)
+        if self.tp_near_pts < 0:
+            raise ValueError(f"tpNearPts 须 ≥0（收到 {tp_near_pts}）")
+        self.tp_trail_slip_pts = float(tp_trail_slip_pts)
+        if self.tp_trail_slip_pts < 0:
+            raise ValueError(f"tpTrailSlipPts 须 ≥0（收到 {tp_trail_slip_pts}）")
+        if tp_mode == "structure" and float(lots) / 2.0 < 0.01:
+            raise ValueError(f"structure 模式可开仓手数须 ≥0.02 才能半仓（收到 {lots}）")
         if same_bar_priority not in ("stop", "tp"):
             raise ValueError(f"sameBarPriority 须为 stop/tp 之一（收到 {same_bar_priority!r}）")
         self.same_bar_priority = same_bar_priority
@@ -287,7 +328,7 @@ class FxMaEngine(BacktestEngine):
         """
         kw = dict(
             entry_res=pm.get("entryRes", "3,15,60"),
-            point_classes=pm.get("pointClasses", "1,2,3"),
+            point_classes=pm.get("pointClasses", "1,2,2x,3,3x"),
             ma_on=pm.get("maOn", True),
             ma_type=pm.get("maType", "SMA"),
             ma_fast1=pm.get("maFast1", 8), ma_slow1=pm.get("maSlow1", 20),
@@ -304,6 +345,9 @@ class FxMaEngine(BacktestEngine):
             point_valid_bars=pm.get("pointValidBars", 0),
             point_valid_pts=pm.get("pointValidPts", 0.0),
             stop_pts=pm.get("stopPts", 10.0), tp_pts=pm.get("tpPts", 30.0),
+            tp_mode=pm.get("tpMode", "points"),
+            tp_near_pts=pm.get("tpNearPts", 0.0),
+            tp_trail_slip_pts=pm.get("tpTrailSlipPts", 1.0),
             same_bar_priority=pm.get("sameBarPriority", "stop"),
             mutex_scope=pm.get("mutexScope", "global"),
         )
@@ -382,6 +426,27 @@ class FxMaEngine(BacktestEngine):
             out = q
         return out
 
+    def _fx_prev_bi_end(self, P, point_time, direction):
+        """入场点（point_time）之前、同周期最近的已确认笔端点（主动止盈目标位）。
+
+        多头取最近上笔终点（前高/阻力）、空头取最近下笔终点（前低/支撑）——只取
+        笔端点，不要求该端点已被识别为买卖点（卖点识别须反向笔走完+背驰，滞后可
+        达数小时，强势突破段入场会两头够不着，见 2026-10-07 trade#11 案例）；
+        _forming 形成中笔的端点随行情漂移，跳过。无则 None。
+        @returns {"type": "前高"|"前低", "time": 端点时间, "price": 端点价}
+        """
+        structure = getattr(self, "_structure_bis", None) or self._bis
+        bis = structure.get(P) or []
+        want_up = direction != "short"
+        label = "前高" if want_up else "前低"
+        out = None
+        for b in bis:
+            if b.get("_forming"):
+                continue
+            if (b.get("type") == "up") == want_up and b.get("endTime", 0) < point_time:
+                out = {"type": label, "time": b["endTime"], "price": b["endPrice"]}
+        return out
+
     def _fx_upper_dir(self, P):
         """上级周期（UPPER_OF[P]）当前笔方向（列表末笔，含形成中）；无笔 None。"""
         structure = getattr(self, "_structure_bis", None) or self._bis
@@ -428,12 +493,13 @@ class FxMaEngine(BacktestEngine):
                 if pt is None:
                     continue
                 cls = POINT_CLASS.get(pt["type"])
-                if cls is None or cls not in self.point_classes:
+                sel = POINT_SEL.get(pt["type"])
+                if cls is None or sel not in self.point_classes:
                     if jr is not None and jr.enabled:
                         jr.reject(t, "fx_class_not_selected", P, pt["time"],
                                   None, ptType=pt["type"],
                                   classes=",".join(str(c) for c in sorted(self.point_classes)))
-                    continue  # 最新点不属所选类别（4类/未选类别不交易）
+                    continue  # 最新点不属所选类别（4类/未选类别不交易；类2/类3随 2x/3x 独立可选）
                 key = (P, pt["type"], pt["time"])
                 if key in fired:
                     continue  # 已触发或已作废
@@ -492,7 +558,7 @@ class FxMaEngine(BacktestEngine):
                     if not (diff > 0 and diff >= self.cross_min_pts):
                         if jr is not None and jr.enabled:
                             jr.reject(t, "fx_ma_gap_fail", P, pt["time"],
-                                      fx_strategy_key(cls, direction),
+                                      fx_strategy_key(sel, direction),
                                       ptType=pt["type"], diff=round(diff, 4),
                                       crossMinPts=self.cross_min_pts,
                                       volatile=("diff",))
@@ -515,7 +581,7 @@ class FxMaEngine(BacktestEngine):
                     if not (standGap > 0 if direction == "long" else standGap < 0):
                         if jr is not None and jr.enabled:
                             jr.reject(t, "fx_ma_stand_fail", P, pt["time"],
-                                      fx_strategy_key(cls, direction),
+                                      fx_strategy_key(sel, direction),
                                       ptType=pt["type"], close=round(lastClose, 4),
                                       ma=round(standVal, 4), maP=standAcc.period,
                                       volatile=("close", "ma"))
@@ -557,7 +623,7 @@ class FxMaEngine(BacktestEngine):
                     if best[0] > self.fib_near_pts:
                         if jr is not None and jr.enabled:
                             jr.reject(t, "fx_fib_not_near", P, pt["time"],
-                                      fx_strategy_key(cls, direction),
+                                      fx_strategy_key(sel, direction),
                                       ptType=pt["type"], ptPrice=round(pt["price"], 4),
                                       refPrice=round(prev["price"], 4), ext=round(ext, 4),
                                       level=round(best[1], 4), ratio=best[2],
@@ -577,7 +643,7 @@ class FxMaEngine(BacktestEngine):
                     if upperDir != ("up" if direction == "long" else "down"):
                         if jr is not None and jr.enabled:
                             jr.reject(t, "fx_upper_dir_fail", P, pt["time"],
-                                      fx_strategy_key(cls, direction),
+                                      fx_strategy_key(sel, direction),
                                       ptType=pt["type"], upper=UPPER_OF[P], upperDir=upperDir)
                         continue
                 fired.add(key)
@@ -608,7 +674,7 @@ class FxMaEngine(BacktestEngine):
                 sig = {
                     "periodX": P, "markRes": P,
                     "time": t, "price": lastBar["close"], "direction": direction,
-                    "strategyKey": fx_strategy_key(cls, direction),
+                    "strategyKey": fx_strategy_key(sel, direction),
                     "pointType": pt["type"], "pointTime": pt["time"], "pointPrice": pt["price"],
                     "strongFxTime": fxTime,
                     "crossGap": round(diff, 4) if diff is not None else None,
@@ -619,11 +685,15 @@ class FxMaEngine(BacktestEngine):
                     "realtime": True, "reason": "+".join(conds),
                     "strategyLabel": f"{self.ma_type}均线V1·{pt['type']}",
                     "signalNote": note,
-                    # 信号拍临时 SL/TP（实盘 immediate 下单用；成交拍由引擎 stopRef/tpRef 对齐）
+                    # 本笔开仓手数（structure=半仓；实盘 immediate 下单与镜像行用）
+                    "lots": self.lots / 2.0 if self.tp_mode == "structure" else float(self.lots),
+                    # 信号拍临时 SL/TP（实盘 immediate 下单用；成交拍由引擎 stopRef/tpRef 对齐；
+                    # structure 无固定止盈 → tp 不挂，主动止盈由引擎触价事件驱动）
                     "provStop": lastBar["close"] + self.stop_pts if short
                     else lastBar["close"] - self.stop_pts,
-                    "provTp": lastBar["close"] - self.tp_pts if short
-                    else lastBar["close"] + self.tp_pts,
+                    "provTp": None if self.tp_mode == "structure" else
+                    (lastBar["close"] - self.tp_pts if short
+                     else lastBar["close"] + self.tp_pts),
                 }
                 stats["signals"] += 1
                 stats["long"] += int(direction == "long")
@@ -643,21 +713,28 @@ class FxMaEngine(BacktestEngine):
     # ---------------- 出场状态机（固定点数止损/止盈） ----------------
 
     def _fx_open_positions(self, open_pos):
-        """遍历未终局持仓 → [(槽位dict, 方向, pos)]（槽位即互斥作用域的实际字典）。"""
+        """遍历未终局持仓 → [(槽位dict, 方向, pos)]（槽位即容量作用域的实际字典；
+        每方向为持仓列表——points 满仓一笔退化为单元素列表）。"""
         if self.mutex_scope == "global":
-            return [(open_pos, d, open_pos[d]) for d in ("long", "short") if open_pos.get(d)]
+            return [(open_pos, d, pos)
+                    for d in ("long", "short") for pos in (open_pos.get(d) or [])]
         out = []
         for P in self.entry_res:
             slot = open_pos.get(P) or {}
             for d in ("long", "short"):
-                if slot.get(d):
-                    out.append((slot, d, slot[d]))
+                for pos in (slot.get(d) or []):
+                    out.append((slot, d, pos))
         return out
 
     def _fx_check_exits(self, open_pos, stats):
         """各持仓：fine 周期新收K线（完整 high/low）逐根判盘中触及止损/止盈价
         → 即时按该触发价成交（与实盘 MT5 SL/TP 同口径：盘中触价成交，不等
-        收盘确认、不等下一开盘）→ 返回本拍终局的 trade 列表（互斥即时解锁）。
+        收盘确认、不等下一开盘）→ 返回本拍终局的 trade 列表（容量即时释放）。
+
+        tpMode=points：止损/止盈触价全平（旧行为）。
+        tpMode=structure：止损触发平剩余全部（已提损记 trailStop，否则 stop）；
+        主动止盈触发按 tpLots 部分平仓（exits 事件带 lots，槽位不释放、
+        tpRef 一次性清空），剩余=0 时终局（exitType=activeTp）。
 
         判定粒度 = 引擎最小周期（fine，持仓不论 P 一律用 fine——实盘 broker 亦
         不分周期按 tick 判）。按K线时间序遍历 _evalCutFine→cut 窗口（正常逐拍
@@ -668,6 +745,7 @@ class FxMaEngine(BacktestEngine):
         lstF = self.bars[fine]["_list"]
         cutF = self._cut.get(fine, 0)
         jr = getattr(self, "_journal", None)
+        structure = self.tp_mode == "structure"
         for slot, d, pos in self._fx_open_positions(open_pos):
             if cutF <= pos.get("_evalCutFine", 0):
                 continue  # 本拍无新收 fine K线
@@ -675,48 +753,140 @@ class FxMaEngine(BacktestEngine):
             for j in range(pos.get("_evalCutFine", 0), cutF):
                 bar = lstF[j]
                 stop_hit = bar["high"] >= pos["stopRef"] if short else bar["low"] <= pos["stopRef"]
-                tp_hit = bar["low"] <= pos["tpRef"] if short else bar["high"] >= pos["tpRef"]
+                tp_hit = pos.get("tpRef") is not None and (
+                    bar["low"] <= pos["tpRef"] if short else bar["high"] >= pos["tpRef"])
                 if stop_hit and tp_hit:
-                    pick = "stop" if self.same_bar_priority == "stop" else "takeProfit"
+                    pick = "stop" if self.same_bar_priority == "stop" else "tp"
                 elif stop_hit:
                     pick = "stop"
                 elif tp_hit:
-                    pick = "takeProfit"
+                    pick = "tp"
                 else:
                     continue
-                exitPrice = pos["stopRef"] if pick == "stop" else pos["tpRef"]
-                parts = []
-                if stop_hit:
-                    parts.append((f"最高 {bar['high']:.2f} ≥ 止损位 {pos['stopRef']:.2f}"
-                                  if short else
-                                  f"最低 {bar['low']:.2f} ≤ 止损位 {pos['stopRef']:.2f}"))
-                if tp_hit:
-                    parts.append((f"最低 {bar['low']:.2f} ≤ 止盈位 {pos['tpRef']:.2f}"
-                                  if short else
-                                  f"最高 {bar['high']:.2f} ≥ 止盈位 {pos['tpRef']:.2f}"))
-                why = (f"{FX_EXIT_LABELS.get(pick, pick)}盘中触发：P={pos['periodX']} "
-                       f"{fmtT(bar['time'])} 当根{'，'.join(parts)}"
-                       f" → 按触发价 {exitPrice:.2f} 成交")
-                if stop_hit and tp_hit:
-                    why += f"（同根双触，按 sameBarPriority={self.same_bar_priority} 取 {pick}）"
-                pos["exits"].append({"type": pick, "time": bar["time"],
-                                     "price": exitPrice, "why": why})
-                tr = close_trade(pos, pick, bar["time"], exitPrice)
-                slot[d] = None
-                stats["closed"] += 1
                 if pick == "stop":
-                    stats["stopped"] = stats.get("stopped", 0) + 1
-                if jr is not None and jr.enabled:
-                    try:
-                        jr.exit_event(tr.get("tradeNo"), (tr.get("exits") or [{}])[-1],
-                                      tr.get("journalId"))
-                        jr.trade_end(tr)
-                    except Exception:
-                        pass
+                    et = "stop"
+                    if structure and pos.get("trailRaised"):
+                        et = "trailStop"
+                    exitPrice = pos["stopRef"]
+                    parts = (f"最高 {bar['high']:.2f} ≥ 止损位 {pos['stopRef']:.2f}" if short
+                             else f"最低 {bar['low']:.2f} ≤ 止损位 {pos['stopRef']:.2f}")
+                    why = (f"{FX_EXIT_LABELS.get(et, et)}盘中触发：P={pos['periodX']} "
+                           f"{fmtT(bar['time'])} 当根{parts}"
+                           f" → 按触发价 {exitPrice:.2f} 成交")
+                    if structure and pos.get("trailMoves"):
+                        last = pos["trailMoves"][-1]
+                        why += (f"（提损 {len(pos['trailMoves'])} 次，最近 "
+                                f"{last['pointType']} @{fmtT(last['pointTime'])} → "
+                                f"{last['stopTo']:.2f}）")
+                    if stop_hit and tp_hit:
+                        why += f"（同根双触，按 sameBarPriority={self.same_bar_priority} 取止损）"
+                    pos["exits"].append({"type": et, "time": bar["time"],
+                                         "price": exitPrice, "why": why})
+                    tr = self._fx_close_position(slot, d, pos, et, bar["time"], exitPrice, stats)
+                    exits.append(tr)
+                    break  # 该持仓已终局
+                # 止盈触发
+                if not structure:
+                    exitPrice = pos["tpRef"]
+                    parts = (f"最低 {bar['low']:.2f} ≤ 止盈位 {pos['tpRef']:.2f}" if short
+                             else f"最高 {bar['high']:.2f} ≥ 止盈位 {pos['tpRef']:.2f}")
+                    why = (f"{FX_EXIT_LABELS['takeProfit']}盘中触发：P={pos['periodX']} "
+                           f"{fmtT(bar['time'])} 当根{parts}"
+                           f" → 按触发价 {exitPrice:.2f} 成交")
+                    if stop_hit and tp_hit:
+                        why += f"（同根双触，按 sameBarPriority={self.same_bar_priority} 取止盈）"
+                    pos["exits"].append({"type": "takeProfit", "time": bar["time"],
+                                         "price": exitPrice, "why": why})
+                    tr = self._fx_close_position(slot, d, pos, "takeProfit",
+                                                 bar["time"], exitPrice, stats)
+                    exits.append(tr)
+                    break  # 该持仓已终局
+                # structure 主动止盈：按 tpLots 部分平仓（一次性）
+                tpLots = min(pos.get("tpLots") or 0.0, pos["lotsLeft"])
+                exitPrice = pos["tpRef"]
+                tgt = pos.get("tpTarget") or {}
+                left = pos["lotsLeft"] - tpLots
+                why = (f"{FX_EXIT_LABELS['activeTp']}盘中触发：P={pos['periodX']} "
+                       f"{fmtT(bar['time'])} 触及止盈目标位 "
+                       f"{tgt.get('type', '?')} @{tgt.get('price', exitPrice):.2f}"
+                       f" → 按触发价 {exitPrice:.2f} 成交")
+                if left > 1e-9:
+                    why += (f"（部分平仓 {tpLots:g} 手，剩 {left:g} 手走"
+                            f"{'跟踪止损' if pos.get('trailRaised') else '固定止损'}）")
+                    if stop_hit:
+                        why += f"（同根双触，按 sameBarPriority={self.same_bar_priority} 取止盈）"
+                    pos["exits"].append({"type": "activeTp", "time": bar["time"],
+                                         "price": exitPrice, "lots": tpLots, "why": why})
+                    pos["lotsLeft"] = left
+                    pos["tpRef"] = None  # 一次性：剩余只受止损保护
+                    stats["activeTpPart"] = stats.get("activeTpPart", 0) + 1
+                    if jr is not None and jr.enabled:
+                        try:
+                            jr.exit_event(pos.get("tradeNo"),
+                                          pos["exits"][-1], pos.get("journalId"))
+                        except Exception:
+                            pass
+                    continue  # 槽位不释放，继续窗口内后续K线判止损
+                pos["exits"].append({"type": "activeTp", "time": bar["time"],
+                                     "price": exitPrice, "lots": tpLots, "why": why})
+                tr = self._fx_close_position(slot, d, pos, "activeTp",
+                                             bar["time"], exitPrice, stats)
                 exits.append(tr)
                 break  # 该持仓已终局
             pos["_evalCutFine"] = cutF
         return exits
+
+    def _fx_close_position(self, slot, d, pos, et, exit_time, exit_price, stats):
+        """终局平仓：容量槽移除 + close_trade 结算（含部分平仓手数加权）+ 日志。"""
+        slot[d] = [p for p in (slot.get(d) or []) if p is not pos]
+        tr = close_trade(pos, et, exit_time, exit_price)
+        stats["closed"] += 1
+        if et in ("stop", "trailStop"):
+            stats["stopped"] = stats.get("stopped", 0) + 1
+        jr = getattr(self, "_journal", None)
+        if jr is not None and jr.enabled:
+            try:
+                jr.exit_event(tr.get("tradeNo"), (tr.get("exits") or [{}])[-1],
+                              tr.get("journalId"))
+                jr.trade_end(tr)
+            except Exception:
+                pass
+        return tr
+
+    def _fx_trail_raise(self, open_pos, t):
+        """structure 模式 1/2类持仓：入场后新出现的 3/类3/4/类4 同向点 →
+        只提损（止损上移到点极值价∓tpTrailSlipPts，只上移不下移；3类入场不提损）。
+
+        在 _fx_check_exits 之后调用：窗口内 fine K线已按旧止损评估完，提损自
+        本拍起生效（点识别用截至当前 cut 的结构，无未来函数）。水位 _trailMark
+        只进不退（点从列表消失也不回滚，与「回测交易不回滚」口径一致）。
+        """
+        if self.tp_mode != "structure":
+            return
+        for slot, d, pos in self._fx_open_positions(open_pos):
+            if POINT_CLASS.get(pos.get("pointType")) == 3:
+                continue  # 3类入场只主动止盈，不提损
+            short = d == "short"
+            P = pos["periodX"]
+            buys, sells = self._fx_all_points(P)
+            lst = sells if short else buys  # 提损参照=同向 3/4类点（多头看买点、空头看卖点）
+            mark = pos.get("_trailMark")
+            if mark is None:
+                mark = pos.get("pointTime") or 0
+            for q in lst:
+                if q["time"] <= mark or q["type"] not in TRAIL_POINT_TYPES:
+                    continue
+                mark = q["time"]
+                newStop = (q["price"] + self.tp_trail_slip_pts) if short \
+                    else (q["price"] - self.tp_trail_slip_pts)
+                if not (newStop < pos["stopRef"] if short else newStop > pos["stopRef"]):
+                    continue  # 只上移（空头只下移）
+                pos["stopRef"] = newStop
+                pos["trailRaised"] = True
+                pos["trailMoves"].append({
+                    "time": t, "pointType": q["type"], "pointTime": q["time"],
+                    "pointPrice": q["price"], "stopTo": newStop})
+            pos["_trailMark"] = mark
 
     def _fx_fill_price(self, P, t, fb_time, fb_open):
         """t（P 周期开盘边界）那根 P K线的开盘价；P 缺位时以 fine 当根开盘兜底。
@@ -732,40 +902,117 @@ class FxMaEngine(BacktestEngine):
 
     def _fx_fill_pending(self, trades, pending, open_pos, stats, t, fb_time, fb_open,
                          on_suppressed=None, sup_out=None):
-        """成交收集拍信号（互斥 + 同拍共振取大周期 + 固定价位）。
+        """成交收集拍信号（同粗类闸门 + 同向容量 + 同拍共振取大周期 + 固定价位）。
 
-        同向互斥作用域按 mutexScope：global=全局同向一笔；perPeriod=每周期独立。
-        pending 按检测周期从大到小排序——同拍同向共振大周期优先成交，其余被互斥过滤。
+        同粗类闸门（structure）：同一粗类（1/2/3；类2/类3 归粗类 2/3）在作用域内
+        同向持仓期间不开第二笔（不同粗类可叠，仍受容量约束）；该类前一笔终局
+        （止损/trailStop/activeTp 全平）后即可再开；主动止盈部分平仓不释放。
+        容量制（mutexScope 决定作用域：global=全局同向 / perPeriod=每周期同向，
+        同类闸门与容量同作用域）：作用域内同向已开总手数 + 本笔手数 ≤ 可开仓手数
+        （self.lots）才成交——points 满仓一笔（退化同向互斥单笔，行为同旧版）；
+        structure 每笔半仓，同向最多两笔叠加。pending 按检测周期从大到小排序——
+        同拍同向共振大周期优先成交，闸门/容量不足的其余被压制。
         """
+        structure = self.tp_mode == "structure"
+        entryLots = self.lots / 2.0 if structure else float(self.lots)
+
+        def _suppress(s, why):
+            stats["suppressed"] += 1
+            jr = getattr(self, "_journal", None)
+            if why and jr is not None and jr.enabled:
+                try:
+                    s["suppressedWhy"] = why
+                    jr.suppressed(t, s, why=why)
+                except Exception:
+                    pass
+            if sup_out is not None:
+                sup_out.append(s)
+            if on_suppressed:
+                try:
+                    on_suppressed(s)
+                except Exception:
+                    pass
+
         for s in sorted(pending, key=lambda x: -(intervalSecOf(x.get("periodX")) or 0)):
             d, P = s["direction"], s["periodX"]
             slot = open_pos if self.mutex_scope == "global" else open_pos.setdefault(P, {})
-            if slot.get(d) is not None:
-                stats["suppressed"] += 1
-                jr = getattr(self, "_journal", None)
-                if jr is not None and jr.enabled:
-                    blk = slot[d]
-                    try:
-                        s["suppressedWhy"] = (
+            held = slot.setdefault(d, [])
+            # 同粗类闸门（structure，与容量同作用域）
+            cls = POINT_CLASS.get(s.get("pointType")) if structure else None
+            if cls is not None:
+                same = next((p for p in held
+                             if POINT_CLASS.get(p.get("pointType")) == cls), None)
+                if same is not None:
+                    _suppress(s, (
+                        f"同类买卖点持仓中（{self.mutex_scope}）：已有"
+                        f"{same.get('pointType')}持仓单 #{same.get('tradeNo')}"
+                        f"（{fmtT(same.get('entryTime'))} @ "
+                        f"{same.get('entryPrice'):.2f} 进场，{same.get('strategyKey')}）"
+                        f"未终局，本 {s.get('pointType')} 同为 {cls} 类不叠加"
+                        f"（其终局后同类可再开），本信号不成交"))
+                    continue
+            heldLots = sum(p.get("lots", 0.0) for p in held)
+            if heldLots + entryLots > self.lots + 1e-9:
+                why = None
+                if held:
+                    blk = held[0]
+                    if structure:
+                        why = (
+                            f"同向容量已满（{self.mutex_scope}）：{DIR_LABELS.get(d, d)}"
+                            f"已持 {heldLots:g} 手 + 本笔 {entryLots:g} 手 > "
+                            f"可开仓手数 {self.lots:g}；已有单 #{blk.get('tradeNo')}"
+                            f"（{fmtT(blk.get('entryTime'))} @ "
+                            f"{blk.get('entryPrice'):.2f} 进场，{blk.get('strategyKey')}）"
+                            f"未终局，本信号不成交")
+                    else:
+                        why = (
                             f"同向互斥（{self.mutex_scope}）：已有{DIR_LABELS.get(d, d)}持仓单 "
                             f"#{blk.get('tradeNo')}（{fmtT(blk.get('entryTime'))} @ "
                             f"{blk.get('entryPrice'):.2f} 进场，{blk.get('strategyKey')}）"
                             f"未终局，本信号不成交")
-                        jr.suppressed(t, s, why=s["suppressedWhy"])
-                    except Exception:
-                        pass
-                if sup_out is not None:
-                    sup_out.append(s)
-                if on_suppressed:
-                    try:
-                        on_suppressed(s)
-                    except Exception:
-                        pass
+                _suppress(s, why)
                 continue
             entryTime, entryPrice = self._fx_fill_price(P, t, fb_time, fb_open)
             short = d == "short"
             stopRef = entryPrice + self.stop_pts if short else entryPrice - self.stop_pts
-            tpRef = entryPrice - self.tp_pts if short else entryPrice + self.tp_pts
+            # 止盈位/主动止盈手数按 tpMode 与入场点类别
+            tpRef = tpLots = tpTarget = None
+            if not structure:
+                tpRef = entryPrice - self.tp_pts if short else entryPrice + self.tp_pts
+            else:
+                cls = POINT_CLASS.get(s.get("pointType"))
+                tgt = self._fx_prev_bi_end(P, s.get("pointTime") or 0, d)
+                # 目标须在盈利侧（多头高于/空头低于进场价），否则本笔不设主动止盈
+                if tgt is not None and (tgt["price"] < entryPrice if short
+                                        else tgt["price"] > entryPrice):
+                    tpRef = (tgt["price"] + self.tp_near_pts) if short \
+                        else (tgt["price"] - self.tp_near_pts)
+                    tpTarget = {"type": tgt["type"], "time": tgt["time"],
+                                "price": tgt["price"]}
+                    # 1/2类：主动止盈半份（entryLots/2），剩余走跟踪止损；
+                    # 3类：触及全平（entryLots）
+                    tpLots = entryLots if cls == 3 else entryLots / 2.0
+            if not structure:
+                stopSource = (f"固定点数止损（盘中触价即成交） 进场价"
+                              f"{'+' if short else '-'}{self.stop_pts}点")
+                exitTail = (f"｜止损位 {stopRef:.2f}（{self.stop_pts}点，盘中触价即成交）"
+                            f"｜止盈位 {tpRef:.2f}（{self.tp_pts}点，同口径）｜{entryLots:g} 手")
+            else:
+                stopSource = ("结构组合：初始固定点数止损（盘中触价即成交）"
+                              f" 进场价{'+' if short else '-'}{self.stop_pts}点"
+                              "；1/2类入场后 3/类3/4/类4 同向点出现只上移")
+                if tpRef is not None:
+                    tpTxt = (f"｜主动止盈 {tpRef:.2f}（{tpTarget['type']} 笔端点 @"
+                             f"{tpTarget['price']:.2f}"
+                             + (f"−{self.tp_near_pts:g}容差" if not short
+                                else f"+{self.tp_near_pts:g}容差")
+                             + f"，平 {tpLots:g} 手）"
+                             + ("" if cls == 3 else "，剩余走跟踪止损"))
+                else:
+                    tpTxt = ("｜主动止盈：无有效前高/前低笔端点，不设"
+                             + ("" if cls == 3 else "，整笔走跟踪止损"))
+                exitTail = (f"｜止损位 {stopRef:.2f}（初始固定，1/2类入场后随 3/4类点提损）"
+                            f"{tpTxt}｜{entryLots:g} 手（半仓）")
             trades.append({
                 "tradeNo": len(trades) + 1,
                 "journalId": s.get("_jid"),
@@ -778,16 +1025,19 @@ class FxMaEngine(BacktestEngine):
                 "pointType": s.get("pointType"), "pointTime": s.get("pointTime"),
                 "entryTime": entryTime, "entryPrice": entryPrice,
                 "fillMode": "nextOpen",
-                "lots": self.lots, "mult": self.contract_mult,
+                "lots": entryLots, "lotsLeft": entryLots, "mult": self.contract_mult,
+                "tpMode": self.tp_mode,
+                "tpLots": tpLots,
+                "tpTarget": tpTarget,
+                "trailRaised": False, "trailMoves": [],
+                "_trailMark": s.get("pointTime") or 0,
                 "stopRef": stopRef,
-                "stopSource": f"固定点数止损（盘中触价即成交） 进场价"
-                              f"{'+' if short else '-'}{self.stop_pts}点",
+                "stopSource": stopSource,
                 "tpRef": tpRef,
                 "entryWhy": (
                     f"{DIR_LABELS.get(d, d)}｜{s.get('signalNote') or s.get('reason')}"
                     f"｜下一开盘 {fmtT(entryTime)} @ {entryPrice:.2f} 进场"
-                    f"｜止损位 {stopRef:.2f}（{self.stop_pts}点，盘中触价即成交）"
-                    f"｜止盈位 {tpRef:.2f}（{self.tp_pts}点，同口径）｜{self.lots} 手"),
+                    f"{exitTail}"),
                 # 中性出场状态机键（live_trader._diff_states/_on_fill 与 chan V1 同位消费）
                 "beStop": None, "beDone": False, "halfDone": False,
                 "state": "open",
@@ -795,7 +1045,7 @@ class FxMaEngine(BacktestEngine):
                 "_evalCutFine": self._cut.get(self.fine_res, 0),
             })
             stats["executed"] += 1
-            slot[d] = trades[-1]
+            held.append(trades[-1])
             jr = getattr(self, "_journal", None)
             if jr is not None and jr.enabled:
                 try:
@@ -806,10 +1056,11 @@ class FxMaEngine(BacktestEngine):
     # ---------------- 三模式统一推进（run 批量 / step_to 实时） ----------------
 
     def _fx_init_state(self):
-        """跨拍持久状态（run 与 step_to 共用同构初始化）。"""
+        """跨拍持久状态（run 与 step_to 共用同构初始化）。每方向为持仓列表
+        （容量制：points 满仓一笔=单元素；structure 半仓可同向叠两笔）。"""
         return {
-            "open_pos": ({"long": None, "short": None} if self.mutex_scope == "global"
-                         else {P: {"long": None, "short": None} for P in self.entry_res}),
+            "open_pos": ({"long": [], "short": []} if self.mutex_scope == "global"
+                         else {P: {"long": [], "short": []} for P in self.entry_res}),
             "pending": [],     # 待成交信号（下一开盘）
             "trades": [],
             "allSignals": {},
@@ -821,12 +1072,14 @@ class FxMaEngine(BacktestEngine):
     def _fx_tick(self, st, t, fb_bar, out, on_suppressed=None):
         """单拍推进（决策时刻 t = fine 下一根开盘时刻；fb_bar = 该根 fine K线或 None）。
 
-        ①出场判定（fine 已收K线盘中触及止损/止盈 → 即时按触发价成交，互斥解锁）
+        ①出场判定（fine 已收K线盘中触及止损/止盈 → 即时按触发价成交，容量释放）
+        → ①′ 提损扫描（structure：1/2类持仓随新 3/4类点上移止损，自本拍生效）
         → ②收集信号 → ③信号成交（同拍共振取大周期）。出场不依赖 fb_bar（按
         触发价成交）；进场仍取 fb_bar 开盘——fb_bar=None（无下一根且不允许进行中
         成交）时信号挂起到下一拍再成交，价格仍取信号边界那根 P K线开盘。
         """
         exits = self._fx_check_exits(st["open_pos"], st["stats"])
+        self._fx_trail_raise(st["open_pos"], t)
         sigs = self._fx_collect(st["allSignals"], st["stats"], st["fired"], t)
         st["pending"] += sigs
         fills = []
@@ -847,9 +1100,11 @@ class FxMaEngine(BacktestEngine):
     def run(self, to_ts=None, start_ts=None, log=None, log_every=2000,
             on_progress=None, on_signal=None, on_trade=None, on_exit=None,
             on_suppressed=None, paused=None, stopped=None, journal=None,
-            journal_symbol=None, journal_strategy="fxma"):
+            journal_symbol=None, journal_strategy="fxma", fast_warmup=True):
         """逐根K线重放（与 BacktestEngine.run 同参同语义；fxma 链路见 _fx_tick）。
-        journal=交易日志（None=默认新建 data/journal NDJSON；False=关闭；实例=注入）。"""
+        journal=交易日志（None=默认新建 data/journal NDJSON；False=关闭；实例=注入）。
+        fast_warmup=预热批量热启动（默认开，语义同 BacktestEngine.run；False=旧逐根
+        预热，对拍基准，见 test_fx_ma_warmup_faststart）。"""
         log = log or (lambda *a, **k: None)
         fine = self.bars[self.fine_res]["_list"]
         n = len(fine)
@@ -885,6 +1140,8 @@ class FxMaEngine(BacktestEngine):
                 "pointValidBars": self.point_valid_bars,
                 "pointValidPts": self.point_valid_pts,
                 "stopPts": self.stop_pts, "tpPts": self.tp_pts,
+                "tpMode": self.tp_mode, "tpNearPts": self.tp_near_pts,
+                "tpTrailSlipPts": self.tp_trail_slip_pts,
                 "sameBarPriority": self.same_bar_priority, "mutexScope": self.mutex_scope,
                 "lots": self.lots, "contractMult": self.contract_mult,
                 "startTs": start_ts, "toTs": to_ts, "fineRes": self.fine_res,
@@ -902,7 +1159,23 @@ class FxMaEngine(BacktestEngine):
 
         # 预热：只推进状态（笔/均线充分建立后开始交易）；进度/日志同缠论V1
         # （刻度统一 end_i，进度条单调爬升，长预热不静默）
-        for i in range(start_i):
+        # 批量热启动（2026-10-07，同缠论V1 fast_warmup）：start_i 超过 RESYNC_EVERY 时
+        # 先一把 _advance_cut 推进到最近重同步网格点（状态=batch(前缀)，与逐步路径
+        # 重同步点同口径），其后 <RESYNC_EVERY 根照旧逐步推进。免逐根推进的超线性
+        # 开销（XAUUSD 60 天 lead·fine=15m 实测预热段 139s → 16s，尾部<200 根受
+        # 重同步节拍对齐契约约束仍逐根；test_fx_ma_warmup_faststart 对拍锁定）。
+        warm_i = 0
+        if fast_warmup and start_i >= RESYNC_EVERY:
+            warm_i = (start_i // RESYNC_EVERY) * RESYNC_EVERY
+            self._advance_cut(fine[warm_i - 1]["time"] + fine_sec)
+            if on_progress:
+                try:
+                    on_progress(warm_i, end_i)
+                except Exception:
+                    pass
+            if log:
+                log(f"预热批量推进：第 {warm_i}/{start_i} 根（{fmtT(fine[warm_i - 1]['time'])}）")
+        for i in range(warm_i, start_i):
             if stopped is not None and stopped.is_set():
                 break
             if not _wait_if_paused():
@@ -1005,8 +1278,8 @@ class FxMaEngine(BacktestEngine):
         if i > end_cut or i > self._cut[self.fine_res]:
             # 回退保护（与基类同语义）：状态倒放 → 回退到当前 cut，清持仓与待成交
             wrap["i"] = i = self._cut[self.fine_res]
-            st["open_pos"] = ({"long": None, "short": None} if self.mutex_scope == "global"
-                              else {P: {"long": None, "short": None} for P in self.entry_res})
+            st["open_pos"] = ({"long": [], "short": []} if self.mutex_scope == "global"
+                              else {P: {"long": [], "short": []} for P in self.entry_res})
             st["pending"] = []
         out = {"signals": [], "fills": [], "exits": [], "suppressed": []}
         while i < end_cut:

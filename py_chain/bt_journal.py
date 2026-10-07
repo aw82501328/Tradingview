@@ -37,6 +37,7 @@ EXIT_LABELS = {
     "breakeven": "TP1 保本", "half": "TP2 平一半", "close": "TP3 全平",
     "stopSr": "支阻位止损", "stopBe": "保本止损",
     "stop": "固定止损", "takeProfit": "固定止盈",
+    "activeTp": "主动止盈", "trailStop": "跟踪止损",
 }
 FILL_MODE_LABELS = {
     "anchor": "锚点当拍成交", "confirm": "确认成交（下一开盘）",

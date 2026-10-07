@@ -998,34 +998,87 @@ def _pair_forms_bi(ctx, a, b):
     return False
 
 
+def _nearEqIdx(ctx):
+    """按型分组的分型索引视图（挂在 ctx 上懒建，ctx 生命周期内按长度失效复用）。
+
+    fractals 本身按 mergedIdx 升序（引擎增量维护保证），过滤保持序，无需排序。
+    子表 + 平行 mergedIdx 数组供二分切片；后缀极值 sfx[i] = 子表 [i:] 的极值
+    （顶=max(high)，底=min(low)），供「之后还存在更极端同型分型」O(1) 判定，
+    替代腿终局守卫里的全表线性扫（2026-10-07；切片集合与扫描语义逐位一致）。"""
+    view = getattr(ctx, "_nearEqView", None)
+    if view is not None and view[0] == len(ctx.fractals or ()):
+        return view[1]
+    tops, bots = [], []
+    for f in (ctx.fractals or ()):
+        (tops if f["type"] == "top" else bots).append(f)
+    idx_t = [f["mergedIdx"] for f in tops]
+    idx_b = [f["mergedIdx"] for f in bots]
+
+    def _sfx(lst):
+        out = [None] * (len(lst) + 1)
+        for i in range(len(lst) - 1, -1, -1):
+            f = lst[i]
+            v = f["high"] if f["type"] == "top" else f["low"]
+            nxt = out[i + 1]
+            if nxt is None:
+                out[i] = v
+            elif f["type"] == "top":
+                out[i] = v if v > nxt else nxt
+            else:
+                out[i] = v if v < nxt else nxt
+        return out
+
+    view = {"top": tops, "bottom": bots, "idx_top": idx_t, "idx_bottom": idx_b,
+            "sfx_top": _sfx(tops), "sfx_bottom": _sfx(bots)}
+    ctx._nearEqView = (len(ctx.fractals or ()), view)
+    return view
+
+
 def _near_equal_shift_falsified(ctx, origin, prev, k):
     """近等后移腿终局守卫（2026-09-30，与 JS chan-core 对齐）：近等后移断言
     「last→k 这条腿终结于 k、中间反弹不成笔」。该断言被后续数据否定时不应提交：
     若 k 被更极端同类型分型突破，且被弹出的反弹段（本段结构极值 anchor→区间实际
     最优反向极值 best→突破点 k2）本可构成两笔有效笔，则拒绝合并——prev/last 留在
     序列里，正确结构由标准成笔规则自然长出。判据与 shiftBreakRestore 的补回条件
-    同源（可证成笔才拦），已被市场走势消化的历史合并不受影响。"""
+    同源（可证成笔才拦），已被市场走势消化的历史合并不受影响。
+
+    2026-10-07：三处全表过滤扫描改为 _nearEqIdx 分型索引视图的二分切片 +
+    后缀极值提前终止（k2 不存在时免全表扫）；切片集合、遍历序与极值取舍
+    （严格比较、同值保先见者）与原实现逐位一致。"""
+    view = _nearEqIdx(ctx)
+    is_top = k["type"] == "top"
+    sub, idxs, sfx = ((view["top"], view["idx_top"], view["sfx_top"]) if is_top
+                      else (view["bottom"], view["idx_bottom"], view["sfx_bottom"]))
     start_idx = origin["mergedIdx"] if origin else prev["mergedIdx"]
+    # anchor：(start_idx, k.mergedIdx) 内最极端同型分型（初值 prev，同原实现）
     anchor = prev
-    for f in ctx.fractals:
-        if f["mergedIdx"] <= start_idx or f["mergedIdx"] >= k["mergedIdx"] or f["type"] != k["type"]:
-            continue
-        if (f["low"] < anchor["low"]) if k["type"] == "bottom" else (f["high"] > anchor["high"]):
+    lo = bisect.bisect_right(idxs, start_idx)
+    hi = bisect.bisect_left(idxs, k["mergedIdx"])
+    for f in sub[lo:hi]:
+        if (f["low"] < anchor["low"]) if not is_top else (f["high"] > anchor["high"]):
             anchor = f
+    # k2：k 之后更极端的同型分型（≤8 个）；后缀极值无非解即提前终止
+    osub, oidxs = ((view["bottom"], view["idx_bottom"]) if is_top
+                   else (view["top"], view["idx_top"]))
     tries = 0
-    for k2 in ctx.fractals:
-        if k2["mergedIdx"] <= k["mergedIdx"] or k2["type"] != k["type"]:
-            continue
-        if not ((k2["low"] < k["low"]) if k["type"] == "bottom" else (k2["high"] > k["high"])):
+    i0 = bisect.bisect_right(idxs, k["mergedIdx"])
+    for ii in range(i0, len(sub)):
+        s = sfx[ii]
+        if s is None or (s <= k["high"] if is_top else s >= k["low"]):
+            break
+        k2 = sub[ii]
+        if not ((k2["high"] > k["high"]) if is_top else (k2["low"] < k["low"])):
             continue
         tries += 1
         if tries > 8:
             break  # 突破点只看近处，防长程扫描
+        # best：(anchor, k2) 内最极端反型分型
+        lo2 = bisect.bisect_right(oidxs, anchor["mergedIdx"])
+        hi2 = bisect.bisect_left(oidxs, k2["mergedIdx"])
         best = None
-        for f in ctx.fractals:
-            if f["mergedIdx"] <= anchor["mergedIdx"] or f["mergedIdx"] >= k2["mergedIdx"] or f["type"] == k["type"]:
-                continue
-            if best is None or ((f["high"] > best["high"]) if f["type"] == "top" else (f["low"] < best["low"])):
+        for f in osub[lo2:hi2]:
+            if best is None or ((f["high"] > best["high"]) if f["type"] == "top"
+                                else (f["low"] < best["low"])):
                 best = f
         if best is not None and _pair_forms_bi(ctx, anchor, best) and _pair_forms_bi(ctx, best, k2):
             if CHAN_CFG["debug"]:
@@ -1491,13 +1544,26 @@ def resetBiFlags(seq, start=0):
 
 def _markLockedPivots(seq, locked_pivots, start=0):
     """在阶段一序列 seq[start:] 上标记与上级端点方向/价格一致的分型（容差 0.001），
-    与 buildBi 的区间套锁定标记同口径（bi_inc 增量路径对新折叠元素调用）。"""
+    与 buildBi 的区间套锁定标记同口径（bi_inc 增量路径对新折叠元素调用）。
+
+    2026-10-07：枢轴价按方向排序后二分定位候选（候选窗放宽 ±0.002 防浮点边界
+    漏解），命中判定仍用原式 abs(q-p)<=0.001——替代 O(seq×pivots) 双层全扫
+    （锁变化全量重建时 seq/枢轴均千级，曾是回测交易段超线性的最大单点）；
+    命中集合与原实现逐位一致。
+    """
     if not locked_pivots:
         return
+    tops = sorted(lp["price"] for lp in locked_pivots if lp["dir"] == "top")
+    bots = sorted(lp["price"] for lp in locked_pivots if lp["dir"] == "bottom")
     for f in seq[start:]:
+        arr = tops if f["type"] == "top" else bots
+        if not arr:
+            continue
         p = f["high"] if f["type"] == "top" else f["low"]
-        for lp in locked_pivots:
-            if lp["dir"] == f["type"] and abs(lp["price"] - p) <= 0.001:
+        i = bisect.bisect_left(arr, p - 0.002)
+        j = bisect.bisect_right(arr, p + 0.002)
+        for q in arr[i:j]:
+            if abs(q - p) <= 0.001:
                 f["locked"] = True
                 break
 
@@ -1667,12 +1733,14 @@ def buildZS(bis, barSec=0):
     """构建笔中枢（基于笔序列，标准缠论笔中枢）。
     取连续三笔（笔序列天然交替）的重叠区间构成中枢：
       中枢上沿 ZG = min(三笔高点)，中枢下沿 ZD = max(三笔低点)，ZG > ZD 时成立。
-    中枢形成后支持延伸：后续笔与 [ZD, ZG] 有重叠则纳入中枢（GG/DD 扩展），
-    出现离开中枢的笔时中枢结束（笔与中枢区间完全无重叠 → 离开；笔的起点在中枢
-    区间内、终点突破中枢边界，且下一笔没有回到已纳入笔的重叠区 → 也视为离开。
-    下一笔重新与该重叠区相交时，这一笔只是回抽，中枢继续延伸）。
-    至少 3 笔即可输出中枢（三笔重叠即成）。
-    中枢区间 [zd, zg] 取「构成中枢的全部笔（含离开笔）的重叠部分」。
+      中枢形成后支持延伸：后续笔与 [ZD, ZG] 有重叠则纳入中枢（GG/DD 扩展），
+      出现离开中枢的笔时中枢结束（终点突破中枢边界即离开，起点不论——含从中枢
+      下方直破上沿的穿越式离开；笔与中枢区间完全无重叠也视为离开。前提都是下一笔
+      没有回到已纳入笔的重叠区——下一笔重新与该重叠区相交时，这一笔只是回抽，
+      中枢继续延伸）。
+      至少 3 笔即可输出中枢（三笔重叠即成）。
+      中枢区间 [zd, zg] 取「构成中枢的全部笔（含离开笔）的重叠部分」；
+      离开/回踩笔与构成笔无重叠（重叠被挤空）时回退为不含离开笔的重叠。
     中枢水平边缘：左边缘 = 进入笔终点 - 5×barSec；右边缘 = 离开笔起点 + 5×barSec；
     无离开笔时右边缘 = 构成中枢最后一笔的终点 + 5×barSec。
     @param bis 笔数组（已排序，含 startTime/endTime/startPrice/endPrice）
@@ -1705,12 +1773,14 @@ def buildZS(bis, barSec=0):
                 bj = bis[j]
                 Hj, Lj = hi(bj), lo(bj)
                 if Lj <= zg and Hj >= zd:  # 与中枢区间有重叠 → 判断延伸还是离开
-                    # 离开判定：笔的起点在中枢区间内、终点突破中枢边界，视为「离开中枢的笔」
-                    startIn = bj["startPrice"] >= zd - eps and bj["startPrice"] <= zg + eps
+                    # 离开判定：终点突破中枢边界即离开，起点不论（2026-10-07 起；
+                    # 此前还要求起点在中枢区间内——从中枢下方直破上沿的「穿越式
+                    # 离开」会被误当延伸，其后悬在中枢外的干净回踩笔（标准 3买 形态）
+                    # 反被记成离开笔并挤空重叠，导致整枢被丢弃）。
                     endBreak = bj["endPrice"] < zd - eps or bj["endPrice"] > zg + eps
                     # 下一笔又回到当前重叠区（回抽未离开）则本笔仍算延伸。
                     # 这样二卖与其后类2卖的公共重叠会整段留在同一个中枢里。
-                    if startIn and endBreak and not _next_bi_returns(bis, i, j, hi, lo):
+                    if endBreak and not _next_bi_returns(bis, i, j, hi, lo):
                         exitTime = bj["startTime"]  # 离开笔起点
                         break
                     dd = min(dd, Lj)
@@ -1725,13 +1795,23 @@ def buildZS(bis, barSec=0):
             if biCount < 3:
                 i = j
                 continue
-            # 中枢区间 = 构成中枢的全部笔（i..i+biCount-1，含离开笔）的重叠部分
+            # 中枢区间 = 构成中枢的全部笔（i..i+biCount-1，含离开笔）的重叠部分；
+            # 离开/回踩笔与已纳入笔完全无重叠（悬在中枢外）时会把重叠挤空——
+            # 回退为不含离开笔的构成笔重叠（2026-10-07 起；此前整枢被防御性丢弃，
+            # 标准 3买 的低中枢因此消失、其后高点被误标类2买）
             zsZd = float("-inf")
             zsZg = float("inf")
             for k in range(i, i + biCount):
                 bk = bis[k]
                 zsZd = max(zsZd, lo(bk))
                 zsZg = min(zsZg, hi(bk))
+            if zsZg <= zsZd and exitTime is not None:
+                zsZd = float("-inf")
+                zsZg = float("inf")
+                for k in range(i, j):
+                    bk = bis[k]
+                    zsZd = max(zsZd, lo(bk))
+                    zsZg = min(zsZg, hi(bk))
             # 全部笔重叠后仍可能 zg <= zd（笔数过多、覆盖区间收窄为空），防御性跳过
             if zsZg <= zsZd:
                 i = j

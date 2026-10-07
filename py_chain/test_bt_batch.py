@@ -65,11 +65,16 @@ class NormalizeCfgSymbolsTest(unittest.TestCase):
              "data_source": "store"}, "backtest")
         self.assertEqual(out["symbols"], ["FX:NAS100", "OANDA:XAUUSD"])
 
-    def test_multi_requires_store(self):
-        for src in ("live", "cache"):
-            with self.assertRaises(ValueError):
-                ControlApp.normalize_cfg(
-                    {"symbols": "A,B", "data_source": src}, "backtest")
+    def test_data_source_forced_store(self):
+        """数据源固定本地存储（2026-10-07）：live/cache/缺失一律归一为 store；
+        多品种批量不再因数据源被拒。"""
+        for src in ("live", "cache", None):
+            cfg = {"symbols": "A,B"}
+            if src is not None:
+                cfg["data_source"] = src
+            out = ControlApp.normalize_cfg(cfg, "backtest")
+            self.assertEqual(out["data_source"], "store")
+            self.assertEqual(out["symbols"], ["A", "B"])
 
     def test_empty_rejected(self):
         with self.assertRaises(ValueError):
@@ -90,11 +95,13 @@ class _FakeWorker:
         self._row_base = 0
         self.duration_sec = 123.4
         self.batch = batch
+        self.strategy = "chan_v1"   # _save_one 按 strategy 取该策略信号行
 
 
 def _fake_app(worker, snapshot_rows):
     signals = types.SimpleNamespace(
-        snapshot=lambda mode, min_id=0: [dict(r) for r in snapshot_rows])
+        snapshot=lambda mode, min_id=0, strategy=None:
+            [dict(r) for r in snapshot_rows])
     return types.SimpleNamespace(
         workers={"backtest": worker}, signals=signals,
         broadcaster=types.SimpleNamespace(emit=lambda *a, **k: None),

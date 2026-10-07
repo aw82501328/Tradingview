@@ -1131,3 +1131,53 @@ describe("参数页总开关 wickMarkOn / wideBarOn", () => {
     assert.equal(core.wideBarPointsOf("3"), 30);
   });
 });
+
+describe("buildZS 穿越式离开与零重叠回踩（2026-10-07）", () => {
+  // 复现 7-9 15m 实盘结构（XAUUSD）：深回踩跌破 zd 后直破上沿（穿越式离开），
+  // 回踩悬在中枢上方（标准 3买）。旧规则下低中枢被整枢丢弃、后续点被误标类2买。
+  const mkBi = (t0, t1, typ, p0, p1) => ({
+    type: typ, startTime: t0, endTime: t1, startPrice: p0, endPrice: p1, span: Math.abs(p1 - p0),
+  });
+  const bis = () => [
+    mkBi(1000, 1100, "up",   4021.82, 4091.67),
+    mkBi(1100, 1200, "down", 4091.67, 4071.64), // 2买
+    mkBi(1200, 1300, "up",   4071.64, 4090.02),
+    mkBi(1300, 1400, "down", 4090.02, 4056.45), // 深回踩跌破 zd（下一笔回枢 → 延伸）
+    mkBi(1400, 1500, "up",   4056.45, 4118.01), // 穿越式离开：起点 < zd，终点 > zg
+    mkBi(1500, 1600, "down", 4118.01, 4093.86), // 回踩悬在 zg 上方（零重叠 → 3买）
+    mkBi(1600, 1700, "up",   4093.86, 4138.06),
+    mkBi(1700, 1800, "down", 4138.06, 4118.91),
+    mkBi(1800, 1900, "up",   4118.91, 4127.81),
+    mkBi(1900, 2000, "down", 4127.81, 4121.06),
+  ];
+
+  test("低中枢在穿越式离开处结束，不再整枢丢弃", () => {
+    const zss = core.buildZS(bis(), 0);
+    const low = zss.filter(z => Math.abs(z.zd - 4071.64) < 1e-6 && Math.abs(z.zg - 4090.02) < 1e-6);
+    assert.equal(low.length, 1);
+    assert.equal(low[0].exitTime, 1400);   // 穿越式离开笔起点结束中枢
+    assert.equal(low[0].enterEndTime, 1100);
+  });
+
+  test("零重叠离开/回踩笔挤空重叠时回退为构成笔重叠", () => {
+    const zss = core.buildZS(bis(), 0);
+    const mid = zss.filter(z => Math.abs(z.zd - 4093.86) < 1e-6 && Math.abs(z.zg - 4118.01) < 1e-6);
+    assert.equal(mid.length, 1);
+    assert.equal(mid[0].exitTime, 1700);
+  });
+
+  test("买点为离枢回踩序列 3买→类3买→4买，不再误标类2买", () => {
+    const upper = [{ type: "up", startTime: 900, endTime: 1650,
+                     startPrice: 4021.82, endPrice: 4138.06,
+                     coverageEnd: 2000, span: 116.24 }];
+    const macd = [];
+    for (let t = 950; t <= 2000; t += 50) macd.push({ time: t, dif: 0, dea: 0, macd: 0 });
+    const pts = core.findBuyPoints(bis(), upper, macd, 900, 0, 0);
+    assert.deepEqual(pts.map(p => [p.type, p.time, p.price]), [
+      ["2买", 1200, 4071.64],
+      ["3买", 1600, 4093.86],
+      ["类3买", 1800, 4118.91],
+      ["4买", 2000, 4121.06],
+    ]);
+  });
+});

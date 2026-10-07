@@ -73,8 +73,9 @@ class LaunchTests(unittest.TestCase):
                        lambda _: self.fail(), compat=lambda owner: False)
         self.assertFalse(m.start()["ok"])
 
-    def test_td_launch_compat_by_source(self):
-        """ControlApp 兼容判断：store/cache（含批量）放行，live 缺省与非回测互斥。"""
+    def test_td_launch_free_during_backtest(self):
+        """回测固定本地存储（2026-10-07）：纯后台不注册模式锁——
+        回测运行中 TD 启动的互斥入口 acquire_active 直接成功。"""
         import tempfile
         from pathlib import Path
         from . import sr_tune
@@ -85,18 +86,13 @@ class LaunchTests(unittest.TestCase):
         w.thread = threading.Thread(target=gate.wait, daemon=True)
         w.thread.start()
         try:
-            webapp._active_mode = "backtest"
-            for src, expect in (("store", True), ("cache", True), ("live", False)):
-                w.cfg = {"data_source": src}
-                self.assertIs(app._td_launch_compat("backtest"), expect)
-            w.cfg = {"data_source": "store", "symbols": ["A", "B"]}   # 多品种批量=store
-            self.assertTrue(app._td_launch_compat("backtest"))
-            w.cfg = {"use_cache": True}     # 旧键兜底 → cache
-            self.assertTrue(app._td_launch_compat("backtest"))
-            w.cfg = {}                      # 缺省 → live
-            self.assertFalse(app._td_launch_compat("backtest"))
-            webapp._active_mode = "replay"  # 非回测占用者一律互斥
-            self.assertFalse(app._td_launch_compat("replay"))
+            self.assertIsNone(webapp.active_mode())
+            holder = webapp.acquire_active("td-launch")
+            self.assertIs(holder, True)
+            webapp.release_active("td-launch")
+            webapp._active_mode = "replay"  # 非回测模式占用时 TD 启动仍互斥
+            self.assertEqual(webapp.acquire_active("td-launch"), "replay")
+            webapp._active_mode = None
         finally:
             webapp._active_mode = None
             gate.set()

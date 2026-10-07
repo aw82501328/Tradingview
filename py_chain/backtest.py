@@ -224,7 +224,13 @@ def execute_pending_exit(pos, exec_bar):
 
 
 def close_trade(pos, exit_type, exit_time, exit_price):
-    """标记持仓终局并结算盈亏（半仓按 half 事件价加权，整体 × lots 手数 × 合约乘数）。"""
+    """标记持仓终局并结算盈亏。
+
+    结算口径（互斥分支）：
+    - 缠论V1 half 事件：0.5 half 价 + 0.5 终局价加权，整体 × lots × 合约乘数；
+    - fxma 部分平仓：exits 中带 "lots" 键的事件按各自手数结算，
+      终局价结算剩余手数（lots − Σ部分手数）。
+    """
     pos["state"] = "closed"
     pos["exitType"] = exit_type
     pos["exitTime"] = exit_time
@@ -237,8 +243,13 @@ def close_trade(pos, exit_type, exit_time, exit_price):
     half_ev = next((e for e in pos.get("exits", []) if e["type"] == "half"), None)
     if half_ev:
         pos["pnl"] = (0.5 * (half_ev["price"] - entry) + 0.5 * (exit_price - entry)) * d * lots * mult
-    else:
-        pos["pnl"] = (exit_price - entry) * d * lots * mult
+        return pos
+    partial = [e for e in pos.get("exits", []) if e.get("lots")]
+    pnl = sum((e["price"] - entry) * d * e["lots"] * mult for e in partial)
+    rest = lots - sum(e["lots"] for e in partial)
+    if rest > 1e-9:
+        pnl += (exit_price - entry) * d * rest * mult
+    pos["pnl"] = pnl
     return pos
 
 
@@ -1789,7 +1800,8 @@ class BacktestEngine:
 
         已平仓（state=closed）的盈亏在 close_trade 终局时已结算（on_exit 回调携带），
         此处保留；未平仓按最新收盘价 mark-to-market（已平一半的按 0.5 half 价
-        + 0.5 最新收盘加权），整体 × lots 手数 × 合约乘数。
+        + 0.5 最新收盘加权；fxma 部分平仓按已平手数实现 + 剩余手数 mark-to-market），
+        整体 × lots 手数 × 合约乘数。
         """
         lastPrice = None
         lastTime = None
@@ -1811,8 +1823,14 @@ class BacktestEngine:
                 # 已平一半：半仓按 half 价已实现 + 半仓按最新收盘 mark-to-market
                 tr["pnl"] = (0.5 * (half_ev["price"] - tr["entryPrice"])
                              + 0.5 * (lastPrice - tr["entryPrice"])) * d * lots * mult
-            else:
-                tr["pnl"] = (lastPrice - tr["entryPrice"]) * d * lots * mult
+                continue
+            partial = [e for e in tr.get("exits", []) if e.get("lots")]
+            pnl = sum((e["price"] - tr["entryPrice"]) * d * e["lots"] * mult
+                      for e in partial)
+            rest = lots - sum(e["lots"] for e in partial)
+            if rest > 1e-9:
+                pnl += (lastPrice - tr["entryPrice"]) * d * rest * mult
+            tr["pnl"] = pnl
         return {
             "signals": allSignals,        # { markRes: [signals] }
             "trades": trades,             # [ { tradeNo, periodX, direction, ... } ]

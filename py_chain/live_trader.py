@@ -273,6 +273,15 @@ class LiveTrader:
         # ④ 参数中心（进程内全局 CHAN_CFG 与引擎 module_params 同 webapp 口径）
         self._pm = param_center.effective_all(c.get("symbol"))
         chan_core.apply_cfg(param_center.chan_cfg_effective(c.get("symbol")))
+        # fxma structure 模式：主动止盈分批=可开仓手数÷4，低于最小手数须显式接受降级
+        if c.get("strategy") == "fxma_v1" \
+                and self._pm["fxma"].get("tpMode", "points") == "structure":
+            quarter = c["lots"] * 0.01 / 4
+            if quarter < spec["volume_min"] and not c["risk"].get("allow_odd_lots"):
+                raise RuntimeError(
+                    f"fxma structure 主动止盈分批 {quarter:.3f} 手 < volume_min "
+                    f"{spec['volume_min']}，需部分→全平降级才可运行"
+                    f"（risk.allow_odd_lots=true 显式接受）")
         # ⑤ 会话与参数漂移守卫
         h = config_hash(self._pm, self.cfg)
         st = live_store.load_state(self._skey("session"))
@@ -531,20 +540,23 @@ class LiveTrader:
         return None
 
     def _on_signal(self, s):
-        """信号拍：记录事件 + 立即市价单（≈引擎「下一开盘」口径）。"""
+        """信号拍：记录事件 + 立即市价单（≈引擎「下一开盘」口径）。
+
+        开仓手数取引擎信号自带 lots（fxma structure=半仓；缺省=配置手数）。"""
         kind = "replay_signal" if self.replaying else "signal"
         live_store.log_event(self.session, kind, s, symbol=self.cfg["symbol"])
         if self.replaying:
             return
         identity = self._identity(s)
         d = s["direction"]
+        entryLots = s.get("lots", self.cfg["lots"])   # fxma structure=半仓
         # 风控门（只挡镜像侧）：被挡 → 成交拍落 shadow
-        ok, reason = self._entry_gate(d)
+        ok, reason = self._entry_gate(d, entryLots)
         if not ok:
             self._pending.append({"identity": identity, "status": "blocked",
                                   "reason": reason})
             live_store.log_order(self.session, "entry", engine_trade_no=None,
-                                 direction=d, volume=self.cfg["lots"] * 0.01,
+                                 direction=d, volume=entryLots * 0.01,
                                  price=s.get("price"), sl=s.get("nearSr"),
                                  ok=0, retcode=0, retcomment=f"gate:{reason}", shadow=1)
             self._alert("gate_blocked", f"进场被门控拦截（shadow）：{reason} {d} "
@@ -552,7 +564,8 @@ class LiveTrader:
             return
         bid, ask = self.broker.quote()
         # 信号拍临时 SL/TP：fxma 信号自带固定点数价位（provStop/provTp，来自触发拍
-        # 收盘价 ∓/± 点数）；缠论V1 信号走近支阻 ± 滑点的 provisional_sl（原行为）。
+        # 收盘价 ∓/± 点数；structure 无固定止盈 → tp 不挂，主动止盈由引擎触价事件驱动）；
+        # 缠论V1 信号走近支阻 ± 滑点的 provisional_sl（原行为）。
         tp = None
         if s.get("provStop") is not None:
             sl = self.broker.normalize_price(s["provStop"])
@@ -561,7 +574,7 @@ class LiveTrader:
         else:
             sl = provisional_sl(d, bid, ask, s.get("nearSr"))
             sl = self.broker.normalize_price(sl)
-        vol = self.broker.normalize_volume(self.cfg["lots"] * 0.01)
+        vol = self.broker.normalize_volume(entryLots * 0.01)
         comment = f"chai_{d}_{s['time']}"
         r = None
         for _ in range(max(1, self.cfg["broker"]["order_retry"])):
@@ -605,7 +618,7 @@ class LiveTrader:
         identity = self._identity(t)
         p = self._pop_pending(identity)   # 重放恢复时 pending 为空 → p=None（只挂接不动券商）
         row = live_store.get_trade(self.session, no)
-        vol = round(self.cfg["lots"] * 0.01, 2)
+        vol = round((t.get("lots", self.cfg["lots"])) * 0.01, 2)   # fxma structure=半仓
         if row is None:
             shadow = 0 if (p and p.get("status") == "ordered") else 1
             row = live_store.upsert_trade({
@@ -785,7 +798,9 @@ class LiveTrader:
         self.log(f"[live] trade#{no} beStop 收盘校正 → {t['beStop']:.2f}")
 
     def _diff_states(self):
-        """持仓原地状态 diff：TP1 保本改SL / TP2 半平 / 止损外推改SL。
+        """持仓原地状态 diff：TP1 保本改SL / TP2 半平 / 止损外推改SL（fxma 提损同路：
+        引擎 stopRef 上移 → stop_changed → modify_sl）；fxma structure 部分主动止盈
+        （exits 新增带 lots 的事件）→ 按事件手数市价平掉。
         无变化不读库（每拍 O(open)内存比较，动作时才落库/下单）。"""
         spec = self.broker.spec()
         eps = spec["point"] or 0.01
@@ -798,7 +813,9 @@ class LiveTrader:
             eff_stop = t["beStop"] if t["beDone"] else t["stopRef"]
             stop_changed = abs((eff_stop or 0) - (snap.get("eff_stop") or 0)) > eps
             half_changed = t["halfDone"] and not snap.get("halfDone")
-            if stop_changed or half_changed:
+            evs = t.get("exits") or []
+            new_parts = [e for e in evs[snap.get("n_exits") or 0:] if e.get("lots")]
+            if stop_changed or half_changed or new_parts:
                 row = live_store.get_trade(self.session, no)
                 if row and row["state"] in ("closed", "detached"):
                     self._snap[no] = self._snapshot(t)
@@ -808,7 +825,54 @@ class LiveTrader:
                                       reason="be" if t["beDone"] else "extrapolate")
                 if half_changed:
                     self._half_close(no, t, row)
+                for ev in new_parts:
+                    self._partial_close(no, t, row, ev)
+                    row = live_store.get_trade(self.session, no)
             self._snap[no] = self._snapshot(t)
+
+    def _partial_close(self, no, t, row, ev):
+        """fxma structure 主动止盈部分平仓：按引擎事件手数市价平掉对应手数。
+
+        手数低于 volume_min → 全平降级（同 half 降级口径）；≥ 券商剩余手数 → 全平。"""
+        if row is None:
+            live_store.log_event(self.session, "partial_close_skip",
+                                 {"tradeNo": no, "why": "no_row"}, symbol=self.cfg["symbol"])
+            return
+        vol_ev = round((ev.get("lots") or 0) * 0.01, 2)
+        if row["shadow"] or not row["position_ticket"]:
+            live_store.log_event(self.session, "partial_close_skip", {
+                "tradeNo": no, "why": "shadow_or_no_ticket", "ev": ev,
+                "engine_pnl_fragment": None}, symbol=self.cfg["symbol"])
+            return
+        left = row["volume_left"] or row["volume_open"]
+        vmin = self.broker.spec()["volume_min"]
+        if vol_ev < vmin or vol_ev >= left:
+            r = self.broker.close_position(row["position_ticket"], comment="partial_degrade_full")
+            live_store.log_order(self.session, "full_close", engine_trade_no=no,
+                                 direction=t["direction"], volume=left,
+                                 position_ticket=row["position_ticket"], ok=int(r.ok),
+                                 retcode=r.retcode, retcomment="partial_degrade_full",
+                                 deal_price=r.deal_price, deal_volume=r.deal_volume)
+            self._alert("partial_degrade", f"trade#{no} 分批 {vol_ev} 手"
+                                           f"{'<最小手数' if vol_ev < vmin else '≥剩余'} → 全平降级")
+            if r.ok:
+                live_store.upsert_trade({"session": self.session, "engine_trade_no": no,
+                                         "volume_left": 0.0, "state": "closed"})
+            return
+        r = self.broker.close_position(row["position_ticket"], volume=vol_ev,
+                                       comment="fx_active_tp")
+        live_store.log_order(self.session, "partial_close", engine_trade_no=no,
+                             direction=t["direction"], volume=vol_ev,
+                             position_ticket=row["position_ticket"], ok=int(r.ok),
+                             retcode=r.retcode, retcomment=r.retcomment,
+                             deal_price=r.deal_price, deal_volume=r.deal_volume, raw=r.raw)
+        if r.ok:
+            live_store.upsert_trade({"session": self.session, "engine_trade_no": no,
+                                     "volume_left": round(left - (r.deal_volume or vol_ev), 2)})
+            self.log(f"[live] trade#{no} 主动止盈分批 {vol_ev} 手 @ {r.deal_price}")
+        else:
+            self._alert("partial_close_failed",
+                        f"trade#{no} 分批失败 retcode={r.retcode}，待 reconcile 收敛")
 
     def _modify_stop(self, no, t, row, sl, reason):
         if row is None or row["shadow"] or not row["position_ticket"]:
@@ -875,7 +939,7 @@ class LiveTrader:
 
     # -- 风控门（只挡镜像侧） ---------------------------------------------------
 
-    def _entry_gate(self, direction):
+    def _entry_gate(self, direction, entry_lots=None):
         rc, rk = self.cfg["run"], self.cfg["risk"]
         if rc["shadow"]:
             return False, "shadow模式"
@@ -889,7 +953,7 @@ class LiveTrader:
         srv = self._server_now()
         if srv is not None and in_block_windows(srv, rk.get("entry_session_block_srv")):
             return False, "时段阻断"
-        vol_new = self.cfg["lots"] * 0.01
+        vol_new = (entry_lots if entry_lots is not None else self.cfg["lots"]) * 0.01
         if vol_new > rk["max_volume_per_order"] + 1e-9:
             return False, f"单笔手数{vol_new}>{rk['max_volume_per_order']}"
         rows = [r for r in live_store.open_trades(self.session) if not r["shadow"]]

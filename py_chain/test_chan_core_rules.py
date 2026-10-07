@@ -365,5 +365,65 @@ class TestMasterSwitches(unittest.TestCase):
             cc.reset_cfg()
 
 
+class TestBuildZsPassThroughLeave(unittest.TestCase):
+    """2026-10-07 离开判定放宽（终点破边即离开，起点不论）+ 挤空回退。
+
+    复现 7-9 15m 实盘结构（XAUUSD 2026-07-10 08:00 信号归因案例）：深回踩
+    4056.45 跌破 zd 后直破上沿（穿越式离开），回踩 4093.86 悬在中枢上方
+    （标准 3买 形态）。旧规则下穿越式离开被误当延伸、零重叠回踩笔被误记为
+    离开笔并挤空重叠 → 低中枢整枢丢弃 → 3买消失、后续点被误标类2买。"""
+
+    def _bis(self):
+        def b(t0, t1, typ, p0, p1):
+            return {"type": typ, "startTime": t0, "endTime": t1,
+                    "startPrice": p0, "endPrice": p1, "span": abs(p1 - p0)}
+        return [
+            b(1000, 1100, "up",   4021.82, 4091.67),
+            b(1100, 1200, "down", 4091.67, 4071.64),  # 2买
+            b(1200, 1300, "up",   4071.64, 4090.02),
+            b(1300, 1400, "down", 4090.02, 4056.45),  # 深回踩跌破 zd（下一笔回枢 → 延伸）
+            b(1400, 1500, "up",   4056.45, 4118.01),  # 穿越式离开：起点 < zd，终点 > zg
+            b(1500, 1600, "down", 4118.01, 4093.86),  # 回踩悬在 zg 上方（零重叠 → 3买）
+            b(1600, 1700, "up",   4093.86, 4138.06),
+            b(1700, 1800, "down", 4138.06, 4118.91),
+            b(1800, 1900, "up",   4118.91, 4127.81),
+            b(1900, 2000, "down", 4127.81, 4121.06),
+        ]
+
+    def test_low_zs_survives_pass_through_leave(self):
+        zss = cc.buildZS(self._bis(), 0)
+        low = [z for z in zss
+               if abs(z["zd"] - 4071.64) < 1e-6 and abs(z["zg"] - 4090.02) < 1e-6]
+        self.assertEqual(len(low), 1)
+        self.assertEqual(low[0]["exitTime"], 1400)      # 穿越式离开笔起点结束中枢
+        self.assertEqual(low[0]["enterEndTime"], 1100)
+
+    def test_zero_overlap_exit_bi_falls_back_to_constituents(self):
+        # 离开/回踩笔与构成笔零重叠时不再挤空丢弃：中间中枢回退为不含离开笔
+        # （1700→1800）的重叠（旧规则整枢被删）
+        zss = cc.buildZS(self._bis(), 0)
+        mid = [z for z in zss
+               if abs(z["zd"] - 4093.86) < 1e-6 and abs(z["zg"] - 4118.01) < 1e-6]
+        self.assertEqual(len(mid), 1)
+        self.assertEqual(mid[0]["exitTime"], 1700)
+
+    def test_buy_points_third_class_series(self):
+        bis = self._bis()
+        upper = [{"type": "up", "startTime": 900, "endTime": 1650,
+                  "startPrice": 4021.82, "endPrice": 4138.06,
+                  "coverageEnd": 2000, "span": 116.24}]
+        macd = [{"time": t, "dif": 0.0, "dea": 0.0, "macd": 0.0}
+                for t in range(950, 2001, 50)]
+        pts = cc.findBuyPoints(bis, upper, macd, 900, 0.0, 0.0)
+        got = [(p["type"], p["time"], p["price"]) for p in pts]
+        # 离枢回踩序列：3买 → 类3买 → 4买；不再误标类2买
+        self.assertEqual(got, [
+            ("2买", 1200, 4071.64),
+            ("3买", 1600, 4093.86),
+            ("类3买", 1800, 4118.91),
+            ("4买", 2000, 4121.06),
+        ])
+
+
 if __name__ == "__main__":
     unittest.main()
