@@ -200,6 +200,39 @@ class ParamCenterFxmaTests(unittest.TestCase):
         self.assertIs(eng.ma_on, False)
         self.assertIs(eng.strong_fx_on, False)
 
+    def test_pick_and_req_schema_and_kwargs(self):
+        # 条件性质（必选/可选）+ 各类点满足数（四选N）：schema 枚举 + normalize +
+        # kwargs 布尔/整数映射 + 引擎落属性；默认=全必选+全N=3（旧 AND 行为）
+        sch = param_center.schema_of("fxma")
+        for k in ("maReq", "maStandReq", "strongFxReq", "fibReq"):
+            self.assertEqual(sch[k]["type"], "str")
+            self.assertEqual(sch[k]["choices"], ["required", "optional"])
+            self.assertEqual(sch[k]["default"], "required")
+        for k in ("entryPick1", "entryPick2", "entryPick2x", "entryPick3", "entryPick3x"):
+            self.assertEqual(sch[k]["choices"], ["1", "2", "3", "4"])
+            self.assertEqual(sch[k]["default"], "3")
+        with self.assertRaises(ValueError):
+            param_center.normalize("fxma", {"maReq": "必选"})   # 非法枚举
+        with self.assertRaises(ValueError):
+            param_center.normalize("fxma", {"entryPick2": "5"})
+        n = param_center.normalize("fxma", {"maReq": "optional", "entryPick3x": "1"})
+        self.assertEqual(n["maReq"], "optional")
+        kw = FxMaEngine.kwargs_from_params(n)
+        self.assertIs(kw["ma_req"], False)          # optional → False
+        self.assertIs(kw["strong_fx_req"], True)    # 缺省 required → True
+        self.assertEqual(kw["entry_pick"]["3x"], 1)
+        self.assertEqual(kw["entry_pick"]["2"], 3)  # 缺省 3
+        eng = FxMaEngine({"3": bars_from_closes(0, [100 + i for i in range(40)])}, **kw)
+        self.assertIs(eng.ma_req, False)
+        self.assertEqual(eng.entry_pick["3x"], 1)
+        eng2 = FxMaEngine({"3": bars_from_closes(0, [100 + i for i in range(40)])},
+                          entry_pick={"2": 4})   # 4=四选四合法
+        self.assertEqual(eng2.entry_pick["2"], 4)
+        with self.assertRaises(ValueError):
+            FxMaEngine({"3": []}, entry_pick={"9": 2})   # 非法选择键
+        with self.assertRaises(ValueError):
+            FxMaEngine({"3": []}, entry_pick={"2": 0})   # 超出 1..4
+
     def test_ma_stand_schema_and_kwargs(self):
         # 收盘站线：开关布尔 + 一类/二三类分开的均线周期（1~500）
         sch = param_center.schema_of("fxma")
@@ -359,6 +392,100 @@ class CollectTests(unittest.TestCase):
         self.engine.cross_min_pts = 1e6
         sigs, _ = self._collect_with(self.pt)
         self.assertEqual(sigs, [])
+
+    # ---------- 条件计票（必选硬门槛 + 通过票数 ≥ 生效N） ----------
+
+    def test_default_config_equals_legacy_and(self):
+        # 前置回归：默认（全启用+全必选+N=3）= 旧 AND 行为——单条件破坏即不触发
+        self.engine.cross_min_pts = 1e6
+        sigs, st = self._collect_with(self.pt)
+        self.assertEqual(sigs, [])
+        self.assertFalse(st["fired"])   # 必选未过=点存活等待（与旧 fx_ma_gap_fail 一致）
+
+    def test_optional_condition_vote_two_of_three(self):
+        # 强分型必选、均线可选、站线可选、二类点三选二：破坏均线后
+        # 强分型+站线 2 票达标仍触发；未通过的均线不进 reason/note
+        self.engine.cross_min_pts = 1e6
+        self.engine.ma_req = False
+        self.engine.entry_pick = {"1": 3, "2": 2, "2x": 3, "3": 3, "3x": 3}
+        sigs, _ = self._collect_with(self.pt)
+        self.assertEqual(len(sigs), 1)
+        s = sigs[0]
+        self.assertEqual(s["pickNeed"], 2)
+        self.assertEqual(s["pickGot"], 2)
+        self.assertEqual(s["reason"], "2买+强分型+站上均线")   # 未通过的均线不在列
+        self.assertIn("条件满足 2/3（需2）", s["signalNote"])
+
+    def test_required_failure_blocks_even_with_low_need(self):
+        # 强分型必选未过 → 即使 N=1 且另两票在手也不触发（必选=硬门槛）
+        self.engine.strong_fx_min_pts = 1e6
+        self.engine.ma_req = False
+        self.engine.ma_stand_req = False
+        self.engine.entry_pick = {"1": 3, "2": 1, "2x": 3, "3": 3, "3x": 3}
+        sigs, st = self._collect_with(self.pt)
+        self.assertEqual(sigs, [])
+        self.assertFalse(st["fired"])
+
+    def test_pick_one_fires_with_single_active_condition(self):
+        # 三选一 + 只留强分型（其余停用）：生效N=min(1,1)=1，单条件过即触发
+        self.engine.ma_on = False
+        self.engine.ma_stand_on = False
+        self.engine.entry_pick = {"1": 3, "2": 1, "2x": 3, "3": 3, "3x": 3}
+        sigs, _ = self._collect_with(self.pt)
+        self.assertEqual(len(sigs), 1)
+        self.assertEqual(sigs[0]["pickNeed"], 1)
+        self.assertEqual(sigs[0]["pickGot"], 1)
+        self.assertEqual(sigs[0]["reason"], "2买+强分型")
+
+    def test_disabled_condition_shrinks_effective_need(self):
+        # N=3 但停用均线 → 生效N=min(3,2)=2：强分型+站线过即触发（=旧停用行为）
+        self.engine.ma_on = False
+        sigs, _ = self._collect_with(self.pt)
+        self.assertEqual(len(sigs), 1)
+        self.assertEqual(sigs[0]["pickNeed"], 2)
+        self.assertEqual(sigs[0]["pickGot"], 2)
+        self.assertIn("条件满足 2/2（需2）", sigs[0]["signalNote"])
+
+    def test_vote_insufficient_waits_then_fires(self):
+        # 票数不足=等待（点不作废）：首拍均线破坏 1/2 差票；恢复阈值推进一根后触发
+        closes = self.closes + [self.closes[-1] + 2.0]
+        e = mk_engine(bars_from_closes(0, closes), strong_fx_on=False,
+                      ma_req=False, ma_stand_req=False,
+                      entry_pick={"1": 3, "2": 2, "2x": 3, "3": 3, "3x": 3})
+        e.cross_min_pts = 1e6
+        for b in e.bars["3"]["_list"][:-1]:
+            e._advance_cut(b["time"] + SEC3)
+        e._fx_align()
+        st = e._fx_init_state()
+        last = e.bars["3"]["_list"][-1]
+        with patch.object(FxMaEngine, "_fx_latest_points",
+                          lambda s, P: (self.pt, None)):
+            self.assertEqual(e._fx_collect(st["allSignals"], st["stats"],
+                                           st["fired"], last["time"]), [])
+            self.assertFalse(st["fired"])   # 差票等待，点存活
+            e.cross_min_pts = 2.0
+            e._advance_cut(last["time"] + SEC3)
+            e._fx_align()
+            sigs = e._fx_collect(st["allSignals"], st["stats"],
+                                 st["fired"], last["time"] + SEC3)
+        self.assertEqual(len(sigs), 1)
+        self.assertEqual(sigs[0]["pickNeed"], 2)
+        self.assertEqual(sigs[0]["pickGot"], 2)
+
+    def test_fib_joins_pool_optional_vs_required(self):
+        # 黄金分割入票池（2类点；容差设 -1 使其恒未过，规避合成行情检出不定点）：
+        # 可选 → 3/4 票仍达标触发；必选（默认）→ 硬门槛拦截
+        self.engine.fib_near_on = True
+        self.engine.fib_near_pts = -1.0
+        self.engine.fib_req = False
+        sigs, _ = self._collect_with(self.pt)
+        self.assertEqual(len(sigs), 1)
+        self.assertEqual(sigs[0]["pickGot"], 3)
+        self.assertIn("条件满足 3/4（需3）", sigs[0]["signalNote"])
+        self.engine.fib_req = True
+        sigs2, st = self._collect_with(self.pt)
+        self.assertEqual(sigs2, [])
+        self.assertFalse(st["fired"])
 
     def test_point_valid_bars_expiry(self):
         # 点有效期 1 根：点后已走多根 → 作废不出信号

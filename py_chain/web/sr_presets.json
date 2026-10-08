@@ -197,5 +197,70 @@
    "draw_text": true,
    "draw_raw": false
   }
+ },
+ {
+  "name": "区间",
+  "saved_at": 1791436060,
+  "cfg": {
+   "symbol": "OANDA:XAUUSD",
+   "from": "",
+   "periods": [
+    "D",
+    "240",
+    "60",
+    "15",
+    "3"
+   ],
+   "minTouchs": {
+    "3": 8,
+    "15": 3,
+    "60": 3,
+    "240": 4,
+    "W": 4,
+    "D": 4
+   },
+   "clusterAtr": "0.5",
+   "recentClusterAtr": "1.0",
+   "recentBiCount": "20",
+   "clusterParamsByPeriod": {},
+   "srTypes": [
+    "cluster",
+    "fib"
+   ],
+   "clusterParts": [
+    "flip",
+    "recent"
+   ],
+   "manualLevels": {
+    "3": "",
+    "15": "",
+    "60": "4615,4450,4305",
+    "240": "",
+    "W": "",
+    "D": ""
+   },
+   "mode": "zones",
+   "lookbackBars": "300",
+   "maxPerPeriod": "50",
+   "touchWeight": "0.6",
+   "barsWeight": "0.4",
+   "fibLevels": "0.382,0.5,0.618",
+   "bollLength": "26",
+   "bollMult": "2.0",
+   "zoneLookbackBars": "300",
+   "zonePivotBars": "3",
+   "zoneClusterAtr": "0.5",
+   "zonePadAtr": "0.15",
+   "zoneAtrLen": "14",
+   "zoneMinEvents": "2",
+   "zoneEventGap": "7",
+   "zoneInvalidBuf": "0.25",
+   "zoneMaxPerSide": "0",
+   "maxDistAtr": "3.0",
+   "sideCount": "2",
+   "color": "#787b86",
+   "draw_text": true,
+   "draw_raw": false
+  }
  }
 ]

@@ -423,5 +423,187 @@ class TestFillEntryBarSeed(unittest.TestCase):
         self.assertEqual(tr["maxLoss"], 85.0)
 
 
+def ecfg(**over):
+    """出场方式配置快照（EXIT_MODE_DEFAULTS 覆盖）"""
+    from py_chain.mark_entry import EXIT_MODE_DEFAULTS
+    c = dict(EXIT_MODE_DEFAULTS)
+    c.update(over)
+    return c
+
+
+class TestExitModes(unittest.TestCase):
+    """出场方式可配置（2026-10-08）：开关 / 平仓比例 / 跟踪止盈 / 部分平仓结算"""
+
+    def make(self, **kw):
+        pos = make_pos(**{k: v for k, v in kw.items()
+                          if k in ("direction", "signalTime", "entryPrice", "stopRef",
+                                   "beStop", "planDirection", "lots")})
+        # _fill_pending 新增字段子集（advance_exit_decision 消费）
+        pos["lotsLeft"] = float(pos["lots"])
+        pos["trailMark"] = pos["signalTime"]
+        pos["trailRaised"] = False
+        pos["trailMoves"] = []
+        pos["stopSrFired"] = pos["stopBeFired"] = pos["trailFired"] = False
+        if "exitCfg" in kw:
+            pos["exitCfg"] = kw["exitCfg"]
+        return pos
+
+    def test_exit_lots_helper(self):
+        from py_chain.backtest import _exit_lots
+        self.assertEqual(_exit_lots(4, 100), 4)
+        self.assertEqual(_exit_lots(4, 50), 2)
+        self.assertEqual(_exit_lots(2.8, 50), 1.4)
+        self.assertEqual(_exit_lots(3, 25), 0.75)
+
+    def test_stop_sr_off_ignored(self):
+        # 支阻止损关闭：穿越不挂起、位计算照旧
+        pos = self.make(exitCfg=ecfg(exitStopSrOn=False))
+        mark_bis = [bi("up", 0, 500, 4440, 4455)]
+        px_bis = [bi("up", 50, 300, 4440, 4450)]
+        r = advance_exit_decision(pos, 400, bar(400, 4450, 4464, 4448, 4452),
+                                  mark_bis, px_bis, T7)
+        self.assertIsNone(r)
+        self.assertEqual(pos["stopRef"], 4463.0)
+
+    def test_stop_be_off_no_tp1_and_no_stopbe(self):
+        mark_bis = [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)]
+        px_bis = [bi("up", 50, 300, 4440, 4450)]
+        pos = self.make(exitCfg=ecfg(exitStopBeOn=False))
+        advance_exit_decision(pos, 300, bar(300, 4440, 4445, 4435, 4441),
+                              mark_bis, px_bis, T7)
+        self.assertFalse(pos["beDone"])       # TP1 迁移随保本止损开关关闭
+        self.assertEqual(len(pos["exits"]), 0)
+        # beDone 状态下穿越保本位（如 half 已移保本）→ stopBe 关闭 → 不挂起
+        pos2 = self.make(exitCfg=ecfg(exitStopBeOn=False))
+        pos2["beDone"] = True
+        r = advance_exit_decision(pos2, 400, bar(400, 4450, 4456, 4448, 4452),
+                                  mark_bis, px_bis, T7)
+        self.assertIsNone(r)
+
+    def test_half_off(self):
+        pos = self.make(exitCfg=ecfg(exitHalfOn=False))
+        mark_bis = [bi("up", 0, 500, 4440, 4455)]
+        px_bis = [bi("up", 0, 50, 4440, 4460), bi("down", 50, 300, 4460, 4440)]
+        r = advance_exit_decision(pos, 700, bar(700, 4445, 4448, 4440, 4444),
+                                  mark_bis, px_bis, T8)
+        self.assertIsNone(r)                  # 够笔止盈关闭：不挂起
+        self.assertFalse(pos["halfDone"])
+
+    def test_close_off(self):
+        pos = self.make(planDirection="多头空", exitCfg=ecfg(exitCloseOn=False))
+        mark_bis = [bi("up", 0, 500, 4440, 4455)]
+        px_bis = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 300, 4440, 4450)]
+        r = advance_exit_decision(pos, 700, bar(700, 4445, 4448, 4440, 4444),
+                                  mark_bis, px_bis, T8)
+        self.assertIsNone(r)                  # 过高低点止盈关闭：逆势 seg5 不挂起
+
+    def test_half_pct_partial_lots_settlement(self):
+        # 够笔止盈 30%：事件带 lots=1.2，剩余 2.8 由 stopBe 终局，pnl 按手数逐段结算
+        pos = self.make(exitCfg=ecfg(exitHalfPct=30))
+        mark_bis = [bi("up", 0, 500, 4440, 4455)]
+        px_bis = [bi("up", 0, 50, 4440, 4460), bi("down", 50, 300, 4460, 4440)]
+        r = advance_exit_decision(pos, 700, bar(700, 4445, 4448, 4440, 4444),
+                                  mark_bis, px_bis, T8)
+        self.assertEqual(r, "half")
+        self.assertEqual(pos["pendingLots"], 1.2)
+        self.assertIsNone(execute_pending_exit(pos, bar(800, 4440, 4445, 4435, 4442)))
+        self.assertEqual(pos["lotsLeft"], 2.8)
+        half_ev = [e for e in pos["exits"] if e["type"] == "half"][0]
+        self.assertEqual(half_ev["lots"], 1.2)
+        # 剩余打掉 beStop → stopBe 终局：pnl = 10×1.2 + (−4)×2.8 = 0.8
+        r = advance_exit_decision(pos, 900, bar(900, 4450, 4456, 4448, 4452),
+                                  mark_bis, px_bis, T8)
+        self.assertEqual(r, "stopBe")
+        tr = execute_pending_exit(pos, bar(1000, 4454, 4458, 4450, 4452))
+        self.assertAlmostEqual(tr["pnl"], 0.8)
+
+    def test_stop_partial_latch(self):
+        # 支阻止损 50%：部分平仓后 stopSrFired 一次性消费，后续穿越不重触发
+        pos = self.make(exitCfg=ecfg(exitStopSrPct=50))
+        mark_bis = [bi("up", 0, 500, 4440, 4455)]
+        px_bis = [bi("up", 50, 300, 4440, 4450)]
+        r = advance_exit_decision(pos, 400, bar(400, 4450, 4464, 4448, 4452),
+                                  mark_bis, px_bis, T7)
+        self.assertEqual(r, "stopSr")
+        self.assertEqual(pos["pendingLots"], 2.0)
+        self.assertTrue(pos["stopSrFired"])
+        self.assertIsNone(execute_pending_exit(pos, bar(500, 4462, 4466, 4455, 4460)))
+        self.assertEqual(pos["lotsLeft"], 2.0)
+        r = advance_exit_decision(pos, 600, bar(600, 4460, 4465, 4455, 4458),
+                                  mark_bis, px_bis, T7)
+        self.assertIsNone(r)                  # latch：不再重触发
+
+    def test_trail_raise_only_tighter_and_trail_stop(self):
+        # 跟踪止盈：同向3类点 → 止损只上移；异向/非3类点忽略；穿越后记 trailStop
+        pos = self.make(exitCfg=ecfg(exitTrailOn=True, exitTrailSlip=1.0))
+        mark_bis = [bi("up", 0, 500, 4440, 4455)]
+        px_bis = [bi("up", 50, 300, 4440, 4450)]
+        sigs = [
+            {"time": 120, "price": 4442.0, "direction": "long", "strategyKey": "wait3Buy"},    # 异向忽略
+            {"time": 150, "price": 4444.0, "direction": "short", "strategyKey": "wait2Sell"},  # 非3类忽略
+            {"time": 200, "price": 4442.0, "direction": "short", "strategyKey": "wait3Sell"},  # 4443 < 4463 上移
+            {"time": 250, "price": 4445.0, "direction": "short", "strategyKey": "wait3Sell"},  # 4446 > 4443 不上移（水位前进）
+            {"time": 300, "price": 4438.0, "direction": "short", "strategyKey": "waitSell"},   # 3类强档 4439 < 4443 上移
+        ]
+        r = advance_exit_decision(pos, 400, bar(400, 4450, 4451, 4448, 4450),
+                                  mark_bis, px_bis, T7, trail_sigs=sigs)
+        self.assertIsNone(r)                  # 当拍仅迁移
+        self.assertEqual(pos["stopRef"], 4439.0)
+        self.assertTrue(pos["trailRaised"])
+        raises = [e for e in pos["exits"] if e["type"] == "trailRaise"]
+        self.assertEqual(len(raises), 1)      # 同拍多次上移汇总为一条事件
+        self.assertEqual(raises[0]["moves"], 2)
+        self.assertEqual(len(pos["trailMoves"]), 2)
+        self.assertEqual(pos["trailMark"], 300)  # 水位只进不退
+        # 下一拍穿越上移位 4439 → trailStop（全平默认 100%）
+        r = advance_exit_decision(pos, 500, bar(500, 4440, 4441, 4435, 4438),
+                                  mark_bis, px_bis, T7, trail_sigs=sigs)
+        self.assertEqual(r, "trailStop")
+        self.assertEqual(pos["pendingLots"], 4.0)
+        tr = execute_pending_exit(pos, bar(600, 4438, 4442, 4430, 4435))
+        self.assertEqual(tr["exitType"], "trailStop")
+        self.assertEqual(tr["pnl"], (4438 - 4450) * (-1) * 4)
+
+    def test_trail_off_by_default(self):
+        # 默认跟踪止盈关闭：同向3类点不引起上移
+        pos = self.make()
+        mark_bis = [bi("up", 0, 500, 4440, 4455)]
+        px_bis = [bi("up", 50, 300, 4440, 4450)]
+        sigs = [{"time": 200, "price": 4442.0, "direction": "short", "strategyKey": "wait3Sell"}]
+        advance_exit_decision(pos, 400, bar(400, 4450, 4451, 4448, 4450),
+                              mark_bis, px_bis, T7, trail_sigs=sigs)
+        self.assertEqual(pos["stopRef"], 4463.0)
+        self.assertFalse(pos["trailRaised"])
+
+    def test_trail_partial_latch(self):
+        # 跟踪止盈 50%：部分平仓后 trailFired 一次性消费
+        pos = self.make(exitCfg=ecfg(exitTrailOn=True, exitTrailSlip=1.0, exitTrailPct=50))
+        pos["trailRaised"] = True
+        pos["stopRef"] = 4439.0
+        pos["trailMark"] = 300
+        mark_bis = [bi("up", 0, 500, 4440, 4455)]
+        px_bis = [bi("up", 50, 300, 4440, 4450)]
+        r = advance_exit_decision(pos, 500, bar(500, 4440, 4441, 4435, 4438),
+                                  mark_bis, px_bis, T7)
+        self.assertEqual(r, "trailStop")
+        self.assertEqual(pos["pendingLots"], 2.0)
+        self.assertTrue(pos["trailFired"])
+        self.assertIsNone(execute_pending_exit(pos, bar(600, 4438, 4442, 4430, 4435)))
+        self.assertEqual(pos["lotsLeft"], 2.0)
+        r = advance_exit_decision(pos, 700, bar(700, 4440, 4442, 4436, 4440),
+                                  mark_bis, px_bis, T7)
+        self.assertIsNone(r)
+
+    def test_legacy_pos_defaults_open_all(self):
+        # 旧 pos（无 exitCfg/新字段）→ EXIT_MODE_DEFAULTS 兜底 = 现网行为
+        pos = make_pos()   # 不带 exitCfg / lotsLeft
+        mark_bis = [bi("up", 0, 500, 4440, 4455)]
+        px_bis = [bi("up", 0, 50, 4440, 4460), bi("down", 50, 300, 4460, 4440)]
+        r = advance_exit_decision(pos, 700, bar(700, 4445, 4448, 4440, 4444),
+                                  mark_bis, px_bis, T8)
+        self.assertEqual(r, "half")
+        self.assertEqual(pos["pendingLots"], 2.0)   # 默认 50% × lots 4
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -413,6 +413,9 @@ class AnalysisManager:
             command.append("--zs-periods=" + (",".join(zs_periods) if zs_periods else ""))
             command.append("--zs-keep=" + ",".join(f"{r}:{n}" for r, n in zs_keep.items()))
         if stage == "plan":
+            # 震荡判定参考周期（对齐引擎 compute_plan 闸门；"" = 关闭 → JS 每周期自判，
+            # 2026-10-08 起 Python/JS 同口径强一致）
+            command.append("--range-res=" + str(pm["plan"].get("rangeRes", "240")))
             command.append("--range-bar-n=" + str(pm["plan"]["rangeBarN"]))
             command.append("--range-bi-n=" + str(pm["plan"]["rangeBiN"]))
             command.append("--range-k-mult=" + str(pm["plan"]["rangeKMult"]))
@@ -436,6 +439,18 @@ class AnalysisManager:
             command.append("--slip-be-atr-k=" + str(cfg.get("slip_be_atr_k", 0.0)))
             command.append("--exit-min-merged=" + str(pm["entry"]["exit_min_merged"]))
             command.append("--zs-weak-ratio=" + str(pm["entry"]["zs_exit_weak_ratio"]))
+            # 出场方式开关/比例（2026-10-08；True→1/False→0，JS EXIT_CFG 同名解析）
+            command.append("--exit-stop-sr-on=" + ("1" if pm["entry"].get("exitStopSrOn", True) else "0"))
+            command.append("--exit-stop-sr-pct=" + str(pm["entry"].get("exitStopSrPct", 100)))
+            command.append("--exit-stop-be-on=" + ("1" if pm["entry"].get("exitStopBeOn", True) else "0"))
+            command.append("--exit-stop-be-pct=" + str(pm["entry"].get("exitStopBePct", 100)))
+            command.append("--exit-half-on=" + ("1" if pm["entry"].get("exitHalfOn", True) else "0"))
+            command.append("--exit-half-pct=" + str(pm["entry"].get("exitHalfPct", 50)))
+            command.append("--exit-close-on=" + ("1" if pm["entry"].get("exitCloseOn", True) else "0"))
+            command.append("--exit-close-pct=" + str(pm["entry"].get("exitClosePct", 100)))
+            command.append("--exit-trail-on=" + ("1" if pm["entry"].get("exitTrailOn", False) else "0"))
+            command.append("--exit-trail-pct=" + str(pm["entry"].get("exitTrailPct", 100)))
+            command.append("--exit-trail-slip=" + str(pm["entry"].get("exitTrailSlip", 1.0)))
             # 顺势参考周期（交易计划模块；"" = 关闭）——低周期只做参考周期方向的单边
             command.append("--trend-res=" + str(pm["plan"].get("trendRes", "")))
             command.append("--trend-rebound=" + ("1" if pm["plan"].get("trendRebound", True) else "0"))
@@ -448,6 +463,7 @@ class AnalysisManager:
             command.append("--point-classes=" + str(fx.get("pointClasses", "1,2,2x,3,3x")))
             # 条件开关：True→1 / False→0（JS 侧 "0" 为关，缺省开）
             command.append("--ma-on=" + ("1" if fx.get("maOn", True) else "0"))
+            command.append("--ma-req=" + ("1" if fx.get("maReq", "required") == "required" else "0"))
             command.append("--ma-type=" + str(fx.get("maType", "SMA")))
             command.append("--ma-fast-1=" + str(fx.get("maFast1", 8)))
             command.append("--ma-slow-1=" + str(fx.get("maSlow1", 20)))
@@ -455,15 +471,21 @@ class AnalysisManager:
             command.append("--ma-slow-2=" + str(fx.get("maSlow2", 8)))
             command.append("--cross-min-pts=" + str(fx.get("crossMinPts", 2.0)))
             command.append("--ma-stand-on=" + ("1" if fx.get("maStandOn", True) else "0"))
+            command.append("--ma-stand-req=" + ("1" if fx.get("maStandReq", "required") == "required" else "0"))
             command.append("--ma-stand-1=" + str(fx.get("maStand1", 5)))
             command.append("--ma-stand-2=" + str(fx.get("maStand2", 5)))
             # 新条件开关（JS 侧 "1"=开、缺省关；显式传 0 亦为关）
             command.append("--fib-near-on=" + ("1" if fx.get("fibNearOn", False) else "0"))
+            command.append("--fib-req=" + ("1" if fx.get("fibReq", "required") == "required" else "0"))
             command.append("--fib-levels=" + str(fx.get("fibLevels", "0.382,0.5,0.618")))
             command.append("--fib-near-pts=" + str(fx.get("fibNearPts", 5.0)))
             command.append("--upper-dir-on=" + ("1" if fx.get("upperDirOn", False) else "0"))
             command.append("--strong-fx-on=" + ("1" if fx.get("strongFxOn", True) else "0"))
+            command.append("--strong-fx-req=" + ("1" if fx.get("strongFxReq", "required") == "required" else "0"))
             command.append("--strong-fx-min-pts=" + str(fx.get("strongFxMinPts", 0.0)))
+            # 各类点条件满足数（三选N；字符串枚举转数值）
+            for k in ("1", "2", "2x", "3", "3x"):
+                command.append(f"--entry-pick-{k}=" + str(fx.get(f"entryPick{k}", "3")))
             command.append("--point-valid-bars=" + str(fx.get("pointValidBars", 0)))
             command.append("--point-valid-pts=" + str(fx.get("pointValidPts", 0)))
             command.append("--stop-pts=" + str(fx.get("stopPts", 10.0)))

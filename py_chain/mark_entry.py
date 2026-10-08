@@ -92,6 +92,37 @@ TREND_PLAN_DIRS = {"多头多", "空头空"}
 TREND_STRATEGY_KEYS = {"wait2Buy", "waitBuy", "wait3Buy", "waitLike2Buy",
                        "wait2Sell", "waitSell", "wait3Sell", "waitLike2Sell"}
 
+# ---- 出场方式配置（2026-10-08 出场方式可配置化；默认 = 现网行为，跟踪止盈默认关） ----
+# 每种离场方式 = 启用开关 + 平仓百分比（占当前剩余仓位 lotsLeft）；至少启用一种
+# （param_center.normalize 跨键校验）。键名与参数中心/engine module_params 同名直通。
+EXIT_STOP_SR_ON = True     # 支阻止损：初始止损位（支阻±滑点/进场K线外推/最大止损兜底）穿越
+EXIT_STOP_SR_PCT = 100.0
+EXIT_STOP_BE_ON = True     # 保本止损：TP1 保本迁移后保本位 beStop 穿越离场
+EXIT_STOP_BE_PCT = 100.0
+EXIT_HALF_ON = True        # 够笔止盈（原 TP2 半平）：仅顺势，检测周期有利方向够笔
+EXIT_HALF_PCT = 50.0
+EXIT_CLOSE_ON = True       # 过高低点止盈（原 TP3 全平）：顺势破前高/低、逆势成笔预期
+EXIT_CLOSE_PCT = 100.0
+EXIT_TRAIL_ON = False      # 跟踪止盈（新增，同 fxma 结构点驱动）：同向3类点→止损上移
+EXIT_TRAIL_PCT = 100.0
+EXIT_TRAIL_SLIP = 1.0      # 跟踪止盈滑点（点）：止损上移到参照点价∓该值（同 fxma tpTrailSlipPts）
+# 出场方式默认快照（BacktestEngine.exit_cfg 消费；_fill_pending 固化进 pos.exitCfg，
+# advance_exit_decision 纯函数读 pos——三模式（回测/实时/实盘）同一份判定）
+EXIT_MODE_DEFAULTS = {
+    "exitStopSrOn": EXIT_STOP_SR_ON, "exitStopSrPct": EXIT_STOP_SR_PCT,
+    "exitStopBeOn": EXIT_STOP_BE_ON, "exitStopBePct": EXIT_STOP_BE_PCT,
+    "exitHalfOn": EXIT_HALF_ON, "exitHalfPct": EXIT_HALF_PCT,
+    "exitCloseOn": EXIT_CLOSE_ON, "exitClosePct": EXIT_CLOSE_PCT,
+    "exitTrailOn": EXIT_TRAIL_ON, "exitTrailPct": EXIT_TRAIL_PCT,
+    "exitTrailSlip": EXIT_TRAIL_SLIP,
+}
+# 出场方式开关键（「至少启用一种」校验用；exitTrailSlip 非开关不列入）
+EXIT_MODE_ON_KEYS = ("exitStopSrOn", "exitStopBeOn", "exitHalfOn",
+                     "exitCloseOn", "exitTrailOn")
+# 跟踪止盈参照信号集合：同向 3类买卖点（wait3Buy/wait3Sell=3买/3卖点，
+# waitBuy/waitSell=新买/卖点=3类点强档；fxma 侧对应 3/类3/4/类4 点流，缠论V1 无4类点）
+EXIT_TRAIL_REF_KEYS = {"wait3Buy", "waitBuy", "wait3Sell", "waitSell"}
+
 
 # ============================================================
 # 背驰识别算法
@@ -709,12 +740,64 @@ def nearSr(price, srLevels, nearTol):
 
 def nearest_sr(price, srLevels):
     """最近的支阻位（不限方向/阈值——拒绝日志「距支阻位 X 超过 near Y」叙事用）。
+    区间候选（kind=support/resistance）按区间感知距离：价在区间内=0（取较近边界
+    作叙事价），区间外=到近边界距离；点位候选同旧口径 |价差|。
     @returns (price, dist) 或 None（无支阻位）"""
     best = None
     for sr in (srLevels or []):
-        d = abs(sr["price"] - price)
+        if isinstance(sr, dict) and sr.get("kind") in ("support", "resistance"):
+            lo, up = sr.get("lower"), sr.get("upper")
+            if lo is None or up is None:
+                continue
+            if lo <= price <= up:
+                p = lo if price - lo <= up - price else up
+                d = 0.0
+            elif price < lo:
+                p, d = lo, lo - price
+            else:
+                p, d = up, price - up
+        else:
+            p = sr.get("price") if isinstance(sr, dict) else sr
+            if p is None:
+                continue
+            d = abs(p - price)
         if best is None or d < best[1]:
-            best = (sr["price"], d)
+            best = (p, d)
+    return best
+
+
+def near_zone(price, srLevels, direction, nearTol):
+    """区间感知支阻闸门（srMode="zones" 时替换 nearSr 的「背驰点+区间」语义）：
+    - 区间候选（kind=support/resistance）：方向匹配——多头只看支撑区间、空头只看
+      压力区间（角色由聚类来源决定，与现价位置无关）；背驰点价 ∈
+      [lower−nearTol, upper+nearTol] 命中，区间内距离=0、区间外按到近边界距离。
+    - 点位候选（无 kind，如人工位）：|价差| ≤ nearTol（与 nearSr 完全同口径）。
+      levels 模式无区间候选 → 行为与 nearSr 逐位一致。
+    @returns None 或 { sr, dist } 最近命中；命中区间的 sr["price"]=远侧边界
+             （support→lower / resistance→upper），信号 nearSr 与止损参考沿它
+             自动落区间外侧（stop_ref_of / provisional_sl 零改动即正确）。"""
+    if not srLevels:
+        return None
+    want = "support" if direction == "long" else "resistance"
+    best = None
+    for sr in srLevels:
+        if not isinstance(sr, dict):
+            continue
+        kind = sr.get("kind")
+        if kind in ("support", "resistance"):
+            if kind != want:
+                continue
+            lo, up = sr.get("lower"), sr.get("upper")
+            if lo is None or up is None:
+                continue
+            d = 0 if lo <= price <= up else min(abs(price - lo), abs(price - up))
+        else:
+            p = sr.get("price")
+            if p is None:
+                continue
+            d = abs(p - price)
+        if d <= nearTol and (best is None or d < best["dist"]):
+            best = {"sr": sr, "dist": d}
     return best
 
 
@@ -788,7 +871,9 @@ def evaluateEntry(ctx, strategy):
 
     nearTol = near  # 绝对价差（2026-09-13 起不再乘 ATR）
     for c in cands:
-        hit = nearSr(c["point"]["price"], srLevels, nearTol)
+        # 区间感知闸门：levels 模式（无区间候选）与 nearSr 逐位一致；
+        # zones 模式=背驰点价落入方向匹配区间（多头=支撑区间 / 空头=压力区间）
+        hit = near_zone(c["point"]["price"], srLevels, direction, nearTol)
         if hit is not None:
             return {"ok": True, "markRes": c["res"], "point": c["point"], "nearSr": hit["sr"]["price"]}
     return {"ok": False, "reason": "以下级别背驰点均远离支阻位"}
@@ -1183,7 +1268,9 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
                 _rej("cand_fired", seg_start=c["segStart"], skey=key,
                      ctx={"markRes": c["res"]})
                 continue  # 该形成段已发过，段延伸不重发
-            hit = nearSr(c["point"]["price"], srX, nearTol)
+            # 区间感知闸门（同确认制 evaluateEntry：levels=逐位同 nearSr，
+            # zones=背驰点价落入方向匹配区间）
+            hit = near_zone(c["point"]["price"], srX, direction, nearTol)
             if hit is None:
                 near2 = nearest_sr(c["point"]["price"], srX)
                 _rej("near_sr_fail", seg_start=c["segStart"], skey=key,

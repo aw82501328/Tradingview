@@ -336,6 +336,64 @@ describe("parseFibLevels", () => {
   });
 });
 
+describe("scanPeriodSignals · 条件计票（必选硬门槛 + 票数≥生效N·四选N，与 py 同构）", () => {
+  // 与上组同构行情（上涨→下跌→V反→反弹；2买 @ bars[21]，尾部三条件齐备）
+  const closes = [];
+  for (let i = 0; i < 12; i++) closes.push(100 + 2.0 * i);
+  for (let i = 0; i < 10; i++) closes.push(closes[closes.length - 1] - 2.8);
+  closes.push(closes[closes.length - 1] + 9.0);
+  for (let i = 0; i < 10; i++) closes.push(closes[closes.length - 1] + 2.0);
+  const bars = barsFromCloses(0, closes);
+  const ptTime = bars[21].time;
+  const T = (i) => bars[i].time;
+  const periodBis = {
+    "3": [
+      { type: "up", startTime: T(0), endTime: T(1), startPrice: closes[0], endPrice: closes[1] },
+      { type: "down", startTime: T(1), endTime: T(2), startPrice: closes[1], endPrice: 90 },
+      { type: "up", startTime: T(2), endTime: T(3), startPrice: 90, endPrice: closes[3] },
+      { type: "down", startTime: T(3), endTime: ptTime, startPrice: closes[3], endPrice: closes[21] },
+      { type: "up", startTime: ptTime, endTime: T(closes.length - 1), startPrice: closes[21], endPrice: closes[closes.length - 1] },
+    ],
+    "15": [],
+  };
+  const pick = (n) => ({ ...MODULE_OPTS.entryPick, "2": n });
+
+  test("默认（全启用+全必选+N=3）= 旧 AND 行为：单条件破坏不触发", () => {
+    const sigs = scanPeriodSignals("3", bars, periodBis, "15",
+                                   { ...MODULE_OPTS, crossMinPts: 1e6 });
+    assert.equal(sigs.length, 0);
+  });
+
+  test("可选+四选二：破坏均线后 强分型+站线 2 票仍触发", () => {
+    const sigs = scanPeriodSignals("3", bars, periodBis, "15",
+                                   { ...MODULE_OPTS, crossMinPts: 1e6,
+                                     maReq: false, entryPick: pick(2) });
+    assert.equal(sigs.length, 1);
+    assert.equal(sigs[0].strategyKey, "fx2Buy");
+  });
+
+  test("必选硬门槛：强分型必选未过 → 即使 N=1 也不触发", () => {
+    const sigs = scanPeriodSignals("3", bars, periodBis, "15",
+                                   { ...MODULE_OPTS, strongFxMinPts: 1e6,
+                                     maReq: false, maStandReq: false,
+                                     entryPick: pick(1) });
+    assert.equal(sigs.length, 0);
+  });
+
+  test("停用收缩生效N：N=3 停用均线 → min(3,2)=2，强分型+站线触发", () => {
+    const sigs = scanPeriodSignals("3", bars, periodBis, "15",
+                                   { ...MODULE_OPTS, maOn: false });
+    assert.equal(sigs.length, 1);
+  });
+
+  test("四选一 + 单条件：只留强分型 → 1/1 触发", () => {
+    const sigs = scanPeriodSignals("3", bars, periodBis, "15",
+                                   { ...MODULE_OPTS, maOn: false, maStandOn: false,
+                                     entryPick: pick(1) });
+    assert.equal(sigs.length, 1);
+  });
+});
+
 describe("scanPeriodSignals · 黄金分割附近/上级同向（opts 注入，默认关）", () => {
   // 与上组同构行情；pt = bars[21]（V 反前低点）@94，摆动窗 bars[4..21] 极值 122.2
   const closes = [];

@@ -87,6 +87,20 @@ const FIB_NEAR_PTS = getNumArg("fib-near-pts", 5.0);        // 档位容差（�
 const UPPER_DIR_ON = getStrArg("upper-dir-on", "0") === "1"; // 上级周期同向条件开关（"1"=开，默认关）
 const STRONG_FX_ON = getStrArg("strong-fx-on", "1") !== "0";  // 强分型条件开关（"0"=关，缺省开）
 const STRONG_FX_MIN_PTS = getNumArg("strong-fx-min-pts", 0.0);
+// 条件性质（必选=1/可选=0；必选不通过该类点不触发，可选仅参与满足数计票）
+const MA_REQ = getStrArg("ma-req", "1") !== "0";
+const MA_STAND_REQ = getStrArg("ma-stand-req", "1") !== "0";
+const STRONG_FX_REQ = getStrArg("strong-fx-req", "1") !== "0";
+const FIB_REQ = getStrArg("fib-req", "1") !== "0";
+// 各类买卖点条件满足数（四选N；生效N=min(N,启用条件数)，缺省3=引擎旧 AND 行为）
+const pickClamp = v => Math.min(4, Math.max(1, Math.round(v)));
+const ENTRY_PICK = {
+  "1": pickClamp(getNumArg("entry-pick-1", 3)),
+  "2": pickClamp(getNumArg("entry-pick-2", 3)),
+  "2x": pickClamp(getNumArg("entry-pick-2x", 3)),
+  "3": pickClamp(getNumArg("entry-pick-3", 3)),
+  "3x": pickClamp(getNumArg("entry-pick-3x", 3)),
+};
 const POINT_VALID_BARS = Math.max(0, Math.round(getNumArg("point-valid-bars", 0)));
 const POINT_VALID_PTS = Math.max(0, getNumArg("point-valid-pts", 0)); // 点有效期（值；0=不限）
 const STOP_PTS = getNumArg("stop-pts", 10.0);
@@ -115,10 +129,12 @@ const POINT_SEL = {
 // （脚本在模块顶层解析 argv，require 时常量固定为默认值，故提供注入口）。
 const MODULE_OPTS = {
   pointClasses: POINT_CLASSES, strongFxOn: STRONG_FX_ON, strongFxMinPts: STRONG_FX_MIN_PTS,
-  maOn: MA_ON, maType: MA_TYPE, crossMinPts: CROSS_MIN_PTS,
+  strongFxReq: STRONG_FX_REQ,
+  maOn: MA_ON, maType: MA_TYPE, crossMinPts: CROSS_MIN_PTS, maReq: MA_REQ,
   maFast1: MA_FAST1, maSlow1: MA_SLOW1, maFast2: MA_FAST2, maSlow2: MA_SLOW2,
-  maStandOn: MA_STAND_ON, maStand1: MA_STAND_1, maStand2: MA_STAND_2,
-  fibNearOn: FIB_NEAR_ON, fibLevels: FIB_LEVELS, fibNearPts: FIB_NEAR_PTS,
+  maStandOn: MA_STAND_ON, maStand1: MA_STAND_1, maStand2: MA_STAND_2, maStandReq: MA_STAND_REQ,
+  fibNearOn: FIB_NEAR_ON, fibLevels: FIB_LEVELS, fibNearPts: FIB_NEAR_PTS, fibReq: FIB_REQ,
+  entryPick: ENTRY_PICK,
   upperDirOn: UPPER_DIR_ON, pointValidBars: POINT_VALID_BARS, pointValidPts: POINT_VALID_PTS,
   tpMode: TP_MODE, tpNearPts: TP_NEAR_PTS, tpTrailSlipPts: TP_TRAIL_SLIP_PTS,
 };
@@ -238,56 +254,84 @@ function scanPeriodSignals(P, bars, periodBis, upperRes, opts = MODULE_OPTS) {
         const far = direction === "long" ? bars[i].high - pt.price : pt.price - bars[i].low;
         if (far > opts.pointValidPts) continue;
       }
+      // ---- 条件计票（与引擎 fx_ma._fx_collect 同构，2026-10-08）：均线分离/收盘站线/
+      //      强分型/黄金分割 各带 启用开关+必选标志。必选不通过 → 跳过本拍；启用条件
+      //      中通过数 ≥ 生效N（=min(entryPickN, 启用数)）才触发；全停用=点出现即触发。
+      //      可选条件未通过只体现在票数中。每条件 ok=null 停用 / true 通过 / false 未过。
       let fxTime = null, crossGap = null;
+      let fxOk = null, maOk = null;
       if (opts.strongFxOn) {
         const fx = strongFxAfter(merged, fractals, pt.time, kind, opts.strongFxMinPts, barSec);
-        if (!fx || fx.confirmTime > closeT) continue;
-        fxTime = fx.time;
+        fxOk = !!(fx && fx.confirmTime <= closeT);
+        if (fxOk) fxTime = fx.time;
       }
       if (opts.maOn) {
         const fa = cls === 1 ? f1[i] : f2[i], sl = cls === 1 ? s1[i] : s2[i];
-        if (fa === null || sl === null) continue;
-        const diff = direction === "short" ? sl - fa : fa - sl;
-        if (!(diff > 0 && diff >= opts.crossMinPts)) continue;
-        crossGap = Math.round(diff * 10000) / 10000;
+        if (fa === null || sl === null) maOk = false;   // 均线未满周期 = 未过
+        else {
+          const diff = direction === "short" ? sl - fa : fa - sl;
+          maOk = diff > 0 && diff >= opts.crossMinPts;
+          if (maOk) crossGap = Math.round(diff * 10000) / 10000;
+        }
       }
       // ④ 收盘站线（1类=maStand1、2/3类=maStand2；买=收盘严格站上、卖=严格站下）
       let standGap = null;
+      let standOk = null;
       if (opts.maStandOn) {
         const sv = cls === 1 ? st1[i] : st2[i];
-        if (sv === null) continue; // 站线均线未满周期
-        const gap = closes[i] - sv;
-        if (!(direction === "long" ? gap > 0 : gap < 0)) continue;
-        standGap = Math.round(gap * 10000) / 10000;
+        if (sv === null) standOk = false;   // 站线均线未满周期 = 未过
+        else {
+          const gap = closes[i] - sv;
+          standOk = direction === "long" ? gap > 0 : gap < 0;
+          if (standOk) standGap = Math.round(gap * 10000) / 10000;
+        }
       }
-      // ⑤ 黄金分割附近（默认关；仅 2/3 类点，1 类点豁免）：摆动段 = 前一同侧买卖点
-      //    价格 → 其后至本点前（时间窗 (前点, 本点]）的 P 周期真实K线极值（买取最高/
-      //    卖取最低）；本点价格距任一档位回撤 ≤ fibNearPts（绝对点数）
+      // ⑤ 黄金分割附近（默认关；仅 2/3 类点参与计票，1 类点豁免）：摆动段 = 前一同侧
+      //    买卖点价格 → 其后至本点前的 P 周期真实K线极值（买取最高/卖取最低）；
+      //    本点价格距任一档位回撤 ≤ fibNearPts（绝对点数）
       let fibLevel = null, fibGap = null;
+      let fibOk = null;
       if (opts.fibNearOn && cls !== 1) {
         const prev = prevOf.get(pt);
-        if (!prev) continue; // 无前一同侧买卖点（摆动段无锚点）
-        let lo = 0;
-        while (lo < bars.length && bars[lo].time <= prev.time) lo++;
-        let hi = lo, ext = null;
-        while (hi < bars.length && bars[hi].time <= pt.time) {
-          const b = bars[hi];
-          if (direction === "long") ext = ext === null ? b.high : Math.max(ext, b.high);
-          else ext = ext === null ? b.low : Math.min(ext, b.low);
-          hi++;
+        if (!prev) fibOk = false;   // 无前一同侧买卖点（摆动段无锚点）
+        else {
+          let lo = 0;
+          while (lo < bars.length && bars[lo].time <= prev.time) lo++;
+          let hi = lo, ext = null;
+          while (hi < bars.length && bars[hi].time <= pt.time) {
+            const b = bars[hi];
+            if (direction === "long") ext = ext === null ? b.high : Math.max(ext, b.high);
+            else ext = ext === null ? b.low : Math.min(ext, b.low);
+            hi++;
+          }
+          const swing = ext === null ? null
+            : (direction === "long" ? ext - prev.price : prev.price - ext);
+          if (swing === null || swing <= 0) fibOk = false;   // 摆动段退化
+          else {
+            let best = null; // {gap, level, ratio}
+            for (const r of opts.fibLevels) {
+              const level = direction === "long" ? ext - r * swing : ext + r * swing;
+              const gap = Math.abs(pt.price - level);
+              if (!best || gap < best.gap) best = { gap, level, ratio: r };
+            }
+            fibOk = best.gap <= opts.fibNearPts;
+            if (fibOk) { fibLevel = best.ratio; fibGap = Math.round(best.gap * 10000) / 10000; }
+          }
         }
-        const swing = ext === null ? null
-          : (direction === "long" ? ext - prev.price : prev.price - ext);
-        if (swing === null || swing <= 0) continue; // 摆动段退化
-        let best = null; // {gap, level, ratio}
-        for (const r of opts.fibLevels) {
-          const level = direction === "long" ? ext - r * swing : ext + r * swing;
-          const gap = Math.abs(pt.price - level);
-          if (!best || gap < best.gap) best = { gap, level, ratio: r };
+      }
+      // 计票：必选硬门槛 → 通过票数 ≥ 生效N（不满足点存活，等待后续拍补票）
+      {
+        const active = [["强分型", fxOk, opts.strongFxReq],
+                        ["均线分离", maOk, opts.maReq],
+                        ["收盘站线", standOk, opts.maStandReq],
+                        ["黄金分割", fibOk, opts.fibReq]].filter(c => c[1] !== null);
+        if (active.length) {
+          if (active.some(c => c[2] && !c[1])) continue;   // 必选未过
+          const pick = (opts.entryPick && opts.entryPick[sel]) || 3;
+          const need = Math.min(pick, active.length);
+          const got = active.filter(c => c[1]).length;
+          if (got < need) continue;   // 票数不足
         }
-        if (best.gap > opts.fibNearPts) continue; // 不在任何档位附近
-        fibLevel = best.ratio;
-        fibGap = Math.round(best.gap * 10000) / 10000;
       }
       // ⑥ 上级周期同向（默认关；全部类别）：上级当前笔（startTime ≤ 本根时间的最后一
       //    根笔，最终快照口径）方向须与信号同向（买=up/卖=down）
@@ -671,6 +715,8 @@ async function main() {
                 fibNearOn: FIB_NEAR_ON, fibLevels: FIB_LEVELS, fibNearPts: FIB_NEAR_PTS,
                 upperDirOn: UPPER_DIR_ON,
                 strongFxOn: STRONG_FX_ON, strongFxMinPts: STRONG_FX_MIN_PTS,
+                strongFxReq: STRONG_FX_REQ, maReq: MA_REQ,
+                maStandReq: MA_STAND_REQ, fibReq: FIB_REQ, entryPick: ENTRY_PICK,
                 pointValidBars: POINT_VALID_BARS, pointValidPts: POINT_VALID_PTS,
                 stopPts: STOP_PTS, tpPts: TP_PTS,
                 tpMode: TP_MODE, tpNearPts: TP_NEAR_PTS, tpTrailSlipPts: TP_TRAIL_SLIP_PTS,

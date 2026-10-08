@@ -317,6 +317,17 @@ def draw_sr_lines(main_by_period=None, raw_by_period=None, cfg=None, clear_first
                 items = []
                 for f in main_by_period.get(L, []):
                     label = str(f.get("label") or f.get("level") or L)
+                    # 支阻区间（srMode=zones）：上下沿双线可视化（label 已含 支撑/压力区间+周期；
+                    # 锚点时间用最近事件时间，缺省 0 同人工位口径）
+                    if f.get("kind") in ("support", "resistance") \
+                            and f.get("lower") is not None and f.get("upper") is not None:
+                        t0 = int(f.get("lastEventTime") or f.get("time") or 0)
+                        for edge, tag in ((float(f["lower"]), "下沿"), (float(f["upper"]), "上沿")):
+                            text = f"{SRT_PREFIX}{label}·{tag} {edge:.2f}"
+                            items.append({"time": t0, "price": edge,
+                                          "color": color,
+                                          "title": text, "text": text, "no_text": no_text})
+                        continue
                     price = float(f["price"])
                     text = f"{SRT_PREFIX}{label} {price:.2f}"
                     items.append({"time": int(f.get("time") or f.get("breakTime") or 0),

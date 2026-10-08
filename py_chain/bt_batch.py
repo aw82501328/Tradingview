@@ -63,12 +63,14 @@ def run_symbol(child_cfg, symbol, msg_q, pause_evt, stop_evt):
         engine_cls = engine_dispatch.engine_class_of(child_cfg.get("strategy"))
         engine = engine_cls(bars, **kw)
         if engine_cls is BacktestEngine:
+            from .backtest import exit_cfg_desc
             _log(f"回测开始（最小周期 {engine.fine_res}，成交口径 {engine.fill_mode}，"
                  f"信号模式 {'当下背驰' if engine.signal_mode == 'realtime' else '确认制'}，"
                  f"背驰进场 {'分型确认后下一根开盘' if engine.diverge_confirm else '当下'}，"
                  f"柱缩闸 {'开' if engine.entry_macd_shrink else '关'}，"
                  f"止损下限 {'开' if engine.stop_entry_bar_floor else '关'}，"
-                 f"检测周期够笔 {'预期' if engine.expect_bi else '分型确认'}）...")
+                 f"检测周期够笔 {'预期' if engine.expect_bi else '分型确认'}，"
+                 f"出场 {exit_cfg_desc(engine.exit_cfg)}）...")
         else:
             _log(f"回测开始（强分型均线V1：周期 {','.join(engine.entry_res)}，"
                  f"最小周期 {engine.fine_res}，止损{engine.stop_pts}/止盈{engine.tp_pts}点）...")

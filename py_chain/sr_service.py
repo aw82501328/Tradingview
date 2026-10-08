@@ -344,8 +344,26 @@ def engine_kwargs_of(cfg):
     2026-09-26 引擎同步（用户拍板）：lookbackBars → clusterLookbackBars（密集区
     限窗，0=不限=全前缀旧口径）；fibLastStroke 恒 True（fib=末段趋势侧口径——
     fib 在引擎默认 srTypes 里关闭，仅显式开启时生效）。回测/分析与控制台同口径；
-    live 实盘不传 sr kwargs，仍为旧口径（例外，如需另做）。
+    live 实盘不传 sr kwargs，仍为旧口径（例外，如需另做）——2026-10-08 起部分
+    打破：支阻区间模式（mode=zones）经 symbol_sr_kwargs() 下发实盘（区间必须在
+    实盘生效）；经典模式实盘仍不传（引擎默认口径，行为不变）。
+
+    2026-10-08 支阻位模式：mode ∈ {"levels","zones"}（缺省 levels=经典支阻位，
+    行为逐位不变）；zones → compute_srflip srMode="zones" 整系统切换为支阻区间
+    （sr_zone 模块），zone* 九参数随桶透传。
     """
+    from .sr_zone import ZONE_DEFAULTS
+    mode = str(cfg.get("mode") or "levels").strip() or "levels"
+    if mode not in ("levels", "zones"):
+        raise ValueError(f"支阻位模式非法：{mode}（levels=经典支阻位 / zones=支阻区间）")
+    def _zone(k, cast):
+        v = cfg.get(k)
+        if v in (None, ""):
+            return ZONE_DEFAULTS[k]
+        try:
+            return cast(v)
+        except (TypeError, ValueError):
+            return ZONE_DEFAULTS[k]
     return {
         "clusterAtr": float(cfg.get("clusterAtr", CLUSTER_ATR)),
         "recentClusterAtr": float(cfg.get("recentClusterAtr", RECENT_CLUSTER_ATR)),
@@ -365,7 +383,33 @@ def engine_kwargs_of(cfg):
         "manualLevels": dict(cfg.get("manualLevels") or {}),
         "clusterLookbackBars": int(cfg.get("lookbackBars", 0) or 0),
         "fibLastStroke": True,
+        "srMode": mode,
+        "zoneLookbackBars": _zone("zoneLookbackBars", int),
+        "zonePivotBars": _zone("zonePivotBars", int),
+        "zoneClusterAtr": _zone("zoneClusterAtr", float),
+        "zonePadAtr": _zone("zonePadAtr", float),
+        "zoneEventGap": _zone("zoneEventGap", int),
+        "zoneMinEvents": _zone("zoneMinEvents", int),
+        "zoneInvalidBuf": _zone("zoneInvalidBuf", float),
+        "zoneAtrLen": _zone("zoneAtrLen", int),
+        "zoneMaxPerSide": _zone("zoneMaxPerSide", int),
     }
+
+
+def symbol_sr_kwargs(symbol=None):
+    """实盘支阻参数：品种桶（param_center.effective_sr）→ compute_srflip kwargs。
+
+    仅当支阻位模式=zones（支阻区间）时返回 kwargs——区间必须在实盘生效；
+    levels（经典支阻位）返回 None=引擎默认口径，实盘行为与 2026-10-08 前逐位
+    不变。读桶/映射异常一律 None（实盘不因参数页坏值起不来，引擎默认兜底）。"""
+    try:
+        from . import param_center
+        cfg = param_center.effective_sr(symbol)
+        if str(cfg.get("mode") or "levels").strip() != "zones":
+            return None
+        return engine_kwargs_of(cfg)
+    except Exception:
+        return None
 
 
 def build_chain_result(bars_by_period, cfg, log=None, bis_by_period=None, engine_extra=None):
@@ -390,9 +434,14 @@ def build_chain_result(bars_by_period, cfg, log=None, bis_by_period=None, engine
     kw = engine_kwargs_of(cfg)
     if engine_extra:
         kw.update(engine_extra)
-    manual = list(kw.get("manualLevels") or {})
-    log(f"计算支阻位（{','.join(kw['srTypes'])}；各周期独立成线，不合并"
-        + (f"；人工输入周期：{'/'.join(manual)}" if manual else "") + "）...")
+    if kw.get("srMode") == "zones":
+        log("计算支阻位（模式=支阻区间：OHLC 高低点聚类；旧类型与人工位停用；"
+            f"回溯{kw.get('zoneLookbackBars')}根/聚类{kw.get('zoneClusterAtr')}×ATR"
+            f"/扩展{kw.get('zonePadAtr')}×ATR；各周期独立成线，不合并）...")
+    else:
+        manual = list(kw.get("manualLevels") or {})
+        log(f"计算支阻位（模式=经典支阻位：{','.join(kw['srTypes'])}；各周期独立成线，不合并"
+            + (f"；人工输入周期：{'/'.join(manual)}" if manual else "") + "）...")
     result = compute_srflip(bis_by_period, bars_by_period, periods, **kw)
     meta = build_meta(result, bars_by_period, bis_by_period, cfg)
     return result, meta

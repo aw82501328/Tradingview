@@ -210,5 +210,37 @@ class TestBtRunStore(unittest.TestCase):
         self.assertEqual(self.store.list(), [])           # 信号行一并删除（get 已 404 源）
 
 
+    def test_half_with_lots_equity_split(self):
+        # 带手数的 half 事件（2026-10-08 比例可配）：按事件 lots 拆段（不再固定 lots/2）
+        from py_chain import bt_runs
+        r = row("已平仓", pnl=6.0, exitType="stopBe", exitTime=1100,
+                exits=[{"type": "half", "time": 1050, "price": 4220.0, "lots": 1.2},
+                       {"type": "stopBe", "time": 1100, "price": 4230.0, "lots": 2.8}])
+        evs = bt_runs._exit_pnl_events(r)
+        # half 段 = (4220-4201)*1*1.2 = 22.8；终局段 = 6 - 22.8 = -16.8
+        self.assertEqual(len(evs), 2)
+        self.assertEqual(evs[0]["t"], 1050)
+        self.assertAlmostEqual(evs[0]["pnl"], 22.8)
+        self.assertAlmostEqual(evs[1]["pnl"], -16.8)
+
+    def test_legacy_half_no_lots_still_half_split(self):
+        # 旧口径 half（无 lots 键）：回退 lots/2 拆段
+        from py_chain import bt_runs
+        r = row("已平仓", pnl=6.0, exitType="stopBe", exitTime=1100,
+                exits=[{"type": "half", "time": 1050, "price": 4220.0},
+                       {"type": "stopBe", "time": 1100, "price": 4230.0}])
+        evs = bt_runs._exit_pnl_events(r)
+        self.assertEqual(len(evs), 2)
+        self.assertAlmostEqual(evs[0]["pnl"], (4220 - 4201) * 2)   # lots/2=2
+
+    def test_trail_stop_counted(self):
+        s = compute_summary([row("已平仓", pnl=5.0, exitType="trailStop"),
+                             row("已平仓", pnl=1.0, exitType="stopBe",
+                                 exits=[{"type": "trailRaise", "time": 1040,
+                                         "price": 4218.0}])])
+        self.assertEqual(s["exits"]["trailStop"], 1)   # trailRaise 迁移不计入终局分布
+        self.assertEqual(s["exits"]["stopBe"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

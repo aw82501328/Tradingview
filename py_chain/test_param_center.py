@@ -297,18 +297,24 @@ class ParamCenterTests(unittest.TestCase):
         param_center.reset("plan")
         self.assertEqual(param_center.effective("plan")["trendRes"], "240")
 
-    def test_range_res_enum_required(self):
-        # plan.rangeRes 字符串枚举（必填，2026-09-16 起无关闭项）：仅 240/D；
-        # ""（未配置）与其他非法值一样 raise；默认 = RANGE_RES
+    def test_range_res_enum_with_off(self):
+        # plan.rangeRes 字符串枚举（2026-10-08 起含关闭项）：240/D 开启闸门、"" 关闭
+        # （每周期自判震荡）；其他非法值 raise；默认 = RANGE_RES（240，闸门开启）
         self.assertEqual(param_center.defaults_of("plan")["rangeRes"],
                          trading_plan.RANGE_RES)
         self.assertEqual(param_center.normalize("plan", {"rangeRes": "D"}), {"rangeRes": "D"})
-        for bad in ("", "XX", 240, None):
+        self.assertEqual(param_center.normalize("plan", {"rangeRes": ""}), {"rangeRes": ""})
+        for bad in ("XX", 240, None):
             with self.assertRaises(ValueError):
                 param_center.normalize("plan", {"rangeRes": bad})
         schema = param_center.schema_of("plan")["rangeRes"]
         self.assertEqual(schema["type"], "str")
-        self.assertEqual(schema["choices"], ["240", "D"])
+        self.assertEqual(schema["choices"], ["", "240", "D"])
+        # 保存-生效往返（"" = 显式关闭，不被默认值覆盖）
+        param_center.update("plan", {"rangeRes": ""})
+        self.assertEqual(param_center.effective("plan")["rangeRes"], "")
+        param_center.reset("plan")
+        self.assertEqual(param_center.effective("plan")["rangeRes"], "240")
 
     def test_slip_atr_k_keys(self):
         # 滑点 ATR 系数（2026-09-19）：默认 0（关闭）、允许 0、范围 [0, 10]、override 往返
@@ -447,6 +453,58 @@ class ParamCenterTests(unittest.TestCase):
         finally:
             param_center._CHAN_CFG_EXPORT_DIR = orig_dir
             param_center._DEFAULT_PARAMS_FILE = orig_default
+class TestExitModesParams(unittest.TestCase):
+    """出场方式参数（2026-10-08）：schema/默认/至少启用一种约束/engine 透传"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._orig_file = param_center.PARAMS_FILE
+        param_center.PARAMS_FILE = str(Path(self.tmp.name) / "module_params.json")
+        chan_core.reset_cfg()
+
+    def tearDown(self):
+        chan_core.reset_cfg()
+        param_center.PARAMS_FILE = self._orig_file
+        self.tmp.cleanup()
+
+    def test_exit_keys_in_schema_and_defaults(self):
+        from py_chain.mark_entry import EXIT_MODE_DEFAULTS
+        defaults = param_center.defaults_of("entry")
+        for k, v in EXIT_MODE_DEFAULTS.items():
+            self.assertIn(k, defaults)
+            self.assertEqual(defaults[k], v)
+            self.assertIn(k, param_center.PARAM_MODULES["entry"]["params"])
+
+    def test_update_rejects_all_off(self):
+        with self.assertRaises(ValueError):
+            param_center.update("entry", {
+                "exitStopSrOn": False, "exitStopBeOn": False, "exitHalfOn": False,
+                "exitCloseOn": False, "exitTrailOn": False})
+        # 与存量覆盖合并后全关同样拒绝：先显式关三种只留 stopSr + trail
+        param_center.update("entry", {"exitStopBeOn": False, "exitHalfOn": False,
+                                      "exitCloseOn": False, "exitTrailOn": True})
+        # exitTrailOn=False 等于默认被剔除 → stopSrOn 回落默认开，合并后仍非全关，放行
+        param_center.update("entry", {"exitTrailOn": False})
+        with self.assertRaises(ValueError):
+            param_center.update("entry", {"exitStopSrOn": False, "exitStopBeOn": False,
+                                          "exitHalfOn": False, "exitCloseOn": False,
+                                          "exitTrailOn": False})  # 合并后全关
+
+    def test_update_accepts_partial_off(self):
+        eff = param_center.update("entry", {"exitHalfOn": False, "exitTrailOn": True,
+                                            "exitHalfPct": 30})
+        self.assertFalse(eff["exitHalfOn"])
+        self.assertTrue(eff["exitTrailOn"])
+        self.assertEqual(eff["exitHalfPct"], 30)
+
+    def test_engine_module_params_passthrough(self):
+        param_center.update("entry", {"exitTrailOn": True, "exitClosePct": 80})
+        pm = param_center.effective_all()
+        mp = param_center.engine_module_params(pm)
+        self.assertTrue(mp["exitTrailOn"])
+        self.assertEqual(mp["exitClosePct"], 80)
+        self.assertTrue(mp["exitStopSrOn"])          # 默认键也透传
+        self.assertEqual(mp["exitHalfPct"], 50)
 
 
 if __name__ == "__main__":

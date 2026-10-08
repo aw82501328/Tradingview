@@ -80,7 +80,7 @@
   <h2>当前持仓 <span class="badge" id="open-count">0</span></h2>
   <table id="open-table"><thead><tr>
     <th>#</th><th>方向</th><th>进场时间</th><th>引擎价</th><th>剩余手数</th>
-    <th>引擎止损</th><th>券商SL</th><th>保本/半平</th><th>shadow</th><th>ticket</th>
+    <th>引擎止损</th><th>券商SL</th><th>保本/够笔</th><th>shadow</th><th>ticket</th>
   </tr></thead><tbody></tbody></table>
   <div class="empty" id="open-empty">无持仓</div>
 </div>
@@ -238,7 +238,7 @@ function render(s) {
     <td class="mono">${esc(t.volume_left)}</td>
     <td class="mono">${esc(t.engine_stop?.toFixed(2))}</td>
     <td class="mono">${esc(t.broker_sl?.toFixed(2))}</td>
-    <td>${t.be_done ? '✓保本 ' : ''}${t.half_done ? '✓半平' : ''}</td>
+    <td>${t.be_done ? '✓保本 ' : ''}${t.half_done ? '✓够笔' : ''}</td>
     <td>${t.shadow ? 'shadow' : ''}</td>
     <td class="mono muted">${esc(t.position_ticket || '—')}</td></tr>`);
 

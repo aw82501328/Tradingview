@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>原型预览 · 支阻位模式（经典支阻位 / 支阻区间）</title>
+<style>
+/* ===== 主题变量（自 theme.css 内联，原型零依赖） ===== */
+:root{color-scheme:dark;--bg:#10151e;--panel:#19212e;--card:var(--panel);--line:#2c384a;--border:var(--line);
+--text:#e7edf7;--muted:#99a9c0;--blue:#8eb7ff;--accent:var(--blue);--primary:#5086e5;--input:#101823;
+--control-border:#3c4d65;--button:#243247;--chip:#27364c;--ok:#92d1b4;--warn:#f0b90b;
+--buy:#ff6b6b;--sell:#4fc3a1;--font:"Segoe UI","Microsoft YaHei",sans-serif}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:13px/1.6 var(--font);padding:14px 18px}
+h1{font-size:19px;color:#fff}
+h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
+h2{font-size:13px;color:#fff;font-weight:600;margin-bottom:6px;border-bottom:1px solid var(--border);padding-bottom:5px}
+h2 .hint{color:var(--muted);font-weight:400;font-size:11px;margin-left:8px}
+button{background:var(--button);border:1px solid var(--control-border);color:var(--text);border-radius:4px;
+padding:4px 12px;cursor:pointer;font-size:12px;font-family:var(--font)}
+button.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+button:disabled{opacity:.45;cursor:not-allowed}
+input[type=text],input[type=number]{background:var(--input);border:1px solid var(--control-border);color:var(--text);
+border-radius:4px;padding:3px 6px;font-size:12px;font-family:var(--font)}
+input[type=number]{width:64px;text-align:right}
+input[type=radio]{accent-color:var(--primary)}
+.proto-banner{background:#3d3208;color:var(--warn);border:1px solid #7a5c1e;border-radius:6px;
+padding:7px 12px;font-size:12px;margin:10px 0 2px}
+.wrap{max-width:880px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin:12px 0}
+.card.sec{border-color:#2a4a8a}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:5px 0}
+.row label{color:var(--muted);font-size:12px;white-space:nowrap}
+.merge-tip{color:var(--muted);font-size:11px;margin:2px 0}
+fieldset{border:1px solid var(--border);border-radius:6px;padding:6px 9px;margin:6px 0}
+fieldset.step{border-color:#3a4a68}
+fieldset.nest{margin-left:12px;background:#161a23}
+fieldset.nest2{margin-left:12px;background:#12151c}
+legend{font-size:12px;color:#fff;padding:0 5px}
+legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;background:var(--chip);
+border:1px solid var(--border);color:var(--muted);margin-left:4px;font-weight:400}
+label.chk{color:var(--text);font-size:12.5px}
+.small{font-size:11px} .muted{color:var(--muted)}
+.dim{opacity:.45}
+.dim input,.dim select,.dim fieldset{pointer-events:none}
+/* 模式单选卡 */
+.mode-cards{display:flex;gap:10px;flex-wrap:wrap}
+.mode-card{flex:1;min-width:300px;background:#141b28;border:1px solid var(--border);border-radius:8px;
+padding:10px 12px;cursor:pointer;display:flex;gap:10px;align-items:flex-start}
+.mode-card:hover{border-color:#3d5a8a}
+.mode-card.sel{border-color:var(--primary);background:#16233c}
+.mode-card .dot{width:16px;height:16px;border-radius:50%;border:2px solid #6b7a90;flex:none;margin-top:3px;
+background:transparent}
+.mode-card.sel .dot{border-color:var(--primary);background:var(--primary);box-shadow:inset 0 0 0 3px #16233c}
+.mode-card .mt{color:var(--text);font-size:13.5px;font-weight:600}
+.mode-card .mt .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;background:var(--chip);
+border:1px solid var(--border);color:var(--muted);margin-left:6px;font-weight:400;vertical-align:1px}
+.mode-card .md{color:var(--muted);font-size:11.5px;margin-top:3px;line-height:1.55}
+/* SVG 示意 */
+.chartbox{background:#0d1017;border:1px solid var(--border);border-radius:6px;padding:6px}
+.legendbar{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin-top:6px}
+.legendbar .k{display:inline-block;width:18px;height:0;border-top:2px solid;vertical-align:middle;margin-right:4px}
+/* 语义速查 */
+.details{background:#171b25;border:1px solid var(--border);border-radius:6px;padding:6px 10px;margin-top:8px;font-size:12px}
+.details summary{cursor:pointer;color:var(--accent)}
+.details ul{margin:5px 0 2px 18px;color:var(--muted);font-size:11.5px}
+.details li{margin:3px 0}
+.details b{color:var(--text)}
+</style>
+</head>
+<body>
+<h1>支阻位参数<span class="sub">「支阻位模式」原型 · 经典支阻位 / 支阻区间 整系统切换</span></h1>
+<div class="proto-banner">静态原型 · 仅供确认布局与交互 · 不连接后端、不保存。模式单选切换 / 置灰联动可交互；参数值为起始默认值。</div>
+
+<div class="wrap">
+
+<!-- ============ 支阻位模式（新增单选，置于「通用计算设置」顶部） ============ -->
+<div class="card sec">
+  <h2>支阻位模式 <span class="hint">整系统二选一：选择启用哪套支阻位；按品种保存</span></h2>
+  <div class="mode-cards" id="modeCards">
+    <div class="mode-card sel" data-mode="levels" id="card-levels">
+      <span class="dot"></span>
+      <div>
+        <div class="mt">经典支阻位 <span class="tag">现状 · 默认</span></div>
+        <div class="md">笔端点密集区（强互换 R2S/S2R + 近期极值 RES/SUP）+ 叠加层（黄金分割 / BOLL）+ 人工输入；
+          进场闸门 = 背驰点价距支阻位 ≤ near（绝对价差）。行为与现在完全一致。</div>
+      </div>
+    </div>
+    <div class="mode-card" data-mode="zones" id="card-zones">
+      <span class="dot"></span>
+      <div>
+        <div class="mt">支阻区间 <span class="tag">新增 · OHLC 高低点聚类</span></div>
+        <div class="md">已确认高低点 → 价格聚类 → ATR 扩展区间 → 有效性筛选；进场闸门 = <b>背驰点价落入方向匹配的区间</b>
+          （多头=底背驰点在支撑区间内，空头=顶背驰点在压力区间内）；止损 = 区间外侧。旧类型全部停用。</div>
+      </div>
+    </div>
+  </div>
+  <div class="merge-tip" style="margin-top:6px">两模式并列；同一品种同一时刻只启用一套。回测 / 实盘 / 分析页共用该配置；经典模式下实盘行为逐位不变。</div>
+</div>
+
+<!-- ============ 经典支阻位参数（现状复刻，区间模式下置灰） ============ -->
+<div class="card" id="levelsCard">
+  <h2>经典支阻位参数 <span class="hint">模式=经典支阻位时生效</span></h2>
+  <fieldset class="step">
+    <legend>生成候选</legend>
+    <fieldset class="nest">
+      <legend>密集区 cluster <span class="tag">支阻位·系统计算</span></legend>
+      <div class="row" style="margin-left:6px">
+        <label class="chk small"><input type="checkbox" checked> 强互换 flip（R2S / S2R）</label>
+        <label class="chk small"><input type="checkbox" checked> 近期极值 recent（RES / SUP）</label>
+      </div>
+      <fieldset class="nest2">
+        <legend>截断 <span class="tag">仅密集区</span></legend>
+        <div class="row"><label style="width:158px">每周期候选上限</label><input type="number" value="50" min="1" step="1"></div>
+        <div class="row"><label style="width:158px">触及次数权重</label><input type="number" value="0.6" min="0" max="1" step="0.05"></div>
+        <div class="row"><label style="width:158px">经过K线权重</label><input type="number" value="0.4" min="0" max="1" step="0.05"></div>
+      </fieldset>
+    </fieldset>
+    <div class="row">
+      <label class="chk"><input type="checkbox"> 黄金分割 fib（叠加层）</label>
+      <label>比率</label><input type="text" value="0.382,0.5,0.618" style="width:130px">
+      <label class="chk" style="margin-left:14px"><input type="checkbox" checked> BOLL（叠加层）</label>
+      <label>周期</label><input type="number" value="26" min="2" step="1">
+      <label>σ 倍数</label><input type="number" value="2.0" min="0.5" step="0.1">
+    </div>
+  </fieldset>
+  <fieldset class="step">
+    <legend>选取上图</legend>
+    <div class="row"><label style="width:158px">距离上限(×本周期ATR)</label><input type="number" value="3.0" min="0.1" step="0.1"></div>
+    <div class="row"><label style="width:158px">每侧条数 sideCount</label><input type="number" value="2" min="1" max="10" step="1"></div>
+  </fieldset>
+</div>
+
+<!-- ============ 支阻区间参数（新增，经典模式下置灰） ============ -->
+<div class="card dim" id="zonesCard">
+  <h2>支阻区间参数 <span class="hint">模式=支阻区间时生效；OHLC 高低点聚类，只吃已收盘K线</span></h2>
+  <fieldset class="step">
+    <legend>1 拐点与聚类</legend>
+    <div class="row"><label style="width:158px">回溯根数（每周期各自）</label>
+      <input type="number" data-k="zoneLookbackBars" value="300" min="30" step="1">
+      <span class="merge-tip">只看最近 N 根已收盘K线</span></div>
+    <div class="row"><label style="width:158px">拐点确认（左右根数）</label>
+      <input type="number" data-k="zonePivotBars" value="3" min="1" step="1">
+      <span class="merge-tip">第 i 根拐点在 i+3 收盘后可用；末 3 根不作拐点</span></div>
+    <div class="row"><label style="width:158px">聚类容差（×ATR14）</label>
+      <input type="number" data-k="zoneClusterAtr" value="0.5" min="0.05" step="0.05">
+      <span class="merge-tip">相近拐点合并为一组（跨度最小相邻组优先，平票先并价低组）</span></div>
+    <div class="row"><label style="width:158px">扩展系数（×ATR14）</label>
+      <input type="number" data-k="zonePadAtr" value="0.15" min="0" step="0.01">
+      <span class="merge-tip">区间 = [组内最低 − k·ATR, 组内最高 + k·ATR]</span></div>
+    <div class="row"><label style="width:158px">ATR 长度（Wilder）</label>
+      <input type="number" data-k="zoneAtrLen" value="14" min="2" step="1"></div>
+  </fieldset>
+  <fieldset class="step">
+    <legend>2 有效性筛选</legend>
+    <div class="row"><label style="width:158px">最少独立事件</label>
+      <input type="number" data-k="zoneMinEvents" value="2" min="1" step="1">
+      <span class="merge-tip">每区间至少 2 次独立拐点事件才算有效</span></div>
+    <div class="row"><label style="width:158px">事件间隔（根）</label>
+      <input type="number" data-k="zoneEventGap" value="7" min="1" step="1">
+      <span class="merge-tip">相邻不足 7 根的拐点合并为一次事件（时间取链末）</span></div>
+    <div class="row"><label style="width:158px">失效缓冲（×当时ATR）</label>
+      <input type="number" data-k="zoneInvalidBuf" value="0.25" min="0" step="0.01">
+      <span class="merge-tip">连续两根收盘越界且各自超缓冲 → 区间失效清零，需其后 ≥2 次新事件才重新入选</span></div>
+    <div class="row"><label style="width:158px">每侧保留数</label>
+      <input type="number" data-k="zoneMaxPerSide" value="0" min="0" step="1">
+      <span class="merge-tip">0=不限（全部有效区间进池，典型每侧 1~6 个）</span></div>
+  </fieldset>
+  <div class="merge-tip">数据不足 30 根或 ATR=0 时该周期不出区间，不强行补齐。</div>
+</div>
+
+<!-- ============ 区间形态与闸门示意 ============ -->
+<div class="card">
+  <h2>区间形态与进场闸门示意 <span class="hint">概念演示图（非真实数据）</span></h2>
+  <div class="chartbox">
+    <svg id="zoneChart" viewBox="0 0 860 320" width="100%" style="display:block"></svg>
+  </div>
+  <div class="legendbar">
+    <span><span class="k" style="border-color:#4fc3a1"></span>支撑区间（低点聚类）</span>
+    <span><span class="k" style="border-color:#ff8f6b"></span>压力区间（高点聚类）</span>
+    <span><span class="k" style="border-color:#8eb7ff;border-style:dashed"></span>当前收盘价</span>
+    <span><span class="k" style="border-color:#f0b90b"></span>底背驰点（落入支撑区间 → 可买）</span>
+    <span><span class="k" style="border-color:#ff6b6b;border-style:dashed"></span>止损 = 区间下沿 − 滑点</span>
+  </div>
+  <details class="details" open>
+    <summary>闸门语义（背驰点 + 区间）</summary>
+    <ul>
+      <li><b>多头</b>：底背驰点价 ∈ 支撑区间 [下沿−near, 上沿+near] → 允许买；<b>空头</b>：顶背驰点价 ∈ 压力区间 → 允许卖。near 沿用进出场参数（默认 10 点，设 0 = 严格区间内）。</li>
+      <li>当下制背驰点 = 当前形成中的极值价（即"基于当前收盘价判断"）；确认制按确认背驰点价位判定；从最新背驰点依次回退重试的既有结构保留。</li>
+      <li>止损自动落在命中区间外侧：多单 = 下沿 − 滑点，空单 = 上沿 + 滑点（沿用现有止损/滑点参数）。</li>
+      <li>区间角色由聚类来源决定（低点=支撑、高点=压力），与当前价位置无关；每根K线收盘后只用当时已知数据重算（前缀稳定，无未来函数）。</li>
+      <li>交易计划不受影响（计划不吃支阻位）；止盈/退出规则不变；变的是"何时允许按计划入场"这道闸门与止损参考位。</li>
+    </ul>
+  </details>
+</div>
+
+<!-- ============ 数量与计算行为说明 ============ -->
+<div class="card">
+  <h2>数量与计算行为</h2>
+  <details class="details">
+    <summary>区间保留几个 / 收盘当下怎么算</summary>
+    <ul>
+      <li><b>数量不固定</b>：300 根窗口内全部通过有效性筛选的区间；典型每侧 1~6 个（震荡少、趋势分散多），上限=拐点数÷2；可按「每侧保留数」截断。</li>
+      <li><b>收盘当下</b>：引擎逐拍（最细周期收盘）用"截至当拍的已收盘切片"全窗口重算，O(300) 极小，周期无新收盘K线时跨拍复用缓存；拐点 i+3 确认、失效需两根收盘越界 → 每拍结果与事后历史重算完全一致（回测/实盘同一路径）。</li>
+      <li><b>结果输出</b>：每周期附"最近支撑区间 / 最近压力区间 / 当前所在区间"（按距离就近，平票依次比事件数、最近事件时间）供展示；策略池吃全部有效区间。</li>
+    </ul>
+  </details>
+  <div class="row" style="margin-top:8px">
+    <button class="primary" disabled title="原型仅供确认，不可保存">保存本模块</button>
+    <button disabled title="原型仅供确认">恢复默认</button>
+    <span class="muted small">原型演示——按钮不可用</span>
+  </div>
+</div>
+
+</div>
+
+<script>
+'use strict';
+/* ===== 模式单选联动（纯 UI 演示） ===== */
+const cards = document.querySelectorAll('#modeCards .mode-card');
+const levelsCard = document.getElementById('levelsCard');
+const zonesCard = document.getElementById('zonesCard');
+cards.forEach(c => c.addEventListener('click', () => {
+  cards.forEach(x => x.classList.toggle('sel', x === c));
+  const zones = c.dataset.mode === 'zones';
+  zonesCard.classList.toggle('dim', !zones);
+  levelsCard.classList.toggle('dim', zones);
+}));
+
+/* ===== 概念示意图（演示数据：双底支撑 100.0/100.2，双顶压力 107.2/107.5） ===== */
+(function drawChart() {
+  const svg = document.getElementById('zoneChart');
+  const W = 860, H = 320, L = 46, R = 26, T = 14, B = 40;
+  const pMin = 95.5, pMax = 111;
+  const y = p => T + (pMax - p) * (H - T - B) / (pMax - pMin);
+  // 演示行情：下跌→双底(100.0/100.2)→反弹→双顶(107.2/107.5)→回落到当前收盘 104.6
+  const bars = [
+    [105.8,106.6],[106.6,107.0],[107.0,106.2],[106.2,105.4],[105.4,104.6],[104.6,103.8],
+    [103.8,102.9],[102.9,102.1],[102.1,101.4],[101.4,100.7],[100.7,100.0],[100.0,100.9],
+    [100.9,101.8],[101.8,102.7],[102.7,103.6],[103.6,104.4],[104.4,105.2],[105.2,106.0],
+    [106.0,106.8],[106.8,107.2],[107.2,106.4],[106.4,105.6],[105.6,106.2],[106.2,107.5],
+    [107.5,106.6],[106.6,105.7],[105.7,104.6]
+  ];
+  const n = bars.length, step = (W - L - R) / n, bw = Math.max(4, step * 0.55);
+  const wick = i => [bars[i][0] + 0.18, bars[i][1] - 0.18]; // 影线略超实体
+  let s = '';
+  // 价格网格
+  for (let p = 96; p <= 110; p += 2)
+    s += `<line x1="${L}" y1="${y(p)}" x2="${W - R}" y2="${y(p)}" stroke="#1c2432" stroke-width="1"/>`
+       + `<text x="${L - 6}" y="${y(p) + 3}" fill="#5b6a88" font-size="9" text-anchor="end">${p.toFixed(0)}</text>`;
+  // K线
+  bars.forEach((b, i) => {
+    const x = L + step * (i + 0.5), up = b[1] >= b[0];
+    const col = up ? '#4fc3a1' : '#ff6b6b';
+    const [h, l] = wick(i);
+    s += `<line x1="${x}" y1="${y(h)}" x2="${x}" y2="${y(l)}" stroke="${col}" stroke-width="1"/>`
+       + `<rect x="${x - bw / 2}" y="${y(Math.max(b[0], b[1]))}" width="${bw}" `
+       + `height="${Math.max(1.2, Math.abs(y(b[0]) - y(b[1])))}" fill="${col}" opacity=".9"/>`;
+  });
+  const xOf = i => L + step * (i + 0.5);
+  // 支撑区间 [99.85, 100.35]（双底 100.0 / 100.2 ± 0.15×ATR）
+  const supLo = 99.85, supHi = 100.35;
+  s += `<rect x="${L}" y="${y(supHi)}" width="${W - L - R}" height="${y(supLo) - y(supHi)}" fill="#4fc3a1" opacity=".13"/>`
+     + `<line x1="${L}" y1="${y(supHi)}" x2="${W - L - R}" y2="${y(supHi)}" stroke="#4fc3a1" stroke-width="1.6"/>`
+     + `<line x1="${L}" y1="${y(supLo)}" x2="${W - L - R}" y2="${y(supLo)}" stroke="#4fc3a1" stroke-width="1.6"/>`
+     + `<text x="${W - R - 4}" y="${y(supHi) - 5}" fill="#7fe0c3" font-size="10" text-anchor="end">支撑区间 [99.85, 100.35] · 2次事件</text>`;
+  // 压力区间 [107.05, 107.65]（双顶 107.2 / 107.5）
+  const resLo = 107.05, resHi = 107.65;
+  s += `<rect x="${L}" y="${y(resHi)}" width="${W - L - R}" height="${y(resLo) - y(resHi)}" fill="#ff8f6b" opacity=".12"/>`
+     + `<line x1="${L}" y1="${y(resHi)}" x2="${W - L - R}" y2="${y(resHi)}" stroke="#ff8f6b" stroke-width="1.6"/>`
+     + `<line x1="${L}" y1="${y(resLo)}" x2="${W - L - R}" y2="${y(resLo)}" stroke="#ff8f6b" stroke-width="1.6"/>`
+     + `<text x="${W - R - 4}" y="${y(resHi) - 5}" fill="#ffb394" font-size="10" text-anchor="end">压力区间 [107.05, 107.65] · 2次事件</text>`;
+  // 事件拐点标记
+  s += `<circle cx="${xOf(10)}" cy="${y(100.0)}" r="4" fill="none" stroke="#4fc3a1" stroke-width="1.6"/>`
+     + `<circle cx="${xOf(22)}" cy="${y(100.2)}" r="4" fill="none" stroke="#4fc3a1" stroke-width="1.6"/>`
+     + `<circle cx="${xOf(18)}" cy="${y(107.2)}" r="4" fill="none" stroke="#ff8f6b" stroke-width="1.6"/>`
+     + `<circle cx="${xOf(23)}" cy="${y(107.5)}" r="4" fill="none" stroke="#ff8f6b" stroke-width="1.6"/>`;
+  // 底背驰点（第二个底，更低 + MACD 背离）→ 落入支撑区间 → 可买
+  const dx = xOf(22), dy = y(100.2);
+  s += `<circle cx="${dx}" cy="${dy}" r="7" fill="none" stroke="#f0b90b" stroke-width="2"/>`
+     + `<line x1="${dx}" y1="${dy - 9}" x2="${dx - 26}" y2="${dy - 34}" stroke="#f0b90b" stroke-width="1.4"/>`
+     + `<text x="${dx - 30}" y="${dy - 38}" fill="#f0b90b" font-size="11" text-anchor="end">底背驰点 ∈ 支撑区间 → 可买</text>`;
+  // 止损 = 下沿 − 滑点
+  const slY = y(supLo) + 16;
+  s += `<line x1="${L}" y1="${slY}" x2="${W - L - R}" y2="${slY}" stroke="#ff6b6b" stroke-width="1.2" stroke-dasharray="6 5"/>`
+     + `<text x="${L + 6}" y="${slY + 12}" fill="#ff9c9c" font-size="10">止损 = 区间下沿 − 滑点</text>`;
+  // 当前收盘价
+  const lastClose = 104.6, cy = y(lastClose);
+  s += `<line x1="${L}" y1="${cy}" x2="${W - L - R}" y2="${cy}" stroke="#8eb7ff" stroke-width="1.2" stroke-dasharray="3 4"/>`
+     + `<text x="${W - R - 4}" y="${cy - 5}" fill="#8eb7ff" font-size="10" text-anchor="end">当前收盘价 ${lastClose.toFixed(1)}</text>`;
+  svg.innerHTML = s;
+})();
+</script>
+</body>
+</html>

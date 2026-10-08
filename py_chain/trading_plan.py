@@ -427,15 +427,17 @@ def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=No
     """逐周期（从大到小）计算交易计划。
 
     @param work_cache 可选：跨次调用复用。本周期笔指纹/cut/ATR/上级笔未变时直接复用该行计划。
-    @param range_res  震荡判定参考周期（必填；None → RANGE_RES；"" = 未配置（防御））。
-                      2026-09-16 最终口径：
-                      - "" → 全部周期固定观望（「参考周期未配置」，参数面已不提供关闭选项）；
-                      - 不低于该周期的行（参考周期自身与更高周期）固定观望，只作锚——
+    @param range_res  震荡判定参考周期（None → RANGE_RES；"" = 关闭；"240"/"D" = 开启）。
+                      - 开启（2026-09-16 闸门口径）：
+                        不低于该周期的行（参考周期自身与更高周期）固定观望，只作锚——
                         regime（震荡门）与 trend_direction（顺势过滤）照常在内部计算，
                         但不再做计划行判定（无自身 A/B、无买卖点匹配）；
-                      - 严格更低的周期只看该周期 regime（_plan_gate_row）：震荡 → 观望；
+                        严格更低的周期只看该周期 regime（_plan_gate_row）：震荡 → 观望；
                         非震荡 → 直接走趋势分支；笔 <2 → 观望「笔数据不足」
                         （不回退自身判定——引擎内自身 A/B 只剩参考周期给自己判这一处）。
+                      - 关闭（2026-10-08 可配置化）：无参考周期——每个周期各自走
+                        predictPlan 自判分支（自身 A/B 震荡判定 → 震荡观望/趋势分支），
+                        无「只作锚」固定观望、无 regime 传递；与图表 JS 口径一致。
     """
     from .sr_flip import _bis_fingerprint
     if range_res is None:
@@ -445,20 +447,13 @@ def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=No
     periodAtr = periodAtr or {}
     planRows = {}
     cfg_fp = tuple(sorted((cfg or {}).items())) if cfg else ()
-    if not range_res:
-        # 必填项未配置（防御）——全部周期观望，不做任何判定
-        for res in periods:
-            if not (periodBis.get(res, []) or []):
-                continue
-            planRows[res] = {"direction": "观望", "strategy": "参考周期未配置，观望",
-                             "reason": "rangeRes 未配置（必填项），全部周期观望",
-                             "pointDesc": "", "label": "配置缺失"}
-        return planRows
-    ref_sec = intervalSecOf(range_res) or 0
-    ref_name = trend_res_name(range_res)
+    gate_on = bool(range_res)  # "" = 关闭：每周期自判，无参考周期锚/regime 传递
+    ref_sec = (intervalSecOf(range_res) or 0) if gate_on else 0
+    ref_name = trend_res_name(range_res) if gate_on else ""
     upperBis = None
     range_gate = None  # 参考周期震荡 regime（见 _plan_gate_row；随循环向更低周期传递）
-    ref_row = next((r for r in periods if str(r).upper() == str(range_res).upper()), None)
+    ref_row = (next((r for r in periods if str(r).upper() == str(range_res).upper()), None)
+               if gate_on else None)
     if ref_row is not None and len(periodBis.get(ref_row) or []) < 2:
         # 参考周期笔不足（含整行无数据被 continue 跳过的情况）——预置不足闸；
         # 行内 ≥2 笔时会被真闸覆盖
@@ -487,7 +482,7 @@ def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=No
 
         # 震荡判定源 regime：在参考周期自身的行上顺带计算（其 upperBis 此刻 = 更高一级笔），
         # 挂 work_cache（输入指纹未变时复用，与 plan 行同口径；重同步后由调用方清空）
-        is_range_src = str(res).upper() == str(range_res).upper()
+        is_range_src = gate_on and str(res).upper() == str(range_res).upper()
         if is_range_src:
             gate_key = ("planGate", res, _bis_fingerprint(curBis), len(rawBars),
                         lastPrice, atr, _bis_fingerprint(upperBis), cfg_fp)
@@ -502,17 +497,17 @@ def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=No
                     work_cache[("planGate", res)] = (gate_key, range_gate)
 
         cache_key = (
-            "plan", res, _bis_fingerprint(curBis), len(rawBars), lastPrice, atr,
+            "plan", range_res, _bis_fingerprint(curBis), len(rawBars), lastPrice, atr,
             _bis_fingerprint(upperBis), cfg_fp,
         )
         if work_cache is not None:
-            ent = work_cache.get(("plan", res))
+            ent = work_cache.get(("plan", range_res, res))
             if ent is not None and ent[0] == cache_key:
                 planRows[res] = ent[1]
                 upperBis = ent[2]
                 continue
 
-        if (intervalSecOf(res) or 0) >= ref_sec:
+        if gate_on and (intervalSecOf(res) or 0) >= ref_sec:
             # 不低于参考周期：只作锚，固定观望（不做自身 A/B 与买卖点判定）
             p = {"res": res, "direction": "观望",
                  "strategy": "参考周期，观望（只作锚不交易）",
@@ -531,7 +526,7 @@ def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=No
         }
         planRows[res] = row
         if work_cache is not None:
-            work_cache[("plan", res)] = (cache_key, row, curBis)
+            work_cache[("plan", range_res, res)] = (cache_key, row, curBis)
         upperBis = curBis
     return planRows
 
@@ -544,10 +539,12 @@ def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=No
 # （参数中心 plan 模块 trendRes，Web 交易计划页签可配；mark_entry 进场方向过滤消费）
 TREND_RES = "240"
 
-# 震荡判定参考周期（必填，2026-09-16 最终口径）："240" = 4小时（默认）；"D" = 日线
-# （参数中心 plan 模块 rangeRes，枚举无关闭项）；"" = 未配置（防御）→ 全部周期观望。
-# 更低周期只看该周期 regime（compute_plan → _plan_gate_row → predictPlan(range_gate=…)，
-# 参考周期笔不足 → 观望）；参考周期自身与更高周期固定观望只作锚。
+# 震荡判定参考周期（2026-09-16 闸门口径；2026-10-08 增加「关闭」项，参数中心 plan 模块
+# rangeRes 可配）："240" = 4小时（默认）；"D" = 日线；"" = 关闭 → 每周期自判震荡
+# （无参考周期锚、无 regime 传递，与图表 JS trading_plan.js 口径一致）。
+# 开启时：更低周期只看该周期 regime（compute_plan → _plan_gate_row →
+# predictPlan(range_gate=…)，参考周期笔不足 → 观望）；参考周期自身与更高周期
+# 固定观望只作锚。
 RANGE_RES = "240"
 
 # 方向相位判定（2026-09-17 与用户确认，图片决策树；参数中心 plan 模块可配）：

@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>原型预览 · 交易计划页签重组 + rangeRes 可关闭</title>
+<style>
+/* ===== 主题变量（自 theme.css 内联，原型零依赖） ===== */
+:root{color-scheme:dark;--bg:#10151e;--panel:#19212e;--card:var(--panel);--card-2:#131c29;--line:#2c384a;
+--border:var(--line);--text:#e7edf7;--muted:#99a9c0;--blue:#8eb7ff;--accent:var(--blue);--primary:#5086e5;
+--input:#101823;--control-border:#3c4d65;--button:#243247;--chip:#27364c;--ok:#92d1b4;--warn:#f0b90b;
+--red:#e75555;--font:"Segoe UI","Microsoft YaHei",sans-serif}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:13px/1.6 var(--font);padding:14px 18px}
+h1{font-size:19px;color:#fff}
+h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
+h2{font-size:14px;color:#bad4ff;margin:22px 0 8px}
+h2 .hsub{color:var(--muted);font-weight:400;font-size:11.5px;margin-left:8px}
+button{background:var(--button);border:1px solid var(--control-border);color:var(--text);border-radius:6px;
+padding:8px 14px;font-size:13px;line-height:1.6;font-family:var(--font);cursor:pointer}
+button.primary{background:var(--primary);border-color:var(--primary);color:white}
+input:not([type=checkbox]),select{background:var(--input);color:var(--text);border:1px solid var(--control-border);
+border-radius:6px;padding:7px 9px;font-size:13px;font-family:var(--font)}
+/* ===== 原型横幅 ===== */
+.proto-banner{background:#3d3208;color:var(--warn);border:1px solid #7a5c1e;border-radius:6px;
+padding:7px 12px;font-size:12px;margin:10px 0 2px}
+/* ===== 以下与 params.html 现网样式一致 ===== */
+.stabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin:12px 0 0;flex-wrap:wrap}
+.stabs button{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;
+color:var(--muted);font-size:13px;padding:8px 16px;cursor:default}
+.stabs button.on{border-color:#55d7b0;color:#92d1b4;font-weight:600}
+.ptabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin:0;flex-wrap:wrap}
+.ptabs button{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;
+color:var(--muted);font-size:13px;padding:8px 16px;cursor:default;font-family:var(--font)}
+.ptabs button.on{border-color:var(--accent);color:#bad4ff;font-weight:600}
+.pane{padding-top:14px}
+.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:8px 16px;max-width:1180px}
+.prow{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--border);
+border-radius:6px;padding:7px 10px;cursor:default}
+.pgroup{grid-column:1/-1;color:var(--muted);font-size:11.5px;display:flex;align-items:center;gap:8px;margin-top:4px}
+.pgroup::after{content:'';flex:1;border-top:1px solid var(--border)}
+.pgroup:first-child{margin-top:0}
+.pgroup .gname{color:#bad4ff;font-weight:600;white-space:nowrap}
+.prow .pname{flex:1;min-width:0}
+.prow .plabel{color:var(--text);font-size:12.5px;display:block}
+.prow .pdef{color:var(--muted);font-size:11px}
+.prow .pdef .pnew{color:#ffe566}
+.prow input[type=number]{width:86px;text-align:right}
+.prow input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px}
+.prow select{background:var(--bg);color:var(--text);border:1px solid var(--border);
+border-radius:4px;padding:3px 6px;font-size:12px}
+.prow.dim{opacity:.45}
+.prow.dim input,.prow.dim select{pointer-events:none}
+.prow.new{border-color:#3a5f8f}
+.prow .code{font-size:10px;color:#8fb3e8;border:1px solid #2f5e9e;border-radius:8px;padding:0 6px;
+margin-left:6px;vertical-align:1px;white-space:nowrap}
+.pfoot{display:flex;gap:10px;align-items:center;margin:14px 0 0;flex-wrap:wrap}
+.pfoot .state{color:var(--muted);font-size:11px}
+.pnote{color:var(--muted);font-size:12px;margin-top:10px;max-width:1180px}
+/* 当前生效口径行 */
+.nowline{background:var(--card-2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;
+font-size:12.5px;margin-top:12px;max-width:1180px}
+.nowline .k{color:var(--muted)}
+.nowline .v{color:var(--ok)}
+.nowline .off{color:var(--muted)}
+.nowline .chg{color:var(--warn)}
+/* ===== 语义对比表 ===== */
+table.semtab{border-collapse:collapse;max-width:1180px;font-size:12.5px;margin-top:6px}
+table.semtab th,table.semtab td{border:1px solid var(--border);padding:6px 10px;text-align:left;vertical-align:top}
+table.semtab th{background:var(--card-2);color:#bad4ff;font-weight:600;white-space:nowrap}
+table.semtab td{background:var(--card)}
+table.semtab td.c{white-space:nowrap}
+table.semtab .new{color:var(--warn)}
+table.semtab tr.hlnow td{outline:1px dashed #3a5f8f;outline-offset:-1px}
+/* 规则表（表1 复刻 .ltable） */
+.ltab{border-collapse:collapse;max-width:1180px;width:100%;font-size:12px;margin:4px 0}
+.ltab th,.ltab td{border:1px solid var(--border);padding:5px 8px;text-align:left;vertical-align:top}
+.ltab th{color:#bad4ff;background:var(--card-2);font-weight:600}
+.ltab td{background:var(--card)}
+.ltab tr.hl td{outline:1px dashed #3a5f8f;outline-offset:-1px}
+.lcap{color:var(--muted);font-size:11.5px;margin:6px 0 0}
+.prules{margin-top:14px;max-width:1180px;background:var(--card);border:1px solid var(--border);
+border-radius:6px;padding:10px 14px}
+.prules h3{font-size:13px;color:#bad4ff;margin-bottom:6px}
+.prules h3 .lsub{color:var(--muted);font-weight:400;font-size:11.5px;margin-left:8px}
+.prules p{color:var(--muted);font-size:12px;margin:4px 0}
+.prules b{color:var(--text);font-weight:600}
+</style>
+</head>
+<body>
+
+<h1>原型预览<span class="sub">交易计划页签 · 卡片重组 + rangeRes 可关闭（静态原型，保存按钮无功能；两个参考周期下拉可交互预览联动）</span></h1>
+<div class="proto-banner">①「交易计划」页签参数分成 <b>3 类</b>（震荡 / 顺势 / 其他，横线分割）；②「震荡判定参考周期 rangeRes」新增<b>关闭</b>选项（关闭 = 每周期自判震荡，与图表 JS 口径一致）；③ 图表 JS 链路同步实现参考周期闸门，恢复 Python/JS 强一致默认。黄字 = 文案有变化，蓝框卡片 = 有新增选项/行为变化。</div>
+
+<nav class="stabs" aria-label="品种">
+  <button>XAUUSD</button><button class="on">XAGUSD</button><button>USOIL</button><button>BTCUSD</button><button>NAS100</button>
+</nav>
+<nav class="ptabs" aria-label="参数模块" style="margin-top:0">
+  <button>支阻位<span class="code">sr</span></button>
+  <button>画笔<span class="code">chan</span></button>
+  <button>买卖点<span class="code">points</span></button>
+  <button>中枢<span class="code">zs</span></button>
+  <button class="on">交易计划<span class="code">plan</span></button>
+  <button>标记进出场<span class="code">entry</span></button>
+  <button>强分型均线V1<span class="code">fxma</span></button>
+</nav>
+
+<div class="pane">
+  <div class="pgrid" id="pgrid">
+
+    <!-- ===== 类1 · 震荡 ===== -->
+    <div class="pgroup"><span class="gname">震荡</span><span id="grpRangeCap">rangeRes 开启时：只有参考周期做这套判定，更低周期全听它的结果</span></div>
+
+    <div class="prow new" id="rowRangeRes" title="大周期震荡闸门：参考周期判震荡→更低周期观望；≥参考周期只作锚不交易；关闭=每周期自判">
+      <span class="pname">
+        <span class="plabel">震荡判定参考周期<span class="code">rangeRes</span><span class="pnew">（新增「关闭」选项）</span></span>
+        <span class="pdef">默认 4小时 · <span class="pnew">大周期闸门</span>：参考周期判震荡 → 更低周期全部观望；参考周期及以上只作锚不交易；<span class="pnew">关闭 = 每个周期自己判震荡、锚规则取消（与图表口径一致）</span></span>
+      </span>
+      <select id="selRangeRes">
+        <option value="240" selected>4小时</option>
+        <option value="D">日线</option>
+        <option value="">关闭</option>
+      </select>
+    </div>
+
+    <div class="prow">
+      <input type="checkbox" checked aria-label="横盘判定">
+      <span class="pname">
+        <span class="plabel">横盘判定<span class="code">rangeBoundOn</span></span>
+        <span class="pdef">默认开 · A 类：K线窄带 + 笔端点窄带 + 涨跌交替（去①编号，开关语义不变）</span>
+      </span>
+    </div>
+    <div class="prow">
+      <span class="pname"><span class="plabel">震荡窗口K线数<span class="code">rangeBarN</span></span>
+      <span class="pdef">默认 40 · 最近 N 根K线的区间判定窗口</span></span>
+      <input type="number" value="40">
+    </div>
+    <div class="prow">
+      <span class="pname"><span class="plabel">震荡最近笔数<span class="code">rangeBiN</span></span>
+      <span class="pdef">默认 4 · 最近 N 笔端点极差与涨跌交替判定</span></span>
+      <input type="number" value="4">
+    </div>
+    <div class="prow">
+      <span class="pname"><span class="plabel">K线区间阈值(×ATR)<span class="code">rangeKMult</span></span>
+      <span class="pdef">默认 5 · 窗口高低差 ≤ 该值×ATR 判震荡</span></span>
+      <input type="number" value="5" step="0.5">
+    </div>
+    <div class="prow">
+      <span class="pname"><span class="plabel">笔端点阈值(×ATR)<span class="code">rangeBiMult</span></span>
+      <span class="pdef">默认 7 · 笔端点极差 ≤ 该值×ATR 判震荡</span></span>
+      <input type="number" value="7" step="0.5">
+    </div>
+    <div class="prow">
+      <span class="pname"><span class="plabel">突破跳过阈值(×ATR)<span class="code">rangeBreakMult</span></span>
+      <span class="pdef">默认 1 · 末笔越过窗口另一端 &gt;该值×ATR 视为突破（不算横盘）</span></span>
+      <input type="number" value="1" step="0.5">
+    </div>
+    <div class="prow">
+      <input type="checkbox" checked aria-label="中枢内判定">
+      <span class="pname">
+        <span class="plabel">中枢内判定<span class="code">rangeZsOn</span></span>
+        <span class="pdef">默认开 · B 类：未离开中枢且现价在箱内（去②编号，开关语义不变）</span>
+      </span>
+    </div>
+
+    <!-- ===== 类2 · 顺势 ===== -->
+    <div class="pgroup"><span class="gname">顺势</span><span id="grpReboundCap">锚点确立后按「形成段→够笔→位置→角度」分相位定方向（trendRes 开启时生效）</span></div>
+
+    <div class="prow" id="rowTrendRes" title="参考周期方向过滤更低周期进场（关闭/4小时/日线）">
+      <span class="pname">
+        <span class="plabel">顺势参考周期<span class="code">trendRes</span></span>
+        <span class="pdef">默认 4小时 · <span class="pnew">大周期定方向</span>：只放行顺着参考周期方向的单（含相位判定）；关闭 = 多空都放行、≥参考周期恢复检测资格</span>
+      </span>
+      <select id="selTrendRes">
+        <option value="240" selected>4小时</option>
+        <option value="D">日线</option>
+        <option value="">关闭</option>
+      </select>
+    </div>
+
+    <div class="prow rebound-row" id="rowRebound">
+      <input type="checkbox" checked aria-label="方向相位判定">
+      <span class="pname">
+        <span class="plabel">方向相位判定<span class="code">trendRebound</span></span>
+        <span class="pdef">默认开 · 关闭 = 旧行为（确立方向锁到闩锁/新点）；<span class="pnew">回测/监控引擎与图表 JS 均生效</span>（修正过时的「JS 无此参数」说明）</span>
+      </span>
+    </div>
+    <div class="prow rebound-row">
+      <span class="pname"><span class="plabel">相位近位容差(点)<span class="code">reboundNearPts</span></span>
+      <span class="pdef">默认 5 · 形成段极值距中枢上/下沿或前低/前高 ≤ 该值视为附近</span></span>
+      <input type="number" value="5" step="0.5">
+    </div>
+    <div class="prow rebound-row">
+      <span class="pname"><span class="plabel">相位角度45°基准(点/根)<span class="code">reboundAngleRef</span></span>
+      <span class="pdef">默认 5 · 当前笔平均每根幅度 &gt; 该值 = 角度&gt;45°（强），≤ 为弱</span></span>
+      <input type="number" value="5" step="0.5">
+    </div>
+
+    <!-- ===== 类3 · 其他 ===== -->
+    <div class="pgroup"><span class="gname">其他</span><span>买卖点三档分类（强档/中间档/弱档）的「附近」容差与强档开关</span></div>
+
+    <div class="prow">
+      <span class="pname"><span class="plabel">前高/前低附近容差(点)<span class="code">prevHighNearPts</span></span>
+      <span class="pdef">默认 5 · 2买/2卖后首段终点距前高/前低 ≤ 该值 → 中间档（等类2买/类2卖点）</span></span>
+      <input type="number" value="5" step="0.5">
+    </div>
+    <div class="prow">
+      <span class="pname"><span class="plabel">回踩2买/2卖点容差(点)<span class="code">secondNearPts</span></span>
+      <span class="pdef">默认 5 · 未过前高/前低时，最近一笔回调/反弹终点回到点价 ≤ 该值 → 中间档</span></span>
+      <input type="number" value="5" step="0.5">
+    </div>
+    <div class="prow">
+      <input type="checkbox" aria-label="3类点强档顺势">
+      <span class="pname">
+        <span class="plabel">3类点强档顺势<span class="code">thirdStrongTrend</span></span>
+        <span class="pdef">默认关 · 开 = 3买/类3买（3卖镜像）过前高不背驰时顺势「等回调后的新买点」；关 = 一律弱档</span>
+      </span>
+    </div>
+
+  </div>
+
+  <div class="nowline" id="nowLine"></div>
+
+  <div class="pfoot">
+    <button class="primary">保存本模块</button>
+    <button>恢复默认</button>
+    <span class="state">原型演示：按钮无功能；切换「顺势参考周期 / 震荡判定参考周期」下拉可看联动置灰与口径行变化</span>
+  </div>
+  <p class="pnote">保存后对本品种的回测 / 实盘 / 监控 / 图表分析在下一轮任务起生效（现网行为不变）。</p>
+</div>
+
+<h2>语义对比 · rangeRes「关闭」前后<span class="hsub">关闭按品种可选；默认仍 4小时（现网行为不变）</span></h2>
+<table class="semtab">
+  <tr><th>维度</th><th>4小时（默认 · 现状）</th><th class="new">关闭（新增）</th></tr>
+  <tr id="semJudge">
+    <td class="c">谁判震荡</td>
+    <td>只有 4小时 用 A横盘/B中枢内 判定；更低周期不自判、全听结果</td>
+    <td class="new">每个周期各自用 A/B 判自己的震荡（A/B 开关与阈值照常生效）</td>
+  </tr>
+  <tr>
+    <td class="c">4小时 / 日线 的计划行</td>
+    <td>固定「观望 · 只作锚」，不参与交易</td>
+    <td class="new">正常出方向+策略行（日线本就不在检测周期；4小时要发信号还需 trendRes 同时关闭，否则仍被顺势结构性剔除）</td>
+  </tr>
+  <tr id="semRange">
+    <td class="c">4小时 判出震荡时</td>
+    <td>更低周期（60/15/3）全部观望，不发信号</td>
+    <td class="new">不再看 4小时 脸色：各周期判自己震荡，非震荡照常走趋势分支</td>
+  </tr>
+  <tr id="semInsuf">
+    <td class="c">参考周期笔 &lt;2</td>
+    <td>更低周期观望「笔数据不足」</td>
+    <td class="new">不适用（无参考周期；各周期自身笔&lt;2 才观望数据不足）</td>
+  </tr>
+  <tr>
+    <td class="c">与图表 JS 口径</td>
+    <td><span class="new">现状不一致</span>：JS（trading_plan.js）一直是每周期自判，725059f 只改了 Python 引擎</td>
+    <td class="new">一致：本次 JS 同步实现闸门（--range-res 默认 4小时），关闭时两侧同为自判</td>
+  </tr>
+</table>
+
+<div class="prules">
+  <h3>表1 · 怎么判「震荡」<span class="lsub">规则说明区同步更新：删「未配置→全部观望」防御行，新增「关闭」行</span></h3>
+  <table class="ltab">
+    <tr><th style="width:33%">情况</th><th>怎么判</th></tr>
+    <tr id="t1lower">
+      <td>周期比参考周期小（60/15/3）</td>
+      <td>自己不判，全听 4小时 的：震荡→跟着观望；非震荡→直接当趋势；4小时笔不足2笔→直接观望（数据不足）</td>
+    </tr>
+    <tr id="t1anchor">
+      <td>4小时自己和比它大的周期（日线）</td>
+      <td>固定观望：只作锚（给小周期定震荡结果、给顺势定方向），不参与交易、不做判定</td>
+    </tr>
+    <tr class="hl" id="t1off">
+      <td>rangeRes ＝ 关闭<span style="color:var(--warn)">（新增）</span></td>
+      <td>每个周期用「横盘判定 / 中枢内判定」自己判：判出震荡→观望；非震荡→走趋势分支找买卖点；「只作锚」规则取消，4小时/日线恢复计划行判定</td>
+    </tr>
+  </table>
+  <p class="lcap">联动演示：把上方「震荡判定参考周期」切到「关闭」时，本表第一/二行与第三行互换高亮，「震荡」组标题同步换文案；「顺势参考周期」切「关闭」时「顺势」组的相位卡片置灰。</p>
+</div>
+
+<div class="prules">
+  <h3>JS / Python 强一致说明<span class="lsub">为什么之前不一致 → 本次怎么对齐</span></h3>
+  <p><b>分歧来源：</b>2026-09-16 提交 725059f「震荡判定源改参考周期（rangeRes 必填）」只改了 py_chain（回测/实盘/监控），图表链路 trading_plan.js / mark_entry.js 未迁移——JS 至今是旧的「每周期自判」口径（现网参数页脚注也注明了这点）。</p>
+  <p><b>本次对齐：</b>trading_plan.js 增加 --range-res（默认 4小时），实现同款闸门（≥ref 只作锚 / ref 震荡→低周期观望 / ref 笔&lt;2 观望 / 非震荡→跳过自判走趋势）；选「关闭」时 JS 与 Python 同为每周期自判。analysis_service 透传参数，图表计划表、plan json、回测、实盘、监控五处口径一致。</p>
+  <p><b>默认不变：</b>默认仍 4小时 闸门（回测/实盘行为原样；图表从「自判」变为与引擎一致的闸门口径——这是修复不一致的预期变化）。</p>
+</div>
+
+<script>
+// ===== 联动演示：两个下拉切换置灰与口径行 =====
+const selT = document.getElementById('selTrendRes');
+const selR = document.getElementById('selRangeRes');
+const resName = v => v === '240' ? '4小时' : v === 'D' ? '日线' : '';
+function refresh() {
+  const t = selT.value, r = selR.value;
+  // 组③ 方向相位判定：trendRes 关闭时整组置灰
+  document.querySelectorAll('.rebound-row').forEach(el => el.classList.toggle('dim', !t));
+  document.getElementById('grpReboundCap').textContent = t
+    ? `锚点确立后按「形成段→够笔→位置→角度」分相位定方向（${resName(t)} 顺势开启中）`
+    : 'trendRes 已关闭——相位判定不参与（组内置灰保留数值）';
+  // 组② 标题文案 + 表1 高亮
+  const on = !!r;
+  document.getElementById('grpRangeCap').textContent = on
+    ? `rangeRes 开启（${resName(r)}）：只有 ${resName(r)} 做这套判定，更低周期全听它的结果`
+    : 'rangeRes 已关闭：每个周期用 A横盘 / B中枢内 各自判自己的震荡';
+  document.getElementById('t1lower').classList.toggle('hl', !on);
+  document.getElementById('t1anchor').classList.toggle('hl', !on);
+  document.getElementById('t1off').classList.toggle('hl', on);
+  document.getElementById('semJudge').classList.toggle('hlnow', !on);
+  document.getElementById('semRange').classList.toggle('hlnow', !on);
+  document.getElementById('semInsuf').classList.toggle('hlnow', !on);
+  // 当前生效口径行
+  const tTxt = t ? `<span class="v">方向随 ${resName(t)}（顺势过滤开启）</span>` : `<span class="off">方向不随大周期（多空都放行）</span>`;
+  const rTxt = on ? `<span class="v">震荡闸门 = ${resName(r)}（低周期听门，${resName(r)} 及以上只作锚）</span>`
+                  : `<span class="chg">震荡闸门关闭（每周期自判，4小时/日线恢复计划行）</span>`;
+  document.getElementById('nowLine').innerHTML =
+    `<span class="k">当前生效口径：</span>${tTxt}<span class="k">；</span>${rTxt}` +
+    `<span class="k">；出信号周期 = </span><span>${(!t && !r) ? '60/15/3 + 4小时（全放开）' : '60/15/3'}</span>`;
+}
+selT.addEventListener('change', refresh);
+selR.addEventListener('change', refresh);
+refresh();
+</script>
+</body>
+</html>

@@ -61,13 +61,6 @@ bis_front*.json
 tmp_*
 webapp-signals-before-restart.json
 
-# 调试残留：一次性脚本/性能剖析产物/参数备份快照（不入库）
-py_chain/_tmp*
-py_chain/.tmp*
-
-# ZCode 会话工作目录（本地工具状态，不入库）
-.zcode/
-
 # WEB 服务运行时信号日志（每次回测/监控追加，可清空重生成，不入库）
 py_chain/signals.ndjson
 
@@ -88,3 +81,31 @@ data/LIVE_ARMED
 data/LIVE_KILL
 data/mt5_probe.json
 data/mt5_align_*.json
+
+# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
+.git/
+.hg/
+.svn/
+bower_components/
+jspm_packages/
+site-packages/
+coverage/
+htmlcov/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+playwright-report/
+test-results/
+allure-results/
+allure-report/
+cdk.out/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----
+# 自定义规则写在下方（本行提示可删除）

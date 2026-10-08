@@ -326,16 +326,19 @@ def replay_enter(c, ts_sec, log=None, fallback=True, timeout=10.0):
 
 
 def _build_monitor_engine(periods, bars_by_period, symbol, lots=DEFAULT_LOTS,
-                          module_params=None, strategy=None, engine_kwargs=None):
+                          module_params=None, strategy=None, engine_kwargs=None,
+                          sr_kwargs=None):
     """按注册表 engine 标识构建监控引擎（2026-09-30 第二策略分发）：
-    chan → BacktestEngine（periods/lots/module_params 原口径）；
+    chan → BacktestEngine（periods/lots/module_params 原口径；sr_kwargs 为支阻
+    参数中心品种桶映射——2026-10-08 起仅支阻区间模式（mode=zones）下发，
+    经典模式 None=引擎默认口径，行为不变）；
     其他（fx_ma）→ 引擎类 + engine_kwargs（webapp Worker 预计算的品种桶参数）。"""
     from . import engine_dispatch
     cls = engine_dispatch.engine_class_of(strategy)
     if cls is BacktestEngine:
         return BacktestEngine(bars_by_period, periods=periods, warmup_bars=0,
                               lots=lots, contract_mult=contract_mult_of(symbol),
-                              module_params=module_params)
+                              module_params=module_params, sr_kwargs=sr_kwargs)
     return cls(bars_by_period, **dict(engine_kwargs or {}))
 
 
@@ -344,7 +347,7 @@ class LiveMonitor:
 
     def __init__(self, symbol=None, periods=None, from_ts=0, port=DEFAULT_CDP_PORT,
                  interval=15.0, tail=100, use_cache=False, log=None, module_params=None,
-                 lots=DEFAULT_LOTS, strategy=None, engine_kwargs=None):
+                 lots=DEFAULT_LOTS, strategy=None, engine_kwargs=None, sr_kwargs=None):
         self.periods = list(periods or DEFAULT_PERIODS)
         self.cfg = CDPConfig(port=port, periods=self.periods)
         self.interval = float(interval)
@@ -377,7 +380,8 @@ class LiveMonitor:
                 self.log(f"  {res:>4}: {n} 根（{fmtT(last)} 止）")
         self.engine = _build_monitor_engine(self.periods, bars_by_period, symbol,
                                             lots=self.lots, module_params=module_params,
-                                            strategy=strategy, engine_kwargs=engine_kwargs)
+                                            strategy=strategy, engine_kwargs=engine_kwargs,
+                                            sr_kwargs=sr_kwargs)
 
         # 2. 预热到最新，初始信号忽略（历史信号不提醒不画）
         last_ts = 0
@@ -550,7 +554,7 @@ class ReplayMonitor(LiveMonitor):
     def __init__(self, symbol=None, periods=None, from_ts=0, port=DEFAULT_CDP_PORT,
                  start_ts=None, speed_ms=1000, hold_sec=2.0, interval=0.5,
                  tail=100, use_cache=False, log=None, module_params=None,
-                 lots=DEFAULT_LOTS, strategy=None, engine_kwargs=None):
+                 lots=DEFAULT_LOTS, strategy=None, engine_kwargs=None, sr_kwargs=None):
         self.periods = list(periods or DEFAULT_PERIODS)
         self.cfg = CDPConfig(port=port, periods=self.periods)
         self.interval = float(interval)
@@ -591,7 +595,8 @@ class ReplayMonitor(LiveMonitor):
                 self.log(f"  {res:>4}: {n} 根（{fmtT(last)} 止）")
         self.engine = _build_monitor_engine(self.periods, bars_by_period, symbol,
                                             lots=self.lots, module_params=module_params,
-                                            strategy=strategy, engine_kwargs=engine_kwargs)
+                                            strategy=strategy, engine_kwargs=engine_kwargs,
+                                            sr_kwargs=sr_kwargs)
         self._drawn = set()       # 已画过的 (time, direction)
         self.log(f"回放回测就绪：起点 {fmtT(start_ts) if start_ts else '（使用回放工具栏当前选择）'} "
                  f"速度 {speed_ms}ms/根，信号停留 {hold_sec}s")

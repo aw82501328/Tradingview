@@ -71,6 +71,18 @@ legend .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;
 .details ul{margin:5px 0 2px 18px;color:var(--muted);font-size:11.5px}
 #stale-note{display:none}
 .dim{opacity:.55}
+/* 支阻位模式单选卡（levels=经典支阻位 / zones=支阻区间，整系统二选一） */
+.mode-cards{display:flex;gap:10px;flex-wrap:wrap;margin:4px 0 8px}
+.mode-card{flex:1;min-width:300px;background:#141b28;border:1px solid var(--border);border-radius:8px;
+padding:9px 12px;cursor:pointer;display:flex;gap:10px;align-items:flex-start}
+.mode-card:hover{border-color:#3d5a8a}
+.mode-card.sel{border-color:#5086e5;background:#16233c}
+.mode-card .dot{width:15px;height:15px;border-radius:50%;border:2px solid #6b7a90;flex:none;margin-top:3px;background:transparent}
+.mode-card.sel .dot{border-color:#5086e5;background:#5086e5;box-shadow:inset 0 0 0 3px #16233c}
+.mode-card .mt{color:var(--text);font-size:13px;font-weight:600}
+.mode-card .mt .tag{display:inline-block;padding:0 7px;border-radius:8px;font-size:10px;background:var(--chip);
+border:1px solid var(--border);color:var(--muted);margin-left:6px;font-weight:400;vertical-align:1px}
+.mode-card .md{color:var(--muted);font-size:11px;margin-top:3px;line-height:1.5}
 .statusline{font-size:12px;color:var(--muted);margin:2px 0 8px}
 .statusline b{color:var(--text)}
 .scrollbox{max-height:460px;overflow:auto;border:1px solid var(--border);border-radius:4px}
@@ -256,9 +268,29 @@ tr.edit-sub:hover td{background:#1a2030}
 
   <!-- 通用计算设置（类型开关已并入：勾选=启用该组件，fib/BOLL 勾选即叠加） -->
   <div class="card sec">
-    <h2>通用计算设置 <span class="hint">按生成 → 截断 → 选取；组件前打勾启用；改后重算生效</span></h2>
+    <h2>通用计算设置 <span class="hint">按生成 → 截断 → 选取；改后重算生效</span></h2>
 
-    <fieldset class="step">
+    <!-- 支阻位模式（2026-10-08）：整系统二选一 -->
+    <div class="mode-cards" id="modeCards">
+      <div class="mode-card sel" data-mode="levels" id="card-levels" title="现状：密集区+黄金分割/BOLL 叠加+人工输入；行为与现在完全一致">
+        <span class="dot"></span>
+        <div>
+          <div class="mt">经典支阻位 <span class="tag">现状 · 默认</span></div>
+          <div class="md">笔端点密集区（强互换 R2S/S2R + 近期极值 RES/SUP）+ 叠加层（黄金分割 / BOLL）+ 人工输入；
+            进场闸门 = 背驰点价距支阻位 ≤ near（绝对价差）。</div>
+        </div>
+      </div>
+      <div class="mode-card" data-mode="zones" id="card-zones" title="OHLC 高低点聚类区间整系统替换：已确认拐点→聚类→ATR扩展→有效性筛选">
+        <span class="dot"></span>
+        <div>
+          <div class="mt">支阻区间 <span class="tag">OHLC 高低点聚类</span></div>
+          <div class="md">已确认高低点 → 价格聚类 → ATR 扩展区间 → 有效性筛选；进场闸门 = <b>背驰点价落入方向匹配的区间</b>
+            （多头=支撑区间、空头=压力区间）；止损=区间外侧。旧类型与人工位全部停用。</div>
+        </div>
+      </div>
+    </div>
+
+    <fieldset class="step" id="fs-generate">
       <legend><span class="stepn">1</span> 生成候选</legend>
       <div class="merge-tip">支阻位来源在「周期与参数」逐周期选择（系统计算=密集区，恒开启；人工输入=手动价位）。fib / BOLL 为<b>叠加层</b>——组件前打勾即叠加，独立于支阻位来源，人工周期照样叠加；密集区才有「截断」子步，fib / BOLL / 手动位不进截断。</div>
 
@@ -300,6 +332,39 @@ tr.edit-sub:hover td{background:#1a2030}
       </div>
     </fieldset>
 
+    <!-- 支阻区间参数（模式=支阻区间时生效；OHLC 高低点聚类，只吃已收盘K线） -->
+    <fieldset class="step dim" id="fs-zones">
+      <legend><span class="stepn">1z</span> 支阻区间 <span class="tag">模式=支阻区间时替代上面全部类型</span></legend>
+      <div class="merge-tip">已确认高低点 → 价格聚类 → ATR 扩展区间 → 有效性筛选；无笔依赖（≥30 根即可计算）；
+        每根K线收盘后只用当时已知数据重算（前缀稳定，无未来函数）；数据不足或 ATR=0 该周期不出区间。</div>
+      <div class="row"><label style="width:158px">回溯根数（每周期各自）</label>
+        <input type="number" data-k="zoneLookbackBars" value="300" min="0" step="1">
+        <span class="merge-tip">只看最近 N 根已收盘K线</span></div>
+      <div class="row"><label style="width:158px">拐点确认（左右根数）</label>
+        <input type="number" data-k="zonePivotBars" value="3" min="1" step="1">
+        <span class="merge-tip">第 i 根拐点在 i+3 收盘后可用；末 3 根不作拐点</span></div>
+      <div class="row"><label style="width:158px">聚类容差（×ATR）</label>
+        <input type="number" data-k="zoneClusterAtr" value="0.5" min="0.05" step="0.05">
+        <span class="merge-tip">相近拐点合并为一组（跨度最小相邻组优先，平票先并价低组）</span></div>
+      <div class="row"><label style="width:158px">扩展系数（×ATR）</label>
+        <input type="number" data-k="zonePadAtr" value="0.15" min="0" step="0.01">
+        <span class="merge-tip">区间 = [组内最低 − k·ATR, 组内最高 + k·ATR]</span></div>
+      <div class="row"><label style="width:158px">ATR 长度（Wilder）</label>
+        <input type="number" data-k="zoneAtrLen" value="14" min="2" step="1"></div>
+      <div class="row"><label style="width:158px">最少独立事件</label>
+        <input type="number" data-k="zoneMinEvents" value="2" min="1" step="1">
+        <span class="merge-tip">每区间至少 N 次独立拐点事件才算有效</span></div>
+      <div class="row"><label style="width:158px">事件间隔（根）</label>
+        <input type="number" data-k="zoneEventGap" value="7" min="1" step="1">
+        <span class="merge-tip">相邻不足 7 根的拐点合并为一次事件（时间取链末）</span></div>
+      <div class="row"><label style="width:158px">失效缓冲（×当时ATR）</label>
+        <input type="number" data-k="zoneInvalidBuf" value="0.25" min="0" step="0.01">
+        <span class="merge-tip">连续两根收盘越界且各自超缓冲 → 区间失效清零，其后 ≥2 次新事件才重新入选</span></div>
+      <div class="row"><label style="width:158px">每侧保留数</label>
+        <input type="number" data-k="zoneMaxPerSide" value="0" min="0" step="1">
+        <span class="merge-tip">0=不限（全部有效区间进池，典型每侧 1~6 个）</span></div>
+    </fieldset>
+
     <fieldset class="step">
       <legend><span class="stepn">2</span> 选取上图</legend>
       <div class="merge-tip">生成/截断之后直接选取（不合并）。各周期独立：距时点价（时点空=现价）最近上/下各 N 条，且 ≤ 距离上限×本周期ATR。纯就近，不再按评分。</div>
@@ -317,7 +382,7 @@ tr.edit-sub:hover td{background:#1a2030}
     <h2>结果明细表
       <span style="float:right;font-weight:400;font-size:12px">
         <span class="muted">过滤:</span>
-        <select id="f-family" style="width:92px"><option value="">全部来源</option><option value="cluster">密集区</option><option value="fib">黄金分割</option><option value="boll">BOLL</option><option value="manual">手动位</option></select>
+        <select id="f-family" style="width:92px"><option value="">全部来源</option><option value="cluster">密集区</option><option value="zone">支阻区间</option><option value="fib">黄金分割</option><option value="boll">BOLL</option><option value="manual">手动位</option></select>
         <select id="f-type" style="width:100px"><option value="">全部子类型</option><option>R2S</option><option>S2R</option><option>RES</option><option>SUP</option><option>上轨</option><option>中轨</option><option>下轨</option></select>
         <select id="f-level" style="width:72px"><option value="">全部级别</option></select>
         <label class="chk small"><input type="checkbox" id="f-drawnonly"> 仅图上选中</label>
@@ -339,6 +404,8 @@ tr.edit-sub:hover td{background:#1a2030}
   <details class="details">
     <summary>语义速查（生成 / 截断 / 选取）</summary>
     <ul>
+      <li><b>支阻位模式</b>（2026-10-08，整系统二选一）= <b>经典支阻位</b>（缺省：密集区+黄金分割/BOLL 叠加+人工输入，行为不变）或 <b>支阻区间</b>（OHLC 高低点聚类整系统替换：已确认拐点（i+3 收盘确认）→ 价格聚类（0.5×ATR）→ ATR 扩展区间（±0.15×ATR）→ 有效性筛选（≥2 次独立事件、两根收盘越界失效清零）；旧类型与<b>人工位全部停用</b>——品种桶遗留的全周期人工位不得架空区间模式）</li>
+      <li><b>区间闸门（背驰点+区间）</b>= 多头：底背驰点价 ∈ 支撑区间 [下沿−near, 上沿+near] → 允许买；空头：顶背驰点价 ∈ 压力区间 → 允许卖。区间角色由聚类来源决定（低点=支撑/高点=压力）；止损=命中区间外侧（多=下沿−滑点/空=上沿+滑点）。每根K线收盘后只用当时已知数据重算（无未来函数，回测/实盘同一路径）；交易计划不受影响</li>
       <li>支阻位来源（「周期与参数」逐周期二选一）= <b>系统计算</b>（密集区：强互换 R2S/S2R 触及≥minTouch 且角色反转或突破 + 近期极值 RES/SUP）或 <b>人工输入</b>（手动价位，type 按现价侧）</li>
       <li>叠加层（「通用计算设置」开关，独立于支阻位来源）= 黄金分割（每方向最新非一类买卖点参照笔×比率，无已形成点走 pending）+ BOLL（每周期<b>含末根K线</b>（当下/时点 bar，与 TV 当前 bar 值一致；回测仍为已收盘口径）的 SMA±σ×倍数 三轨，中轨按现价侧）；人工周期照样叠加</li>
       <li>截断（仅密集区）= 超 maxPerPeriod 按评分留 Top N；评分 = 触及权重×触及 + 经过K线权重×经K线（候选集内 min-max 归一）；fib/boll/manual 豁免</li>
@@ -356,7 +423,7 @@ tr.edit-sub:hover td{background:#1a2030}
 <script>
 const LEVELS = ['W', 'D', '240', '60', '15', '3'];
 const LEVEL_NAME = { W: 'W 周线', D: 'D 日线', 240: '240 4H', 60: '60 1H', 15: '15 15m', 3: '3 3m' };
-const FAMILY = { cluster: '密集区', fib: '黄金分割', boll: 'BOLL', manual: '手动位' };
+const FAMILY = { cluster: '密集区', fib: '黄金分割', boll: 'BOLL', manual: '手动位', zone: '支阻区间' };
 // 五品种（与参数中心 SYMBOL_META / params.html .stabs 一致）
 const SYMBOLS = [
   { id: 'XAUUSD', label: '黄金', code: 'OANDA:XAUUSD' },
@@ -539,7 +606,27 @@ function syncParamDim() {
   el('box-recent')?.classList.toggle('dim', !on('t-recent'));
   el('box-fib').classList.toggle('dim', !on('t-fib'));
   el('box-boll').classList.toggle('dim', !on('t-boll'));
+  // 支阻位模式（2026-10-08）：zones=整系统切换——生成候选（旧类型）与「周期与参数」
+  // 的人工输入支阻位整块变淡停用（人工位仅经典模式生效，防止全周期人工位架空区间）；
+  // 区间参数点亮。「选取上图」两模式共用，恒可用
+  const zones = srMode === 'zones';
+  el('fs-generate').classList.toggle('dim', zones);
+  el('fs-zones').classList.toggle('dim', !zones);
+  qa('.src-sel').forEach(s => { s.disabled = zones; s.classList.toggle('dim', zones); });
+  qa('.manual-input').forEach(i => { i.disabled = zones; i.classList.toggle('dim', zones); });
 }
+
+// ---------- 支阻位模式（levels=经典支阻位 / zones=支阻区间，整系统二选一） ----------
+let srMode = 'levels';
+function setSrMode(mode, silent) {
+  srMode = mode === 'zones' ? 'zones' : 'levels';
+  el('card-levels').classList.toggle('sel', srMode === 'levels');
+  el('card-zones').classList.toggle('sel', srMode === 'zones');
+  syncParamDim();
+  if (!silent) { checkStale(); updateButtons(); }
+}
+qa('#modeCards .mode-card').forEach(c =>
+  c.addEventListener('click', () => setSrMode(c.dataset.mode)));
 
 // ---------- 配置收集 / 应用 ----------
 function collectCfg() {
@@ -558,6 +645,8 @@ function collectCfg() {
   if (el('t-recent').checked) cfg.clusterParts.push('recent');
   // 人工支阻位：select=人工输入 的周期 → 原始价位文本（服务端统一解析；空=该周期无支阻位）
   cfg.manualLevels = {...manualLevelsByPeriod};
+  // 支阻位模式（levels/zones）+ 区间参数（data-k 输入随下方循环一并收集）
+  cfg.mode = srMode;
   qa('[data-k]').forEach(inp => { cfg[inp.dataset.k] = inp.value; });
   cfg.color = el('d-color').value;
   cfg.draw_text = el('d-text').checked;
@@ -571,6 +660,10 @@ function cfgSnapshot() {
   return JSON.stringify({ symbol: c.symbol, from: c.from, lookbackBars: c.lookbackBars, periods: c.periods,
     minTouchs: c.minTouchs, clusterParamsByPeriod: c.clusterParamsByPeriod,
     srTypes: c.srTypes, clusterParts: c.clusterParts, manualLevels: c.manualLevels,
+    mode: c.mode, zoneLookbackBars: c.zoneLookbackBars, zonePivotBars: c.zonePivotBars,
+    zoneClusterAtr: c.zoneClusterAtr, zonePadAtr: c.zonePadAtr, zoneAtrLen: c.zoneAtrLen,
+    zoneMinEvents: c.zoneMinEvents, zoneEventGap: c.zoneEventGap,
+    zoneInvalidBuf: c.zoneInvalidBuf, zoneMaxPerSide: c.zoneMaxPerSide,
     clusterAtr: c.clusterAtr, recentClusterAtr: c.recentClusterAtr,
     maxDistAtr: c.maxDistAtr, maxPerPeriod: c.maxPerPeriod, sideCount: c.sideCount,
     recentBiCount: c.recentBiCount, touchWeight: c.touchWeight, barsWeight: c.barsWeight,
@@ -596,6 +689,9 @@ function applyCfgToUI(cfg) {
   el('t-boll').checked = (cfg.srTypes || []).includes('boll');
   el('t-flip').checked = (cfg.clusterParts || []).includes('flip');
   el('t-recent').checked = (cfg.clusterParts || []).includes('recent');
+  // 支阻位模式回填（缺省 levels；旧桶/预设无 mode 键 → 经典支阻位，行为不变）；
+  // 区间参数为 data-k 输入，由下方通用回填循环填入
+  setSrMode(cfg.mode === 'zones' ? 'zones' : 'levels', true);
   // 人工支阻位回填：manualLevels 有该周期（列表或文本）→ select=人工 + 价位框填入；
   // 子行内容随来源切换（系统=参数 / 人工=价位）
   const ml = cfg.manualLevels || {};
@@ -816,6 +912,8 @@ async function delPreset(name) {
 // ---------- 结果渲染 ----------
 function kindOf(f) {
   if (f.manual) return 'manual';
+  // 支阻区间（srMode=zones）：kind 标记识别（与引擎 sr_flip._kindOf 同口径）
+  if (f.kind === 'support' || f.kind === 'resistance') return 'zone';
   if (f.boll) return 'boll';
   if (f.fib || f.pending) return 'fib';
   return (f.srcType && !FAMILY[f.srcType]) ? f.srcType : 'cluster';
@@ -875,15 +973,28 @@ function renderTable() {
 
   const cells = (f, L) => cols.map(c => {
     const k = c[1];
+    const isZone = (f.kind === 'support' || f.kind === 'resistance')
+      && f.lower != null && f.upper != null;
     if (k === 'level') return `<td class="num">${f.level ?? '—'}</td>`;
     if (k === 'res') return `<td>${L ?? '—'}</td>`;
     if (k === 'fam') return `<td>${esc(famName(f))}</td>`;
     if (k === 'label') return `<td>${esc(f.label || '—')}</td>`;
     if (k === 'type') return `<td>${esc(typeText(f))}</td>`;
-    if (k === 'price') return `<td class="num">${fmt(f.price)}</td>`;
+    if (k === 'price') {
+      // 支阻区间：显示为范围（下沿~上沿），不再是单点价格
+      if (isZone) return `<td class="num">${fmt(f.lower)}~${fmt(f.upper)}</td>`;
+      return `<td class="num">${fmt(f.price)}</td>`;
+    }
     if (k === 'dist') {
-      const d = cur == null ? null : f.price - cur;
-      if (d == null) return '<td class="num">—</td>';
+      if (cur == null) return '<td class="num">—</td>';
+      // 区间：现价在区间内标「区间内」，否则显示到近边界的有向距离（上方+/下方−）
+      if (isZone) {
+        if (f.lower <= cur && cur <= f.upper) return '<td class="num">区间内</td>';
+        const dz = cur < f.lower ? f.lower - cur : f.upper - cur;
+        const cls = dz >= 0 ? 'pos' : 'neg';
+        return `<td class="num ${cls}">${dz >= 0 ? '+' : ''}${fmt(dz)}</td>`;
+      }
+      const d = f.price - cur;
       const cls = d >= 0 ? 'pos' : 'neg';
       return `<td class="num ${cls}">${d >= 0 ? '+' : ''}${fmt(d)}</td>`;
     }
@@ -894,7 +1005,7 @@ function renderTable() {
     }
     if (k === 'tc') return `<td class="num">${num(f.touchCount)}</td>`;
     if (k === 'bp') return `<td class="num">${num(f.barsPassed)}</td>`;
-    if (k === 'bt') return `<td>${fmtTime(f.breakTime)}</td>`;
+    if (k === 'bt') return `<td>${fmtTime(isZone ? f.lastEventTime : f.breakTime)}</td>`;
     if (k === 'gap') return `<td class="num">—</td>`;
     return '<td></td>';
   });

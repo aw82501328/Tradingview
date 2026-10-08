@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from . import chan_core, data_store, live_store, param_center
 from .backtest import BacktestEngine, DEFAULT_PERIODS
 from .mark_entry import (DEFAULT_SLIP_FALLBACK, DEFAULT_SLIP_STOP,
-                         contract_mult_of)
+                         contract_mult_of, EXIT_MODE_DEFAULTS, EXIT_MODE_ON_KEYS)
 from .mt5_broker import MT5Broker, _TP_UNCHANGED
 from .mt5_feed import MT5Feed, DEFAULT_TAIL_M1
 
@@ -255,24 +255,44 @@ class LiveTrader:
                                   c["account"]["server"] or None, require_mode)
         self.log(f"[live] 账号守卫通过：login={acc['login']} server={acc['server']} "
                  f"mode={acc['trade_mode']} margin={acc['margin_mode']}")
-        # ② 规格/手数校验
+        # ② 规格/手数校验（奇数/半仓守卫按策略分流：fxma 固定半仓口径不变；
+        #   缠论V1 出场比例可配，最小分批守卫移至 ④ 参数中心加载后按配置推导）
         spec = self.broker.spec()
         vol = c["lots"] * 0.01
         if vol < spec["volume_min"] or vol > spec["volume_max"]:
             raise RuntimeError(f"手数越界：lots={c['lots']}（{vol} 手）不在 "
                                f"[{spec['volume_min']},{spec['volume_max']}]")
-        if c["lots"] % 2 != 0 and not c["risk"].get("allow_odd_lots"):
-            raise RuntimeError(f"lots={c['lots']} 为奇数：TP2 半仓（{vol / 2:.3f} 手）"
-                               f"低于最小手数，需 half→全平降级才可运行"
-                               f"（risk.allow_odd_lots=true 显式接受）")
-        if vol / 2 < spec["volume_min"] and not c["risk"].get("allow_odd_lots"):
-            raise RuntimeError(f"半仓 {vol / 2:.3f} 手 < volume_min {spec['volume_min']}")
+        if c.get("strategy", "chan_v1") == "fxma_v1":
+            if c["lots"] % 2 != 0 and not c["risk"].get("allow_odd_lots"):
+                raise RuntimeError(f"lots={c['lots']} 为奇数：半仓（{vol / 2:.3f} 手）"
+                                   f"低于最小手数，需 half→全平降级才可运行"
+                                   f"（risk.allow_odd_lots=true 显式接受）")
+            if vol / 2 < spec["volume_min"] and not c["risk"].get("allow_odd_lots"):
+                raise RuntimeError(f"半仓 {vol / 2:.3f} 手 < volume_min {spec['volume_min']}")
         # ③ 数据源
         finfo = self.feed.connect()
         self.log(f"[live] 行情源就绪：{finfo}")
         # ④ 参数中心（进程内全局 CHAN_CFG 与引擎 module_params 同 webapp 口径）
         self._pm = param_center.effective_all(c.get("symbol"))
         chan_core.apply_cfg(param_center.chan_cfg_effective(c.get("symbol")))
+        # 缠论V1：出场方式比例驱动的最小分批守卫（启用方式中比例最小者换算出的
+        # 分批手数须 ≥ volume_min，否则部分平仓会触发全平降级——需显式接受）
+        if c.get("strategy", "chan_v1") == "chan_v1":
+            ec = {**EXIT_MODE_DEFAULTS, **self._pm["entry"]}
+            if not any(ec.get(k) for k in EXIT_MODE_ON_KEYS):
+                raise RuntimeError("出场方式至少启用一种（当前参数中心配置全部关闭）")
+            pcts = [float(ec.get(k.replace("On", "Pct"), 100.0) or 100.0)
+                    for k in EXIT_MODE_ON_KEYS if ec.get(k)]
+            min_vol = c["lots"] * 0.01 * min(pcts) / 100.0
+            if min_vol < spec["volume_min"] and not c["risk"].get("allow_odd_lots"):
+                raise RuntimeError(
+                    f"最小分批 {min_vol:.3f} 手（出场比例最小 {min(pcts):.0f}%）"
+                    f"< volume_min {spec['volume_min']}，需部分→全平降级才可运行"
+                    f"（risk.allow_odd_lots=true 显式接受）")
+            if not (ec.get("exitStopSrOn") or ec.get("exitStopBeOn")
+                    or ec.get("exitTrailOn")):
+                self.log("[live] 警告：止损类出场方式全部关闭，持仓无止损兜底"
+                         "（仅止盈类离场）")
         # fxma structure 模式：主动止盈分批=可开仓手数÷4，低于最小手数须显式接受降级
         if c.get("strategy") == "fxma_v1" \
                 and self._pm["fxma"].get("tpMode", "points") == "structure":
@@ -371,10 +391,14 @@ class LiveTrader:
         self.log(f"[live] 预载 {self.cfg['db_symbol']}：3m×{n3}（"
                  f"{datetime.fromtimestamp(bars['3'][0]['time'], timezone.utc)} ~ "
                  f"{datetime.fromtimestamp(bars['3'][-1]['time'], timezone.utc)}）")
+        from . import sr_service
         self.engine = BacktestEngine(
             bars, periods=periods, warmup_bars=0, lots=self.cfg["lots"],
             contract_mult=contract_mult_of(self.cfg["symbol"]),
             module_params=param_center.engine_module_params(pm),
+            # 支阻参数：仅支阻区间模式（mode=zones）下发品种桶（区间须在实盘生效）；
+            # 经典模式 None=引擎默认口径，行为与 2026-10-08 前逐位不变
+            sr_kwargs=sr_service.symbol_sr_kwargs(self.cfg.get("symbol")),
             fill_at_open_bar=True,   # 逐拍同拍成交（见 backtest.py 注释；批量口径不变）
             fine_res="3")            # 显式固定 fine=3m：OANDA 补深 240/D 后各周期数据
                                     # 跨度不齐，自动探测会误选 240 作时间轴（2026-09-24
@@ -798,9 +822,10 @@ class LiveTrader:
         self.log(f"[live] trade#{no} beStop 收盘校正 → {t['beStop']:.2f}")
 
     def _diff_states(self):
-        """持仓原地状态 diff：TP1 保本改SL / TP2 半平 / 止损外推改SL（fxma 提损同路：
-        引擎 stopRef 上移 → stop_changed → modify_sl）；fxma structure 部分主动止盈
-        （exits 新增带 lots 的事件）→ 按事件手数市价平掉。
+        """持仓原地状态 diff：TP1 保本改SL / 够笔止盈按事件手数部分平 / 止损外推或
+        跟踪止盈上移改SL（引擎 stopRef/beStop 变化 → stop_changed → modify_sl）；
+        部分平仓事件（exits 新增带 lots 键、half 除外——half 走 halfDone 状态位路径）
+        → 按事件手数市价平掉。
         无变化不读库（每拍 O(open)内存比较，动作时才落库/下单）。"""
         spec = self.broker.spec()
         eps = spec["point"] or 0.01
@@ -810,19 +835,23 @@ class LiveTrader:
             if no not in self._be_fix:
                 self._maybe_fix_bestop(no, t)
             snap = self._snap.get(no) or self._snapshot(t)
-            eff_stop = t["beStop"] if t["beDone"] else t["stopRef"]
+            eff_stop = self._eff_stop_of(t)
             stop_changed = abs((eff_stop or 0) - (snap.get("eff_stop") or 0)) > eps
             half_changed = t["halfDone"] and not snap.get("halfDone")
             evs = t.get("exits") or []
-            new_parts = [e for e in evs[snap.get("n_exits") or 0:] if e.get("lots")]
+            new_parts = [e for e in evs[snap.get("n_exits") or 0:]
+                         if e.get("lots") and e.get("type") != "half"]
             if stop_changed or half_changed or new_parts:
                 row = live_store.get_trade(self.session, no)
                 if row and row["state"] in ("closed", "detached"):
                     self._snap[no] = self._snapshot(t)
                     continue
                 if stop_changed:
-                    self._modify_stop(no, t, row, eff_stop,
-                                      reason="be" if t["beDone"] else "extrapolate")
+                    trail_on = (bool(t.get("trailRaised"))
+                                and (t.get("exitCfg") or {}).get("exitTrailOn"))
+                    reason = "trail" if trail_on else \
+                        ("be" if t["beDone"] else "extrapolate")
+                    self._modify_stop(no, t, row, eff_stop, reason=reason)
                 if half_changed:
                     self._half_close(no, t, row)
                 for ev in new_parts:
@@ -831,7 +860,8 @@ class LiveTrader:
             self._snap[no] = self._snapshot(t)
 
     def _partial_close(self, no, t, row, ev):
-        """fxma structure 主动止盈部分平仓：按引擎事件手数市价平掉对应手数。
+        """部分平仓（事件带 lots）：fxma 主动止盈分批 / 缠论V1 按比例触发的
+        过高低点止盈、止损类部分平仓——按引擎事件手数市价平掉对应手数。
 
         手数低于 volume_min → 全平降级（同 half 降级口径）；≥ 券商剩余手数 → 全平。"""
         if row is None:
@@ -859,8 +889,10 @@ class LiveTrader:
                 live_store.upsert_trade({"session": self.session, "engine_trade_no": no,
                                          "volume_left": 0.0, "state": "closed"})
             return
+        comment = "fx_active_tp" if ev.get("type") == "activeTp" \
+            else f"exit_{ev.get('type') or 'part'}"
         r = self.broker.close_position(row["position_ticket"], volume=vol_ev,
-                                       comment="fx_active_tp")
+                                       comment=comment)
         live_store.log_order(self.session, "partial_close", engine_trade_no=no,
                              direction=t["direction"], volume=vol_ev,
                              position_ticket=row["position_ticket"], ok=int(r.ok),
@@ -869,7 +901,8 @@ class LiveTrader:
         if r.ok:
             live_store.upsert_trade({"session": self.session, "engine_trade_no": no,
                                      "volume_left": round(left - (r.deal_volume or vol_ev), 2)})
-            self.log(f"[live] trade#{no} 主动止盈分批 {vol_ev} 手 @ {r.deal_price}")
+            self.log(f"[live] trade#{no} 部分平仓 {vol_ev} 手"
+                     f"（{ev.get('type')}）@ {r.deal_price}")
         else:
             self._alert("partial_close_failed",
                         f"trade#{no} 分批失败 retcode={r.retcode}，待 reconcile 收敛")
@@ -904,16 +937,19 @@ class LiveTrader:
                                          "engine_trade_no": no, "half_done": 1})
             return
         left = row["volume_left"] or row["volume_open"]
-        half = round(left / 2, 2)
+        # 够笔止盈分批手数：优先引擎 half 事件的手数（比例可配），旧口径回退 剩余/2
+        ev_lots = next((e.get("lots") for e in reversed(t.get("exits") or [])
+                        if e.get("type") == "half" and e.get("lots")), None)
+        half = round(ev_lots * 0.01, 2) if ev_lots else round(left / 2, 2)
         vmin = self.broker.spec()["volume_min"]
-        if half < vmin:   # 奇数手降级：全平
+        if half < vmin:   # 分批低于最小手数：全平降级
             r = self.broker.close_position(row["position_ticket"], comment="half_degrade_full")
             live_store.log_order(self.session, "full_close", engine_trade_no=no,
                                  direction=t["direction"], volume=left,
                                  position_ticket=row["position_ticket"], ok=int(r.ok),
                                  retcode=r.retcode, retcomment="half_degrade_full",
                                  deal_price=r.deal_price, deal_volume=r.deal_volume)
-            self._alert("half_degrade", f"trade#{no} 半仓 {half} < {vmin} → 全平降级")
+            self._alert("half_degrade", f"trade#{no} 分批 {half} < {vmin} → 全平降级")
             if r.ok:
                 live_store.upsert_trade({"session": self.session, "engine_trade_no": no,
                                          "half_done": 1, "volume_left": 0.0,
@@ -932,10 +968,10 @@ class LiveTrader:
             live_store.upsert_trade({"session": self.session, "engine_trade_no": no,
                                      "half_done": 1,
                                      "volume_left": round(left - (r.deal_volume or half), 2)})
-            self.log(f"[live] trade#{no} TP2 半平 {half} 手 @ {r.deal_price}")
+            self.log(f"[live] trade#{no} 够笔止盈分批 {half} 手 @ {r.deal_price}")
         else:
-            self._alert("half_close_failed", f"trade#{no} 半平失败 retcode={r.retcode}，"
-                                             f"待 reconcile 收敛")
+            self._alert("half_close_failed", f"trade#{no} 够笔止盈分批失败 "
+                                             f"retcode={r.retcode}，待 reconcile 收敛")
 
     # -- 风控门（只挡镜像侧） ---------------------------------------------------
 
@@ -1117,10 +1153,22 @@ class LiveTrader:
     # -- 辅助 -----------------------------------------------------------------
 
     @staticmethod
-    def _snapshot(t):
+    def _eff_stop_of(t):
+        """引擎口径的当前有效止损位（advance_exit_decision 同口径：保本后=beStop；
+        跟踪止盈接管（trailRaised 且开关开）时取 beStop 与上移后 stopRef 的更紧者）。"""
+        eff = t.get("beStop") if t.get("beDone") else t.get("stopRef")
+        if (t.get("beDone") and t.get("trailRaised")
+                and (t.get("exitCfg") or {}).get("exitTrailOn")
+                and eff is not None and t.get("stopRef") is not None):
+            eff = min(eff, t["stopRef"]) if t["direction"] == "short" \
+                else max(eff, t["stopRef"])
+        return eff
+
+    @classmethod
+    def _snapshot(cls, t):
         return {"beDone": bool(t.get("beDone")), "halfDone": bool(t.get("halfDone")),
                 "stopRef": t.get("stopRef"),
-                "eff_stop": t.get("beStop") if t.get("beDone") else t.get("stopRef"),
+                "eff_stop": cls._eff_stop_of(t),
                 "n_exits": len(t.get("exits") or []),
                 "state": t.get("state")}
 

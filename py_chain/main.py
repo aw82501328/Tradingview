@@ -101,8 +101,8 @@ def build_full_chain(bars_by_period, periods, with_marks=True, sr_types=None, fi
         srKw["bollMult"] = boll_mult
     sr = compute_srflip(bis, bars_by_period, core, **srKw)
     # plan 模块的 trendRes（顺势参考周期）/ rangeRes（震荡判定参考周期）单独取出：
-    # 不混入震荡阈值 cfg；trendRes "" = 关闭顺势过滤，rangeRes "" = 未配置（必填项，
-    # 防御语义——compute_plan 全部周期观望）
+    # 不混入震荡阈值 cfg；trendRes "" = 关闭顺势过滤，rangeRes "" = 关闭震荡闸门
+    # （每周期自判震荡，2026-10-08 可配置化）
     plan_mp = dict(mp.get("plan") or {})
     trend_res = plan_mp.pop("trendRes", None)
     range_res = plan_mp.pop("rangeRes", None)
@@ -259,10 +259,13 @@ def main(argv=None):
     slip_fallback_atr_k = args.slip_fallback_atr_k if args.slip_fallback_atr_k is not None else ep["slip_fallback_atr_k"]
     slip_be_atr_k = args.slip_be_atr_k if args.slip_be_atr_k is not None else ep["slip_be_atr_k"]
     near = args.near if args.near is not None else ep["near"]
+    from .mark_entry import EXIT_MODE_DEFAULTS
     module_params = {"plan": pm["plan"], "marks": pm["points"],
                      "exit_min_merged": ep["exit_min_merged"],
                      "realtime_min_bars": ep["realtime_min_bars"],
                      "zs_exit_weak_ratio": ep["zs_exit_weak_ratio"],
+                     # 出场方式开关/比例（2026-10-08；同名直通，缺键引擎用默认）
+                     **{k: ep[k] for k in EXIT_MODE_DEFAULTS if k in ep},
                      "entry": ep}
     sr_types = [t.strip().lower() for t in args.sr_types.split(",") if t.strip()] if args.sr_types else None
     fib_levels = ([float(x.strip()) for x in args.fib_levels.split(",") if x.strip()]

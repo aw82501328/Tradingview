@@ -132,10 +132,12 @@ class TestExitWhy(unittest.TestCase):
         bar = {"time": 1200, "open": 99, "high": 101, "low": 97.5, "close": 99}
         typ = advance_exit_decision(pos, 1203, bar, [], px_bis, None)
         self.assertEqual(typ, "half")
-        self.assertIn("TP2 半平", pos["pendingWhy"])
+        self.assertIn("够笔止盈", pos["pendingWhy"])
+        self.assertIn("平 50%", pos["pendingWhy"])
         tr = execute_pending_exit(pos, {"time": 1203, "open": 99.0})
-        self.assertIsNone(tr)   # half 不终局
+        self.assertIsNone(tr)   # half 部分平仓不终局（默认 50%）
         ev = [e for e in pos["exits"] if e["type"] == "half"][0]
+        self.assertEqual(ev["lots"], pos["lots"] / 2)   # 默认比例 = 原半平口径
         self.assertIn("下一开盘", ev["why"])
         self.assertTrue(pos["beDone"])
 

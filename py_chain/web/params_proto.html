@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>原型预览 · 强分型均线V1 参数重构</title>
+<style>
+/* ===== 主题变量（自 theme.css 内联，原型零依赖） ===== */
+:root{color-scheme:dark;--bg:#10151e;--panel:#19212e;--card:var(--panel);--card-2:#131c29;--line:#2c384a;
+--border:var(--line);--text:#e7edf7;--muted:#99a9c0;--blue:#8eb7ff;--accent:var(--blue);--primary:#5086e5;
+--input:#101823;--control-border:#3c4d65;--button:#243247;--chip:#27364c;--ok:#92d1b4;--warn:#f0b90b;
+--font:"Segoe UI","Microsoft YaHei",sans-serif}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:13px/1.6 var(--font);padding:14px 18px}
+h1{font-size:19px;color:#fff}
+h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
+button{background:var(--button);border:1px solid var(--control-border);color:var(--text);border-radius:6px;
+padding:8px 14px;font-size:13px;line-height:1.6;font-family:var(--font);cursor:pointer}
+button:hover:not(:disabled){background:#30435e}
+button.primary{background:var(--primary);border-color:var(--primary);color:white}
+button.primary:hover:not(:disabled){background:#6295ed}
+button:disabled{opacity:.45;cursor:default}
+input:not([type=checkbox]):not([type=radio]),select{background:var(--input);color:var(--text);
+border:1px solid var(--control-border);border-radius:6px;padding:7px 9px;font-size:13px;font-family:var(--font)}
+input[type=checkbox]{accent-color:var(--primary)}
+/* ===== 原型横幅 ===== */
+.proto-banner{background:#3d3208;color:var(--warn);border:1px solid #7a5c1e;border-radius:6px;
+padding:7px 12px;font-size:12px;margin:10px 0 2px}
+/* ===== 以下与 params.html 现网样式一致 ===== */
+.stabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin:12px 0 0;flex-wrap:wrap}
+.stabs button{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;
+color:var(--muted);font-size:13px;padding:8px 16px;cursor:default}
+.stabs button.on{border-color:#55d7b0;color:#92d1b4;font-weight:600}
+.stabs button .scode{color:var(--muted);font-size:11px;margin-left:6px;font-weight:400}
+.ptabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin:0;flex-wrap:wrap}
+.ptabs button{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;
+color:var(--muted);font-size:13px;padding:8px 16px;cursor:pointer;font-family:var(--font)}
+.ptabs button:hover{color:var(--text)}
+.ptabs button.on{border-color:var(--accent);color:#bad4ff;font-weight:600}
+.pane{padding-top:14px}
+.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:8px 16px;max-width:1180px}
+.prow{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--border);
+border-radius:6px;padding:7px 10px;cursor:default}
+.pgroup{grid-column:1/-1;color:var(--muted);font-size:11.5px;display:flex;align-items:center;gap:8px;margin-top:4px}
+.pgroup::after{content:'';flex:1;border-top:1px solid var(--border)}
+.pgroup:first-child{margin-top:0}
+.prow .pname{flex:1;min-width:0}
+.prow .plabel{color:var(--text);font-size:12.5px;display:block}
+.prow .pdef{color:var(--muted);font-size:11px}
+.prow input[type=number]{width:86px;text-align:right}
+.prow input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px}
+.prow select{background:var(--bg);color:var(--text);border:1px solid var(--border);
+border-radius:4px;padding:3px 6px;font-size:12px}
+.multi-opts{display:flex;flex-wrap:wrap;gap:4px 12px;justify-content:flex-end;max-width:60%}
+.multi-opts .ms-opt{display:flex;align-items:center;gap:4px;color:var(--text);font-size:12px;white-space:nowrap}
+.prow.dim{opacity:.45}
+.prow.dim input,.prow.dim select{pointer-events:none}
+.prow .zs-side{display:flex;align-items:center;gap:12px;flex-shrink:0}
+.prow .zs-side .zs-draw{display:flex;align-items:center;gap:6px;color:var(--text);font-size:12.5px;white-space:nowrap}
+.prow .zs-side .zs-keep{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px;white-space:nowrap}
+.prow .zs-side .zs-keep.dim{opacity:.45}
+.prow .zs-side .zs-keep.dim input,.prow .zs-side .zs-keep.dim select{pointer-events:none}
+.prow .tp-dot{width:15px;height:15px;border-radius:50%;border:2px solid #6b7a90;display:inline-block;
+flex:none;cursor:pointer;align-self:center;background:transparent}
+.prow .tp-dot:hover{border-color:var(--accent)}
+.prow .tp-dot.on{border-color:var(--accent);background:var(--accent);box-shadow:inset 0 0 0 3px var(--card)}
+.prow.tp-card.sel{border-color:#2f5e9e}
+.prow.tp-card .tp-tag{display:inline-block;font-size:10px;color:#8fb3e8;border:1px solid #2f5e9e;
+border-radius:8px;padding:0 6px;margin-left:6px;vertical-align:1px}
+.pfoot{display:flex;gap:10px;align-items:center;margin:14px 0 0;flex-wrap:wrap}
+.pfoot .state{color:var(--muted);font-size:11px}
+.pnote{color:var(--muted);font-size:12px;margin-top:10px;max-width:1180px}
+</style>
+</head>
+<body>
+<h1>参数配置<span class="sub">强分型均线V1 参数页重构原型</span></h1>
+<div class="proto-banner">静态原型 · 仅供确认布局与控件形态 · 控件值为当前默认值 · 不连接后端、不保存。页签切换 / 开关置灰 / 止盈圆点可交互。</div>
+<nav class="stabs" aria-label="品种">
+  <button class="on">黄金 <span class="scode">XAUUSD</span></button>
+  <button>白银 <span class="scode">XAGUSD</span></button>
+  <button>原油 <span class="scode">USOIL</span></button>
+  <button>比特币 <span class="scode">BTCUSD</span></button>
+  <button>纳斯达克 <span class="scode">NAS100</span></button>
+</nav>
+<nav class="ptabs" id="tabs" aria-label="参数模块">
+  <button data-tab="fxmaBase" class="on">基本参数</button>
+  <button data-tab="fxmaEntry">进场条件</button>
+</nav>
+<div class="pane" id="pane-form">
+  <div class="pgrid" id="pgrid"></div>
+  <div class="pfoot">
+    <button class="primary" disabled title="原型仅供确认，不可保存">保存本模块</button>
+    <button disabled title="原型仅供确认">恢复默认</button>
+    <span class="state">原型演示——按钮不可用</span>
+  </div>
+  <p class="pnote" id="noteLine"></p>
+</div>
+<script>
+'use strict';
+/* ===== 模拟 schema / 默认值（默认值与 FXMA_DEFAULTS 一致；新字段默认保持现网 AND 语义） ===== */
+const DEF = {
+  entryRes:'3,15,60', pointClasses:'1,2,2x,3,3x',
+  maOn:true, maReq:'required', maType:'SMA', maFast1:8, maSlow1:20, maFast2:5, maSlow2:8, crossMinPts:2.0,
+  maStandOn:true, maStandReq:'required', maStand1:5, maStand2:5,
+  fibNearOn:false, fibReq:'required', fibLevels:'0.382,0.5,0.618', fibNearPts:5.0,
+  upperDirOn:false,
+  strongFxOn:true, strongFxReq:'required', strongFxMinPts:0.0,
+  pointValidBars:0, pointValidPts:0.0, stopPts:10.0,
+  tpPts:30.0, tpMode:'points', tpNearPts:0.0, tpTrailSlipPts:1.0,
+  sameBarPriority:'stop', mutexScope:'global', lots:4.0,
+  entryPick1:3, entryPick2:3, entryPick2x:3, entryPick3:3, entryPick3x:3,
+};
+const SCHEMA = {
+  entryRes:{label:'进出场周期',type:'multi',choices:['30S','3','15','60'],
+    cl:{'30S':'30秒(仅回测)','3':'3分钟','15':'15分钟','60':'1小时'},
+    desc:'多选并行产生信号（逗号分隔；30S 仅回测可用）'},
+  pointClasses:{label:'买卖点类别',type:'multi',choices:['1','2','2x','3','3x'],
+    cl:{'1':'一类买卖点','2':'二类买卖点','2x':'类二买卖点','3':'三类买卖点','3x':'类三买卖点'},
+    desc:'只交易所选类别的缠论买卖点；4类不交易'},
+  pointValidBars:{label:'点有效期(根)',type:'int',desc:'超时该点作废；0=不限'},
+  pointValidPts:{label:'点有效期(值)',type:'float',desc:'盘中价距点极值上限，超距等待回范围；0=不限'},
+  stopPts:{label:'止损点数',type:'float',desc:'多：进场价−N；空：进场价+N。盘中触价即成交（与实盘 MT5 SL 同口径）'},
+  tpPts:{label:'止盈点数',type:'float',desc:'盘中触价全平；仅止盈方式=固定点数时生效'},
+  tpMode:{label:'止盈方式',type:'str',choices:['points','structure'],cl:{points:'固定点数',structure:'结构组合'},desc:'止盈三卡圆点选择'},
+  tpNearPts:{label:'到点容差(点)',type:'float',desc:'主动止盈价=前一点位价向入场侧偏移N点；仅组合模式生效'},
+  tpTrailSlipPts:{label:'提损滑点(点)',type:'float',desc:'结构跟踪止损偏移；仅组合模式生效'},
+  sameBarPriority:{label:'同根双触优先级',type:'str',choices:['stop','tp'],
+    cl:{stop:'止损优先(保守)',tp:'止盈优先'},desc:'同一根最小周期K线盘中同时触及止损与止盈时按哪个成交'},
+  mutexScope:{label:'同向互斥范围',type:'str',choices:['global','perPeriod'],
+    cl:{global:'全局同向一笔(同缠论V1)',perPeriod:'每周期独立互斥'},desc:'同向持仓互斥的作用域'},
+  lots:{label:'默认开仓手数',type:'float',desc:'回测卡/实盘配置显式指定手数时以配置为准'},
+  upperDirOn:{label:'上级周期同向条件',type:'bool',
+    desc:'开启=进出场周期的上级周期（30S→3→15→60→240）当前笔方向须与信号同向（买=上涨笔/卖=下跌笔）；关闭=跳过'},
+  /* —— 新字段：条件性质（必选/可选），并入各自启用开关卡 —— */
+  maReq:{label:'条件性质',type:'str',choices:['required','optional'],cl:{required:'必选',optional:'可选'},
+    desc:'必选=不通过则该类买卖点不触发；可选=仅参与满足数计票（未通过只影响票数）'},
+  maStandReq:{label:'条件性质',type:'str',choices:['required','optional'],cl:{required:'必选',optional:'可选'},
+    desc:'必选=不通过则该类买卖点不触发；可选=仅参与满足数计票（未通过只影响票数）'},
+  strongFxReq:{label:'条件性质',type:'str',choices:['required','optional'],cl:{required:'必选',optional:'可选'},
+    desc:'必选=不通过则该类买卖点不触发；可选=仅参与满足数计票（未通过只影响票数）'},
+  fibReq:{label:'条件性质',type:'str',choices:['required','optional'],cl:{required:'必选',optional:'可选'},
+    desc:'必选=不通过则该类买卖点不触发；可选=仅参与满足数计票（未通过只影响票数）'},
+  /* —— 新字段：各类点满足数（三选N） —— */
+  entryPick1:{label:'一类点·条件满足数',type:'str',choices:['1','2','3'],
+    cl:{'1':'四选一','2':'四选二','3':'四选三','4':'四选四'},desc:'1买/1卖触发需启用条件中至少满足N个；生效N=min(N,启用条件数)'},
+  entryPick2:{label:'二类点·条件满足数',type:'str',choices:['1','2','3'],
+    cl:{'1':'四选一','2':'四选二','3':'四选三','4':'四选四'},desc:'2买/2卖触发需启用条件中至少满足N个；生效N=min(N,启用条件数)'},
+  entryPick2x:{label:'类二点·条件满足数',type:'str',choices:['1','2','3'],
+    cl:{'1':'四选一','2':'四选二','3':'四选三','4':'四选四'},desc:'类2买/类2卖触发需启用条件中至少满足N个；生效N=min(N,启用条件数)'},
+  entryPick3:{label:'三类点·条件满足数',type:'str',choices:['1','2','3'],
+    cl:{'1':'四选一','2':'四选二','3':'四选三','4':'四选四'},desc:'3买/3卖触发需启用条件中至少满足N个；生效N=min(N,启用条件数)'},
+  entryPick3x:{label:'类三点·条件满足数',type:'str',choices:['1','2','3'],
+    cl:{'1':'四选一','2':'四选二','3':'四选三','4':'四选四'},desc:'类3买/类3卖触发需启用条件中至少满足N个；生效N=min(N,启用条件数)'},
+  /* —— 四组条件参数 —— */
+  maOn:{label:'均线分离条件',type:'bool',desc:'启用=参与条件判定（性质=必选/可选）；关闭=停用，不计票不拦截'},
+  maType:{label:'均线类型',type:'str',choices:['SMA','EMA'],cl:{SMA:'简单均线SMA',EMA:'指数均线EMA'},desc:'按进出场周期K线计算'},
+  maFast1:{label:'一类点快线',type:'int',desc:'1类买卖点用的均线对（快线周期）'},
+  maSlow1:{label:'一类点慢线',type:'int',desc:'1类买卖点用的均线对（慢线周期）'},
+  maFast2:{label:'二三类点快线',type:'int',desc:'2/3类买卖点共用均线对（快线周期）'},
+  maSlow2:{label:'二三类点慢线',type:'int',desc:'2/3类买卖点共用均线对（慢线周期）'},
+  crossMinPts:{label:'均线上下穿确认点数',type:'float',desc:'交叉成立须快慢线间距≥该点数；0=任意落差'},
+  maStandOn:{label:'收盘站线条件',type:'bool',desc:'启用=参与条件判定；关闭=停用，不计票不拦截'},
+  maStand1:{label:'一类点站线均线',type:'int',desc:'1类买卖点站线判定的均线周期'},
+  maStand2:{label:'二三类点站线均线',type:'int',desc:'2/3类买卖点站线判定的均线周期'},
+  strongFxOn:{label:'强分型条件',type:'bool',desc:'启用=参与条件判定；关闭=停用，不计票不拦截'},
+  strongFxMinPts:{label:'强分型实体最小落差',type:'float',desc:'0=现口径；>0 须至少低/高该点数'},
+  fibNearOn:{label:'黄金分割附近条件',type:'bool',desc:'启用=参与条件判定（仅2/3类点，1类豁免）；关闭=停用，不计票不拦截'},
+  fibLevels:{label:'黄金分割档位',type:'multi',choices:['0.236','0.382','0.5','0.618','0.786'],
+    cl:{'0.236':'回撤23.6%','0.382':'回撤38.2%','0.5':'回撤50%','0.618':'回撤61.8%','0.786':'回撤78.6%'},desc:'靠近任一所选档位即通过'},
+  fibNearPts:{label:'黄金分割容差(点)',type:'float',desc:'本点价格与最近档位价位的绝对价差上限'},
+};
+/* ===== 页签键集 ===== */
+const FXMA_BASE_KEYS = ['entryRes','pointClasses','pointValidBars','stopPts','tpPts',
+                        'sameBarPriority','mutexScope','lots','upperDirOn'];
+const FXMA_ENTRY_GROUPS = [
+  ['条件组合（四选N）',['entryPick1','entryPick2','entryPick2x','entryPick3','entryPick3x']],
+  ['均线分离',['maOn+maReq','maType','maPair1','maPair2','crossMinPts']],
+  ['收盘站线',['maStandOn+maStandReq','maStand1','maStand2']],
+  ['强分型',['strongFxOn+strongFxReq','strongFxMinPts']],
+  ['黄金分割附近',['fibNearOn+fibReq','fibLevels','fibNearPts']],
+];
+/* ===== 渲染（结构同 params.html rowHtml，去掉修改徽标/保存态） ===== */
+const vals = Object.assign({}, DEF);
+const cl = (k,v) => (SCHEMA[k].cl && SCHEMA[k].cl[v]) || v;
+function rowHtml(key) {
+  if (key.includes('+')) { const [onk, reqk] = key.split('+'); return condRowHtml(onk, reqk); }
+  if (key === 'maPair1' || key === 'maPair2') return maPairRowHtml(key);
+  const s = SCHEMA[key], v = vals[key];
+  let control;
+  if (s.type === 'bool') {
+    control = `<input type="checkbox" data-k="${key}" ${v ? 'checked' : ''}>`;
+  } else if (s.type === 'str') {
+    control = `<select data-k="${key}">` + s.choices
+      .map(c => `<option value="${c}" ${c === String(v) ? 'selected' : ''}>${cl(key,c)}</option>`).join('') + '</select>';
+  } else if (s.type === 'multi') {
+    const sel = new Set(String(v).split(','));
+    control = `<span class="multi-opts">` + s.choices
+      .map(c => `<label class="ms-opt"><input type="checkbox" data-k="${key}" data-multi value="${c}" ${sel.has(c)?'checked':''}>${cl(key,c)}</label>`).join('') + '</span>';
+  } else {
+    const step = s.type === 'int' ? '1' : 'any';
+    control = `<input type="number" step="${step}" data-k="${key}" value="${v}">`;
+  }
+  return `<div class="prow" title="${s.desc}"><span class="pname"><span class="plabel">${s.label}</span>
+    <span class="pdef">${s.desc}</span></span>${control}</div>`;
+}
+/* 条件启用开关 + 必选/可选 并入同一张卡（开关关闭时「性质」置灰） */
+function condRowHtml(onKey, reqKey) {
+  const s = SCHEMA[onKey], r = SCHEMA[reqKey];
+  const reqSel = `<select data-k="${reqKey}" title="${r.desc}">` + r.choices
+    .map(c => `<option value="${c}" ${c === vals[reqKey] ? 'selected' : ''}>${cl(reqKey,c)}</option>`).join('') + '</select>';
+  return `<div class="prow" title="${s.desc}">
+    <span class="pname"><span class="plabel">${s.label}</span><span class="pdef">${s.desc}</span></span>
+    <span class="zs-side">
+      <label class="zs-draw"><input type="checkbox" data-k="${onKey}" ${vals[onKey] ? 'checked' : ''}>启用</label>
+      <span class="zs-keep req-side">性质 ${reqSel}</span>
+    </span></div>`;
+}
+/* 均线对：快/慢线周期同一张卡（一类点 / 二三类点各一对） */
+function maPairRowHtml(pair) {
+  const fk = pair === 'maPair1' ? 'maFast1' : 'maFast2';
+  const sk = pair === 'maPair1' ? 'maSlow1' : 'maSlow2';
+  const label = pair === 'maPair1' ? '一类点均线对' : '二三类点均线对';
+  const desc = pair === 'maPair1' ? '1类买卖点用的均线对（快线/慢线周期）'
+                                   : '2/3类买卖点共用均线对（快线/慢线周期）';
+  const num = (k, tag) => `<span class="zs-keep">${tag}
+    <input type="number" step="1" min="1" max="500" data-k="${k}" value="${vals[k]}" aria-label="${label}${tag}"></span>`;
+  return `<div class="prow" title="${desc}">
+    <span class="pname"><span class="plabel">${label}</span><span class="pdef">${desc}</span></span>
+    <span class="zs-side">${num(fk,'快')}${num(sk,'慢')}</span></div>`;
+}
+function validRowHtml() {  // 点有效期双输入合并卡（同现网）
+  return `<div class="prow" title="根=超时作废；值=盘中价距点极值，超距等待回范围">
+    <span class="pname"><span class="plabel">点有效期</span>
+    <span class="pdef">根=超时作废；值=盘中价距点极值，超距等待回范围（0=不限）</span></span>
+    <span class="zs-side">
+      <span class="zs-keep">根 <input type="number" step="1" min="0" max="1000" data-k="pointValidBars" value="${vals.pointValidBars}"></span>
+      <span class="zs-keep">值 <input type="number" step="any" min="0" max="10000" data-k="pointValidPts" value="${vals.pointValidPts}"></span>
+    </span></div>`;
+}
+function tpRowsHtml() {  // 止盈三卡（圆点单选，同现网）
+  const mode = vals.tpMode;
+  const dot = v => `<span class="tp-dot${mode === v ? ' on' : ''}" data-tpmode="${v}" role="radio" title="选为止盈方式"></span>`;
+  const num = (k,label) => `<span class="zs-keep">${label} <input type="number" step="any" min="0.1" max="1000" data-k="${k}" value="${vals[k]}"></span>`;
+  return `
+  <div class="prow tp-card${mode === 'points' ? ' sel' : ''}" title="${SCHEMA.tpPts.desc}">${dot('points')}
+    <span class="pname"><span class="plabel">止盈点数<span class="tp-tag">固定点数</span></span>
+    <span class="pdef">满仓一笔，盘中触价全平（旧行为）</span></span>
+    <span class="zs-side">${num('tpPts','点数')}</span></div>
+  <div class="prow tp-card${mode === 'structure' ? ' sel' : ''}" title="${SCHEMA.tpNearPts.desc}">${dot('structure')}
+    <span class="pname"><span class="plabel">主动止盈<span class="tp-tag">组合模式</span></span>
+    <span class="pdef">半仓开仓可叠两笔 · 一半仓位到前高/前低主动止盈</span></span>
+    <span class="zs-side">${num('tpNearPts','容差(点)')}</span></div>
+  <div class="prow tp-card${mode === 'structure' ? ' sel' : ''}" title="${SCHEMA.tpTrailSlipPts.desc}">${dot('structure')}
+    <span class="pname"><span class="plabel">结构跟踪止损<span class="tp-tag">组合模式</span></span>
+    <span class="pdef">另一半仓位走跟踪止损：同向点出现止损只上移</span></span>
+    <span class="zs-side">${num('tpTrailSlipPts','滑点(点)')}</span></div>
+  <input type="hidden" data-k="tpMode" value="${mode}">`;
+}
+let activeTab = 'fxmaBase';
+function render() {
+  const grid = document.getElementById('pgrid');
+  if (activeTab === 'fxmaBase') {
+    let html = '';
+    for (const k of FXMA_BASE_KEYS) {
+      if (k === 'pointValidBars') { html += validRowHtml(); continue; }
+      if (k === 'tpPts') { html += tpRowsHtml(); continue; }
+      html += rowHtml(k);
+    }
+    grid.innerHTML = html;
+    document.getElementById('noteLine').textContent =
+      '基本参数：周期/类别/点有效期/止损止盈/双触/互斥/手数/上级周期同向——各类买卖点通用的全局参数。';
+  } else {
+    grid.innerHTML = FXMA_ENTRY_GROUPS.map(([title, keys]) =>
+      `<div class="pgroup">${title}</div>` + keys.map(rowHtml).join('')).join('');
+    document.getElementById('noteLine').textContent =
+      '进场条件：均线分离/收盘站线/强分型/黄金分割附近 各设「启用+必选/可选」；各类买卖点设满足数（四选N）——必选必须通过，且通过票数≥N 才触发（必选通过也计票，生效N=min(N,启用条件数)）。';
+  }
+  applyDim();
+}
+/* ===== 条件开关关闭时：组内子参数置灰、「性质」下拉置灰（数值仍随表单保存） ===== */
+const DIM_GROUPS = [
+  ['maOn', 'maReq', ['maType','maFast1','maSlow1','maFast2','maSlow2','crossMinPts']],
+  ['maStandOn', 'maStandReq', ['maStand1','maStand2']],
+  ['strongFxOn', 'strongFxReq', ['strongFxMinPts']],
+  ['fibNearOn', 'fibReq', ['fibLevels','fibNearPts']],
+];
+function applyDim() {
+  for (const [sw, reqKey, keys] of DIM_GROUPS) {
+    const on = document.querySelector(`#pgrid [data-k="${sw}"]`);
+    if (!on) continue;
+    const reqSel = document.querySelector(`#pgrid [data-k="${reqKey}"]`);
+    const reqSide = reqSel && reqSel.closest('.req-side');
+    if (reqSide) reqSide.classList.toggle('dim', !on.checked);
+    for (const k of keys) {
+      const inp = document.querySelector(`#pgrid [data-k="${k}"]`);
+      if (!inp) continue;
+      const row = inp.closest('.prow');
+      if (row) row.classList.toggle('dim', !on.checked);
+    }
+  }
+  // 止盈方式三卡置灰（同现网）：points→容差/滑点灰；structure→tpPts灰
+  const holder = document.querySelector('#pgrid input[data-k="tpMode"]');
+  if (holder) {
+    const dimKeys = holder.value === 'structure' ? ['tpPts'] : ['tpNearPts','tpTrailSlipPts'];
+    for (const k of ['tpPts','tpNearPts','tpTrailSlipPts']) {
+      const inp = document.querySelector(`#pgrid [data-k="${k}"]`);
+      const row = inp && inp.closest('.prow');
+      if (row) row.classList.toggle('dim', dimKeys.includes(k));
+    }
+  }
+}
+/* ===== 事件 ===== */
+document.getElementById('tabs').addEventListener('click', e => {
+  const b = e.target.closest('button[data-tab]');
+  if (!b) return;
+  activeTab = b.dataset.tab;
+  document.querySelectorAll('#tabs button').forEach(x => x.classList.toggle('on', x === b));
+  render();
+});
+document.getElementById('pgrid').addEventListener('change', e => {
+  const t = e.target;
+  if (t.dataset.k) {
+    if (t.dataset.multi !== undefined) {
+      const list = [...document.querySelectorAll(`#pgrid [data-k="${t.dataset.k}"][data-multi]:checked`)].map(x => x.value);
+      vals[t.dataset.k] = list.join(',');
+    } else {
+      vals[t.dataset.k] = t.type === 'checkbox' ? t.checked : t.value;
+    }
+  }
+  applyDim();
+});
+document.getElementById('pgrid').addEventListener('click', e => {  // 止盈圆点
+  const dot = e.target.closest('.tp-dot');
+  if (!dot) return;
+  vals.tpMode = dot.dataset.tpmode;
+  const holder = document.querySelector('#pgrid input[data-k="tpMode"]');
+  if (holder) holder.value = vals.tpMode;
+  document.querySelectorAll('#pgrid .tp-dot').forEach(d =>
+    d.classList.toggle('on', d.dataset.tpmode === vals.tpMode));
+  document.querySelectorAll('#pgrid .tp-card').forEach(c =>
+    c.classList.toggle('sel', !!c.querySelector('.tp-dot.on')));
+  applyDim();
+});
+render();
+</script>
+</body>
+</html>

@@ -672,7 +672,7 @@ class TestEntryFiltering(unittest.TestCase):
                 mock.patch.object(me, "counterMoveQualifies", return_value=True), \
                 mock.patch.object(me, "mergedSegmentCount", return_value=99), \
                 mock.patch.object(me, "strategyExtraOk", return_value=None), \
-                mock.patch.object(me, "nearSr",
+                mock.patch.object(me, "near_zone",
                                   return_value={"sr": {"price": 105.0}}):
             sigs = me.evaluateRealtimeEntries(
                 periodBis, {}, {}, plan, [{"price": 105.0}],
@@ -733,7 +733,7 @@ class TestEntryFiltering(unittest.TestCase):
                 mock.patch.object(me, "counterMoveQualifies", return_value=True), \
                 mock.patch.object(me, "mergedSegmentCount", return_value=99), \
                 mock.patch.object(me, "strategyExtraOk", return_value=None), \
-                mock.patch.object(me, "nearSr",
+                mock.patch.object(me, "near_zone",
                                   return_value={"sr": {"price": 105.0}}):
             sigs = me.evaluateRealtimeEntries(
                 periodBis, {}, {}, plan, [{"price": 105.0}],

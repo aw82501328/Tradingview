@@ -620,10 +620,13 @@ def periodNameOf(res):
 def sourceLabelOf(f):
     """支阻位来源类型的中文标注（落盘 drawnByPeriod 的 label 用）。
     manual → 手动位；boll → BOLL上轨/中轨/下轨；fib → 预期<N>（pending）/
-    黄金分割<ratio>（已形成）；cluster → 密集区。
+    黄金分割<ratio>（已形成）；zone → 支撑区间/压力区间（srMode="zones"）；
+    cluster → 密集区。
     """
     if f.get("manual"):
         return "手动位"
+    if f.get("kind") in ("support", "resistance"):
+        return "支撑区间" if f["kind"] == "support" else "压力区间"
     if f.get("boll"):
         b = f["boll"]
         return "BOLL上轨" if b == "upper" else "BOLL中轨" if b == "mid" else "BOLL下轨"
@@ -689,9 +692,11 @@ def flipScore(f, group, touchWeight=TOUCH_WEIGHT, barsWeight=BARS_WEIGHT):
 
 
 def _kindOf(f):
-    """候选来源类型：manual/boll/fib/cluster（由标记反推，与 JS 一致）。"""
+    """候选来源类型：manual/boll/fib/zone/cluster（由标记反推，与 JS 一致）。"""
     if f.get("manual"):
         return "manual"
+    if f.get("kind") in ("support", "resistance"):
+        return "zone"
     if f.get("boll"):
         return "boll"
     if f.get("fib"):
@@ -702,7 +707,7 @@ def _kindOf(f):
 def flatten_candidates(combined):
     """展平各周期候选为全量候选池（不合并，与 JS flattenCandidates 逐行对齐）：
     每条候选独立成线，价格=原始识别价（不做任何加权平均），同价位不同周期/不同类型
-    的候选也各自保留；附 level（自身周期）与 srcType（cluster/fib/boll，由自身标记反推）。
+    的候选也各自保留；附 level（自身周期）与 srcType（cluster/fib/boll/zone/manual，由自身标记反推）。
     排序：先按 LEVEL_ORDER 级别序（大→小，未知键落尾），再按 price 升序（确定性输出）。
     @param combined { 周期: [候选,...] }（密集区截断后 + fib + boll）
     @returns [{ ...原候选字段, level, srcType }]
@@ -796,6 +801,71 @@ def cluster_candidates(bis, bars, atr, *, clusterAtr=CLUSTER_ATR,
     return out
 
 
+def _compute_srflip_zones(barsByPeriod, periods, manualLevels=None,
+                          zoneLookbackBars=300, zonePivotBars=3, zoneClusterAtr=0.5,
+                          zonePadAtr=0.15, zoneEventGap=7, zoneMinEvents=2,
+                          zoneInvalidBuf=0.25, zoneAtrLen=14, zoneMaxPerSide=0,
+                          sideCount=SIDE_COUNT, maxDistAtr=MAX_DIST_ATR,
+                          work_cache=None, periodAtrsIn=None):
+    """srMode="zones"：整系统切换为支阻区间（sr_zone 模块，已收盘K线高低点聚类）。
+
+    密集区/黄金分割/BOLL/人工位全部停用（2026-10-08 实测教训：品种桶遗留的
+    全周期人工位会静默替换掉区间，"整系统切换"被架空——人工位仅在经典模式生效，
+    manualLevels 形参保留但本分支忽略）；无笔依赖（≥30 根即可计算）。
+    输出结构与 levels 分支同构，另附 zoneSelection（SPEC 第4步就近选取，仅供展示）。
+    候选 price=按 kind 的远侧边界（support→lower / resistance→upper）：
+    mark_entry.stop_ref_of / live_trader.provisional_sl 零改动即把止损放区间外侧。
+    """
+    from .sr_zone import zone_candidates
+    zoneParams = {
+        "zoneLookbackBars": zoneLookbackBars, "zonePivotBars": zonePivotBars,
+        "zoneClusterAtr": zoneClusterAtr, "zonePadAtr": zonePadAtr,
+        "zoneEventGap": zoneEventGap, "zoneMinEvents": zoneMinEvents,
+        "zoneInvalidBuf": zoneInvalidBuf, "zoneAtrLen": zoneAtrLen,
+        "zoneMaxPerSide": zoneMaxPerSide,
+    }
+    periodAtrs, lastCloseByRes, combined, zoneSelection = {}, {}, {}, {}
+    for res in periods:
+        bars = barsByPeriod.get(res, []) or []
+        if not bars:
+            continue
+        # 展示口径的 ATR/现价沿 levels 分支（calcATR 14 / 各周期末收盘）；
+        # 区间算法内部用 Wilder ATR（sr_zone 自带，失效缓冲需逐bar序列）。
+        # periodAtrsIn（引擎 AtrAccumulator O(1) 增量值，与 calcATR 同口径）优先，
+        # 免每拍每周期全前缀 O(n) 重算——曾是回测第二大热点
+        atr = (periodAtrsIn or {}).get(res)
+        periodAtrs[res] = calcATR(bars, 14) if atr is None else atr
+        lastCloseByRes[res] = bars[-1]["close"]
+        cands, sel = zone_candidates(res, bars, zoneParams, work_cache=work_cache)
+        if cands:
+            combined[res] = cands
+        zoneSelection[res] = sel
+    # 当前价格：最小有数据周期末收盘（与 levels 分支同口径）
+    currentPrice = None
+    for k in ("3", "15", "60", "240", "D"):
+        if k in lastCloseByRes:
+            currentPrice = lastCloseByRes[k]
+            break
+    mergedOut = flatten_candidates(combined)
+    # 就近选取上图（区间候选 price=远侧边界参与就近/距离上限；区间高 ≤0.8ATR，
+    # 远近边界之差对选取与 maxDistAtr 过滤的影响可忽略，保持与 levels 同一函数）
+    displayPeriods = [r for r in periods if r in periodAtrs]
+    drawnByPeriod = pickNearestForDisplay(mergedOut, displayPeriods, currentPrice,
+                                          sideCount, maxDistAtr, periodAtrs) \
+        if currentPrice is not None else {}
+    for L, lines in drawnByPeriod.items():
+        for f in lines:
+            f["label"] = labelOf(f)
+    return {
+        "periods": combined,
+        "merged": mergedOut,
+        "drawnByPeriod": drawnByPeriod,
+        "currentPrice": currentPrice,
+        "periodAtrs": periodAtrs,
+        "zoneSelection": zoneSelection,
+    }
+
+
 def compute_srflip(periodBis, barsByPeriod, periods,
                    clusterAtr=CLUSTER_ATR, recentClusterAtr=RECENT_CLUSTER_ATR,
                    maxDistAtr=MAX_DIST_ATR, maxPerPeriod=MAX_PER_PERIOD,
@@ -808,7 +878,11 @@ def compute_srflip(periodBis, barsByPeriod, periods,
                    sideCount=SIDE_COUNT,
                    clusterParamsByPeriod=None, manualLevels=None, periodBarTimesIn=None,
                    periodBarArraysIn=None, work_cache=None, clusterLookbackBars=None,
-                   fibLookbackBars=None, fibLastStroke=False, bollIncludeLast=False):
+                   fibLookbackBars=None, fibLastStroke=False, bollIncludeLast=False,
+                   srMode="levels", zoneLookbackBars=300, zonePivotBars=3,
+                   zoneClusterAtr=0.5, zonePadAtr=0.15, zoneEventGap=7,
+                   zoneMinEvents=2, zoneInvalidBuf=0.25, zoneAtrLen=14,
+                   zoneMaxPerSide=0):
     """逐周期识别支阻位（密集区 + 黄金分割 + BOLL + 人工输入），展平为全量候选池、各周期独立选取。
 
     @param work_cache 可选：跨次调用复用的 dict。未变周期（cut/ATR/笔指纹相同）直接复用
@@ -829,7 +903,24 @@ def compute_srflip(periodBis, barsByPeriod, periods,
                       默认 False=已收盘口径（回测历史锚点：切片已无形成中K，语义=再旧一根，
                       既有信号数不得改变）。仅 SR 调参页经 build_chain_result(engine_extra=...)
                       显式传入，engine_kwargs_of 永不映射（回测/分析/CLI 机制上拿不到）。
+    @param srMode 支阻位模式（2026-10-08）："levels"=经典支阻位（密集区+fib+BOLL+人工，
+                      缺省，行为逐位不变）；"zones"=支阻区间整系统切换（sr_zone 模块，
+                      OHLC 高低点聚类；密集区/fib/BOLL/人工位全部停用——品种桶遗留的
+                      全周期人工位不得静默架空整系统切换）。
+                      zone* 参数为区间算法起始参数（回溯/拐点确认/聚类容差/扩展/事件
+                      间隔/最少事件/失效缓冲/ATR长度/每侧保留数），详见 sr_zone.ZONE_DEFAULTS。
     """
+    # 支阻区间整系统切换：bars-only（无笔依赖），提前返回（与 levels 分支输出同构）
+    if srMode == "zones":
+        return _compute_srflip_zones(
+            barsByPeriod, periods, manualLevels=manualLevels,
+            zoneLookbackBars=zoneLookbackBars, zonePivotBars=zonePivotBars,
+            zoneClusterAtr=zoneClusterAtr, zonePadAtr=zonePadAtr,
+            zoneEventGap=zoneEventGap, zoneMinEvents=zoneMinEvents,
+            zoneInvalidBuf=zoneInvalidBuf, zoneAtrLen=zoneAtrLen,
+            zoneMaxPerSide=zoneMaxPerSide, sideCount=sideCount,
+            maxDistAtr=maxDistAtr, work_cache=work_cache,
+            periodAtrsIn=periodAtrsIn)
     # 可选加速输入：时间索引与 bars 同序；价格数组仅含当前可见前缀。
     periodAtrsIn = periodAtrsIn or {}
     periodMacdIn = periodMacdIn or {}

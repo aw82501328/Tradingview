@@ -90,6 +90,29 @@ const EXIT_MIN_MERGED = Math.max(2, Math.round(getArg("exit-min-merged", 5) || 5
 // 出中枢力度衰减比例：离开笔 span < 进入笔 span × ratio 视为力度变弱
 // （--zs-weak-ratio 来自 WEB 参数中心，py_chain ZS_EXIT_WEAK_RATIO 同名）
 const ZS_WEAK_RATIO = getArg("zs-weak-ratio", 1.0) || 1.0;
+// ---- 出场方式（2026-10-08 可配置化；与 py_chain EXIT_MODE_DEFAULTS 同名同默认） ----
+// 开关 --exit-*-on=1/0；比例 --exit-*-pct（% ，平剩余仓位）；跟踪止盈滑点 --exit-trail-slip（点）
+// 均来自 WEB 参数中心（analysis_service entry 阶段透传）
+const boolArg = (name, def) => {
+  const v = String(getStrArg(name, def ? "1" : "0"));
+  return !(v === "0" || v.toLowerCase() === "false");
+};
+const EXIT_CFG = {
+  stopSrOn: boolArg("exit-stop-sr-on", true),
+  stopSrPct: getArg("exit-stop-sr-pct", 100) || 100,
+  stopBeOn: boolArg("exit-stop-be-on", true),
+  stopBePct: getArg("exit-stop-be-pct", 100) || 100,
+  halfOn: boolArg("exit-half-on", true),
+  halfPct: getArg("exit-half-pct", 50) || 50,
+  closeOn: boolArg("exit-close-on", true),
+  closePct: getArg("exit-close-pct", 100) || 100,
+  trailOn: boolArg("exit-trail-on", false),
+  trailPct: getArg("exit-trail-pct", 100) || 100,
+  trailSlip: getArg("exit-trail-slip", 1.0),
+};
+// 跟踪止盈参照信号集合：同向 3类买卖点（py_chain EXIT_TRAIL_REF_KEYS 同名；
+// wait3Buy/wait3Sell=3买/3卖，waitBuy/waitSell=新买/卖点=3类点强档）
+const EXIT_TRAIL_REF_KEYS = new Set(["wait3Buy", "waitBuy", "wait3Sell", "waitSell"]);
 // 参数中心（WEB 参数配置页）整体覆盖；未知键在 JS 侧闲置无害
 const CHAN_CFG_JSON = getStrArg("chan-cfg", "");
 if (CHAN_CFG_JSON) {
@@ -832,16 +855,29 @@ function favSeg5Time(pd, isShort, entryT) {
  * @param {number} stopRef stopRefOf 的输出（永不为 null）
  * @param {object} markResData 背驰级别周期数据 {bis, bars}
  * @param {object} periodXData 检测周期数据 {bis, bars}
- * @param {object} [opts] {slipBe, kBe}（默认 SLIP_BE / SLIP_BE_ATR_K；有效保本滑点 = slipBe + kBe×markRes ATR）
- * @returns {{events:Array<{type:string,time:number,price:number|null}>, closed:boolean, beStop:number}}
- *   type: breakeven | half | close | stopSr（支阻位止损）| stopBe（保本止损）| stillOpen
+ * @param {object} [opts] {slipBe, kBe, exitCfg, trailSigs, lots}
+ *   （slipBe/kBe 默认 SLIP_BE / SLIP_BE_ATR_K，有效保本滑点 = slipBe + kBe×markRes ATR；
+ *   exitCfg 默认 EXIT_CFG 旗标；trailSigs = 同 markRes 全量信号流，跟踪止盈参照点）
+ * @returns {{events:Array<{type:string,time:number,price:number|null}>, closed:boolean, beStop:number, lotsLeft:number}}
+ *   type: breakeven | trailRaise（仅迁移）| half（够笔止盈）| close（过高低点止盈）|
+ *         stopSr（支阻位止损）| stopBe（保本止损）| trailStop（跟踪止盈）| stillOpen；
+ *   成交型事件带 lots（本次平仓手数）与 final（是否终局——比例<100 时为部分平仓）
  */
 function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
   const isShort = sig.direction === "short";
   const entryT = sig.time;
   const entryP = sig.price;
-  const slipBe = opts && opts.slipBe != null ? opts.slipBe : SLIP_BE;
-  const kBe = opts && opts.kBe != null ? opts.kBe : SLIP_BE_ATR_K;
+  opts = opts || {};
+  const slipBe = opts.slipBe != null ? opts.slipBe : SLIP_BE;
+  const kBe = opts.kBe != null ? opts.kBe : SLIP_BE_ATR_K;
+  // 出场方式开关/比例（py_chain advance_exit_decision 同口径；缺省 EXIT_CFG=现网行为）
+  const ec = Object.assign({}, EXIT_CFG, opts.exitCfg || {});
+  const lotsTotal = opts.lots != null ? opts.lots : LOTS;
+  let lotsLeft = lotsTotal;
+  // 跟踪止盈参照点流：同 markRes、同向 3类点（含被互斥抑制的信号），晚于信号时间
+  const trailSigs = (opts.trailSigs || []).filter(
+    (q) => q.markRes === sig.markRes && q.direction === sig.direction
+      && EXIT_TRAIL_REF_KEYS.has(q.strategyKey) && q.time > entryT);
   // 有效保本滑点 = 固定值 + ATR系数 × 背驰周期 ATR(14)（markResData.atr，0=关闭）
   const slipBeEff = slipBe + kBe * ((markResData && markResData.atr) || 0);
   const fav = isShort ? "down" : "up"; // 有利方向笔（short 持仓盼下跌笔）
@@ -866,66 +902,103 @@ function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
     for (const b of mbars) if (b.time > T) return b;
     return null;
   };
+  // 按比例换算本次平仓手数（占剩余仓位；≥100 取全部；引擎 _exit_lots 同口径）
+  const exitLots = (pct) => {
+    const ev = (pct == null || pct >= 100) ? lotsLeft
+      : Math.max(0, Math.round(lotsLeft * pct / 100 * 100) / 100);
+    return Math.min(ev, lotsLeft);
+  };
+  const take = (type, t, p, pct) => {
+    const evLots = exitLots(pct);
+    lotsLeft = Math.round((lotsLeft - evLots) * 100) / 100;
+    events.push({ type, time: t, price: p, lots: evLots, final: lotsLeft <= 1e-9 });
+    return lotsLeft <= 1e-9;
+  };
 
   const events = [];
   let stop = stopRef;
-  let be = false, half = false;
-  // 应用 upto 时刻之前（含）的止盈事件（同拍顺序 保本→半平→全平，且同拍只挂一个
-  // 成交型事件——与 py 引擎 advance_exit_decision 的单事件挂起语义一致）：
-  //   返回 "close"（终局）| "half"（挂起，本拍跳过止损检查）| null（含仅 breakeven 状态迁移）
+  let be = false, half = false, closed = false;
+  let trailMark = entryT, trailRaised = false;
+  const stopFired = { stopSr: false, stopBe: false, trailStop: false };
+  const trailOn = () => ec.trailOn && trailRaised;
+  // 应用 upto 时刻之前（含）的止盈事件（同拍顺序 保本→够笔止盈→过高低点止盈，且同拍
+  // 只挂一个成交型事件——与 py 引擎 advance_exit_decision 的单事件挂起语义一致）：
+  //   返回 "close"（终局）| "half"（挂起，本拍跳过止损检查）| null（含仅迁移）
   const applyTps = (upto) => {
-    if (tp1 && tp1.time <= upto && !be) {
+    if (ec.stopBeOn && tp1 && tp1.time <= upto && !be) {
       be = true;
       stop = beStop; // 保本：止损位上移至 beStop（进场K线极值±保本滑点）
       events.push({ type: "breakeven", time: tp1.time, price: tp1.price });
     }
-    if (trend && t5 != null && t5 <= upto && !half) {
+    if (ec.halfOn && trend && t5 != null && t5 <= upto && !half) {
       const nb = nextOpen(t5);
       if (nb) { // 触发后无下一根 → 未成交（与引擎口径一致）
         half = true;
-        be = true;  // 剩余半仓止损移至 beStop
+        be = true;  // 剩余仓位止损移至 beStop
         stop = beStop;
         lastFill = nb.time;
-        events.push({ type: "half", time: nb.time, price: nb.open });
+        if (take("half", nb.time, nb.open, ec.halfPct)) return "close";
         return "half";
       }
     }
     const closeT = trend ? (tp3a ? tp3a.time : null) : t5;
-    if (closeT != null && closeT <= upto) {
+    if (ec.closeOn && closeT != null && closeT <= upto) {
       const nb = nextOpen(closeT);
       if (nb) {
-        events.push({ type: "close", time: nb.time, price: nb.open });
-        return "close";
+        lastFill = nb.time;
+        if (take("close", nb.time, nb.open, ec.closePct)) return "close";
+        return "half"; // 过高低点止盈部分平仓：挂起拍跳过止损检查（同引擎单事件）
       }
     }
     return null;
   };
+  // 跟踪止盈上移（引擎 trail_raise 同机制：出场判定之后执行、下一拍生效——本函数在
+  // 止损检查之后调用，同 bar 上移下一根生效；只上移，水位 trailMark 只进不退）
+  const trailRaise = (upto) => {
+    if (!ec.trailOn || !trailSigs.length) return;
+    for (const q of trailSigs) {
+      if (q.time <= trailMark || q.time > upto) continue;
+      trailMark = q.time;
+      const newStop = isShort ? q.price + ec.trailSlip : q.price - ec.trailSlip;
+      if (stop != null && !(isShort ? newStop < stop : newStop > stop)) continue; // 只上移
+      stop = newStop;
+      trailRaised = true;
+      events.push({ type: "trailRaise", time: q.time, price: q.price, stopTo: newStop });
+    }
+  };
 
-  let closed = false;
   for (const bar of mbars) {
     if (bar.time <= entryT) continue; // 进场当根不计（进场K线自身的高低点）
     const ev = applyTps(bar.time);
     if (ev === "close") { closed = true; break; }
-    if (ev === "half") continue; // 本拍已挂 half，跳过止损检查（同拍单事件）
+    if (ev === "half") { trailRaise(bar.time); continue; } // 本拍已挂事件，跳过止损检查
     if (stop != null) {
-      const hit = isShort ? bar.high > stop : bar.low < stop;
-      if (hit) {
-        // 跳空穿越止损位时按开盘价成交（更差价格）
-        const fill = isShort ? Math.max(stop, bar.open) : Math.min(stop, bar.open);
-        events.push({ type: be ? "stopBe" : "stopSr", time: bar.time, price: fill });
-        closed = true;
-        break;
+      const typ = trailOn() ? "trailStop" : (be ? "stopBe" : "stopSr");
+      const on = typ === "trailStop" ? true : (typ === "stopBe" ? ec.stopBeOn : ec.stopSrOn);
+      const pct = typ === "trailStop" ? ec.trailPct : (typ === "stopBe" ? ec.stopBePct : ec.stopSrPct);
+      if (on && !stopFired[typ]) {
+        const hit = isShort ? bar.high > stop : bar.low < stop;
+        if (hit) {
+          // 跳空穿越止损位时按开盘价成交（更差价格）
+          const fill = isShort ? Math.max(stop, bar.open) : Math.min(stop, bar.open);
+          if (take(typ, bar.time, fill, pct)) { closed = true; break; }
+          stopFired[typ] = true; // 部分平仓：该方式一次性消费（防逐拍重触发）
+          trailRaise(bar.time);
+          continue;
+        }
       }
     }
+    trailRaise(bar.time);
   }
   if (!closed) {
     applyTps(Infinity); // 数据末尾仍持仓：补记已触发的止盈事件
-    if (!events.some(e => e.type === "close" || e.type === "stopSr" || e.type === "stopBe")) {
+    trailRaise(Infinity);
+    if (!events.some((e) => e.final)) {
       events.push({ type: "stillOpen", time: mbars.length ? mbars[mbars.length - 1].time : entryT, price: null });
     }
   }
   events.sort((a, b) => a.time - b.time);
-  return { events, closed, beStop };
+  return { events, closed, beStop, lotsLeft };
 }
 
 // ============================================================
@@ -1348,8 +1421,9 @@ async function main() {
     // 信号时间早于终局时间的同向新信号被过滤；晚于终局时间（平仓后）可再进场。
     const openPos = { long: null, short: null };
     const EXIT_NAMES = {
-      breakeven: "保本", half: "平一半", close: "全平",
-      stopSr: "支阻位止损", stopBe: "保本止损", stillOpen: "仍持仓",
+      breakeven: "保本", half: "够笔止盈", close: "过高低点止盈",
+      stopSr: "支阻位止损", stopBe: "保本止损", trailStop: "跟踪止盈",
+      trailRaise: "跟踪止盈上移", stillOpen: "仍持仓",
     };
     for (const s of flatSigs) {
       const held = openPos[s.direction];
@@ -1362,17 +1436,21 @@ async function main() {
       // 止损参考位带 ATR 分量（2026-09-19）：ATR 取背驰周期 markRes 的 ATR(14)
       const mrAtr = (periodData[s.markRes] && periodData[s.markRes].atr) || 0;
       s.stopRef = stopRefOf(s, srOfDetect(srLevels, s.periodX), SLIP_STOP, SLIP_FALLBACK, mrAtr);
+      // 跟踪止盈参照点流：同 markRes 全量信号（含被互斥抑制的；simulatePosition 内
+      // 再过滤 同向+3类点+晚于信号时间），与引擎 allSignals 口径一致
       const sim = simulatePosition(
         s, s.stopRef,
         periodData[s.markRes] || null,
         periodData[s.periodX] || null,
+        { exitCfg: EXIT_CFG, trailSigs: flatSigs, lots: LOTS },
       );
       s.exits = sim.events;
       s.state = sim.closed ? "closed" : "open";
       s.beStop = sim.beStop;
-      const terminal = [...sim.events].reverse().find(e => e.type === "close" || e.type === "stopSr" || e.type === "stopBe");
+      const terminal = [...sim.events].reverse().find(
+        (e) => e.final || e.type === "close" || e.type === "stopSr" || e.type === "stopBe");
       openPos[s.direction] = { sig: s, endTime: terminal ? terminal.time : Infinity };
-      const evDesc = sim.events.map(e => `${EXIT_NAMES[e.type] || e.type} ${toT(e.time)}${e.price != null ? " @" + e.price.toFixed(2) : ""}`).join(" → ");
+      const evDesc = sim.events.map(e => `${EXIT_NAMES[e.type] || e.type} ${toT(e.time)}${e.price != null ? " @" + e.price.toFixed(2) : ""}${e.lots != null ? ` (${e.lots}手${e.final ? "终局" : ""})` : ""}`).join(" → ");
       console.log(`[持仓] ${toT(s.time)} ${s.direction === "long" ? "做多" : "做空"}（检测周期 ${s.periodX}，${trendFollowingOf(s.planDirection, s.strategyKey) ? "顺势" : "逆势"}，${LOTS} 手，止损参考 ${s.stopRef.toFixed(2)}，保本位 ${sim.beStop.toFixed(2)}）: ${evDesc || "无出场事件"}`);
     }
     // 重新按背驰级别聚合（flatSigs 为带互斥/出场信息的信号副本，落盘与绘制都用它）
@@ -1619,14 +1697,14 @@ async function main() {
       if (!entries || entries.length === 0) continue;
       // 出场标记：与进场同款箭头（统一黄 #FFEB3B），方向 = 平仓方向（多头出场 ↓ /
       // 空头出场 ↑，与 Web 控制台 ML· 出场一致）；文本 = 事件名；保本/仍持仓仅落盘。
-      const EXIT_NM = { stopSr: "止损", stopBe: "保损", close: "全平", half: "半平" };
+      const EXIT_NM = { stopSr: "止损", stopBe: "保损", close: "过高低", half: "够笔", trailStop: "跟盈" };
       const exitMarks = [];
       for (const e of entries) {
         const shape = e.direction === "long" ? "arrow_down" : "arrow_up";
         for (const ev of (e.exits || [])) {
           if (ev.type === "stopSr" || ev.type === "stopBe" || ev.type === "close"
-              || ev.type === "half") {
-            exitMarks.push({ shape, text: `${EXIT_NM[ev.type] || ev.type} ${ev.price != null ? ev.price.toFixed(2) : ""}`,
+              || ev.type === "half" || ev.type === "trailStop") {
+            exitMarks.push({ shape, text: `${EXIT_NM[ev.type] || ev.type} ${ev.price != null ? ev.price.toFixed(2) : ""}${ev.lots != null ? ` ${ev.lots}手` : ""}`,
                              time: ev.time, price: ev.price });
           }
         }

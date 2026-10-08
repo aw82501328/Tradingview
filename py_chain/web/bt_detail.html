@@ -302,24 +302,25 @@ function btDetailMetricsHtml(s) {
 
 function btDetailExitsHtml(s) {
   const ex = s.exits || {};
-  // 缠论V1 三类 + 强分型均线V1 四类（stop/takeProfit/activeTp/trailStop；同一方案
-  // 只命中一组，fxma 类为 0 时不列行，环形图 0 值段自动隐藏）
+  // 缠论V1 四类 + 强分型均线V1 四类（stop/takeProfit/activeTp/trailStop 两侧共用
+  // trailStop=跟踪止盈；同一方案只命中一组，为 0 时不列行，环形图 0 值段自动隐藏）
   const base = [
     { label: '保损', n: Number(ex.stopBe || 0), color: '#5a8de6' },
     { label: '止损', n: Number(ex.stopSr || 0), color: '#c8742a' },
-    { label: '全平', n: Number(ex.close || 0), color: '#8f6ce8' },
-  ];
+    { label: '过高低点止盈', n: Number(ex.close || 0), color: '#8f6ce8' },
+  ].concat(Number(ex.trailStop || 0) > 0
+    ? [{ label: '跟踪止盈', n: Number(ex.trailStop || 0), color: '#b0508f' }] : []);
   const fx = [
     { label: '止盈', n: Number(ex.takeProfit || 0), color: '#3aa981' },
     { label: '主动止盈', n: Number(ex.activeTp || 0), color: '#2b9ecf' },
-    { label: '跟踪止损', n: Number(ex.trailStop || 0), color: '#b0508f' },
+    { label: '跟踪止盈', n: Number(ex.trailStop || 0), color: '#b0508f' },
     { label: '固定止损', n: Number(ex.stop || 0), color: '#9a6b2f' },
   ].filter(c => c.n > 0);
   const cats = base.concat(fx);
   const total = cats.reduce((n, c) => n + c.n, 0);
   return `<div class="bt-distribution">${donutHtml(cats, String(total), '次出场')}
     <div class="bt-exit-legend">${cats.map(c => `<div class="bt-exit-row"><span><i class="sw" style="background:${c.color}"></i>${c.label}</span><b>${c.n} 次</b><span>${total ? Math.round(c.n / total * 100) + '%' : '—'}</span></div>`).join('')}</div></div>
-    <p class="bt-note">半平 ${Number(ex.half || 0)} 次，单独计数，不纳入上方占比。${total ? '' : '暂无完整出场样本。'}</p>`;
+    <p class="bt-note">够笔止盈 ${Number(ex.half || 0)} 次（部分平仓），单独计数，不纳入上方占比。${total ? '' : '暂无完整出场样本。'}</p>`;
 }
 
 // 亏损归因条（占比堆叠条 + 分类明细（计数、占比、双向盈亏条），数字口径与旧文本版一致
@@ -424,7 +425,7 @@ function fillBtDetail(run, preserve = false) {
     ? run.summary.equity
     : equityPoints(btDetailSignals);
   drawEquityChart(el('bt-detail-equity'), eq.length ? [{ name: run.name, points: eq }] : [], {
-    height: 280, title: '资金曲线', note: '出场盈亏累加（含半平）；终点含浮盈',
+    height: 280, title: '资金曲线', note: '出场盈亏累加（含部分平仓）；终点含浮盈',
   });
   el('bt-detail-equity-empty').hidden = !!eq.length;
   restoreBtDetailScroll();
@@ -546,8 +547,8 @@ function toggleBtDetailPnlSort() {
   renderBtDetailRows();
 }
 
-// 条形比例尺 = 全部展示盈亏（含半平行）的 |pnl| 最大值；取出场级而非交易级，
-// 因半平部分与剩余腿之和可能超过任何单笔 |pnl|；无有效样本返回 null（表格回退纯文本）
+// 条形比例尺 = 全部展示盈亏（含部分平仓行）的 |pnl| 最大值；取出场级而非交易级，
+// 因部分平仓与剩余腿之和可能超过任何单笔 |pnl|；无有效样本返回 null（表格回退纯文本）
 function pnlScaleMax(rows) {
   let m = 0;
   for (const r of rows) for (const x of exitDisplayRows(r)) {
@@ -689,7 +690,7 @@ function redrawBtDetailEquity() {
   const host = el('bt-detail-equity');
   if (!host || !host._eqSeries?.length) return;
   drawEquityChart(host, host._eqSeries, host._eqOpts || {
-    height: 280, title: '资金曲线', note: '出场盈亏累加（含半平）；终点含浮盈',
+    height: 280, title: '资金曲线', note: '出场盈亏累加（含部分平仓）；终点含浮盈',
   });
 }
 

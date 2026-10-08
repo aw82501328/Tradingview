@@ -34,10 +34,10 @@ FLUSH_EVERY = 500
 # ---- 中文标签单一来源（写侧组句 / 读侧渲染共用） ----
 DIR_LABELS = {"long": "做多", "short": "做空"}
 EXIT_LABELS = {
-    "breakeven": "TP1 保本", "half": "TP2 平一半", "close": "TP3 全平",
+    "breakeven": "TP1 保本", "half": "够笔止盈", "close": "过高低点止盈",
     "stopSr": "支阻位止损", "stopBe": "保本止损",
     "stop": "固定止损", "takeProfit": "固定止盈",
-    "activeTp": "主动止盈", "trailStop": "跟踪止损",
+    "activeTp": "主动止盈", "trailStop": "跟踪止盈", "trailRaise": "跟踪止盈上移",
 }
 FILL_MODE_LABELS = {
     "anchor": "锚点当拍成交", "confirm": "确认成交（下一开盘）",

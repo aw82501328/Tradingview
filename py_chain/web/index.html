@@ -156,6 +156,12 @@
     gap: 10px; margin-bottom: 6px; font-size: 12px; color: var(--muted);
   }
   .equity-chart .eq-head strong { color: var(--text); font-size: 13px; }
+  .equity-chart .eq-clock {
+    color: var(--text); font-weight: 600; margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+  }
+  .equity-chart .eq-clock.run { color: var(--accent); }
+  .equity-chart .eq-clock:empty { display: none; }
   .equity-chart .eq-legend {
     display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--muted);
     align-items: center;
@@ -661,8 +667,28 @@ function renderLiveEquity() {
     && btRowStrategy(r) === curBtTab && (!fs || r.symbol === fs)));
   if (!pts.length) { host.hidden = true; host.innerHTML = ''; return; }
   drawEquityChart(host, [{ name: '本轮回测', points: pts }], {
-    height: 280, title: '资金曲线', note: '出场盈亏累加（含半平）；策略/品种页签生效，状态/策略/方向筛选不影响',
+    height: 280, title: '资金曲线', clock: eqClockText(),
+    note: '出场盈亏累加（含部分平仓）；策略/品种页签生效，状态/策略/方向筛选不影响',
   });
+}
+// 回测运行时钟（当前策略TAB）：运行中从 started_at 走秒，结束后定格 duration_sec；
+// 口径=自然墙钟（与后端 duration_sec 一致，暂停不冻结）
+function eqClockText() {
+  const w = state.bt[curBtTab];
+  if (!w) return '';
+  if (w.duration_sec != null) return `⏱ ${fmtDuration(w.duration_sec)}`;
+  if (w.started_at != null && (w.state === 'running' || w.state === 'paused'))
+    return `⏱ ${fmtDuration(Math.max(0, Date.now() / 1000 - w.started_at))}`;
+  return '';
+}
+// 只更新时钟文本与运行态着色，不重绘图表（曲线重绘频繁，时钟由 1s 定时器独立走秒）
+function updateEqClock() {
+  const c = el('equity-chart')?.querySelector('.eq-clock');
+  if (!c) return;
+  const w = state.bt[curBtTab];
+  c.textContent = eqClockText();
+  c.classList.toggle('run', !!(w && w.duration_sec == null && w.started_at != null
+    && (w.state === 'running' || w.state === 'paused')));
 }
 // 状态/策略/方向过滤器：状态 '' = 全部；策略/方向为多选下拉，不勾选 = 全部
 // 方向按 方向 列的展示口径（signalDirectionName，旧记录回退到策略映射）过滤
@@ -742,19 +768,24 @@ function summaryHtml(s, opts = {}) {
     const maxRF = Math.max(Math.abs(realized), Math.abs(floating), Math.abs(total), 0);
     const avgWin = num(s.avg_win), avgLoss = num(s.avg_loss);
     const maxAvg = Math.max(avgWin, avgLoss);
-    // 出场分布：缠论V1 三类 + fxma 两类（同一方案只会命中其中一组，0 值类不进环形图）
-    const exitN = num(ex.stopBe) + num(ex.stopSr) + num(ex.close) + num(ex.stop) + num(ex.takeProfit);
+    // 出场分布：缠论V1 四类 + fxma 两类（同一方案只会命中其中一组，0 值类不进环形图）
+    const exitN = num(ex.stopBe) + num(ex.stopSr) + num(ex.close) + num(ex.stop)
+      + num(ex.takeProfit) + num(ex.trailStop) + num(ex.activeTp);
     const exitCats = [
       { n: num(ex.stopBe), color: '#5a8de6', label: '保损' },
       { n: num(ex.stopSr), color: '#c8742a', label: '止损' },
-      { n: num(ex.close), color: '#8f6ce8', label: '全平' },
+      { n: num(ex.close), color: '#8f6ce8', label: '过高低' },
+      { n: num(ex.trailStop), color: '#d29922', label: '跟盈' },
       { n: num(ex.takeProfit), color: '#3aa981', label: '止盈' },
+      { n: num(ex.activeTp), color: '#2f7d5d', label: '主盈' },
       { n: num(ex.stop), color: '#9a6b2f', label: '固定止损' },
     ];
-    const exitLegend = `保损 ${num(ex.stopBe)} · 止损 ${num(ex.stopSr)} · 全平 ${num(ex.close)}`
+    const exitLegend = `保损 ${num(ex.stopBe)} · 止损 ${num(ex.stopSr)} · 过高低 ${num(ex.close)}`
+      + (ex.trailStop ? ` · 跟盈 ${num(ex.trailStop)}` : '')
       + (ex.takeProfit ? ` · 止盈 ${num(ex.takeProfit)}` : '')
+      + (ex.activeTp ? ` · 主盈 ${num(ex.activeTp)}` : '')
       + (ex.stop ? ` · 固定止损 ${num(ex.stop)}` : '')
-      + (ex.half ? ` · 半平 ${num(ex.half)}` : '');
+      + (ex.half ? ` · 够笔 ${num(ex.half)}` : '');
     const tile = (label, value, graph, legend) =>
       `<div class="sum-tile"><span class="sum-label">${label}</span><span class="sum-value">${value}</span><span class="sum-graph">${graph}</span>${legend ? `<span class="sum-legend">${legend}</span>` : ''}</div>`;
     const pairBar = (label, val, txt, color) => `
@@ -789,10 +820,11 @@ function summaryHtml(s, opts = {}) {
     `已平仓盈亏 <b class="${cls(s.realized)}">${fmtV(s.realized)}</b>`,
     `浮盈 <b class="${cls(s.floating)}">${fmtV(s.floating)}</b>`,
     `合计 <b class="${cls(total)}">${fmtV(total)}</b>`,
-    `出场：保损 ${s.exits.stopBe} · 止损 ${s.exits.stopSr} · 全平 ${s.exits.close}`
+    `出场：保损 ${s.exits.stopBe} · 止损 ${s.exits.stopSr} · 过高低 ${s.exits.close}`
+      + (s.exits.trailStop ? ` · 跟盈 ${s.exits.trailStop}` : '')
       + (s.exits.takeProfit ? ` · 止盈 ${s.exits.takeProfit}` : '')
       + (s.exits.stop ? ` · 固定止损 ${s.exits.stop}` : '')
-      + (s.exits.half ? ` · 半平 ${s.exits.half}` : ''),
+      + (s.exits.half ? ` · 够笔 ${s.exits.half}` : ''),
   ];
   return parts.map(p => `<span>${p}</span>`).join('');
 }
@@ -1036,6 +1068,7 @@ function applyBtStatus(sid, w) {
   renderBtTabs();
   renderBtBatch();
   updateBtSaveButton();
+  updateEqClock();
 }
 
 // ---------- 多品种批量并行（回测）：每品种进度表 + 品种筛选 ----------
@@ -1568,10 +1601,11 @@ const BT_METRICS = [
   ['浮盈', s => `<span class="${pnlClass(s.floating)}">${fmtPnlText(s.floating)}</span>`],
   ['合计', s => `<b class="${pnlClass(s.total)}">${fmtPnlText(s.total)}</b>`],
   ['运行时长', s => fmtDuration(s.duration_sec)],
-  ['出场分布', s => `保损 ${s.exits?.stopBe ?? 0} · 止损 ${s.exits?.stopSr ?? 0} · 全平 ${s.exits?.close ?? 0}`
+  ['出场分布', s => `保损 ${s.exits?.stopBe ?? 0} · 止损 ${s.exits?.stopSr ?? 0} · 过高低 ${s.exits?.close ?? 0}`
+    + (s.exits?.trailStop ? ` · 跟盈 ${s.exits.trailStop}` : '')
     + (s.exits?.takeProfit ? ` · 止盈 ${s.exits.takeProfit}` : '')
     + (s.exits?.stop ? ` · 固定止损 ${s.exits.stop}` : '')
-    + (s.exits?.half ? ` · 半平 ${s.exits.half}` : '')],
+    + (s.exits?.half ? ` · 够笔 ${s.exits.half}` : '')],
   ['信号总数', s => s.rows_total ?? '-'],
   ['未成交信号', s => s.cnt_signal ?? '-'],
   ['持仓中', s => s.cnt_open ?? '-'],
@@ -2021,6 +2055,7 @@ async function init() {
   connectSSE();
   reportModes();
   setInterval(reportModes,1000);
+  setInterval(updateEqClock,1000);   // 资金曲线运行时钟：无信号/长计算期间也走秒
 }
 init();
 </script>

@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>原型预览 · 缠论V1 出场方式可配置</title>
+<style>
+/* ===== 主题变量（自 theme.css 内联，原型零依赖） ===== */
+:root{color-scheme:dark;--bg:#10151e;--panel:#19212e;--card:var(--panel);--card-2:#131c29;--line:#2c384a;
+--border:var(--line);--text:#e7edf7;--muted:#99a9c0;--blue:#8eb7ff;--accent:var(--blue);--primary:#5086e5;
+--input:#101823;--control-border:#3c4d65;--button:#243247;--chip:#27364c;--ok:#92d1b4;--warn:#f0b90b;
+--red:#e75555;--font:"Segoe UI","Microsoft YaHei",sans-serif}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:13px/1.6 var(--font);padding:14px 18px}
+h1{font-size:19px;color:#fff}
+h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
+h2{font-size:14px;color:#bad4ff;margin:20px 0 8px}
+button{background:var(--button);border:1px solid var(--control-border);color:var(--text);border-radius:6px;
+padding:8px 14px;font-size:13px;line-height:1.6;font-family:var(--font);cursor:pointer}
+button:hover:not(:disabled){background:#30435e}
+button.primary{background:var(--primary);border-color:var(--primary);color:white}
+button.primary:hover:not(:disabled){background:#6295ed}
+button:disabled{opacity:.45;cursor:default}
+input:not([type=checkbox]):not([type=radio]),select{background:var(--input);color:var(--text);
+border:1px solid var(--control-border);border-radius:6px;padding:7px 9px;font-size:13px;font-family:var(--font)}
+input[type=checkbox]{accent-color:var(--primary)}
+/* ===== 原型横幅 ===== */
+.proto-banner{background:#3d3208;color:var(--warn);border:1px solid #7a5c1e;border-radius:6px;
+padding:7px 12px;font-size:12px;margin:10px 0 2px}
+.proto-banner.err{background:#3d1518;color:#ff9c9c;border-color:#8a3038}
+/* ===== 以下与 params.html 现网样式一致 ===== */
+.stabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin:12px 0 0;flex-wrap:wrap}
+.stabs button{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;
+color:var(--muted);font-size:13px;padding:8px 16px;cursor:default}
+.stabs button.on{border-color:#55d7b0;color:#92d1b4;font-weight:600}
+.stabs button .scode{color:var(--muted);font-size:11px;margin-left:6px;font-weight:400}
+.ptabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin:0;flex-wrap:wrap}
+.ptabs button{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;
+color:var(--muted);font-size:13px;padding:8px 16px;cursor:default;font-family:var(--font)}
+.ptabs button.on{border-color:var(--accent);color:#bad4ff;font-weight:600}
+.pane{padding-top:14px}
+.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:8px 16px;max-width:1180px}
+.prow{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--border);
+border-radius:6px;padding:7px 10px;cursor:default}
+.pgroup{grid-column:1/-1;color:var(--muted);font-size:11.5px;display:flex;align-items:center;gap:8px;margin-top:4px}
+.pgroup::after{content:'';flex:1;border-top:1px solid var(--border)}
+.pgroup:first-child{margin-top:0}
+.prow .pname{flex:1;min-width:0}
+.prow .plabel{color:var(--text);font-size:12.5px;display:block}
+.prow .pdef{color:var(--muted);font-size:11px}
+.prow input[type=number]{width:86px;text-align:right}
+.prow input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px}
+.prow.dim{opacity:.45}
+.prow.dim input{pointer-events:none}
+.prow.new{border-color:#3a5f8f}
+.prow .code{font-size:10px;color:#8fb3e8;border:1px solid #2f5e9e;border-radius:8px;padding:0 6px;
+margin-left:6px;vertical-align:1px;white-space:nowrap}
+.prow .pct-wrap{display:flex;align-items:center;gap:4px;flex-shrink:0}
+.prow .pct-wrap input{width:64px;text-align:right}
+.prow .pct-wrap .pct{color:var(--muted);font-size:12px}
+.prow.ghost{opacity:.5}
+.pfoot{display:flex;gap:10px;align-items:center;margin:14px 0 0;flex-wrap:wrap}
+.pfoot .state{color:var(--muted);font-size:11px}
+.pnote{color:var(--muted);font-size:12px;margin-top:10px;max-width:1180px}
+.exit-sum{background:var(--card-2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;
+font-size:12.5px;margin-top:10px;max-width:1180px}
+.exit-sum .k{color:var(--muted)}
+.exit-sum .v{color:var(--ok)}
+.exit-sum .off{color:var(--muted)}
+/* ===== 语义表 ===== */
+table.semtab{border-collapse:collapse;max-width:1180px;font-size:12.5px;margin-top:6px}
+table.semtab th,table.semtab td{border:1px solid var(--border);padding:6px 10px;text-align:left;vertical-align:top}
+table.semtab th{background:var(--card-2);color:#bad4ff;font-weight:600;white-space:nowrap}
+table.semtab td{background:var(--card)}
+table.semtab td.c{white-space:nowrap}
+table.semtab .tag{font-size:10px;border:1px solid #2f5e9e;color:#8fb3e8;border-radius:8px;padding:0 6px;white-space:nowrap}
+table.semtab .new{color:var(--warn)}
+</style>
+</head>
+<body>
+<h1>参数配置<span class="sub">缠论V1 · 出场方式可配置化 原型</span></h1>
+<div class="proto-banner" id="banner">静态原型 · 仅供确认布局与控件形态 · 默认值 = 现网行为（跟踪止盈默认关闭）。开关置灰 / 全关校验可交互；不连接后端、不保存。</div>
+
+<nav class="stabs" aria-label="品种">
+  <button class="on">黄金 <span class="scode">XAUUSD</span></button>
+  <button>白银 <span class="scode">XAGUSD</span></button>
+  <button>原油 <span class="scode">USOIL</span></button>
+  <button>比特币 <span class="scode">BTCUSD</span></button>
+  <button>纳斯达克 <span class="scode">NAS100</span></button>
+</nav>
+
+<nav class="ptabs" aria-label="策略页签">
+  <button>支阻位 <span class="scode">缠论V1</span></button>
+  <button>交易计划 <span class="scode">缠论V1</span></button>
+  <button class="on">标记进出场 <span class="scode">缠论V1</span></button>
+  <button>基本参数 <span class="scode">强分型均线V1</span></button>
+  <button>进场条件 <span class="scode">强分型均线V1</span></button>
+</nav>
+
+<div class="pane">
+  <div class="pgrid" id="pgrid"></div>
+  <div class="exit-sum" id="exitSum"></div>
+  <div class="pfoot">
+    <button class="primary" id="btnSave" disabled title="原型仅供确认，不可保存">保存本模块</button>
+    <button disabled title="原型仅供确认">恢复默认</button>
+    <span class="state" id="footState">原型演示——按钮不可用</span>
+  </div>
+  <p class="pnote">
+    出场方式约束：<b>至少启用一种</b>（全部关闭时保存被拒绝，见上方红字提示）。<br>
+    开关语义 = 「该触发是否导致离场」；止损位/保本位的计算与状态迁移照旧维护（关闭的触发被忽略，持仓由其余启用方式了结）。<br>
+    平仓比例 = 触发时平掉<b>当前剩余仓位的百分比</b>；每种方式一次性触发，部分平仓后剩余仓位由其它方式了结或期末按市价结算。<br>
+    跟踪止盈（新增）：与强分型均线V1 同机制——持仓期间每出现一个<b>同向 3类/类3类买卖点</b>，止损一次性上移到该点价∓跟踪止盈滑点（只上移不下移）；被穿越后离场，记「跟踪止盈」。
+  </p>
+</div>
+
+<h2>出场阶梯语义（供确认）</h2>
+<table class="semtab">
+  <tr><th>方式</th><th>类型码</th><th>触发条件</th><th>默认</th><th>默认比例</th><th>终局/部分</th></tr>
+  <tr>
+    <td class="c">支阻止损</td><td class="c"><span class="tag">stopSr</span></td>
+    <td>盘中K线穿越初始止损位（支阻位±止损滑点；进场K线外推只放松；最大止损硬上限兜底）</td>
+    <td class="c">开</td><td class="c">100%</td><td>可配比例；默认全平</td>
+  </tr>
+  <tr>
+    <td class="c">保本止损</td><td class="c"><span class="tag">stopBe</span></td>
+    <td>TP1 保本迁移（背驰周期首笔有利方向笔完成 → 止损上移至保本位 beStop）后，盘中穿越保本位</td>
+    <td class="c">开</td><td class="c">100%</td><td>可配比例；默认全平</td>
+  </tr>
+  <tr>
+    <td class="c">够笔止盈</td><td class="c"><span class="tag">half</span></td>
+    <td>仅顺势（多头多/空头空）：检测周期出现有利方向够笔（空单末笔下跌/多单末笔上涨）</td>
+    <td class="c">开</td><td class="c">50%</td><td>部分平仓；剩余止损移保本位</td>
+  </tr>
+  <tr>
+    <td class="c">过高低点止盈</td><td class="c"><span class="tag">close</span></td>
+    <td>顺势：检测周期有利方向笔破前一同向笔端点；逆势：首个有利方向形成段合并≥5根K（成笔预期）</td>
+    <td class="c">开</td><td class="c">100%</td><td>可配比例；默认全平</td>
+  </tr>
+  <tr class="new">
+    <td class="c">跟踪止盈 <span class="new">（新增）</span></td><td class="c"><span class="tag">trailStop</span></td>
+    <td>出现同向 3类/类3类买卖点 → 止损上移到该点价∓跟踪止盈滑点（只上移）；上移后的止损被盘中穿越</td>
+    <td class="c new">关</td><td class="c">100%</td><td>可配比例；默认全平剩余</td>
+  </tr>
+</table>
+<p class="pnote">
+  生效范围：回测（Web/CLI/批量）、实盘 live_trader、实时监控、标记进出场（JS 镜像）与图上标记同步支持；
+  参数按品种覆盖存储（与现网机制一致）。旧数据兼容：已落库交易的半平事件无手数标注时按旧 50/50 口径结算。
+</p>
+
+<script>
+'use strict';
+/* ===== 模拟 schema / 默认值（默认 = 现网行为不变，跟踪止盈默认关） ===== */
+const METHODS = [
+  {k:'exitStopSrOn', pct:'exitStopSrPct', on:true,  def:100, label:'支阻止损', code:'stopSr',
+   desc:'支阻位±止损滑点 · 进场K线外推只放松 · 最大止损兜底；盘中穿越离场'},
+  {k:'exitStopBeOn', pct:'exitStopBePct', on:true,  def:100, label:'保本止损', code:'stopBe',
+   desc:'TP1保本迁移（首笔有利方向笔完成→止损上移保本位）后穿越保本位离场'},
+  {k:'exitHalfOn',   pct:'exitHalfPct',   on:true,  def:50,  label:'够笔止盈', code:'half',
+   desc:'仅顺势：检测周期有利方向够笔 → 平指定比例，剩余止损移保本位'},
+  {k:'exitCloseOn',  pct:'exitClosePct',  on:true,  def:100, label:'过高低点止盈', code:'close',
+   desc:'顺势=有利方向笔破前高/低；逆势=形成段成笔预期 → 平指定比例'},
+  {k:'exitTrailOn',  pct:'exitTrailPct',  on:false, def:100, label:'跟踪止盈', code:'trailStop', isNew:true,
+   desc:'同强分型均线V1：出现同向3类/类3类买卖点→止损上移到点价∓滑点（只上移）；穿越记跟踪止盈'},
+];
+const state = {};
+METHODS.forEach(m => { state[m.k] = m.on; state[m.pct] = m.def; });
+state.exitTrailSlip = 1.0;
+
+/* 现网既有组（ghost 演示，不做交互）；跟踪止盈滑点并入「滑点」组 */
+const EXISTING = `
+  <div class="pgroup">手数</div>
+  <div class="prow ghost"><div class="pname"><span class="plabel">手数</span>
+    <span class="pdef">默认 4 · 现网参数，不变</span></div><input type="number" value="4" disabled></div>
+  <div class="pgroup">滑点</div>
+  <div class="prow ghost"><div class="pname"><span class="plabel">止损/保本/最大止损滑点 · ATR系数</span>
+    <span class="pdef">现网参数，不变（略）</span></div></div>
+  <div class="prow new" id="trailSlipRow" title="仅跟踪止盈启用时生效（跟随启用开关置灰）">
+    <div class="pname"><span class="plabel">跟踪止盈滑点</span>
+      <span class="pdef">止损上移到参照点价后向不利侧偏移的点数（同 fxma tpTrailSlipPts）</span></div>
+    <div class="pct-wrap"><input type="number" min="0" max="100" step="0.1" data-k="exitTrailSlip"
+      value="${state.exitTrailSlip}"><span class="pct">点</span></div>
+  </div>
+  <div class="pgroup">出场判定</div>
+  <div class="prow ghost"><div class="pname"><span class="plabel">成笔预期门槛 / 实时够笔 / 出中枢衰减</span>
+    <span class="pdef">现网参数，不变（略）</span></div></div>`;
+
+function methodRow(m){
+  const on = state[m.k];
+  return `
+  <div class="prow new${on ? '' : ' dim'}" data-m="${m.k}">
+    <input type="checkbox" data-k="${m.k}"${on ? ' checked' : ''}>
+    <div class="pname">
+      <span class="plabel">${m.label}${m.isNew ? ' <span class="new" style="color:var(--warn);font-size:10px">NEW</span>' : ''}</span>
+      <span class="code">${m.code}</span>
+      <span class="pdef" style="display:block">${m.desc}</span>
+    </div>
+    <div class="pct-wrap">
+      <input type="number" min="1" max="100" step="1" data-k="${m.pct}" value="${state[m.pct]}">
+      <span class="pct">%</span>
+    </div>
+  </div>`;
+}
+
+function render(){
+  const rows = METHODS.map(methodRow).join('');
+  document.getElementById('pgrid').innerHTML =
+    EXISTING +
+    `<div class="pgroup">出场方式（新增 · 至少启用一种；比例 = 平剩余仓位%）</div>` +
+    rows;
+  // 跟踪止盈滑点（滑点组内）：跟随跟踪止盈开关置灰
+  const slipRow = document.getElementById('trailSlipRow');
+  if (slipRow){
+    slipRow.classList.toggle('dim', !state.exitTrailOn);
+    const inp = slipRow.querySelector('input[data-k="exitTrailSlip"]');
+    if (inp) inp.disabled = !state.exitTrailOn;
+  }
+
+  const enabled = METHODS.filter(m => state[m.k]);
+  const sum = document.getElementById('exitSum');
+  if (enabled.length === 0){
+    sum.innerHTML = `<span style="color:var(--red);font-weight:600">✗ 出场方式至少启用一种</span>
+      <span class="k">—— 全部关闭时保存被拒绝（参数中心跨键校验）</span>`;
+    document.getElementById('banner').className = 'proto-banner err';
+    document.getElementById('banner').textContent =
+      '校验失败：出场方式至少启用一种。请至少勾选一种离场方式后再保存。';
+    document.getElementById('footState').textContent = '校验未通过——保存被拒绝（原型演示）';
+  } else {
+    sum.innerHTML = `<span class="k">当前出场配置：</span>` + METHODS.map(m =>
+      state[m.k]
+        ? `<span class="v">${m.label} ${state[m.pct]}%</span>`
+        : `<span class="off">${m.label} 关</span>`
+    ).join('<span class="k"> · </span>') +
+      (state.exitTrailOn ? `<span class="k"> · 跟踪止盈滑点 </span><span class="v">${state.exitTrailSlip}点</span>` : '');
+    document.getElementById('banner').className = 'proto-banner';
+    document.getElementById('banner').textContent =
+      '静态原型 · 仅供确认布局与控件形态 · 默认值 = 现网行为（跟踪止盈默认关闭）。开关置灰 / 全关校验可交互；不连接后端、不保存。';
+    document.getElementById('footState').textContent = '原型演示——按钮不可用';
+  }
+
+  document.querySelectorAll('#pgrid input[type=checkbox][data-k]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      state[cb.dataset.k] = cb.checked;
+      render();
+    });
+  });
+  document.querySelectorAll('#pgrid input[type=number][data-k]').forEach(inp => {
+    inp.addEventListener('input', () => {
+      const v = parseFloat(inp.value);
+      if (!isNaN(v)) state[inp.dataset.k] = v;
+    });
+  });
+}
+render();
+</script>
+</body>
+</html>

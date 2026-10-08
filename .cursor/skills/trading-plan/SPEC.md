@@ -38,13 +38,15 @@
 
 ### 2.2 每周期计划计算（predictPlan）
 
-输入：`{ res, bis, upperBis, macdArr, atr, lastPrice, bars, barSec }`（`bis` 取最近 60 笔，`bars` 为本周期实时K线）。
+输入：`{ res, bis, upperBis, macdArr, atr, lastPrice, bars, barSec, rangeGate }`（`bis` 取最近 60 笔，`bars` 为本周期实时K线；`rangeGate` 为主循环传入的参考周期 regime，见 §2.2.1）。
 输出：`{ res, direction, strategy, reason, label }`。
 
 判定顺序：
 
 0. **数据不足**：`bis` 长度 < 2 → 方向「观望」，策略「数据不足」。
-1. **震荡判定（A 或 B 任一命中即震荡）**：
+1. **震荡优先——判定源二选一（2026-10-08 与 py_chain 对齐）**：
+   - `rangeGate` 给定（参考周期闸门开启，替换语义）：regime 震荡 → 方向「观望」，策略「震荡整理（4小时）…」（文案注明来源周期）；regime 带 `insufficient`（参考周期笔 <2）→ 观望「4小时笔数据不足，观望」；regime 非震荡 → **跳过本周期 A/B 自判**，直接走第 2 步趋势分支；
+   - `rangeGate` 为空（`--range-res=""` 关闭）→ 本周期自身判定（A 或 B 任一命中即震荡）：
    - A：`isRangeBound(bis, bars, atr)`（复制自 chan-status）：最近 `rangeBarN=40` 根K线 `maxHigh-minLow ≤ 5×ATR`；笔端点区间（≤ 7×ATR）与涨跌交替只取「最近 40 根K线时间范围内」的笔判断（窗口内无笔则跳过这两条）→ `range === true`；
    - A-突破跳过：最后一笔终点相对窗口区间 `[minL, maxH]` 的另一端明显偏移（up 笔 `endPrice - minL > rangeBreakMult×ATR`，down 笔 `maxH - endPrice > rangeBreakMult×ATR`，`rangeBreakMult` 默认 1.0）→ 视为突破盘整，跳过 A 判定（`range:false, breakOut:true`）；
    - B：中枢必须构建在**上一级别同一笔**内：`buildZSByUpper(bis, upperBis, barSec)`（分解原则：用上级笔时间区间把本级别笔切段，每段内独立 `buildZS`，中枢不跨上级笔端点；无上级笔时退化为 `buildZS(bis, barSec)`）。取**上一级别最后一笔**对应段（`z.upperStart ≥ 上级最后一笔.startTime - barSec`）内最后一个中枢，`exitTime === null`（未离开）且 `lastPrice` 位于中枢 `[zd, zg]` 内；
@@ -54,6 +56,22 @@
    - 先匹配最后一笔终点 → 命中按类型映射精确策略（`strategyOf`）；2/3 类买卖点先经 `classifySecond` 分类（过左高/过左低不背驰 vs 其他）再映射；
    - 最后一笔终点为空 → 从倒数第二笔起**逐笔向前扫描**，取最近的有买卖点的笔端点 → **同样按类型精确映射**（`strategyOf` + `classifySecond`，不降级为只判断买卖方向）；
    - 仍无 → 方向「观望」，策略「趋势中无匹配买卖点」。
+
+### 2.2.1 参考周期震荡闸门（--range-res，2026-10-08 与 py_chain compute_plan 强一致）
+
+> 背景：py_chain 2026-09-16（725059f）把引擎震荡判定源改为参考周期（rangeRes 必填）但 JS 未迁移，
+> 图表与回测/实盘口径不一致；2026-10-08 起 JS 实现同款闸门并支持关闭，两侧强一致。
+
+- **参数**：`--range-res=240|D|off`（默认 `RANGE_RES="240"`；`off`/空 = 关闭）。WEB 参数中心
+  plan 模块 `rangeRes`（含「关闭」选项）经 `analysis_service` 透传。
+- **开启时**（主循环从大到小逐周期）：
+  - **≥ 参考周期的行**（240 自身与日线）→ 固定「观望 · 参考周期，观望（只作锚不交易）」，不做任何判定；
+  - **参考周期行上顺带计算 regime**（`planGateRow`）：笔 <2 → `insufficient`；否则用参考周期自身数据走 predictPlan 的 A/B 自判，`label=震荡观望` 即 regime 震荡（结果随循环传给更低周期）；
+  - **严格更低的周期**（60/15/3）→ 不自判 A/B，只听 regime（predictPlan `rangeGate` 替换语义）：震荡 → 观望「震荡整理（4小时）…」；非震荡 → 直接走趋势分支；insufficient → 观望「4小时笔数据不足，观望」（不回退自身判定）。
+  - 参考周期笔不足的**预置闸**：主循环开始前参考周期笔 <2（含整行无数据）→ 更低周期全部观望·笔数据不足。
+- **关闭时**（`--range-res=""`）：无参考周期——每个周期各自走 predictPlan 自判 A/B（§2.2 的旧行为），
+  无「只作锚」固定观望、无 regime 传递；与 py_chain `compute_plan(range_res="")` 口径一致。
+
 
 ### 2.3 策略映射（strategyOf + classifySecond，2026-09-24 三档）
 

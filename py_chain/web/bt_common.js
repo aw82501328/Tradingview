@@ -40,30 +40,34 @@ function candidateBadges(r) {
 }
 
 // 出场类型：stopSr=支阻位止损（支阻位±止损滑点，再按最大止损夹紧）
-//          | stopBe=保本止损（beStop=进场K线极值±保本滑点）| close=全平（顺势=有利方向破前高/低；
-//          逆势=形成段≥5合并K）；exits 含 half=平一半（顺势形成段≥5合并K）/breakeven=保本
+//          | stopBe=保本止损（beStop=进场K线极值±保本滑点）| close=过高低点止盈（顺势=
+//          有利方向破前高/低；逆势=形成段≥5合并K）；exits 含 half=够笔止盈（顺势
+//          检测周期够笔，平剩余比例）/breakeven=保本/trailRaise=跟踪止盈上移（仅迁移）
 //          强分型均线V1（fxma）：stop=固定点数止损 | takeProfit=固定点数止盈（盘中触价即
 //          按触发价成交，与实盘 MT5 SL/TP 同口径）；structure 模式：activeTp=主动止盈 |
-//          trailStop=跟踪止损（提损后触发）（名称同后端 EXIT_NAMES / bt_journal.EXIT_LABELS）
+//          trailStop=跟踪止盈（同向3/4类点提损后触发）（名称同后端 EXIT_NAMES / bt_journal.EXIT_LABELS）
 function exitTypeName(t) {
-  if (t === 'half') return '半平';
+  if (t === 'half') return '够笔止盈';
   if (t === 'stopSr') return '支阻位止损';
   if (t === 'stopBe') return '保本止损';
-  if (t === 'close') return '全平';
+  if (t === 'close') return '过高低点止盈';
   if (t === 'stop') return '固定止损';
   if (t === 'takeProfit') return '固定止盈';
   if (t === 'activeTp') return '主动止盈';
-  if (t === 'trailStop') return '跟踪止损';
+  if (t === 'trailStop') return '跟踪止盈';
+  if (t === 'trailRaise') return '跟踪止盈上移';
   return t || '-';
 }
 function exitEventsDesc(r) {
-  const names = { breakeven: '保本', half: '半', close: '平', stopSr: '损', stopBe: '保损',
-                  stop: '固损', takeProfit: '固盈', activeTp: '主盈', trailStop: '跟损' };
+  const names = { breakeven: '保本', half: '够笔', close: '过高低', stopSr: '损', stopBe: '保损',
+                  stop: '固损', takeProfit: '固盈', activeTp: '主盈', trailStop: '跟盈',
+                  trailRaise: '提' };
   return (r.exits || []).map(e => names[e.type] || e.type).join('·') || '';
 }
 // 分批出场只拆分展示，仍按整笔交易计数、汇总和排序。
-// 缠论V1：首次 half 平掉原持仓一半；fxma structure：exits 带 lots 键的主动止盈
-// 事件按各自手数拆行（末位与终局 exitType 对应的 lots 事件是终局平仓，不重复拆）。
+// 部分平仓事件（exits 带 lots 键：缠论V1 按比例触发的 half/close/stop 类、fxma
+// structure 主动止盈）按各自手数拆行（末位与终局 exitType 对应的 lots 事件是终局
+// 平仓，不重复拆）；旧口径 half 事件（无 lots 键）回退 持仓一半 拆行。
 function exitDisplayRows(r) {
   const numeric = value => value != null && Number.isFinite(Number(value)) ? Number(value) : null;
   const totalPnl = numeric(r.pnl), lots = numeric(r.lots);
@@ -78,14 +82,14 @@ function exitDisplayRows(r) {
     return entry == null || p == null || l == null || direction == null
       ? null : (p - entry) * direction * l * mult;
   };
-  const half = evs.find(e => e.type === 'half');
+  const half = evs.find(e => e.type === 'half' && !e.lots);
   if (half) {
     const halfLots = lots == null ? null : lots / 2;
     const halfPnl = partPnl({...half, lots: halfLots});
     final.lots = halfLots;
     final.pnl = totalPnl == null || halfPnl == null ? null : totalPnl - halfPnl;
     if (!r.exitType) final.label = '剩余持仓';
-    return [{time:half.time,price:half.price,type:'half',label:'半平',lots:halfLots,pnl:halfPnl},final];
+    return [{time:half.time,price:half.price,type:'half',label:'够笔止盈',lots:halfLots,pnl:halfPnl},final];
   }
   const isFinalEv = (e, i) => i === evs.length - 1 && r.exitType && e.type === r.exitType;
   const parts = evs.filter((e, i) => e.lots && !isFinalEv(e, i));
@@ -194,6 +198,7 @@ function escAttr(s) {
 }
 // 自绘 SVG 资金曲线：seriesList = [{id?, name, points:[{t,v}], color?}]；opts.height 大图约 280 / 小图约 140
 // opts.pickColors=true 时图例旁出颜色选择器，改色触发 opts.onColorChange(id, color, series)
+// opts.clock 非空时在头部右侧说明文字前渲染运行时钟 <b class="eq-clock">（调用方负责每秒更新其文本）
 function drawEquityChart(host, seriesList, opts = {}) {
   const series = (seriesList || []).filter(s => s.points && s.points.length);
   if (!host) return;
@@ -254,8 +259,12 @@ function drawEquityChart(host, seriesList, opts = {}) {
   }).join('');
   const title = opts.title || '资金曲线';
   const note = opts.note || '出场盈亏累加（含半平）；终点含浮盈';
+  // opts.clock !== undefined 即渲染时钟节点（空文本经 CSS :empty 隐藏）——
+  // 状态轮询瞬时空窗（如刚结束 duration 未就绪）重绘后，每秒刷新仍能把文本补上
+  const clockHtml = opts.clock !== undefined
+    ? `<b class="eq-clock">${escAttr(opts.clock)}</b>` : '';
   host.innerHTML = `
-    <div class="eq-head"><strong>${escAttr(title)}</strong><span>${escAttr(note)}</span></div>
+    <div class="eq-head"><strong>${escAttr(title)}</strong><span>${clockHtml}${escAttr(note)}</span></div>
     <div class="eq-legend">${legend}</div>
     <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="${escAttr(title)}">
       <line x1="${pad.l}" y1="${zeroY.toFixed(1)}" x2="${W - pad.r}" y2="${zeroY.toFixed(1)}"

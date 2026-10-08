@@ -217,6 +217,14 @@ def run_sr_compute(app, cfg, mode):
     # TV 当前 bar 同拍）；回测/分析保持已收盘口径、信号基线不变
     as_of_ts = cfg.get("as_of_ts")
     lb = int(cfg.get("lookbackBars") or 0)
+    # 支阻区间模式（2026-10-08）：取数窗口还需覆盖区间回溯根数（每周期各自计数），
+    # 否则区间算法（只用最近 zoneLookbackBars 根）拿不到足量已收盘K线
+    if str(cfg.get("mode") or "levels") == "zones":
+        try:
+            zlb = int(cfg.get("zoneLookbackBars") or 0)
+        except (TypeError, ValueError):
+            zlb = 0
+        lb = max(lb, zlb)
     ft_map = sr_service.fetch_from_map(cfg["periods"], as_of_ts, lb)
     for i, sym in enumerate(symbols):
         try:
@@ -724,7 +732,9 @@ class ModeWorker:
         return {"mode": self.MODE, "state": self.state,
                 "strategy": self.strategy,
                 "error": self.error, "progress": self.progress,
-                "batch": self.batch}
+                "batch": self.batch,
+                "started_at": self.started_at,
+                "duration_sec": self.duration_sec}
 
 
 class BacktestWorker(ModeWorker):
@@ -1231,7 +1241,8 @@ class LiveWorker(ModeWorker):
                             interval=cfg.get("interval", 15.0), tail=cfg.get("tail", 100),
                             use_cache=cfg.get("use_cache", False), log=self.log,
                             lots=param_center.lots_of(pm["entry"], cfg.get("symbol")),
-                            module_params=param_center.engine_module_params(pm))
+                            module_params=param_center.engine_module_params(pm),
+                            sr_kwargs=sr_service.symbol_sr_kwargs(cfg.get("symbol")))
         self.monitor = m
         self.log("实时监控就绪（Ctrl+C 无效，用停止按钮）")
         while not self._stop_evt.is_set():
@@ -1295,7 +1306,8 @@ class ReplayWorker(ModeWorker):
                               interval=cfg.get("interval", 0.5), tail=cfg.get("tail", 100),
                               use_cache=cfg.get("use_cache", False), log=self.log,
                               lots=param_center.lots_of(pm["entry"], cfg.get("symbol")),
-                              module_params=param_center.engine_module_params(pm))
+                              module_params=param_center.engine_module_params(pm),
+                              sr_kwargs=sr_service.symbol_sr_kwargs(cfg.get("symbol")))
         self.monitor = m
         m.enter_replay()
         self.log(f"回放自动播放已启动：速度 {m.speed_ms}ms/根，默认驻留 3m")
@@ -1485,11 +1497,17 @@ class ControlApp:
         else:
             cfg.pop("as_of_ts", None)
             cfg.pop("from_ts", None)
-        # 类型开关
+        # 支阻位模式（2026-10-08）：levels=经典支阻位（缺省）；zones=支阻区间
+        # 整系统切换（密集区/fib/BOLL 停用，人工位照旧按周期覆盖）
+        mode = str(cfg.get("mode") or "levels").strip() or "levels"
+        if mode not in ("levels", "zones"):
+            raise ValueError("支阻位模式非法：mode 须为 levels（经典支阻位）或 zones（支阻区间）")
+        cfg["mode"] = mode
+        # 类型开关（zones 模式下旧类型全部停用，srTypes 仅存档不强制）
         sr_types = [s for s in (cfg.get("srTypes") or []) if s in ("cluster", "fib", "boll")]
-        if not sr_types:
+        if not sr_types and mode != "zones":
             raise ValueError("至少开启一种支阻类型（密集区/黄金分割/BOLL）")
-        cfg["srTypes"] = sr_types
+        cfg["srTypes"] = sr_types or ["cluster", "boll"]
         parts = [s for s in cfg.get("clusterParts", ["flip", "recent"])
                  if s in ("flip", "recent")]
         cfg["clusterParts"] = parts
@@ -1510,6 +1528,25 @@ class ControlApp:
                 raise ValueError(f"{k} 须 >= {lo}")
         cfg.update(floats)
         cfg.update(ints)
+        # 支阻区间参数（mode=zones；缺省走引擎默认，此处只校验显式传入的非法值）
+        zfloats = {k: float(cfg[k]) for k in
+                   ("zoneClusterAtr", "zonePadAtr", "zoneInvalidBuf")
+                   if k in cfg and cfg[k] not in (None, "")}
+        if zfloats.get("zoneClusterAtr") is not None and zfloats["zoneClusterAtr"] <= 0:
+            raise ValueError("zoneClusterAtr 须 > 0")
+        for k in ("zonePadAtr", "zoneInvalidBuf"):
+            if zfloats.get(k) is not None and zfloats[k] < 0:
+                raise ValueError(f"{k} 须 >= 0")
+        zints = {k: int(cfg[k]) for k in
+                 ("zoneLookbackBars", "zonePivotBars", "zoneEventGap",
+                  "zoneMinEvents", "zoneAtrLen", "zoneMaxPerSide")
+                 if k in cfg and cfg[k] not in (None, "")}
+        for k, lo in (("zoneLookbackBars", 0), ("zonePivotBars", 1), ("zoneEventGap", 1),
+                      ("zoneMinEvents", 1), ("zoneAtrLen", 2), ("zoneMaxPerSide", 0)):
+            if zints.get(k) is not None and zints[k] < lo:
+                raise ValueError(f"{k} 须 >= {lo}")
+        cfg.update(zfloats)
+        cfg.update(zints)
         # 时点回溯：向前K线根数（仅限密集区候选窗口，每周期各自计数；缺省 300，空/0=不限）
         if cfg.get("lookbackBars") in (None, ""):
             cfg["lookbackBars"] = 0 if "lookbackBars" in cfg else sr_service.LOOKBACK_BARS_DEFAULT

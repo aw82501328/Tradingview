@@ -53,8 +53,8 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 .prow .zs-side{display:flex;align-items:center;gap:12px;flex-shrink:0}
 .prow .zs-side .zs-draw{display:flex;align-items:center;gap:6px;color:var(--text);font-size:12.5px;white-space:nowrap}
 .prow .zs-side .zs-keep{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px;white-space:nowrap}
-.prow .zs-side .zs-keep.dim{opacity:.45}
-.prow .zs-side .zs-keep.dim input{pointer-events:none}
+  .prow .zs-side .zs-keep.dim{opacity:.45}
+  .prow .zs-side .zs-keep.dim input,.prow .zs-side .zs-keep.dim select{pointer-events:none}
 /* 画笔：顶底分形不能包含，一张卡片里放各周期单根长K豁免点数 */
 .prow.span-all{grid-column:1/-1;flex-direction:column;align-items:stretch;gap:8px}
 .prow .period-fields{display:flex;flex-wrap:wrap;gap:8px 14px}
@@ -150,15 +150,24 @@ const TAB_IDS = ['chan', 'zs', 'points', 'sr', 'plan', 'entry'];
 const TAB_GROUPS = [
   { id: 'base', label: '基础组件', tabs: [['chan', '画笔'], ['zs', '画中枢'], ['points', '标记买卖点']] },
   { id: 'strategy', label: '交易策略 · 缠论V1', tabs: [['sr', '支阻位'], ['plan', '交易计划'], ['entry', '标记进出场']] },
-  { id: 'fxma', label: '交易策略 · 强分型均线V1', tabs: [['fxma', '强分型均线V1'], ['fxmaPos', '位置与方向']] },
+  { id: 'fxma', label: '交易策略 · 强分型均线V1', tabs: [['fxmaBase', '基本参数'], ['fxmaEntry', '进场条件']] },
 ];
 const TABS = TAB_GROUPS.flatMap(g => g.tabs);
 const GROUP_IDS = TAB_GROUPS.map(g => g.id);
 
-// fxma 双页签拆分：「位置与方向」页签只渲染这四个键（同属 fxma 模块，
-// 保存按模块合并语义只动本页键；恢复默认清整个模块桶）
-const FXMA_POS_KEYS = ['fibNearOn', 'fibLevels', 'fibNearPts', 'upperDirOn'];
-const TAB_MODULE = { fxmaPos: 'fxma' };   // 页签 id → 参数模块 id（缺省=自身）
+// fxma 双页签（2026-10-08 重构）：基本参数 / 进场条件。两页签同属 fxma 模块，
+// 保存按模块合并语义只动本页键；恢复默认清整个模块桶（两页签一起还原）
+const FXMA_BASE_KEYS = ['entryRes', 'pointClasses', 'pointValidBars', 'stopPts', 'tpPts',
+                        'sameBarPriority', 'mutexScope', 'lots', 'upperDirOn'];
+// 进场条件分组：组标题行 + 组内键序；'X+Y'=启用开关+条件性质并入一张卡，'maPairN'=均线对快/慢并卡
+const FXMA_ENTRY_GROUPS = [
+  ['条件组合（四选N）', ['entryPick1', 'entryPick2', 'entryPick2x', 'entryPick3', 'entryPick3x']],
+  ['均线分离', ['maOn+maReq', 'maType', 'maPair1', 'maPair2', 'crossMinPts']],
+  ['收盘站线', ['maStandOn+maStandReq', 'maStand1', 'maStand2']],
+  ['强分型', ['strongFxOn+strongFxReq', 'strongFxMinPts']],
+  ['黄金分割附近', ['fibNearOn+fibReq', 'fibLevels', 'fibNearPts']],
+];
+const TAB_MODULE = { fxmaBase: 'fxma', fxmaEntry: 'fxma' };   // 页签 id → 参数模块 id（缺省=自身）
 const tabModule = (name) => TAB_MODULE[name] || name;
 let modules = {}, active = 'chan', activeSymbol = 'XAUUSD', toastTimer;
 let activeGroup = null;   // 'base' | 'strategy' | null（全部平铺）
@@ -185,12 +194,12 @@ const LOGIC_BODY = `
 <p class="lnote">笔窗口：多了只看最近60笔（上限，老结构不参与）；至少2笔（下限，笔太少连高低结构都搭不起来，只能观望）；恰好2笔能判震荡、但找买卖点至少要3笔，找不到即走「没有」分支观望。</p>
 <p class="lnote">「贴着买卖点」＝先看最后一笔终点、再逐笔向前；对得上＝时间差≤1根K、价格差≤max(ATR×0.2, 0.05)。</p>
 <p class="lnote">观望的四种原因：数据不足 / 跟着{RANGE_REF}等 / 无买卖点 / 只作锚——谁说了算见表1。</p>
-<h4>表1 · 怎么判「震荡」<span class="lsub">小周期不自己判，只看参考周期判的结果</span></h4>
+<h4>表1 · 怎么判「震荡」<span class="lsub">小周期不自己判，只看参考周期判的结果（rangeRes 选「关闭」时例外：各自判）</span></h4>
 <table class="ltable" id="t1a">
 <tr><th>情况</th><th>怎么判</th></tr>
 <tr><td>周期比参考周期小（{LOWER}）</td><td>自己不判，全听{RANGE_REF}的：震荡→跟着观望；非震荡→直接当趋势；{RANGE_REF}笔不足2笔→直接观望（数据不足）</td></tr>
 <tr><td>{RANGE_REF}自己和比它大的周期（日线）</td><td>固定观望：只作锚（给小周期定震荡结果、给顺势定方向），不参与交易、不做判定</td></tr>
-<tr><td>rangeRes 未配置（必填项，正常配不到这状态）</td><td>全部周期观望</td></tr>
+<tr><td>rangeRes ＝ 关闭（2026-10-08 新增选项）</td><td>每个周期用①横盘/②中枢内自己判：判出震荡→观望；非震荡→走趋势分支找买卖点；「只作锚」规则取消，{RANGE_REF}自己和更大周期恢复正常计划行（此时 {RANGE_REF} 是否发信号还看 trendRes 的结构性剔除）</td></tr>
 </table>
 <div class="lcap">{RANGE_REF}怎么判自己震不震荡——下面两个条件满足任意一个就算震荡；小周期跟着这个结果走（本页可分别开关关闭某一类）：</div>
 <table class="ltable" id="t1b">
@@ -198,7 +207,7 @@ const LOGIC_BODY = `
 <tr><td>① 横盘</td><td>最近40根K挤在一条窄带里，最近几笔涨跌交替没一边倒；但最后一笔已经冲出窄带→正在突破，不算横盘</td><td>①40根K最高−最低 ≤ 5×ATR；②窗口内最近4笔端点极差 ≤ 7×ATR、涨跌都有、无连续3笔同向；③末笔越过窄带另一端 &gt;1×ATR → 直接算趋势</td></tr>
 <tr><td>② 待在箱体里</td><td>价格正待在一个还没走完的箱子里，上不去下不来</td><td>最近一个中枢（至少5笔搭成、不跨上一级笔端点）还没离开，当前价在箱顶箱底之间</td></tr>
 </table>
-<p class="lnote">注：{RANGE_REF}自己也按这两个条件判，数据用它自己的K线和笔（箱体条件的上一级笔=日线笔）；判出震荡时更低周期一并观望。参数配置页「①横盘判定 / ②中枢内判定」开关可独立关闭某一类（关闭横盘后其阈值变灰仍保留数值）。</p>
+<p class="lnote">注：{RANGE_REF}自己也按这两个条件判，数据用它自己的K线和笔（箱体条件的上一级笔=日线笔）；判出震荡时更低周期一并观望。参数配置页「横盘判定 / 中枢内判定」开关可独立关闭某一类（关闭横盘后其阈值变灰仍保留数值；rangeRes 关闭后这两类对每个周期各自生效）。</p>
 <p class="lnote">ATR＝最近14根K平均每根的波动幅度（含跳空），即「一根K正常晃多大」。5×ATR＝总波动不超过5根K的正常波动；行情波动大时窄带自动放宽。</p>
 <p class="lnote"><b>预期笔规则：</b>下跌够笔且底分型确认，即预期上涨并立即参与下级买点、中枢及方向判断；合并后满5块才通过够笔进场门槛。上涨与顶分型完全镜像。活动端点不作为已确认一买/一卖，所有判断使用已收盘数据。</p>
 <h4>表2 · 顺势方向怎么定<span class="lsub">只放行顺着参考周期方向的单</span></h4>
@@ -262,8 +271,8 @@ const LOGIC_BODY = `
 <tr><td>2卖</td><td>下跌在前低附近（参数化），或者未过前低，反弹又回到2卖点附近（参数化）</td><td>空头空</td><td>等反弹后的类2卖点</td><td>waitLike2Sell</td></tr>
 <tr><td>2买/类2买</td><td>冲过前高且力度没变弱</td><td>多头多</td><td>等回调后的3买点</td><td>wait3Buy</td></tr>
 <tr><td>2卖/类2卖</td><td>跌破前低且力度没变弱</td><td>空头空</td><td>等反弹后的3卖点</td><td>wait3Sell</td></tr>
-<tr><td>3买/类3买</td><td>冲过前高且力度没变弱（开关③3类点强档顺势 开，默认开）</td><td>多头多</td><td>等回调后的新买点</td><td>waitBuy</td></tr>
-<tr><td>3卖/类3卖</td><td>跌破前低且力度没变弱（开关③开）</td><td>空头空</td><td>等反弹后的新卖点</td><td>waitSell</td></tr>
+<tr><td>3买/类3买</td><td>冲过前高且力度没变弱（开关「3类点强档顺势」开，默认关）</td><td>多头多</td><td>等回调后的新买点</td><td>waitBuy</td></tr>
+<tr><td>3卖/类3卖</td><td>跌破前低且力度没变弱（开关同上）</td><td>空头空</td><td>等反弹后的新卖点</td><td>waitSell</td></tr>
 </table>
 <p class="lnote">方向命名：前两个字＝现在的结构是涨是跌，后一个字＝做多还是做空。三档按序判定：强档（过前高不背驰）→ 中间档（仅 2买/2卖）→ 弱档。</p>
 <p class="lnote"><b>策略列</b>＝进场策略键（「计划买卖点」文案 → 键，1:1，2026-09-25 起）：wait3Buy/wait3Sell/waitLike2Buy/waitLike2Sell 是当天拆分出的独立键，waitBuy/waitSell 从此仅指「新买点/新卖点」；回测/监控记录里的「策略」显示的就是这一列的键。</p>
@@ -272,7 +281,7 @@ const LOGIC_BODY = `
 <p class="lnote">② 强档：after 终点 &gt; 前高（卖点：&lt; 前低），且和前一波同向比 MACD 没变弱（柱子总面积、DIF 峰、最高柱任一变弱＝背驰）。</p>
 <p class="lnote">③ 中间档（仅 2买/2卖）：after 终点距前高/前低 ≤「前高/前低附近容差」参数（默认5点，含刚越过一点但背驰）；或未过前高/前低且之后最近一笔回调/反弹的终点回到 2买/2卖点价 ≤「回踩2买/2卖点容差」参数（默认5点）。</p>
 <p class="lnote">结论：② → 强档；③ → 中间档；都不满足 → 弱档（非一类行）。类2买/类2卖不走中间档；3类点强档受开关③控制（关＝一律弱档）。</p>
-<p class="lnote llast">观望的周期不出信号；定了策略的周期还要由进出场模块检查进场条件（笔够不够、低级别有没有背驰、离支阻位近不近、策略自己的条件）才发信号——那是「进出场」的事。以上是回测引擎口径；工作台分析页跑的 JS 版暂无「小周期听参考周期」这条，这点两边不同。</p>`;
+<p class="lnote llast">观望的周期不出信号；定了策略的周期还要由进出场模块检查进场条件（笔够不够、低级别有没有背驰、离支阻位近不近、策略自己的条件）才发信号——那是「进出场」的事。以上口径回测/实盘/监控引擎与工作台分析页（JS）<b>一致</b>（2026-10-08 对齐：JS 已实现同款参考周期闸门，此前「JS 各周期自判」的分歧消除；rangeRes 选「关闭」时两侧同为每周期自判）。</p>`;
 
 const DIA_MAIN = `flowchart LR
     REF["参考周期（{RANGE_REF}）<br/>定方向"]
@@ -366,8 +375,8 @@ async function ensureLogic() {
   if (key === logicKey) return;  // 已按当前配置渲染过
   $('logicBody').innerHTML = fillTpl(LOGIC_BODY, refs);
   $('capRange').textContent = refs.rOn
-    ? `当前配置：震荡判定参考周期 rangeRes ＝ ${refs.RANGE_REF}（必填；可在「交易计划」页签修改）`
-    : '当前配置：rangeRes 未配置（必填项）——全部周期观望，图中小周期分支暂不生效';
+    ? `当前配置：震荡判定参考周期 rangeRes ＝ ${refs.RANGE_REF}（可在「交易计划」页签修改；也可选「关闭」）`
+    : '当前配置：rangeRes 已关闭——每个周期用 A横盘/B中枢内 自己判震荡，图中小周期改为自判分支';
   $('capTrend').textContent = refs.tOn
     ? `当前配置：顺势参考周期 trendRes ＝ ${refs.TREND_REF}（可在「交易计划」页签修改）`
     : '当前配置：trendRes 已关闭——整套不拦、多空都放行，下图暂不生效';
@@ -465,34 +474,92 @@ function switchTab(name) {
 
 // 枚举参数的选项展示名（choices 原值提交，展示用中文）
 const CHOICE_LABELS = { trendRes: { '': '关闭', '240': '4小时', 'D': '日线' },
-                        rangeRes: { '240': '4小时', 'D': '日线' },
+                        rangeRes: { '': '关闭', '240': '4小时', 'D': '日线' },
                         entryRes: { '30S': '30秒(仅回测)', '3': '3分钟', '15': '15分钟', '60': '1小时' },
                         pointClasses: { '1': '一类买卖点', '2': '二类买卖点', '2x': '类二买卖点', '3': '三类买卖点', '3x': '类三买卖点' },
                         maType: { 'SMA': '简单均线SMA', 'EMA': '指数均线EMA' },
                         fibLevels: { '0.236': '回撤23.6%', '0.382': '回撤38.2%', '0.5': '回撤50%', '0.618': '回撤61.8%', '0.786': '回撤78.6%' },
                         sameBarPriority: { 'stop': '止损优先(保守)', 'tp': '止盈优先' },
                         mutexScope: { 'global': '全局同向一笔(同缠论V1)', 'perPeriod': '每周期独立互斥' },
-                        tpMode: { 'points': '固定点数', 'structure': '结构组合(半仓+主动止盈+跟踪止损)' } };
+                        tpMode: { 'points': '固定点数', 'structure': '结构组合(半仓+主动止盈+跟踪止损)' },
+                        maReq: { 'required': '必选', 'optional': '可选' },
+                        maStandReq: { 'required': '必选', 'optional': '可选' },
+                        strongFxReq: { 'required': '必选', 'optional': '可选' },
+                        fibReq: { 'required': '必选', 'optional': '可选' },
+                        entryPick1: { '1': '四选一', '2': '四选二', '3': '四选三', '4': '四选四' },
+                        entryPick2: { '1': '四选一', '2': '四选二', '3': '四选三', '4': '四选四' },
+                        entryPick2x: { '1': '四选一', '2': '四选二', '3': '四选三', '4': '四选四' },
+                        entryPick3: { '1': '四选一', '2': '四选二', '3': '四选三', '4': '四选四' },
+                        entryPick3x: { '1': '四选一', '2': '四选二', '3': '四选三', '4': '四选四' } };
 const choiceLabel = (key, v) => (CHOICE_LABELS[key] && CHOICE_LABELS[key][v]) || v;
 
 // 三滑点的 ATR 系数键（entry 模块）：系数不独立成行，内嵌进各自滑点行（2026-09-19）
 const SLIP_ATR_K = { slip_stop: 'slip_stop_atr_k', slip_fallback: 'slip_fallback_atr_k', slip_be: 'slip_be_atr_k' };
 
-// 换行断点（该参数从第1列起排，卡片本身不占整行）：顺势参考周期前断行 → 紧跟②中枢内判定下一行
-const BREAK_BEFORE_KEYS = new Set(['trendRes']);
+// 换行断点机制已由分组标题行替代（PLAN_GROUPS/ENTRY_GROUPS 的 .pgroup 占满整行自动换行；
+// 2026-10-08 交易计划页签 3 类分组上线后 trendRes 断行移除），保留空集兜底渲染逻辑
+const BREAK_BEFORE_KEYS = new Set();
 
 // 「标记进出场」分类分组：组标题行 + 组内键序（macdZeroTol 在 schema 里排末尾但语义属进场扩展组；
 // 键集与 param_center entry 模块对应，未列键自动排尾部兜底渲染）
+// __EXIT_MODES__ = 出场方式组标记（exitModeRowsHtml 专用：每方式一张 开关+比例 卡）
 const ENTRY_GROUPS = [
   ['支阻', ['near']],
   ['手数', ['lots']],
-  ['滑点（ATR系数内嵌各行）', ['slip_stop', 'slip_fallback', 'slip_be']],
+  ['滑点（ATR系数内嵌各行；跟踪止盈滑点随其开关置灰）', ['slip_stop', 'slip_fallback', 'slip_be', 'exitTrailSlip']],
   ['出场判定', ['exit_min_merged', 'realtime_min_bars', 'zs_exit_weak_ratio']],
+  ['__EXIT_MODES__', []],
   ['进场扩展（M1/M2/M4、0轴容差）', ['sinkFallback', 'sinkFallbackRearm', 'nearEqualAtrK', 'nearEqualPct',
                                      'expectBiEnough', 'expectBiMinBars', 'divergeConfirm', 'macdZeroTol']],
   ['进场闸门', ['entryMacdShrink', 'stopEntryBarFloor']],
   ['规则修复（07-07 06:30 案例锚点）', ['divergeReferByZs', 'sinkSkipLevel']],
 ];
+
+// 出场方式：每张卡 = 启用开关 + 平仓比例（比例占剩余仓位%；关闭时比例置灰仍随表单保存）
+const EXIT_MODE_ROWS = [
+  ['exitStopSrOn', 'exitStopSrPct'],
+  ['exitStopBeOn', 'exitStopBePct'],
+  ['exitHalfOn', 'exitHalfPct'],
+  ['exitCloseOn', 'exitClosePct'],
+  ['exitTrailOn', 'exitTrailPct'],
+];
+const EXIT_MODE_KEYS = EXIT_MODE_ROWS.flat();
+function exitModeRowsHtml(m) {
+  return EXIT_MODE_ROWS.map(([onKey, pctKey]) => {
+    const oSpec = m.schema[onKey], pSpec = m.schema[pctKey];
+    const on = m.effective[onKey], pct = m.effective[pctKey];
+    const isMod = m.overrides[onKey] !== undefined || m.overrides[pctKey] !== undefined;
+    const defText = `${onSpecDef(oSpec)} · 比例默认 ${pSpec.default}%`;
+    return `<div class="prow ${isMod ? 'mod' : ''}" title="${oSpec.desc}">
+      <input type="checkbox" data-k="${onKey}" ${on ? 'checked' : ''} aria-label="${oSpec.label}">
+      <span class="pname"><span class="plabel">${oSpec.label}<span class="badge">已修改</span></span>
+      <span class="pdef">${defText} · ${oSpec.desc}</span></span>
+      <span class="zs-keep" data-keep-for="${onKey}"><input type="number" step="1"
+        min="${pSpec.min}" max="${pSpec.max}" data-k="${pctKey}" value="${pct}">%</span></div>`;
+  }).join('');
+}
+function onSpecDef(spec) { return spec.default ? '默认开' : '默认关'; }
+
+// 出场方式开关关闭时：同卡比例输入置灰；跟踪止盈关闭时滑点组的「跟踪止盈滑点」置灰
+function applyExitModeDim() {
+  for (const [onKey, pctKey] of EXIT_MODE_ROWS) {
+    const on = document.querySelector(`#pgrid [data-k="${onKey}"]`);
+    const wrap = document.querySelector(`#pgrid .zs-keep[data-keep-for="${onKey}"]`);
+    if (!on || !wrap) continue;
+    const enabled = !!on.checked;
+    wrap.classList.toggle('dim', !enabled);
+    const inp = wrap.querySelector('input');
+    if (inp) inp.disabled = !enabled;
+  }
+  const trailOn = document.querySelector('#pgrid [data-k="exitTrailOn"]');
+  const slipRow = [...document.querySelectorAll('#pgrid .prow')].find(r => r.querySelector('[data-k="exitTrailSlip"]'));
+  if (trailOn && slipRow) {
+    const enabled = !!trailOn.checked;
+    slipRow.classList.toggle('dim', !enabled);
+    const inp = slipRow.querySelector('input[data-k="exitTrailSlip"]');
+    if (inp) inp.disabled = !enabled;
+  }
+}
 
 // 近等双顶规则更新句：卡片说明里用黄字标出（悬停 title 仍是纯文本）
 const PNEW_OPEN = '末根不等顶分型确认即可后移；';
@@ -565,11 +632,33 @@ function paramRow(m, key) {
 // 标记进出场：按分类分组换行（组标题占满整行 → 下一组自动起新视觉行，卡片普通宽度不变）
 function entryRowsHtml(m) {
   const grouped = new Set(ENTRY_GROUPS.flatMap(([, keys]) => keys));
-  return ENTRY_GROUPS.map(([title, keys]) =>
-    `<div class="pgroup">${title}</div>` + keys.filter(k => m.schema[k]).map(k => paramRow(m, k)).join('')
-  ).join('') + Object.keys(m.schema)
+  EXIT_MODE_KEYS.forEach(k => grouped.add(k));   // 出场方式键由专用卡片渲染
+  return ENTRY_GROUPS.map(([title, keys]) => {
+    if (title === '__EXIT_MODES__') {
+      return `<div class="pgroup">出场方式（至少启用一种；比例 = 平剩余仓位%）</div>`
+        + exitModeRowsHtml(m);
+    }
+    return `<div class="pgroup">${title}</div>`
+      + keys.filter(k => m.schema[k]).map(k => paramRow(m, k)).join('');
+  }).join('') + Object.keys(m.schema)
     .filter(k => !grouped.has(k) && !Object.values(SLIP_ATR_K).includes(k))
     .map(k => paramRow(m, k)).join('');  // 未分组键（未来新增）尾部兜底，不丢渲染
+}
+
+// 「交易计划」3 类分组（2026-10-08 与用户确认重排；组标题横线分割；键序与
+// param_center plan 模块一致，未列键自动排尾部兜底渲染）
+const PLAN_GROUPS = [
+  ['震荡', ['rangeRes', 'rangeBoundOn', 'rangeBarN', 'rangeBiN', 'rangeKMult', 'rangeBiMult', 'rangeBreakMult', 'rangeZsOn']],
+  ['顺势', ['trendRes', 'trendRebound', 'reboundNearPts', 'reboundAngleRef']],
+  ['其他', ['prevHighNearPts', 'secondNearPts', 'thirdStrongTrend']],
+];
+
+// 交易计划：按 震荡/顺势/其他 3 类分组渲染（组标题占满整行；未分组键尾部兜底，不丢渲染）
+function planRowsHtml(m) {
+  const grouped = new Set(PLAN_GROUPS.flatMap(([, keys]) => keys));
+  return PLAN_GROUPS.map(([title, keys]) => `<div class="pgroup">${title}</div>`
+    + keys.filter(k => m.schema[k]).map(k => paramRow(m, k)).join('')).join('')
+    + Object.keys(m.schema).filter(k => !grouped.has(k)).map(k => paramRow(m, k)).join('');
 }
 
 // 画中枢：同周期「是否画 + 最近个数」同一行
@@ -787,20 +876,73 @@ function fxmaTpRowsHtml(m) {
   <input type="hidden" data-k="tpMode" value="${mode}">`;
 }
 
-// fxma 主页签：点有效期双输入并一张卡，其余键按 schema 键序平铺（排除「位置与方向」页签键）
-function fxmaRowsHtml(m) {
+// fxma「基本参数」页签：点有效期双输入并一张卡、止盈三卡，其余按 FXMA_BASE_KEYS 平铺
+function fxmaBaseRowsHtml(m) {
   let html = '';
-  for (const key of Object.keys(m.schema)) {
-    if (Object.values(SLIP_ATR_K).includes(key)) continue;
-    if (FXMA_POS_KEYS.includes(key)) continue;
+  for (const key of FXMA_BASE_KEYS) {
+    if (!m.schema[key]) continue;
     if (key === 'pointValidBars') { html += fxmaValidRowHtml(m); continue; }
-    if (key === 'pointValidPts') continue;  // 已并入「点有效期」卡
     if (key === 'tpPts') { html += fxmaTpRowsHtml(m); continue; }   // 止盈三卡（含新参数）
-    if (key === 'tpMode' || key === 'tpNearPts' || key === 'tpTrailSlipPts')
-      continue;  // 已并入止盈三卡
     html += paramRow(m, key);
   }
   return html;
+}
+
+// 条件启用开关 + 必选/可选（条件性质）并入同一张卡；开关关闭时「性质」置灰（applyFxmaDim）
+function fxmaCondRowHtml(m, onKey, reqKey) {
+  const s = m.schema[onKey], r = m.schema[reqKey];
+  if (!s) return '';
+  if (!r) return paramRow(m, onKey);
+  const isMod = m.overrides[onKey] !== undefined || m.overrides[reqKey] !== undefined;
+  const reqSel = `<select data-k="${reqKey}" title="${r.desc}">` + (r.choices || [])
+    .map(c => `<option value="${c}" ${c === m.effective[reqKey] ? 'selected' : ''}>${choiceLabel(reqKey, c)}</option>`).join('') + '</select>';
+  return `<div class="prow ${isMod ? 'mod' : ''}" title="${s.desc}">
+    <span class="pname"><span class="plabel">${s.label}<span class="badge">已修改</span></span>
+    <span class="pdef">必选=不通过不触发 · 可选=仅计票 · 默认${choiceLabel(reqKey, r.default)}</span></span>
+    <span class="zs-side">
+      <label class="zs-draw"><input type="checkbox" data-k="${onKey}" ${m.effective[onKey] ? 'checked' : ''}>启用</label>
+      <span class="zs-keep req-side">性质 ${reqSel}</span>
+    </span></div>`;
+}
+
+// 均线对：快/慢线周期同一张卡（一类点 / 二三类点各一对）
+function fxmaMaPairRowHtml(m, pair) {
+  const fk = pair === 'maPair1' ? 'maFast1' : 'maFast2';
+  const sk = pair === 'maPair1' ? 'maSlow1' : 'maSlow2';
+  const f = m.schema[fk], s = m.schema[sk];
+  if (!f || !s) return '';
+  const isMod = m.overrides[fk] !== undefined || m.overrides[sk] !== undefined;
+  const label = pair === 'maPair1' ? '一类点均线对' : '二三类点均线对';
+  const num = (k, tag) => `<input type="number" step="1" min="${m.schema[k].min}" max="${m.schema[k].max}" data-k="${k}" value="${m.effective[k]}" aria-label="${label}${tag}线周期">`;
+  return `<div class="prow ${isMod ? 'mod' : ''}" title="${f.desc}">
+    <span class="pname"><span class="plabel">${label}<span class="badge">已修改</span></span>
+    <span class="pdef">默认 快${f.default}/慢${s.default} · ${f.desc}</span></span>
+    <span class="zs-side">
+      <span class="zs-keep">快 ${num(fk)}</span>
+      <span class="zs-keep">慢 ${num(sk)}</span>
+    </span></div>`;
+}
+
+// fxma「进场条件」页签：分组渲染（组标题横线行 + 合并卡/普通卡）；未列键尾部兜底不丢渲染
+function fxmaEntryRowsHtml(m) {
+  const covered = new Set(FXMA_BASE_KEYS);
+  for (const [, keys] of FXMA_ENTRY_GROUPS) for (const k of keys) {
+    if (k.includes('+')) k.split('+').forEach(x => covered.add(x));
+    else if (k === 'maPair1') { covered.add('maFast1'); covered.add('maSlow1'); }
+    else if (k === 'maPair2') { covered.add('maFast2'); covered.add('maSlow2'); }
+    else covered.add(k);
+  }
+  covered.add('pointValidPts');   // 已并入「点有效期」卡
+  covered.add('tpMode'); covered.add('tpNearPts'); covered.add('tpTrailSlipPts');   // 已并入止盈三卡
+  return FXMA_ENTRY_GROUPS.map(([title, keys]) =>
+    `<div class="pgroup">${title}</div>` + keys.map(k => {
+      if (k.includes('+')) { const [on, req] = k.split('+'); return fxmaCondRowHtml(m, on, req); }
+      if (k === 'maPair1' || k === 'maPair2') return fxmaMaPairRowHtml(m, k);
+      return m.schema[k] ? paramRow(m, k) : '';
+    }).join('')).join('')
+    + Object.keys(m.schema)
+      .filter(k => !covered.has(k) && !Object.values(SLIP_ATR_K).includes(k))
+      .map(k => paramRow(m, k)).join('');
 }
 
 function renderModule(name) {
@@ -815,16 +957,15 @@ function renderModule(name) {
     ? entryRowsHtml(m)
     : name === 'points'
     ? pointsRowsHtml(m)
-    : name === 'fxma'
-    ? fxmaRowsHtml(m)
-    : name === 'fxmaPos'
-    // 「位置与方向」页签：只渲染拆出的四参数
-    ? FXMA_POS_KEYS.filter(k => m.schema[k]).map(k => paramRow(m, k)).join('')
+    : name === 'plan'
+    ? planRowsHtml(m)
+    : name === 'fxmaBase'
+    ? fxmaBaseRowsHtml(m)
+    : name === 'fxmaEntry'
+    ? fxmaEntryRowsHtml(m)
     : Object.entries(m.schema)
       // 滑点 ATR 系数不独立成行：内嵌进各自滑点行（badge 在固定值或系数任一被改时亮）
-      // fxma 主页签：黄金分割附近/上级同向四参数已拆到「位置与方向」页签，不在此渲染
-      .filter(([key]) => !Object.values(SLIP_ATR_K).includes(key)
-                    && !(modName === 'fxma' && FXMA_POS_KEYS.includes(key)))
+      .filter(([key]) => !Object.values(SLIP_ATR_K).includes(key))
       .map(([key]) => paramRow(m, key))
       .join('');
   const n = Object.keys(m.overrides).length;
@@ -834,10 +975,10 @@ function renderModule(name) {
     chan: '画笔参数按当前品种独立；保存后该品种成笔阈值即时生效（画笔/回测/监控）。有任务运行中时会拒绝保存。',
     points: '标记买卖点按当前品种：邻近合并/保留数/中枢容差在工作台与回测读取；背驰时长可比上限写入该品种 CHAN_CFG。有任务运行中时会拒绝保存。',
     zs: '画中枢按当前品种：各周期是否绘制、以及每周期只保留最近几个中枢。',
-    entry: '标记进出场按当前品种：近支阻、手数、滑点、出场判定、进场扩展与闸门。进场扩展写入该品种 CHAN_CFG。「当下制够笔K线数」仅回测/监控引擎。有效滑点 = 固定值 + ATR系数×ATR(14)。手数口径：1手=0.01标准手。有任务运行中时会拒绝保存。',
-    plan: '交易计划按当前品种：震荡阈值与顺势参考周期在工作台/回测读取；「方向相位判定」等见下方图解。',
-    fxma: '强分型均线V1按当前品种：进出场周期/买卖点类别/强分型/均线分离/收盘站线与止盈止损、互斥。止盈方式三卡单选：固定点数（满仓一笔触价全平）/ 结构组合（每笔半仓、同向容量最多两笔且同一粗类 1/2/3 持仓期间不叠加、该类平仓后可再开——1/2类一半到前一点位主动止盈+另一半走3/4类点提损跟踪，3类只主动止盈；容差与提损滑点见两张组合卡）。点有效期=根数+价距双约束（同卡配置）。黄金分割附近与上级周期同向两条件在「位置与方向」页签。',
-    fxmaPos: '位置与方向按当前品种（属强分型均线V1）：黄金分割附近（仅2/3类点，参照前一同侧买卖点摆动段）与上级周期同向（30秒→3分钟→15分钟→1小时→4小时当前笔）两个进场条件，均默认关；开关关闭时子参数变灰（数值仍随表单保存，只是不参与信号判定）。',
+    entry: '标记进出场按当前品种：近支阻、手数、滑点、出场判定、出场方式（开关+平仓比例，至少启用一种）、进场扩展与闸门。进场扩展写入该品种 CHAN_CFG。「当下制够笔K线数」仅回测/监控引擎。有效滑点 = 固定值 + ATR系数×ATR(14)。手数口径：1手=0.01标准手。比例 = 触发时平剩余仓位百分比（每种方式一次性触发，部分平仓后剩余由其它方式了结）；跟踪止盈同强分型均线V1（同向3类/类3类买卖点→止损上移，只上移）。有任务运行中时会拒绝保存。',
+    plan: '交易计划按当前品种分 3 类：震荡（参考周期闸门 rangeRes——可关闭=每周期自判，与图表口径一致；A 横盘/B 中枢内阈值）/ 顺势（参考周期 trendRes + 方向相位判定）/ 其他（点位分类容差）。工作台/回测/实盘/监控同源读取；详见下方图解。有任务运行中时会拒绝保存。',
+    fxmaBase: '强分型均线V1·基本参数（按当前品种）：进出场周期/买卖点类别/点有效期/止损止盈/同根双触/同向互斥/默认手数/上级周期同向。止盈方式三卡单选：固定点数（满仓一笔触价全平）/ 结构组合（每笔半仓、同向容量最多两笔且同一粗类 1/2/3 持仓期间不叠加、该类平仓后可再开——1/2类一半到前一点位主动止盈+另一半走3/4类点提损跟踪，3类只主动止盈）。点有效期=根数+价距双约束（同卡配置）。',
+    fxmaEntry: '强分型均线V1·进场条件（按当前品种）：均线分离/收盘站线/强分型/黄金分割附近 各设「启用+必选/可选」；各类买卖点设条件满足数（四选N）。必选条件不通过该类点不触发；启用条件中通过数≥生效N 才触发（必选通过也计票；生效N=min(N,启用条件数)；四条件全停=点出现即触发）。黄金分割仅2/3类点参与（1类豁免）；上级周期同向在「基本参数」页签（独立硬门槛，不参与计票）。开关关闭时子参数变灰（数值仍随表单保存，只是不参与判定）。',
   }[name] || '';
   const rules = MODULE_RULES[name];
   const rb = $('rulesBlock');
@@ -851,7 +992,8 @@ function renderModule(name) {
   if (name === 'zs') applyZsKeepDim();
   if (name === 'chan') applyChanMasterDim();
   if (name === 'points') applyAnchorDim();
-  if (name === 'fxma' || name === 'fxmaPos') applyFxmaDim();
+  if (name === 'fxmaBase' || name === 'fxmaEntry') applyFxmaDim();
+  if (name === 'entry') applyExitModeDim();
   if (name === 'plan') {
     applyPlanRangeDim();
     if ($('logicDetails').open) {
@@ -902,36 +1044,53 @@ function applyZsKeepDim() {
 const RANGE_BOUND_KEYS = ['rangeBarN', 'rangeBiN', 'rangeKMult', 'rangeBiMult', 'rangeBreakMult'];
 function applyPlanRangeDim() {
   const on = document.querySelector('#pgrid [data-k="rangeBoundOn"]');
-  if (!on) return;
-  const enabled = !!on.checked;
-  for (const key of RANGE_BOUND_KEYS) {
-    const inp = document.querySelector(`#pgrid [data-k="${key}"]`);
-    if (!inp) continue;
-    inp.disabled = !enabled;
-    const row = inp.closest('.prow');
-    if (row) row.classList.toggle('dim', !enabled);
-  }
-}
-
-// fxma 条件开关关闭时：所属参数行变灰不可改（数值仍随表单保存，只是不参与信号判定）
-const FXMA_DIM_GROUPS = [
-  ['maOn', ['maType', 'maFast1', 'maSlow1', 'maFast2', 'maSlow2', 'crossMinPts']],
-  ['maStandOn', ['maStand1', 'maStand2']],
-  ['fibNearOn', ['fibLevels', 'fibNearPts']],
-  ['upperDirOn', []],
-  ['strongFxOn', ['strongFxMinPts']],
-];
-function applyFxmaDim() {
-  for (const [swKey, keys] of FXMA_DIM_GROUPS) {
-    const on = document.querySelector(`#pgrid [data-k="${swKey}"]`);
-    if (!on) continue;
+  if (on) {
     const enabled = !!on.checked;
-    for (const key of keys) {
+    for (const key of RANGE_BOUND_KEYS) {
       const inp = document.querySelector(`#pgrid [data-k="${key}"]`);
       if (!inp) continue;
       inp.disabled = !enabled;
       const row = inp.closest('.prow');
       if (row) row.classList.toggle('dim', !enabled);
+    }
+  }
+  // trendRes 关闭（选「关闭」）→ 方向相位判定组置灰（数值仍随表单保存，只是不参与判定）
+  const tr = document.querySelector('#pgrid [data-k="trendRes"]');
+  if (tr) {
+    const trOn = tr.value !== '';
+    for (const key of ['trendRebound', 'reboundNearPts', 'reboundAngleRef']) {
+      const inp = document.querySelector(`#pgrid [data-k="${key}"]`);
+      if (!inp) continue;
+      inp.disabled = !trOn;
+      const row = inp.closest('.prow');
+      if (row) row.classList.toggle('dim', !trOn);
+    }
+  }
+}
+
+// fxma 条件开关关闭时：卡内「性质」下拉与所属参数行变灰不可改（数值仍随表单保存，只是不参与信号判定）
+const FXMA_DIM_GROUPS = [
+  ['maOn', 'maReq', ['maType', 'maFast1', 'maSlow1', 'maFast2', 'maSlow2', 'crossMinPts']],
+  ['maStandOn', 'maStandReq', ['maStand1', 'maStand2']],
+  ['strongFxOn', 'strongFxReq', ['strongFxMinPts']],
+  ['fibNearOn', 'fibReq', ['fibLevels', 'fibNearPts']],
+  ['upperDirOn', null, []],
+];
+function applyFxmaDim() {
+  for (const [swKey, reqKey, keys] of FXMA_DIM_GROUPS) {
+    const on = document.querySelector(`#pgrid [data-k="${swKey}"]`);
+    if (!on) continue;
+    if (reqKey) {
+      const reqSel = document.querySelector(`#pgrid [data-k="${reqKey}"]`);
+      const side = reqSel && reqSel.closest('.req-side');
+      if (side) side.classList.toggle('dim', !on.checked);
+    }
+    for (const key of keys) {
+      const inp = document.querySelector(`#pgrid [data-k="${key}"]`);
+      if (!inp) continue;
+      inp.disabled = !on.checked;
+      const row = inp.closest('.prow');
+      if (row) row.classList.toggle('dim', !on.checked);
     }
   }
   applyTpModeDim();
@@ -1037,9 +1196,10 @@ document.addEventListener('click', e => {
     else renderModule(active);
   }
 });
-// 横盘开关变化时即时变灰/恢复（不立刻保存，点「保存本模块」才落盘）
+// 横盘开关 / 顺势参考周期变化时即时变灰/恢复（不立刻保存，点「保存本模块」才落盘）
 document.addEventListener('change', e => {
-  if (e.target && e.target.dataset && e.target.dataset.k === 'rangeBoundOn') applyPlanRangeDim();
+  if (e.target && e.target.dataset
+      && (e.target.dataset.k === 'rangeBoundOn' || e.target.dataset.k === 'trendRes')) applyPlanRangeDim();
   if (e.target && e.target.dataset && ZS_KEEP_PAIR[e.target.dataset.k]) applyZsKeepDim();
   if (e.target && e.target.dataset && e.target.dataset.k === 'anchorUndecidedSkip') applyAnchorDim();
   if (e.target && e.target.dataset && CHAN_KEEP_MASTERS.includes(e.target.dataset.k)) applyChanMasterDim();
@@ -1047,6 +1207,10 @@ document.addEventListener('change', e => {
       && (e.target.dataset.k === 'maOn' || e.target.dataset.k === 'maStandOn'
           || e.target.dataset.k === 'fibNearOn' || e.target.dataset.k === 'upperDirOn'
           || e.target.dataset.k === 'strongFxOn')) applyFxmaDim();
+  // 出场方式开关变化：同卡比例/跟踪止盈滑点即时置灰或恢复
+  if (e.target && e.target.dataset
+      && (EXIT_MODE_KEYS.includes(e.target.dataset.k)
+          || e.target.dataset.k === 'exitTrailSlip')) applyExitModeDim();
 });
 $('saveBtn').onclick = () => save(active).catch(err => toast(err.message, true));
 $('resetBtn').onclick = () => reset(active).catch(err => toast(err.message, true));

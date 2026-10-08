@@ -1142,9 +1142,19 @@ def tryNearEqualSameType(ctx, last, head, k):
         return None
     pull, cnt = False, 0
     chain = [last]
-    for f in fractals:
-        if f["mergedIdx"] <= last["mergedIdx"] or f["mergedIdx"] >= k["mergedIdx"]:
-            continue
+    # 平台区间 (last.mergedIdx, k.mergedIdx) 的夹层分型：分型按 mergedIdx 升序、
+    # last 是栈顶（尾部）分型 → 从表尾反向收集、越过 last 即止，免全表线性扫
+    # （本函数被 biStep 高频调用，全表扫描曾是回测第一大热点）
+    lo, hi = last.get("mergedIdx"), k.get("mergedIdx")
+    mid = []
+    for f in reversed(fractals):
+        mi = f["mergedIdx"]
+        if mi <= lo:
+            break
+        if mi < hi:
+            mid.append(f)
+    mid.reverse()
+    for f in mid:
         cnt += 1
         if is_top and f["type"] == "bottom" and last["high"] - f["low"] >= thr:
             pull = True

@@ -26,9 +26,14 @@
   6. 上级周期同向（upperDirOn，默认关；全部类别）：上级周期（UPPER_OF：
      30S→3→15→60→240）当前笔（列表末笔，含形成中）方向须与信号同向（买=up/
      卖=down）；上级无笔不触发；upperDirOn=False 跳过本条；
-  7. 所选条件齐备（strongFxOn/maOn/maStandOn/fibNearOn/upperDirOn 均可独立
-     关闭；全关=点属所选类别且未失效即当拍触发）的首个收盘拍出信号（每个点只
-     触发一次；pointValidBars 根内未齐备作废）→ 下一根 P 周期K线开盘价成交。
+  7. 条件计票（2026-10-08 重构）：均线分离/收盘站线/强分型/黄金分割四个条件各带
+     启用开关（*On）与必选标志（*Req，默认必选）。必选不通过 → 该类点当拍不触发
+     （原拒绝码保留）；全部启用条件中通过数 ≥ 生效N 才触发（必选通过也计票），
+     生效N = min(entryPickN, 启用条件数)，entryPick1/2/2x/3/3x 为各类买卖点的
+     条件满足数（默认 3，与旧 AND 行为一致）；四条件全停用 = 点属所选类别且未失效
+     即当拍触发（旧全关行为）；黄金分割仅 2/3 类点参与计票（1 类豁免）；上级周期
+     同向（⑥）保持独立硬门槛，不参与计票。首个满足拍出信号（每个点只触发一次；
+     pointValidBars 根内未满足作废）→ 下一根 P 周期K线开盘价成交。
 【出场】持仓期间按引擎最小周期（fine）已收K线逐根判盘中触及 → 盘中触价即按该
   触发价即时成交（与实盘 MT5 SL/TP 同口径：不等收盘确认、不等下一开盘；进场那根
   fine K线收盘后即参与判定）；同根双触按 sameBarPriority（默认止损优先）；
@@ -97,19 +102,29 @@ TRAIL_POINT_TYPES = ("3买", "类3买", "4买", "类4买",
 FXMA_DEFAULTS = {
     "entryRes": "3,15,60",          # 多选：30S/3/15/60（30S 仅回测）
     "pointClasses": "1,2,2x,3,3x",  # 多选：1/2/2x/3/3x（2x=类2买卖、3x=类3买卖）
-    "maOn": True,                   # 均线分离条件开关（False=跳过均线条件）
+    "maOn": True,                   # 均线分离条件开关（False=停用：不计票不拦截）
+    "maReq": "required",            # 均线分离条件性质：required=必选 / optional=可选（仅计票）
     "maType": "SMA",                # 枚举：SMA/EMA
     "maFast1": 8, "maSlow1": 20,    # 一类点均线对
     "maFast2": 5, "maSlow2": 8,     # 二三类点均线对
     "crossMinPts": 2.0,             # 均线上下穿确认点数（快慢线间距≥该值）
-    "maStandOn": True,              # 收盘站线条件开关（False=跳过站线条件）
+    "maStandOn": True,              # 收盘站线条件开关（False=停用：不计票不拦截）
+    "maStandReq": "required",       # 收盘站线条件性质：required=必选 / optional=可选
     "maStand1": 5, "maStand2": 5,   # 站线均线周期：一类点 / 二三类点（买站上、卖站下）
-    "fibNearOn": False,             # 黄金分割附近条件开关（仅2/3类点；False=跳过）
+    "fibNearOn": False,             # 黄金分割附近条件开关（参与计票；仅2/3类点，1类豁免）
+    "fibReq": "required",           # 黄金分割条件性质：required=必选 / optional=可选
     "fibLevels": "0.382,0.5,0.618", # 黄金分割档位（逗号串，各档 0<r<1）
     "fibNearPts": 5.0,              # 黄金分割档位容差（绝对点数）
-    "upperDirOn": False,            # 上级周期同向条件开关（False=跳过）
-    "strongFxOn": True,             # 强分型条件开关（False=跳过强分型条件）
+    "upperDirOn": False,            # 上级周期同向条件开关（独立硬门槛，不参与计票）
+    "strongFxOn": True,             # 强分型条件开关（False=停用：不计票不拦截）
+    "strongFxReq": "required",      # 强分型条件性质：required=必选 / optional=可选
     "strongFxMinPts": 0.0,          # 强分型实体最小落差（0=现口径）
+    # 各类买卖点条件满足数（四选N；生效N=min(N,启用条件数)，默认3=旧 AND 行为）
+    "entryPick1": "3",
+    "entryPick2": "3",
+    "entryPick2x": "3",
+    "entryPick3": "3",
+    "entryPick3x": "3",
     "pointValidBars": 0,            # 点有效期（根；0=不限直到反向点）
     "pointValidPts": 0.0,           # 点有效期（值；盘中价距点极值上限，0=不限；超距等待回范围）
     "stopPts": 10.0,                # 止损点数（绝对价差；盘中触价即成交，与实盘 MT5 SL 同口径）
@@ -228,12 +243,15 @@ class FxMaEngine(BacktestEngine):
     """强分型均线V1 引擎（step_to/run 接口与 BacktestEngine 一致，见模块 docstring）。"""
 
     def __init__(self, bars_by_period, entry_res="3,15,60", point_classes="1,2,3",
-                 ma_on=True, ma_type="SMA", ma_fast1=8, ma_slow1=20,
+                 ma_on=True, ma_req=True, ma_type="SMA", ma_fast1=8, ma_slow1=20,
                  ma_fast2=5, ma_slow2=8,
-                 cross_min_pts=2.0, ma_stand_on=True, ma_stand1=5, ma_stand2=5,
-                 fib_near_on=False, fib_near_levels="0.382,0.5,0.618",
+                 cross_min_pts=2.0, ma_stand_on=True, ma_stand_req=True,
+                 ma_stand1=5, ma_stand2=5,
+                 fib_near_on=False, fib_req=True,
+                 fib_near_levels="0.382,0.5,0.618",
                  fib_near_pts=5.0, upper_dir_on=False,
-                 strong_fx_on=True, strong_fx_min_pts=0.0,
+                 strong_fx_on=True, strong_fx_req=True, strong_fx_min_pts=0.0,
+                 entry_pick=None,
                  point_valid_bars=0, point_valid_pts=0.0,
                  stop_pts=10.0, tp_pts=30.0, same_bar_priority="stop",
                  tp_mode="points", tp_near_pts=0.0, tp_trail_slip_pts=1.0,
@@ -243,6 +261,7 @@ class FxMaEngine(BacktestEngine):
         self.point_classes = set(
             parse_multi(point_classes, ("1", "2", "2x", "3", "3x"), "pointClasses"))
         self.ma_on = bool(ma_on)
+        self.ma_req = bool(ma_req)
         self.ma_type = str(ma_type).upper()
         if self.ma_type not in ("SMA", "EMA"):
             raise ValueError(f"maType 须为 SMA/EMA 之一（收到 {ma_type!r}）")
@@ -254,10 +273,12 @@ class FxMaEngine(BacktestEngine):
                 raise ValueError(f"{name} 周期须满足 1 ≤ 快线 < 慢线（收到 {f}/{s}）")
         self.cross_min_pts = float(cross_min_pts)
         self.ma_stand_on = bool(ma_stand_on)
+        self.ma_stand_req = bool(ma_stand_req)
         self.ma_stand1, self.ma_stand2 = int(ma_stand1), int(ma_stand2)
         if self.ma_stand1 < 1 or self.ma_stand2 < 1:
             raise ValueError(f"站线均线周期须 ≥1（收到 {ma_stand1}/{ma_stand2}）")
         self.fib_near_on = bool(fib_near_on)
+        self.fib_req = bool(fib_req)
         # 注意：基类 BacktestEngine 自带 fib_levels（支阻 sr 黄金分割比率）属性，
         # fxma 档位用 fib_near_levels 避免被 super().__init__ 覆盖
         self.fib_near_levels = parse_fib_levels(fib_near_levels)
@@ -266,7 +287,17 @@ class FxMaEngine(BacktestEngine):
             raise ValueError(f"fibNearPts 须 ≥0（收到 {fib_near_pts}）")
         self.upper_dir_on = bool(upper_dir_on)
         self.strong_fx_on = bool(strong_fx_on)
+        self.strong_fx_req = bool(strong_fx_req)
         self.strong_fx_min_pts = float(strong_fx_min_pts)
+        # 各类买卖点条件满足数（四选N）：sel → 1..4；生效N=min(N, 启用条件数)
+        pick = dict.fromkeys(("1", "2", "2x", "3", "3x"), 3)
+        for k, v in dict(entry_pick or {}).items():
+            if k not in pick:
+                raise ValueError(f"entryPick 键须为 1/2/2x/3/3x（收到 {k!r}）")
+            if int(v) not in (1, 2, 3, 4):
+                raise ValueError(f"entryPick 须为 1/2/3/4（{k}={v!r}）")
+            pick[k] = int(v)
+        self.entry_pick = pick
         self.point_valid_bars = int(point_valid_bars)
         self.point_valid_pts = float(point_valid_pts)
         if self.point_valid_pts < 0:
@@ -330,18 +361,24 @@ class FxMaEngine(BacktestEngine):
             entry_res=pm.get("entryRes", "3,15,60"),
             point_classes=pm.get("pointClasses", "1,2,2x,3,3x"),
             ma_on=pm.get("maOn", True),
+            ma_req=pm.get("maReq", "required") == "required",
             ma_type=pm.get("maType", "SMA"),
             ma_fast1=pm.get("maFast1", 8), ma_slow1=pm.get("maSlow1", 20),
             ma_fast2=pm.get("maFast2", 5), ma_slow2=pm.get("maSlow2", 8),
             cross_min_pts=pm.get("crossMinPts", 2.0),
             ma_stand_on=pm.get("maStandOn", True),
+            ma_stand_req=pm.get("maStandReq", "required") == "required",
             ma_stand1=pm.get("maStand1", 5), ma_stand2=pm.get("maStand2", 5),
             fib_near_on=pm.get("fibNearOn", False),
+            fib_req=pm.get("fibReq", "required") == "required",
             fib_near_levels=pm.get("fibLevels", "0.382,0.5,0.618"),
             fib_near_pts=pm.get("fibNearPts", 5.0),
             upper_dir_on=pm.get("upperDirOn", False),
             strong_fx_on=pm.get("strongFxOn", True),
+            strong_fx_req=pm.get("strongFxReq", "required") == "required",
             strong_fx_min_pts=pm.get("strongFxMinPts", 0.0),
+            entry_pick={k: int(pm.get(f"entryPick{k}", "3"))
+                        for k in ("1", "2", "2x", "3", "3x")},
             point_valid_bars=pm.get("pointValidBars", 0),
             point_valid_pts=pm.get("pointValidPts", 0.0),
             stop_pts=pm.get("stopPts", 10.0), tp_pts=pm.get("tpPts", 30.0),
@@ -532,104 +569,137 @@ class FxMaEngine(BacktestEngine):
                             jr.reject(t, "fx_point_drift_fail", P, pt["time"], None,
                                       ptType=pt["type"], validPts=self.point_valid_pts)
                         continue
-                # ① 强分型（点之后，实体口径；strongFxOn=False 跳过本条件）
+                # ---- 条件计票（2026-10-08）：均线分离/收盘站线/强分型/黄金分割四条件
+                # 各带 启用开关（*On）+ 必选标志（*Req）。必选不通过 → 按原拒绝码拦截；
+                # 全部启用条件中通过数 ≥ 生效N（=min(entryPickN, 启用数)）才触发
+                # （必选通过也计票）；四条件全停用 = 点属所选类别且未失效即当拍触发
+                # （旧全关行为）。可选条件未通过不单独记拒绝码，只体现在票数中。
+                # 每条件结果：ok=None 停用 / True 通过 / False 未过；rej=(拒绝码, 带策略键?, 附注)
+                # ① 强分型（点之后出现强底/顶分型即算通过——粘性，实体口径）
                 fxTime = None
+                fx_ok = fx_rej = None
                 if self.strong_fx_on:
                     fxTime = strong_fx_after(self._merged[P], self._fractals[P], pt["time"],
                                              kind, self.strong_fx_min_pts)
-                    if fxTime is None:
-                        if jr is not None and jr.enabled:
-                            jr.reject(t, "fx_no_strong_fx", P, pt["time"], None,
-                                      ptType=pt["type"], kind=kind,
-                                      minPts=self.strong_fx_min_pts)
-                        continue
-                # ② 均线分离（按类别选均线对；卖点=快线低于慢线、买点=快线高于慢线；
-                #    maOn=False 跳过本条件）
+                    fx_ok = fxTime is not None
+                    if not fx_ok:
+                        fx_rej = ("fx_no_strong_fx", False,
+                                  dict(ptType=pt["type"], kind=kind,
+                                       minPts=self.strong_fx_min_pts))
+                # ② 均线分离（按类别选均线对；卖点=快线低于慢线、买点=快线高于慢线）
                 diff = None
+                ma_ok = ma_rej = None
                 if self.ma_on:
                     st = self._fx_ma[P]
                     fast, slow = (st["mas"][0], st["mas"][1]) if cls == 1 else (st["mas"][2], st["mas"][3])
                     if not fast.ready or not slow.ready:
-                        if jr is not None and jr.enabled:
-                            jr.reject(t, "fx_ma_not_ready", P, pt["time"], None,
-                                      ptType=pt["type"], maKind=cls)
-                        continue  # 均线未满周期
-                    diff = (slow.value - fast.value) if direction == "short" else (fast.value - slow.value)
-                    if not (diff > 0 and diff >= self.cross_min_pts):
-                        if jr is not None and jr.enabled:
-                            jr.reject(t, "fx_ma_gap_fail", P, pt["time"],
-                                      fx_strategy_key(sel, direction),
-                                      ptType=pt["type"], diff=round(diff, 4),
-                                      crossMinPts=self.cross_min_pts,
-                                      volatile=("diff",))
-                        continue
+                        ma_ok = False   # 均线未满周期 = 未过
+                        ma_rej = ("fx_ma_not_ready", False,
+                                  dict(ptType=pt["type"], maKind=cls))
+                    else:
+                        diff = (slow.value - fast.value) if direction == "short" else (fast.value - slow.value)
+                        if diff > 0 and diff >= self.cross_min_pts:
+                            ma_ok = True
+                        else:
+                            ma_ok = False
+                            ma_rej = ("fx_ma_gap_fail", True,
+                                      dict(ptType=pt["type"], diff=round(diff, 4),
+                                           crossMinPts=self.cross_min_pts,
+                                           volatile=("diff",)))
                 # ③ 收盘站线（按类别选站线均线：1类=maStand1、2/3类=maStand2，SMA/EMA
-                #    同 maType；买=当拍收盘价严格大于站线均线、卖=严格小于；
-                #    maStandOn=False 跳过本条件）
+                #    同 maType；买=当拍收盘价严格大于站线均线、卖=严格小于）
                 standGap = None
                 standVal = None
+                stand_ok = stand_rej = None
                 if self.ma_stand_on:
                     lastClose = self.bars[P]["_list"][self._cut[P] - 1]["close"]
                     standAcc = self._fx_ma[P]["mas"][4 if cls == 1 else 5]
                     if not standAcc.ready:
-                        if jr is not None and jr.enabled:
-                            jr.reject(t, "fx_ma_stand_not_ready", P, pt["time"], None,
-                                      ptType=pt["type"], maKind=cls)
-                        continue  # 站线均线未满周期
-                    standVal = standAcc.value
-                    standGap = lastClose - standVal
-                    if not (standGap > 0 if direction == "long" else standGap < 0):
-                        if jr is not None and jr.enabled:
-                            jr.reject(t, "fx_ma_stand_fail", P, pt["time"],
-                                      fx_strategy_key(sel, direction),
-                                      ptType=pt["type"], close=round(lastClose, 4),
-                                      ma=round(standVal, 4), maP=standAcc.period,
-                                      volatile=("close", "ma"))
-                        continue
-                # ④ 黄金分割附近（fibNearOn=False 跳过；仅 2/3 类点，1 类点豁免）：
+                        stand_ok = False   # 站线均线未满周期 = 未过
+                        stand_rej = ("fx_ma_stand_not_ready", False,
+                                     dict(ptType=pt["type"], maKind=cls))
+                    else:
+                        standVal = standAcc.value
+                        standGap = lastClose - standVal
+                        if standGap > 0 if direction == "long" else standGap < 0:
+                            stand_ok = True
+                        else:
+                            stand_ok = False
+                            stand_rej = ("fx_ma_stand_fail", True,
+                                         dict(ptType=pt["type"], close=round(lastClose, 4),
+                                              ma=round(standVal, 4), maP=standAcc.period,
+                                              volatile=("close", "ma")))
+                # ④ 黄金分割附近（仅 2/3 类点参与计票，1 类豁免）：
                 #    摆动段 = 前一同侧买卖点价格 → 其后至本点前（时间窗 (前点, 本点]）
                 #    的 P 周期真实K线极值（买取最高/卖取最低）；本点价格须落在任一
                 #    fibLevels 档位回撤 ±fibNearPts（绝对点数）内（判定随点固定）
                 fibLevel = fibGap = fibRef = fibExt = None
+                fib_ok = fib_rej = None
                 if self.fib_near_on and cls != 1:
                     prev = self._fx_prev_point(P, pt, "buy" if direction == "long" else "sell")
                     if prev is None:
-                        if jr is not None and jr.enabled:
-                            jr.reject(t, "fx_fib_no_ref", P, pt["time"], None,
-                                      ptType=pt["type"])
-                        continue
-                    times = self._times[P]
-                    lo = bisect_right(times, prev["time"])
-                    hi = bisect_right(times, pt["time"])
-                    lst = self.bars[P]["_list"]
-                    if direction == "long":
-                        ext = max((b["high"] for b in lst[lo:hi]), default=None)
-                        swing = (ext - prev["price"]) if ext is not None else None
+                        fib_ok = False
+                        fib_rej = ("fx_fib_no_ref", False, dict(ptType=pt["type"]))
                     else:
-                        ext = min((b["low"] for b in lst[lo:hi]), default=None)
-                        swing = (prev["price"] - ext) if ext is not None else None
-                    if swing is None or swing <= 0:
+                        times = self._times[P]
+                        lo = bisect_right(times, prev["time"])
+                        hi = bisect_right(times, pt["time"])
+                        lst = self.bars[P]["_list"]
+                        if direction == "long":
+                            ext = max((b["high"] for b in lst[lo:hi]), default=None)
+                            swing = (ext - prev["price"]) if ext is not None else None
+                        else:
+                            ext = min((b["low"] for b in lst[lo:hi]), default=None)
+                            swing = (prev["price"] - ext) if ext is not None else None
+                        if swing is None or swing <= 0:
+                            fib_ok = False
+                            fib_rej = ("fx_fib_swing_fail", False,
+                                       dict(ptType=pt["type"], refPrice=round(prev["price"], 4),
+                                            ext=round(ext, 4) if ext is not None else None))
+                        else:
+                            best = None  # (gap, level, ratio)
+                            for r in self.fib_near_levels:
+                                level = ext - r * swing if direction == "long" else ext + r * swing
+                                gap = abs(pt["price"] - level)
+                                if best is None or gap < best[0]:
+                                    best = (gap, level, r)
+                            if best[0] > self.fib_near_pts:
+                                fib_ok = False
+                                fib_rej = ("fx_fib_not_near", True,
+                                           dict(ptType=pt["type"], ptPrice=round(pt["price"], 4),
+                                                refPrice=round(prev["price"], 4), ext=round(ext, 4),
+                                                level=round(best[1], 4), ratio=best[2],
+                                                gap=round(best[0], 4), tol=self.fib_near_pts))
+                            else:
+                                fib_ok = True
+                                fibGap, fibLevel, fibRef, fibExt = best[0], best[2], prev["price"], ext
+                # 计票：必选硬门槛（原拒绝码）→ 通过票数 ≥ 生效N；不满足点存活等待下拍
+                active = [(n, ok, req, rej) for n, ok, req, rej in (
+                    ("强分型", fx_ok, self.strong_fx_req, fx_rej),
+                    ("均线分离", ma_ok, self.ma_req, ma_rej),
+                    ("收盘站线", stand_ok, self.ma_stand_req, stand_rej),
+                    ("黄金分割", fib_ok, self.fib_req, fib_rej)) if ok is not None]
+                pickNeed = pickGot = 0
+                if active:
+                    if any(req and not ok for _, ok, req, _ in active):
                         if jr is not None and jr.enabled:
-                            jr.reject(t, "fx_fib_swing_fail", P, pt["time"], None,
-                                      ptType=pt["type"], refPrice=round(prev["price"], 4),
-                                      ext=round(ext, 4) if ext is not None else None)
+                            for _, ok, req, rej in active:
+                                if req and not ok:
+                                    jr.reject(t, rej[0], P, pt["time"],
+                                              fx_strategy_key(sel, direction) if rej[1] else None,
+                                              **rej[2])
                         continue
-                    best = None  # (gap, level, ratio)
-                    for r in self.fib_near_levels:
-                        level = ext - r * swing if direction == "long" else ext + r * swing
-                        gap = abs(pt["price"] - level)
-                        if best is None or gap < best[0]:
-                            best = (gap, level, r)
-                    if best[0] > self.fib_near_pts:
+                    pickNeed = min(self.entry_pick.get(sel, 3), len(active))
+                    pickGot = sum(1 for _, ok, _, _ in active if ok)
+                    if pickGot < pickNeed:
                         if jr is not None and jr.enabled:
-                            jr.reject(t, "fx_fib_not_near", P, pt["time"],
+                            jr.reject(t, "fx_pick_count_fail", P, pt["time"],
                                       fx_strategy_key(sel, direction),
-                                      ptType=pt["type"], ptPrice=round(pt["price"], 4),
-                                      refPrice=round(prev["price"], 4), ext=round(ext, 4),
-                                      level=round(best[1], 4), ratio=best[2],
-                                      gap=round(best[0], 4), tol=self.fib_near_pts)
+                                      ptType=pt["type"], need=pickNeed, got=pickGot,
+                                      states=",".join(
+                                          f"{n}:{'过' if ok else '否'}{'必' if req else '选'}"
+                                          for n, ok, req, _ in active))
                         continue
-                    fibGap, fibLevel, fibRef, fibExt = best[0], best[2], prev["price"], ext
                 # ⑤ 上级周期同向（upperDirOn=False 跳过；全部类别）：上级周期当前笔
                 #    （列表末笔，含形成中）方向须与信号同向（买=up/卖=down）
                 upperDir = None
@@ -649,18 +719,19 @@ class FxMaEngine(BacktestEngine):
                 fired.add(key)
                 lastBar = self.bars[P]["_list"][self._cut[P] - 1]
                 short = direction == "short"
-                conds = [pt["type"]] + (["强分型"] if self.strong_fx_on else []) \
-                    + (["均线分离"] if self.ma_on else []) \
+                # conds/note 按实际通过的条件组装（可选条件未通过不列入）
+                conds = [pt["type"]] + (["强分型"] if fx_ok else []) \
+                    + (["均线分离"] if ma_ok else []) \
                     + (["站上均线" if direction == "long" else "站下均线"]
-                       if self.ma_stand_on else []) \
+                       if stand_ok else []) \
                     + ([f"黄金分割{fibLevel:g}"] if fibLevel is not None else []) \
                     + ([f"上级{UPPER_OF[P]}同向"] if self.upper_dir_on else [])
                 note = (f"{pt['type']} @ {fmtT(pt['time'])} {pt['price']:.2f}")
-                if self.strong_fx_on:
+                if fx_ok:
                     note += f"｜强分型（{kind}）{fmtT(fxTime)}"
-                if self.ma_on:
+                if ma_ok:
                     note += f"｜{self.ma_type} 分离 {abs(diff):.2f} ≥ {self.cross_min_pts} 点"
-                if self.ma_stand_on:
+                if stand_ok:
                     note += (f"｜收盘 {lastBar['close']:.2f} "
                              f"{'>' if direction == 'long' else '<'} "
                              f"{self.ma_type}{self.ma_stand1 if cls == 1 else self.ma_stand2}"
@@ -670,6 +741,8 @@ class FxMaEngine(BacktestEngine):
                              f"{fibExt:.2f}，距 {fibGap:.2f} ≤ {self.fib_near_pts} 点）")
                 if self.upper_dir_on:
                     note += f"｜上级 {UPPER_OF[P]} 当前笔 {upperDir}"
+                if active:
+                    note += f"｜条件满足 {pickGot}/{len(active)}（需{pickNeed}）"
                 note += f"｜P={P} 收盘 {lastBar['close']:.2f} 出信号"
                 sig = {
                     "periodX": P, "markRes": P,
@@ -679,6 +752,7 @@ class FxMaEngine(BacktestEngine):
                     "strongFxTime": fxTime,
                     "crossGap": round(diff, 4) if diff is not None else None,
                     "standGap": round(standGap, 4) if standGap is not None else None,
+                    "pickNeed": pickNeed, "pickGot": pickGot,
                     "fibLevel": fibLevel,
                     "fibGap": round(fibGap, 4) if fibGap is not None else None,
                     "upperDir": upperDir,

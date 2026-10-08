@@ -63,6 +63,13 @@ const RANGE_CFG = {
   secondNearPts: numArg("second-near-pts", 5.0),
   thirdStrongTrend: getStrArg("third-strong-trend", "0") !== "0",
 };
+// 震荡判定参考周期（对齐 py_chain/trading_plan.py RANGE_RES；WEB 参数中心 plan 模块
+// rangeRes，analysis_service 透传 --range-res）。开启（"240"/"D"）= 参考周期闸门：
+// 更低周期不自判 A/B、只听参考周期 regime，参考周期及以上只作锚不交易；
+// ""（off）= 关闭 → 每周期自判震荡（旧行为，与 Python 关闭口径一致，2026-10-08 对齐）
+const RANGE_RES_ARG = getStrArg("range-res", "240");
+const RANGE_RES = (RANGE_RES_ARG === "off" || RANGE_RES_ARG === "") ? "" : RANGE_RES_ARG;
+
 // 参数中心（WEB 参数配置页）整体覆盖；未知键在 JS 侧闲置无害
 const CHAN_CFG_JSON = getStrArg("chan-cfg", "");
 if (CHAN_CFG_JSON) {
@@ -310,8 +317,12 @@ function classifySecond(bis, macdArr, p, cfg) {
  * 核心：对单个周期生成「方向 + 策略」。
  *
  * 判定顺序：
- *   1. 震荡优先：isRangeBound（A 震荡）或 buildZS 最后一个中枢未离开且当前价在中枢内（B 震荡）
- *      → 方向「观望」，策略「震荡整理，观望等待方向选择」；
+ *   1. 震荡优先——判定源二选一（对齐 py_chain predictPlan，2026-10-08）：
+ *      rangeGate 给定时用参考周期 regime（替换语义：regime 震荡 → 观望（strategy
+ *      注明来源周期）；regime 非震荡 → 跳过本周期 A/B 支直接走趋势分支；regime 带
+ *      insufficient（参考周期笔 <2）→ 观望·笔数据不足）；
+ *      rangeGate 为空时按本周期自身判定：isRangeBound（A 震荡）或 buildZS 最后一个
+ *      中枢未离开且当前价在中枢内（B 震荡）→ 方向「观望」，策略「震荡整理，观望等待方向选择」；
  *   2. 趋势：获取最近笔端点上的买卖点（findBuyPoints/findSellPoints）：
  *      - 先匹配最后一笔终点上的买卖点 → 按类型映射策略；
  *      - 若最后一笔终点无买卖点（空）→ 再向前获取一笔（逐笔向前扫描最近笔端点），
@@ -326,16 +337,32 @@ function classifySecond(bis, macdArr, p, cfg) {
  *   atr        本周期 ATR
  *   lastPrice  当前最新价（判断是否在中枢区间内）
  *   bars       本周期实时K线（供震荡判定，可为空）
+ *   rangeGate  参考周期震荡 regime（planGateRow 结果；对齐 py_chain range_gate
+ *              替换语义；缺省 = 本周期自判 A/B 旧行为）
  * @returns {object} { res, direction, strategy, reason, label, pointDesc }
  *   pointDesc  找到的最近买卖点描述（如 "1卖@8-17 18:00(30262.95)"，供图上标注；震荡/无匹配时为空）
  */
 function predictPlan(opts) {
-  const { res, bis, upperBis, macdArr, lastPrice, bars } = opts;
+  const { res, bis, upperBis, macdArr, lastPrice, bars, rangeGate } = opts;
   const atr = opts.atr || 0;
   const barSec = opts.barSec || intervalSecOf(res) || 60;
   const empty = { res, direction: "观望", strategy: "数据不足", reason: "笔数量不足，无法判断", label: "数据不足" };
   if (!bis || bis.length < 2) return empty;
 
+  if (rangeGate) {
+    // 1. 震荡优先·参考周期闸门（替换语义，对齐 py_chain predictPlan(range_gate=…)）
+    if (rangeGate.range) {
+      if (rangeGate.insufficient) {
+        return { res, direction: "观望",
+                 strategy: `${rangeGate.resName || "参考周期"}笔数据不足，观望`,
+                 reason: rangeGate.reason || "", label: "数据不足" };
+      }
+      return { res, direction: "观望",
+               strategy: `震荡整理（${rangeGate.resName || "参考周期"}），观望等待方向选择`,
+               reason: rangeGate.reason || "", label: "震荡观望" };
+    }
+    // regime 非震荡 → 跳过本周期 A/B 支，直接走趋势分支
+  } else {
   // 1. 震荡优先（A：isRangeBound 横盘判定，RANGE_CFG 来自参数中心/CLI；rangeBoundOn 关闭则跳过）
   if (RANGE_CFG.rangeBoundOn !== false) {
     const rb = isRangeBound(bis, bars, atr, RANGE_CFG);
@@ -372,6 +399,7 @@ function predictPlan(opts) {
       return { res, direction: "观望", strategy: "震荡整理（中枢内），观望等待方向选择", reason, label: "震荡观望" };
     }
   }
+  } // else（自判 A/B）结束
 
   // 2. 趋势 → 获取本周期买卖点
   let buyPts = [], sellPts = [];
@@ -443,6 +471,34 @@ function predictPlan(opts) {
   // 5. 趋势但未匹配到买卖点
   const reason = `趋势（非震荡），但最近笔端点均无已确认买卖点`;
   return { res, direction: "观望", strategy: "趋势中无匹配买卖点", reason, label: "观察" };
+}
+
+// ============================================================
+// 参考周期震荡 regime（对齐 py_chain/trading_plan.py _plan_gate_row；
+// 主循环在参考周期行上顺带计算，供更低周期 predictPlan(rangeGate=…) 消费）
+// ============================================================
+
+/**
+ * 参考周期震荡 regime：笔 <2 → insufficient（更低周期观望·笔数据不足）；
+ * 否则以参考周期自身数据走 predictPlan 的 A/B 自判——label=「震荡观望」即 regime 震荡。
+ * @param {string} res       参考周期名（如 "240"）
+ * @param {Array}  bis       参考周期笔列表
+ * @param {Array}  bars      参考周期K线
+ * @param {number} atr       参考周期 ATR
+ * @param {Array}  upperBis  参考周期的上一级笔（B 支中枢归属用，可为空）
+ * @param {Array}  macdArr   参考周期 MACD（可为空）
+ * @param {number} lastPrice 最新价
+ * @returns {{range:boolean, resName:string, reason:string, insufficient?:boolean}}
+ */
+function planGateRow(res, bis, bars, atr, upperBis, macdArr, lastPrice) {
+  const name = trendResName(res);
+  if (!bis || bis.length < 2) {
+    return { range: true, insufficient: true, resName: name,
+             reason: `${name}笔数据不足（少于2笔），无法判定震荡/趋势，观望` };
+  }
+  const row = predictPlan({ res, bis, upperBis, macdArr, atr, lastPrice, bars });
+  if (row.label === "震荡观望") return { range: true, resName: name, reason: row.reason || "" };
+  return { range: false, resName: name, reason: "" };
 }
 
 // ============================================================
@@ -650,10 +706,12 @@ module.exports = {
   strategyOf,
   classifySecond,
   predictPlan,
+  planGateRow,
   dispWidth,
   padCell,
   printPlanTable,
   TREND_RES,
+  RANGE_RES,
   RES_NAME_CN,
   trendResName,
   strongFractalAfter,
@@ -934,6 +992,18 @@ async function main() {
     }
 
     // 逐周期：从大到小计算交易计划并收集报告行（表格形式统一输出）
+    // 震荡判定参考周期闸门（对齐 py_chain compute_plan；--range-res="" 关闭 → 每周期自判旧行为）
+    const gateOn = !!RANGE_RES;
+    const refSec = gateOn ? (intervalSecOf(RANGE_RES) || 0) : 0;
+    const refName = gateOn ? trendResName(RANGE_RES) : "";
+    let rangeGate = null; // 参考周期震荡 regime（参考周期行上顺带计算，随循环向更低周期传递）
+    if (gateOn && (structuredBis[RANGE_RES] || []).length < 2) {
+      // 参考周期笔不足（含整行无数据被 continue 跳过的情况）——预置不足闸
+      rangeGate = { range: true, insufficient: true, resName: refName,
+                    reason: `${refName}笔数据不足（少于2笔），无法判定震荡/趋势，观望` };
+    }
+    if (gateOn) console.log(`[震荡闸门] 参考周期 ${refName}：开启（更低周期不自判 A/B 只听门，${refName}及以上只作锚）`);
+    else console.log("[震荡闸门] rangeRes 已关闭：每个周期用 A横盘/B中枢内 各自判震荡（与引擎关闭口径一致）");
     let currentRes = prepRes;
     let upperBis = null;
     const reportRows = []; // [{symbol, res, direction, strategy}]
@@ -963,10 +1033,22 @@ async function main() {
       // 取最近 60 笔即可（计划只看最新结构）
       if (curBis.length > 60) curBis = curBis.slice(-60);
 
-      // 计算交易计划
-      const p = predictPlan({
-        res, bis: curBis, upperBis, macdArr, atr, lastPrice, bars: rawBars,
-      });
+      // 计算交易计划（闸门开启：≥参考周期固定观望只作锚；更低周期听 regime 不自判 A/B）
+      let p;
+      if (gateOn && (intervalSecOf(res) || 0) >= refSec) {
+        p = { res, direction: "观望", strategy: "参考周期，观望（只作锚不交易）",
+              reason: `不低于震荡参考周期${refName}，不参与交易计划判定`,
+              label: "参考周期", pointDesc: "" };
+      } else {
+        p = predictPlan({
+          res, bis: curBis, upperBis, macdArr, atr, lastPrice, bars: rawBars,
+          rangeGate: gateOn ? rangeGate : undefined,
+        });
+      }
+      if (gateOn && res === RANGE_RES) {
+        // 参考周期行上顺带计算 regime（此刻 upperBis = 更高一级笔），供更低周期听门
+        rangeGate = planGateRow(res, curBis, rawBars, atr, upperBis, macdArr, lastPrice);
+      }
 
       // 汇总报告行
       reportRows.push({ symbol: SYMBOL, res, direction: p.direction, strategy: p.strategy, reason: p.reason || "" });
