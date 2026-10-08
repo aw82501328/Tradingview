@@ -47,7 +47,8 @@ function candidateBadges(r) {
 //          按触发价成交，与实盘 MT5 SL/TP 同口径）；structure 模式：activeTp=主动止盈 |
 //          trailStop=跟踪止盈（同向3/4类点提损后触发）（名称同后端 EXIT_NAMES / bt_journal.EXIT_LABELS）
 function exitTypeName(t) {
-  if (t === 'half') return '够笔止盈';
+  if (t === 'half') return '检测够笔止盈';
+  if (t === 'halfMr') return '背驰够笔止盈';
   if (t === 'stopSr') return '支阻位止损';
   if (t === 'stopBe') return '保本止损';
   if (t === 'close') return '过高低点止盈';
@@ -59,7 +60,7 @@ function exitTypeName(t) {
   return t || '-';
 }
 function exitEventsDesc(r) {
-  const names = { breakeven: '保本', half: '够笔', close: '过高低', stopSr: '损', stopBe: '保损',
+  const names = { breakeven: '保本', half: '检够笔', halfMr: '背够笔', close: '过高低', stopSr: '损', stopBe: '保损',
                   stop: '固损', takeProfit: '固盈', activeTp: '主盈', trailStop: '跟盈',
                   trailRaise: '提' };
   return (r.exits || []).map(e => names[e.type] || e.type).join('·') || '';
@@ -89,7 +90,7 @@ function exitDisplayRows(r) {
     final.lots = halfLots;
     final.pnl = totalPnl == null || halfPnl == null ? null : totalPnl - halfPnl;
     if (!r.exitType) final.label = '剩余持仓';
-    return [{time:half.time,price:half.price,type:'half',label:'够笔止盈',lots:halfLots,pnl:halfPnl},final];
+    return [{time:half.time,price:half.price,type:'half',label:'检测够笔止盈',lots:halfLots,pnl:halfPnl},final];
   }
   const isFinalEv = (e, i) => i === evs.length - 1 && r.exitType && e.type === r.exitType;
   const parts = evs.filter((e, i) => e.lots && !isFinalEv(e, i));
@@ -98,7 +99,8 @@ function exitDisplayRows(r) {
     label:exitTypeName(e.type), lots:numeric(e.lots), pnl:partPnl(e)}));
   const partsLots = parts.reduce((s, e) => s + (numeric(e.lots) || 0), 0);
   const sumParts = rows.reduce((s, x) => s + (x.pnl || 0), 0);
-  final.lots = lots == null ? null : Math.max(0, lots - partsLots);
+  // 剩余手数取整（开/平仓手数恒整数口径；旧数据含小数仍按 2 位兜底显示）
+  final.lots = lots == null ? null : Math.max(0, Math.round(lots - partsLots));
   final.pnl = totalPnl == null ? null : totalPnl - sumParts;
   if (!r.exitType) final.label = '剩余持仓';
   return rows.concat([final]);

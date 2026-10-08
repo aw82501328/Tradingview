@@ -148,6 +148,12 @@ CHAN_CFG_DEFAULTS = dict(CHAN_CFG)
 _cfg_lock = threading.Lock()
 
 
+# wideBarPointsOf/nearDoubleOn 的按入参缓存（值派生自 CHAN_CFG；apply_cfg/
+# reset_cfg 改配置时经 _cfg_derived_invalidate 整体失效）
+_WIDE_BAR_MEMO = {}
+_NEAR_DOUBLE_MEMO = {}
+
+
 def apply_cfg(overrides):
     """应用参数中心覆盖（进程内全局生效）：只接受 CHAN_CFG_DEFAULTS 已有的键，
     值按默认值类型校验（bool 严格、int/float 数值化），未知键忽略。
@@ -174,6 +180,8 @@ def apply_cfg(overrides):
                     continue
             CHAN_CFG[k] = v
             applied[k] = v
+        if applied:
+            _cfg_derived_invalidate()
     return applied
 
 
@@ -182,6 +190,14 @@ def reset_cfg():
     with _cfg_lock:
         CHAN_CFG.clear()
         CHAN_CFG.update(CHAN_CFG_DEFAULTS)
+        _cfg_derived_invalidate()
+
+
+def _cfg_derived_invalidate():
+    """配置变化时失效「按周期入参缓存、值来自 CHAN_CFG」的派生查询
+    （wideBarPointsOf/nearDoubleOn——热路径每调用读 CHAN_CFG 改查表）。"""
+    _WIDE_BAR_MEMO.clear()
+    _NEAR_DOUBLE_MEMO.clear()
 
 
 def active_overrides():
@@ -1279,9 +1295,12 @@ def biStep(ctx, head, k):
                     head = _stkCons(k, head[1])       # result[-1] = k
         # 近等双顶/双底平台取后顶/后底：价差只比实体；锚点用替换前的 last
         # （更极端的影线替换已先改 head，近等仍相对原端点判断，与原顺序一致）。
-        shifted = tryNearEqualSameType(ctx, last, head, k)
-        if shifted is not None:
-            return shifted
+        # ctx.nearDouble 前置：本调用点 head/last 非 None、类型必相等，函数内的
+        # 同判据恒过——关闭近等的周期免一次调用 + 三次 dict.get。
+        if ctx.nearDouble:
+            shifted = tryNearEqualSameType(ctx, last, head, k)
+            if shifted is not None:
+                return shifted
         return head
     # 异类型
     # MACD 端点让位必须保住整根候选笔的双向极值（等价允许）。
@@ -1739,6 +1758,15 @@ def _next_bi_returns(bis, i, j, hi, lo):
     return min(run_zg, nhi) > max(run_zd, nlo)
 
 
+# buildZS 内容指纹缓存：中枢只依赖笔五元组（type/起终时间/起终价格）与 barSec。
+# 回测交易段每根 fine 收盘都要走计划判定/结构上下文/买卖点匹配/背驰评估，对同一
+# （未变化的）笔列表反复重建同一批中枢——按内容指纹缓存，未变即复用。
+# 命中与未命中路径统一返回**浅拷贝**：buildZSByUpper 会给中枢 dict 原地挂
+# upperStart/upperEnd，共享底层 dict 会把缓存污染成「带上级标注」的状态。
+_ZS_MEMO = {}
+_ZS_MEMO_MAX = 4096
+
+
 def buildZS(bis, barSec=0):
     """构建笔中枢（基于笔序列，标准缠论笔中枢）。
     取连续三笔（笔序列天然交替）的重叠区间构成中枢：
@@ -1759,6 +1787,11 @@ def buildZS(bis, barSec=0):
     """
     if not bis or len(bis) < 3:
         return []
+    key = (barSec or 0, tuple((b["type"], b["startTime"], b["endTime"],
+                               b["startPrice"], b["endPrice"]) for b in bis))
+    ent = _ZS_MEMO.get(key)
+    if ent is not None:
+        return [dict(z) for z in ent]
     n = len(bis)
     pad = (barSec or 0) * 5  # 左右各外扩 5 根K线（本周期时长）
     hi = lambda b: max(b["startPrice"], b["endPrice"])
@@ -1843,7 +1876,10 @@ def buildZS(bis, barSec=0):
             i = j  # 从离开中枢的笔开始重新扫描
         else:
             i += 1  # 三笔不重叠，滑窗
-    return zss
+    if len(_ZS_MEMO) >= _ZS_MEMO_MAX:
+        _ZS_MEMO.clear()
+    _ZS_MEMO[key] = zss
+    return [dict(z) for z in zss]
 
 
 def buildZSByUpper(lowerBis, upperBis, tolSec=0, open_last=True):
@@ -2333,28 +2369,44 @@ def calibrateBiTimes(bis, bigBars, refBars, bigIntervalSec):
     return bis
 
 
+# intervalSecOf 结果记忆化：笔构建热路径（biStep/wideBarPointsOf/结构上下文）
+# 每步高频调用，原先每次都走 re.fullmatch 分支链；周期值域有限且可哈希，直接查表。
+_INTERVAL_SEC_MEMO = {}
+
+
 def intervalSecOf(res):
     """周期 → 单根K线时长（秒）。注意 "30" = 30分钟，"30S" = 30秒（TradingView resolution 后缀 S 表秒级）。"""
+    memo = _INTERVAL_SEC_MEMO
+    try:
+        return memo[res]
+    except (KeyError, TypeError):
+        pass
     r = str(res).upper()
-    if re.fullmatch(r"\d+S", r):
-        return int(r[:-1])  # "30S" → 30（秒级）
-    if r == "3":
-        return 180
-    if r == "5":
-        return 300
-    if r == "15":
-        return 900
-    if r == "30":
-        return 1800
-    if r == "60" or r == "1H":
-        return 3600
-    if r == "240" or r == "4H":
-        return 14400
-    if r == "D" or r == "1D":
-        return 86400
-    if r == "W" or r == "1W":
-        return 604800
-    return 0
+    if r.endswith("S") and r[:-1].isdigit():
+        v = int(r[:-1])  # "30S" → 30（秒级）
+    elif r == "3":
+        v = 180
+    elif r == "5":
+        v = 300
+    elif r == "15":
+        v = 900
+    elif r == "30":
+        v = 1800
+    elif r == "60" or r == "1H":
+        v = 3600
+    elif r == "240" or r == "4H":
+        v = 14400
+    elif r == "D" or r == "1D":
+        v = 86400
+    elif r == "W" or r == "1W":
+        v = 604800
+    else:
+        v = 0
+    try:
+        memo[res] = v
+    except TypeError:
+        pass  # 不可哈希的入参（异常用法）不缓存，行为不变
+    return v
 
 
 _NEAR_DOUBLE_SWITCH_BY_SEC = {180: "nearDouble3", 900: "nearDouble15", 3600: "nearDouble60",
@@ -2368,15 +2420,23 @@ def wideBarPointsOf(res):
     单根K线振幅 ≥ 返回值时，不参与分型终点侧三根的反向贯穿检查。
     res 接受周期码（'3'/'15'/'60'/'240'/'D'，含 1H/4H/1D 别名）或 barSec 秒数 int。
     未列周期、缺省、或配置为 0 时返回 0（不豁免）。"""
+    try:
+        return _WIDE_BAR_MEMO[res]
+    except (KeyError, TypeError):
+        pass
     if not CHAN_CFG.get("wideBarOn", True):
-        return 0.0
-    if res is None or isinstance(res, bool):
-        return 0.0
-    sec = res if isinstance(res, int) else intervalSecOf(res)
-    key = _WIDE_BAR_POINTS_BY_SEC.get(sec or 0)
-    if not key:
-        return 0.0
-    return float(CHAN_CFG.get(key) or 0)
+        v = 0.0
+    elif res is None or isinstance(res, bool):
+        v = 0.0
+    else:
+        sec = res if isinstance(res, int) else intervalSecOf(res)
+        key = _WIDE_BAR_POINTS_BY_SEC.get(sec or 0)
+        v = float(CHAN_CFG.get(key) or 0) if key else 0.0
+    try:
+        _WIDE_BAR_MEMO[res] = v
+    except TypeError:
+        pass
+    return v
 
 
 def nearDoubleOn(res):
@@ -2386,11 +2446,21 @@ def nearDoubleOn(res):
     一律 False——沿用旧口径 intervalSecOf(res) or 0 >= 3600 的失败安全语义。
     注意：旧口径对 W(604800) 会返回 True，此处收窄为 False；全链路（画笔/回测/对拍）
     无 W 调用点，零实际影响。"""
+    try:
+        return _NEAR_DOUBLE_MEMO[res]
+    except (KeyError, TypeError):
+        pass
     if isinstance(res, bool):
-        return False
-    sec = res if isinstance(res, int) else intervalSecOf(res)
-    key = _NEAR_DOUBLE_SWITCH_BY_SEC.get(sec or 0)
-    return bool(CHAN_CFG.get(key)) if key else False
+        v = False
+    else:
+        sec = res if isinstance(res, int) else intervalSecOf(res)
+        key = _NEAR_DOUBLE_SWITCH_BY_SEC.get(sec or 0)
+        v = bool(CHAN_CFG.get(key)) if key else False
+    try:
+        _NEAR_DOUBLE_MEMO[res] = v
+    except TypeError:
+        pass
+    return v
 
 
 # ============================================================

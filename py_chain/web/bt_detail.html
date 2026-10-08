@@ -320,7 +320,7 @@ function btDetailExitsHtml(s) {
   const total = cats.reduce((n, c) => n + c.n, 0);
   return `<div class="bt-distribution">${donutHtml(cats, String(total), '次出场')}
     <div class="bt-exit-legend">${cats.map(c => `<div class="bt-exit-row"><span><i class="sw" style="background:${c.color}"></i>${c.label}</span><b>${c.n} 次</b><span>${total ? Math.round(c.n / total * 100) + '%' : '—'}</span></div>`).join('')}</div></div>
-    <p class="bt-note">够笔止盈 ${Number(ex.half || 0)} 次（部分平仓），单独计数，不纳入上方占比。${total ? '' : '暂无完整出场样本。'}</p>`;
+    <p class="bt-note">够笔止盈 ${Number(ex.half || 0) + Number(ex.halfMr || 0)} 次（检测 ${Number(ex.half || 0)}/背驰 ${Number(ex.halfMr || 0)}，部分平仓），单独计数，不纳入上方占比。${total ? '' : '暂无完整出场样本。'}</p>`;
 }
 
 // 亏损归因条（占比堆叠条 + 分类明细（计数、占比、双向盈亏条），数字口径与旧文本版一致

@@ -26,6 +26,9 @@
   一致，增量漂移会跨重同步点存活导致后续 bis 偏离，已回退——见 SPEC §11。）
 """
 
+from itertools import accumulate
+from operator import add
+
 from .chan_core import (BiBuildCtx, biSeqStep, biStep, biPair, fixBiExtremes,
                         _stkLen, biListFromHead, countRaw, CHAN_CFG,
                         applyNearDoubleOpen, _markLockedPivots, resetBiFlags)
@@ -243,17 +246,22 @@ class BiIncBuilder:
 
     def _sync_gap_cum(self, m, force=False):
         """同步逐对跳空差值与 _rawCount 前缀和。块 p 一旦不是末块（p ≤ m-2）即固化；
-        末对 (m-2, m-1) 与末块计数随末块包含合并变化，每次重算（临时值）。"""
+        末对 (m-2, m-1) 与末块计数随末块包含合并变化，每次重算（临时值）。
+
+        批量段用切片+推导+accumulate（全量重建时此处曾以逐元素 append 方式
+        全前缀循环，是重建路径的固定大头）；产出与逐元素版逐位一致。"""
         merged = self._merged
-        for p in range(self._gap_final, max(self._gap_final, m - 2)):
-            a, b = merged[p], merged[p + 1]
-            up = b.get("rawLow", b["low"]) - a.get("rawHigh", a["high"])
-            dn = a.get("rawLow", a["low"]) - b.get("rawHigh", b["high"])
-            if p < len(self._gap_diffs):
-                self._gap_diffs[p] = (up, dn)
+        gf = self._gap_final
+        end = m - 2 if m >= 2 else 0
+        if end > gf:
+            new = [(b.get("rawLow", b["low"]) - a.get("rawHigh", a["high"]),
+                    a.get("rawLow", a["low"]) - b.get("rawHigh", b["high"]))
+                   for a, b in zip(merged[gf:end], merged[gf + 1:end + 1])]
+            if gf < len(self._gap_diffs):
+                self._gap_diffs[gf:end] = new
             else:
-                self._gap_diffs.append((up, dn))
-        self._gap_final = max(self._gap_final, m - 2 if m >= 2 else 0)
+                self._gap_diffs.extend(new)
+        self._gap_final = max(gf, end)
         if m >= 2:
             p = m - 2
             a, b = merged[p], merged[p + 1]
@@ -264,9 +272,14 @@ class BiIncBuilder:
             else:
                 self._gap_diffs.append((up, dn))
         # cum 有效到 m-1（cum[m-1] 含块 m-2，已固化）
-        for i in range(self._cum_final, m):
-            self._cum.append(self._cum[-1] + merged[i - 1]["_rawCount"])
-        self._cum_final = max(self._cum_final, m)
+        if m > self._cum_final:
+            base = self._cum[-1]
+            self._cum.extend(v + base for v in
+                             accumulate((x["_rawCount"] for x in
+                                         merged[self._cum_final - 1:m - 1]), add))
+            self._cum_final = m
+        else:
+            self._cum_final = max(self._cum_final, m)
 
     def _splice_bis(self, head, merged, ctx, k):
         """阶段三尾部拼接 + 端点修正（只作用于尾部；冻结前缀按引用复用）。

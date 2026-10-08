@@ -102,6 +102,8 @@ const EXIT_CFG = {
   stopSrPct: getArg("exit-stop-sr-pct", 100) || 100,
   stopBeOn: boolArg("exit-stop-be-on", true),
   stopBePct: getArg("exit-stop-be-pct", 100) || 100,
+  halfMrOn: boolArg("exit-half-mr-on", false),
+  halfMrPct: getArg("exit-half-mr-pct", 50) || 50,
   halfOn: boolArg("exit-half-on", true),
   halfPct: getArg("exit-half-pct", 50) || 50,
   closeOn: boolArg("exit-close-on", true),
@@ -902,22 +904,26 @@ function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
     for (const b of mbars) if (b.time > T) return b;
     return null;
   };
-  // 按比例换算本次平仓手数（占剩余仓位；≥100 取全部；引擎 _exit_lots 同口径）
+  // 按比例换算本次平仓手数（占总仓位=初始手数，非剩余仓位；≥100 取全部剩余；
+  // 引擎 _exit_lots 同口径）。平仓手数恒整数：⌊总手数×比例%⌋ 向下取整不多平，
+  // 不足 1 手至少平 1 手（0 手事件无成交且方式 latch 消费后剩余仓位永远平不掉，
+  // 2026-10-08 trade#6 案例），封顶剩余手数——剩余本身不足 1（旧数据残留小数）时全平剩余
   const exitLots = (pct) => {
-    const ev = (pct == null || pct >= 100) ? lotsLeft
-      : Math.max(0, Math.round(lotsLeft * pct / 100 * 100) / 100);
+    if (pct == null || pct <= 0 || pct >= 100) return lotsLeft;
+    let ev = Math.floor(lotsTotal * pct / 100);
+    if (ev < 1) ev = 1;
     return Math.min(ev, lotsLeft);
   };
   const take = (type, t, p, pct) => {
     const evLots = exitLots(pct);
-    lotsLeft = Math.round((lotsLeft - evLots) * 100) / 100;
+    lotsLeft = lotsLeft - evLots;
     events.push({ type, time: t, price: p, lots: evLots, final: lotsLeft <= 1e-9 });
     return lotsLeft <= 1e-9;
   };
 
   const events = [];
   let stop = stopRef;
-  let be = false, half = false, closed = false;
+  let be = false, half = false, closed = false, closeDone = false, halfMr = false;
   let trailMark = entryT, trailRaised = false;
   const stopFired = { stopSr: false, stopBe: false, trailStop: false };
   const trailOn = () => ec.trailOn && trailRaised;
@@ -930,6 +936,18 @@ function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
       stop = beStop; // 保本：止损位上移至 beStop（进场K线极值±保本滑点）
       events.push({ type: "breakeven", time: tp1.time, price: tp1.price });
     }
+    // 背驰周期够笔（引擎 halfMr 同口径）：事件源同 TP1（不限顺势），halfMr latch 一次性
+    if (ec.halfMrOn && tp1 && tp1.time <= upto && !halfMr) {
+      const nb = nextOpen(tp1.time);
+      if (nb) {
+        halfMr = true;
+        be = true;  // 剩余仓位止损移至 beStop
+        stop = beStop;
+        lastFill = nb.time;
+        if (take("halfMr", nb.time, nb.open, ec.halfMrPct)) return "close";
+        return "half"; // 部分平仓：挂起拍跳过止损检查（同引擎单事件）
+      }
+    }
     if (ec.halfOn && trend && t5 != null && t5 <= upto && !half) {
       const nb = nextOpen(t5);
       if (nb) { // 触发后无下一根 → 未成交（与引擎口径一致）
@@ -941,12 +959,15 @@ function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
         return "half";
       }
     }
+    // tp3a/t5 是「首个匹配」事件，一旦存在每拍都满足——部分平仓（closePct<100）
+    // 须 closeDone latch 一次性消费，防逐拍重复挂起（引擎 closeDone 同口径）
     const closeT = trend ? (tp3a ? tp3a.time : null) : t5;
-    if (ec.closeOn && closeT != null && closeT <= upto) {
+    if (ec.closeOn && !closeDone && closeT != null && closeT <= upto) {
       const nb = nextOpen(closeT);
       if (nb) {
         lastFill = nb.time;
         if (take("close", nb.time, nb.open, ec.closePct)) return "close";
+        closeDone = true; // 部分平仓：该方式一次性消费
         return "half"; // 过高低点止盈部分平仓：挂起拍跳过止损检查（同引擎单事件）
       }
     }
@@ -1421,7 +1442,8 @@ async function main() {
     // 信号时间早于终局时间的同向新信号被过滤；晚于终局时间（平仓后）可再进场。
     const openPos = { long: null, short: null };
     const EXIT_NAMES = {
-      breakeven: "保本", half: "够笔止盈", close: "过高低点止盈",
+      breakeven: "保本", halfMr: "背驰够笔止盈", half: "检测够笔止盈",
+      close: "过高低点止盈",
       stopSr: "支阻位止损", stopBe: "保本止损", trailStop: "跟踪止盈",
       trailRaise: "跟踪止盈上移", stillOpen: "仍持仓",
     };

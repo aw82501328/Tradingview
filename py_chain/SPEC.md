@@ -170,7 +170,7 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 ```
 【进场】交易计划给策略 → 三个公共条件 → 策略专属条件 → 进场信号（画在背驰级别）
         → 下一根K线开盘价成交
-【出场】持仓后每根收盘判定：保本 → 够笔止盈 → 过高低点止盈 → 止损/跟踪止盈 → 跟踪止盈上移 → 结算（× 手数；出场方式可配置：开关+平仓比例，默认=原行为）
+【出场】持仓后每根收盘判定：保本 → 背驰周期够笔 → 检测周期够笔 → 过高低点止盈 → 止损/跟踪止盈 → 跟踪止盈上移 → 结算（× 手数；出场方式可配置：开关+平仓比例，默认=原行为）
 ```
 
 ### 2.1.2 进场
@@ -261,19 +261,20 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 
 持仓后**每根 K 线收盘**判定一次；**同一根 K 线内按固定顺序只看第一个命中的事件**：
 
-> **保本 → 够笔止盈 → 过高低点止盈 → 止损/跟踪止盈穿越 → 跟踪止盈上移**
+> **保本 → 背驰周期够笔 → 检测周期够笔 → 过高低点止盈 → 止损/跟踪止盈穿越 → 跟踪止盈上移**
 
 所有成交型出场统一在**触发 K 线的下一根开盘价**成交；触发 K 线若已是最后一根则未成交（持仓保持 `open`，按最新收盘价 mark-to-market 收尾）。
 
-**出场方式可配置（2026-10-08；参数中心 entry 模块「出场方式」组，`EXIT_MODE_DEFAULTS` 同名直通引擎）**：五种方式各 = 启用开关 + 平仓比例（% ，占当前剩余仓位 `lotsLeft`；**至少启用一种**，`param_center.update` 跨键校验）。默认 = 现网行为（跟踪止盈默认关）。比例 <100% 为**部分平仓**：事件带 `lots` 手数，每种方式一次性触发（half/TP3 由挂起语义天然一次；止损类部分平仓按 `stopSrFired/stopBeFired/trailFired` latch 防逐拍重触发），剩余仓位由其它启用方式了结或期末 mark-to-market。关闭的方式触发时不离场（位计算与状态迁移照旧维护）。
+**出场方式可配置（2026-10-08；参数中心 entry 模块「出场方式」组，`EXIT_MODE_DEFAULTS` 同名直通引擎；2026-10-08 够笔止盈拆两源——背驰周期/检测周期共一张卡）**：六种方式各 = 启用开关 + 平仓比例（% ，**占总仓位=初始开仓手数，非剩余仓位**；**至少启用一种**，`param_center.update` 跨键校验）。默认 = 现网行为（背驰周期够笔、跟踪止盈默认关，旧基线可比）。比例 <100% 为**部分平仓**：事件带 `lots` 手数，**恒整数**（`_exit_lots`：⌊总手数×比例%⌋ 向下取整、不足1手平1手、封顶剩余 `lotsLeft`），每种方式一次性触发（half/halfMr/close 分别用 `halfDone/halfMrDone/closeDone` latch——tp1/tp3a/seg5 是首个匹配事件，触发条件一旦满足每拍都成立，必须 latch；止损类部分平仓按 `stopSrFired/stopBeFired/trailFired` latch 防逐拍重触发），剩余仓位由其它启用方式了结或期末 mark-to-market。剩余手数本身不足 1（旧数据残留小数）时取全部剩余，防 0 手空事件与挂死尾仓。关闭的方式触发时不离场（位计算与状态迁移照旧维护）。
 
 | 顺序 | 事件 | 触发条件 | 动作 |
 |------|------|----------|------|
 | 1 | **保本** `breakeven` | 背驰周期出现进场后第一笔**有利方向**的完成笔（做空→down / 做多→up，`find_bi_event`） | 止损位从「止损参考位」上移到**保本位 beStop**（不动仓位，仅状态迁移） |
-| 2 | **够笔止盈** `half` | **仅顺势**：检测周期出现首个有利方向、**合并后 ≥5 根 K** 且有成笔预期的形成段（`forming_seg_ready`） | 按比例平仓（默认 50%）；剩余仓位止损移到 beStop |
-| 3 | **过高低点止盈** `close` | **顺势**：检测周期有利方向笔**破前高 / 破前低**（`find_bi_event(..., break_prev=True)`）；**逆势**：达到上述「形成段 ≥5 根 K」条件 | 按比例平仓（默认 100% 终局） |
-| 4 | **止损** `stopSr` / `stopBe` / **跟踪止盈** `trailStop` | K 线**盘中**触及止损位（做空 `high > 位` / 做多 `low < 位`）；跟踪止盈上移过（`trailRaised`）记 `trailStop` | 按比例平仓（默认 100% 终局） |
-| 5 | **跟踪止盈上移** `trailRaise`（仅迁移） | 信号流出现**同向 3类买卖点**（`wait3Buy/waitBuy/wait3Sell/waitSell`，含被同向互斥抑制的；同 fxma 结构点驱动） | 止损一次性上移到 点价∓跟踪止盈滑点（只上移、水位只进不退；本拍上移下一拍生效） |
+| 2 | **背驰周期够笔** `halfMr`（默认关） | 背驰周期出现进场后第一笔**有利方向**完成笔（与 TP1 保本同事件源，**不限顺势**） | 按比例平仓（默认 50%）；剩余仓位止损移到 beStop |
+| 3 | **检测周期够笔** `half`（原「够笔止盈」） | **仅顺势**：检测周期出现首个有利方向、**合并后 ≥5 根 K** 且有成笔预期的形成段（`forming_seg_ready`） | 按比例平仓（默认 50%）；剩余仓位止损移到 beStop |
+| 4 | **过高低点止盈** `close` | **顺势**：检测周期有利方向笔**破前高 / 破前低**（`find_bi_event(..., break_prev=True)`）；**逆势**：达到上述「形成段 ≥5 根 K」条件 | 按比例平仓（默认 100% 终局） |
+| 5 | **止损** `stopSr` / `stopBe` / **跟踪止盈** `trailStop` | K 线**盘中**触及止损位（做空 `high > 位` / 做多 `low < 位`）；跟踪止盈上移过（`trailRaised`）记 `trailStop` | 按比例平仓（默认 100% 终局） |
+| 6 | **跟踪止盈上移** `trailRaise`（仅迁移） | 信号流出现**同向 3类买卖点**（`wait3Buy/waitBuy/wait3Sell/waitSell`，含被同向互斥抑制的；同 fxma 结构点驱动） | 止损一次性上移到 点价∓跟踪止盈滑点（只上移、水位只进不退；本拍上移下一拍生效） |
 
 > **「合并后 ≥5 根 K」是什么意思**：用缠论 K 线包含合并后的结果计数——检测周期当前形成段自段起点块算起，**合并后满 5 块**即视为「具备成笔预期」，可提前减半或离场（`EXIT_MIN_MERGED=5`，与 `chan_core` 成笔判定 `isValid` 的 `gap>=4` 同一口径）。末笔延伸创新极值 → 锚点右移、计数归零。
 
@@ -495,7 +496,7 @@ run() 批量路径成交 bar 当拍未收盘，存在 ≤1 根 fine bar 的微�
 
 ## 2.3 强分型均线V1（fxma_v1，2026-09-30 接入；与缠论V1并行）
 
-第二交易策略：**缠论买卖点 + 强分型 + 均线分离 + 收盘站线 + 可选黄金分割附近/上级周期同向（2026-10-03 增，默认关）+ 固定点数止损止盈**。引擎 `py_chain/fx_ma.py`
+第二交易策略：**缠论买卖点 + 强分型 + 均线分离 + 收盘站线 + 可选黄金分割附近/上级周期同向（2026-10-03 增，默认关）+ 可选次级别/次次级别背驰（2026-10-08 增，默认关，缠论V1 lowerDiverge 同源）+ 固定点数止损止盈**。引擎 `py_chain/fx_ma.py`
 （`FxMaEngine(BacktestEngine)` 子类，step_to/run 接口与缠论V1 完全一致），工作台侧
 `.cursor/skills/fxma-entry/scripts/fxma_entry.js`（同一套规则，工作台口径差同 §2.1.5.2）。
 复用基类增量笔机制（_advance_cut/BiIncBuilder/分型/MACD/ATR），**跳过支阻位与交易计划链路**
@@ -534,12 +535,23 @@ bt_batch 子进程与 live_trader._build_engine 共用）。
    （周期链 30S→3→15→60→240）**当前笔**（列表末笔，含形成中）方向须与信号同向——买=up /
    卖=down；上级无笔（`fx_upper_no_bi`）/ 方向相反（`fx_upper_dir_fail`）不消费点
    （上级笔变化时刻必为 P 收盘边界，逐拍评估不漏）。关闭后跳过本条件。
-7. **时窗与触发**：所选条件齐备的首个收盘拍出信号（每个买卖点只触发一次；`pointValidBars` 根内
+7. **次级别/次次级别背驰**（`divLowerOn` 开关，**默认关**，2026-10-08 接入；参与计票）：
+   完整复用缠论V1「以下级别背驰」同源判定——`mark_entry.lowerDiverge`（`findDivergePoints`
+   双判据背驰 + `sinkChainConfirm` 区间套下沉链校验，SPEC §2.2.3 同规则），落在次级别还是
+   次次级别由下沉链结构自动归属（检测周期 P 自身不算）；引擎侧笔取 `_structure_bis`
+   结构过滤视图（与买卖点识别同口径），工作台侧用画笔落盘快照 + 次级别K线现算 MACD。
+   时间窗=**点锚定·粘性**：存在方向匹配的下沉链候选背驰点且 `point.time ≥ pt.time − 1根
+   P 周期K线`（容差对齐次级别与 P 级极值边界差）即通过，之后持续有效直到点作废/反向点
+   （与强分型粘性语义一致）；无候选（`fx_no_lower_diverge`，附已扫级别与最近候选时间）
+   不消费点。P=3 且 30S 未加载时无更低级别 → 条件永不通过（开启即等效停用 3 分钟周期
+   信号）；下沉链行为跟随全局 CHAN_CFG（sinkSkipLevel/divergeReferByZs 等），与缠论V1
+   同源同参。关闭后跳过本条件。
+8. **时窗与触发**：所选条件齐备的首个收盘拍出信号（每个买卖点只触发一次；`pointValidBars` 根内
    未齐备作废，0=不限；`pointValidPts` 盘中价距点极值上限——买=评估根最高价−买点最低价、
    卖=卖点最高价−评估根最低价，0=不限，超距该拍不消费点、**等待**价格回到范围内（点不作废），
    reject 码 `fx_point_drift_fail`）；信号拍=决策拍=P 收盘边界。`strongFxOn`/`maOn`/`maStandOn`/
-   `fibNearOn`/`upperDirOn` 可独立关闭——全关时退化为纯买卖点策略（点属所选类别且未失效
-   即当拍收盘触发）。
+   `fibNearOn`/`divLowerOn`/`upperDirOn` 可独立关闭——全关时退化为纯买卖点策略（点属所选
+   类别且未失效即当拍收盘触发）。
 
 ### 2.3.2 成交与出场
 
@@ -560,7 +572,8 @@ bt_batch 子进程与 live_trader._build_engine 共用）。
     仍受容量约束），该类前一笔**终局**（止损/trailStop/activeTp 全平）后即可再开
     （主动止盈部分平仓不释放）；points 满仓一笔=容量制单笔特例，
     互斥文案不变。分批分工（卖点一律镜像）：
-    - **1/2类入场**对半——主动止盈半份（`lots`/4）：目标=入场点之前同周期最近**已确认
+    - **1/2类入场**对半——半仓=⌊`lots`/2⌋ 整手（开/平仓手数恒整数）；主动止盈半份
+      =max(1, ⌊半仓/2⌋，小手数退化触及全平）：目标=入场点之前同周期最近**已确认
       笔端点**价（多头前高=最近上笔终点/空头前低=最近下笔终点；只取笔端点，不要求该
       端点已被识别为买卖点——买卖点识别须反向笔走完+背驰、滞后可达数小时，强势突破段
       会两头够不着（2026-10-07 trade#11 前高止盈落空案例）；`_forming` 形成中笔端点
@@ -808,3 +821,44 @@ JS/Python 双端一致（`biStep` 阶段二「间隔不足→回溯替换」分�
 验证锚点（逐拍回放对拍）：全开产出 `short X=60 wait2Sell markRes=3 @07-07 06:33 4168.65，
 nearSr=4165.61（1h fib0.5），06:36 成交 4166.95`；默认关与基线逐位一致（07-03 信号/成交不变）。
 新增 test_rule_fixes.py（15 用例）；web/params.html entry 卡新增「规则修复」分组。
+
+## 全量回测提速 P0（保真缓存/微优化）+ P1（单品种子进程化）（2026-10-08）
+
+归因（当日实测）：chan 全量（XAUUSD fine=3m、lead=90D、6/3→10/2）998.7s / 39926 步，
+步成本随前缀深度增长（3m 前缀 3万→6.8万根，~11ms/步→尾部 ~40ms）。新鲜 cProfile 显示
+`_advance_cut` 真实大头是 biStep 重放机器（锁变化全量重建 + ATR 跳空阈值回卷 + 其
+_endSideExtremes/fractalRangeClear 放大器与 3.4 亿次 dict.get），链路重算侧（buildZS
+无缓存 101 次/步、structurePeriods、fine plan 每步 miss）占比被 cProfile 膨胀高估——
+修完后实测占比 ~5%。resync_all ~5%（尾部 ~11%）；sr_zone 有界（300 根窗）非瓶颈。
+
+**P0 保真优化（输出逐位一致；A/B `_ab_p0_perf.py`：禁 zs memo+全量 fine plan 的基线
+vs 优化后，25 天窗 trades/signals/stats/bis+journal 9492 行剥墙钟逐位一致；全窗 stats
+与 10-08 18:53 生产 run footer 逐项全等；`test_engine_lock_parity`/`test_warmup_faststart`
+等 190+ 用例全绿）**：
+- `chan_core.buildZS` 内容指纹 memo（`_ZS_MEMO`，key=(barSec, 笔五元组×全表)；命中/未命中
+  统一返回浅拷贝——`buildZSByUpper` 会原地挂 upperStart/upperEnd，共享 dict 会污染缓存；
+  `_ZS_MEMO_MAX=4096` 溢出整体清空）。`buildZSByUpper` 本身不 memo（长列表指纹不划算，
+  内层 buildZS memo 已覆盖其大头）。
+- `intervalSecOf` 查表记忆化（原每调用 re.fullmatch，笔构建热路径百万次/窗）；
+  `wideBarPointsOf`/`nearDoubleOn` 按入参缓存（`apply_cfg`/`reset_cfg` 经
+  `_cfg_derived_invalidate` 整体失效——测试代码若直接改 CHAN_CFG 绕过 apply_cfg 会读到
+  旧值，须走 apply_cfg）。
+- `biStep` 同类型分支 `ctx.nearDouble` 前置（函数内同判据恒过，关闭近等的周期免一调用）。
+- `bi_inc._sync_gap_cum` 批量段切片+推导+accumulate（全量重建路径曾逐元素全前缀循环）。
+- realtime 回测非采样步跳过 fine 计划行（`_rebuild_chain(plan_periods=...)`；采样步 i%3==0
+  读的是 i-1 步 rebuild 的计划，故跳过条件为 `(i+1)%3==0`；检测周期 15/60/240 行每步照常）。
+- `bt_journal.reject` 去重签名 json.dumps → 规范化元组 `_ctx_sig`（同键调用点字面量构造、
+  类型稳定，判定等价）。
+
+**P1 单品种子进程化（输出不变；`test_bt_subproc.py` 10 用例含真实 spawn 冒烟）**：
+`BacktestWorker._run` 单品种默认走 `_run_single_subproc`（复用 `_run_batch`/`bt_batch.run_symbol`
+spawn 机制与事件中继；chan 走 `_engine_kwargs_of`、fxma 走 `fxma_engine_kwargs`，与线程路径
+逐参一致；进度/信号/成交/日志/暂停/停止全中继，done 回填 journal 与持仓行）——多策略 TAB
+（chan+fxma）从 GIL 线程互踩（墙钟≈两策略 CPU 之和）变真并行（墙钟≈最长者）。
+`PY_CHAIN_BT_SUBPROC=0` 回退线程路径（回滚开关）。
+
+**已核实不做**：fine 周期 sr zones 不能跳过（`_sr["merged"]` 聚合全周期 zones，
+nearSr/止损推导消费）；锁变化局部化/漂移检测/resync 语义放宽为 P2（基线不可比）。
+**既有失败（非本批引入，HEAD 6f53f08 同样失败，git worktree 验证）**：test_mark_entry_sink
+3（no_expansion_stops_at_x/only_stop_level_candidate/3m_candidate_filtered…）+
+test_divergence_fallback 6（10-02 近等简化既有，见 wickminrange 记忆）。

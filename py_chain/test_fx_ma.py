@@ -201,20 +201,20 @@ class ParamCenterFxmaTests(unittest.TestCase):
         self.assertIs(eng.strong_fx_on, False)
 
     def test_pick_and_req_schema_and_kwargs(self):
-        # 条件性质（必选/可选）+ 各类点满足数（四选N）：schema 枚举 + normalize +
+        # 条件性质（必选/可选）+ 各类点满足数（五选N）：schema 枚举 + normalize +
         # kwargs 布尔/整数映射 + 引擎落属性；默认=全必选+全N=3（旧 AND 行为）
         sch = param_center.schema_of("fxma")
-        for k in ("maReq", "maStandReq", "strongFxReq", "fibReq"):
+        for k in ("maReq", "maStandReq", "strongFxReq", "fibReq", "divLowerReq"):
             self.assertEqual(sch[k]["type"], "str")
             self.assertEqual(sch[k]["choices"], ["required", "optional"])
             self.assertEqual(sch[k]["default"], "required")
         for k in ("entryPick1", "entryPick2", "entryPick2x", "entryPick3", "entryPick3x"):
-            self.assertEqual(sch[k]["choices"], ["1", "2", "3", "4"])
+            self.assertEqual(sch[k]["choices"], ["1", "2", "3", "4", "5"])
             self.assertEqual(sch[k]["default"], "3")
         with self.assertRaises(ValueError):
             param_center.normalize("fxma", {"maReq": "必选"})   # 非法枚举
         with self.assertRaises(ValueError):
-            param_center.normalize("fxma", {"entryPick2": "5"})
+            param_center.normalize("fxma", {"entryPick2": "6"})
         n = param_center.normalize("fxma", {"maReq": "optional", "entryPick3x": "1"})
         self.assertEqual(n["maReq"], "optional")
         kw = FxMaEngine.kwargs_from_params(n)
@@ -226,12 +226,17 @@ class ParamCenterFxmaTests(unittest.TestCase):
         self.assertIs(eng.ma_req, False)
         self.assertEqual(eng.entry_pick["3x"], 1)
         eng2 = FxMaEngine({"3": bars_from_closes(0, [100 + i for i in range(40)])},
-                          entry_pick={"2": 4})   # 4=四选四合法
+                          entry_pick={"2": 4})   # 4=五选四合法
         self.assertEqual(eng2.entry_pick["2"], 4)
+        eng3 = FxMaEngine({"3": bars_from_closes(0, [100 + i for i in range(40)])},
+                          entry_pick={"2": 5})   # 5=五选五合法（次级别背驰入池后）
+        self.assertEqual(eng3.entry_pick["2"], 5)
         with self.assertRaises(ValueError):
             FxMaEngine({"3": []}, entry_pick={"9": 2})   # 非法选择键
         with self.assertRaises(ValueError):
-            FxMaEngine({"3": []}, entry_pick={"2": 0})   # 超出 1..4
+            FxMaEngine({"3": []}, entry_pick={"2": 0})   # 超出 1..5
+        with self.assertRaises(ValueError):
+            FxMaEngine({"3": []}, entry_pick={"2": 6})   # 超出 1..5
 
     def test_ma_stand_schema_and_kwargs(self):
         # 收盘站线：开关布尔 + 一类/二三类分开的均线周期（1~500）
@@ -889,6 +894,153 @@ class FibUpperGateTests(unittest.TestCase):
         self.assertIsNone(e._fx_upper_dir("3"))
 
 
+class DivLowerGateTests(unittest.TestCase):
+    """⑤次级别/次次级别背驰条件（divLower，2026-10-08 增，默认关）。
+
+    语义：缠论V1 lowerDiverge 同源（下沉链自动归属次/次次级别）+ 点锚定·粘性窗口
+    [pt.time − 1根P周期K线, 评估时刻]。候选经猴子补丁 fx_ma.lowerDiverge 注入
+    （背驰/下沉链判定本身由 test_mark_entry_sink.py 锁定）；「无更低级别数据」
+    用真实路径（P=3 且 30S 未加载 → levelsBelow 空 → 条件永不通过）。
+    """
+
+    def setUp(self):
+        self.closes = signal_bars()
+        self.bars = bars_from_closes(0, self.closes)
+        self.pt_time = self.bars[len(self.closes) - 12]["time"]
+        self.pt = {"type": "2买", "time": self.pt_time,
+                   "price": self.closes[len(self.closes) - 12]}
+        self.t_end = self.bars[-1]["time"] + SEC3
+
+    def _engine(self, **kw):
+        e = mk_engine(self.bars, **kw)
+        for b in self.bars:
+            e._advance_cut(b["time"] + SEC3)
+        e._fx_align()
+        return e
+
+    def _collect(self, engine, point, cands=None, lower=None):
+        """cands=None 走真实路径；否则注入 long 向候选与更低级别链。"""
+        st = engine._fx_init_state()
+        with ExitStack() as es:
+            es.enter_context(patch.object(FxMaEngine, "_fx_latest_points",
+                                          lambda self, P: (point, None)))
+            if cands is not None:
+                es.enter_context(patch("py_chain.fx_ma.lowerDiverge",
+                                       lambda pd, X, d: cands if d == "long" else []))
+                es.enter_context(patch("py_chain.fx_ma.levelsBelow",
+                                       lambda pd, X: lower if lower is not None else []))
+            sigs = engine._fx_collect(st["allSignals"], st["stats"], st["fired"],
+                                      self.t_end)
+        return sigs, st
+
+    def _cand(self, t, res="15"):
+        return {"res": res, "point": {"time": t, "price": 90.0, "direction": "long"}}
+
+    def test_div_lower_schema_and_kwargs(self):
+        sch = param_center.schema_of("fxma")
+        self.assertEqual(sch["divLowerOn"]["type"], "bool")
+        self.assertIs(sch["divLowerOn"]["default"], False)
+        self.assertIs(param_center.normalize("fxma", {"divLowerOn": True})["divLowerOn"], True)
+        kw = FxMaEngine.kwargs_from_params(
+            dict(FXMA_DEFAULTS, entryRes="3", divLowerOn=True, divLowerReq="optional"))
+        self.assertIs(kw["div_lower_on"], True)
+        self.assertIs(kw["div_lower_req"], False)
+        eng = FxMaEngine({"3": bars_from_closes(0, [100 + i for i in range(40)])}, **kw)
+        self.assertIs(eng.div_lower_on, True)
+        self.assertIs(eng.div_lower_req, False)
+
+    def test_default_off_unchanged(self):
+        # 默认关：不进计票不进叙事，与旧基线一致
+        sigs, _ = self._collect(self._engine(), self.pt)
+        self.assertEqual(len(sigs), 1)
+        self.assertIsNone(sigs[0]["divLowerRes"])
+        self.assertNotIn("次级别", sigs[0]["reason"])
+        self.assertFalse(self._engine().div_lower_on)
+
+    def test_div_lower_pass_fires_with_evidence(self):
+        # 点后 60s 出现 15m 底背驰候选 → 通过（必选+计票），证据字段/叙事齐全
+        sigs, _ = self._collect(self._engine(div_lower_on=True), self.pt,
+                                cands=[self._cand(self.pt_time + 60)], lower=["15", "3"])
+        self.assertEqual(len(sigs), 1)
+        s = sigs[0]
+        self.assertEqual(s["divLowerRes"], "15")
+        self.assertEqual(s["divLowerTime"], self.pt_time + 60)
+        self.assertIn("次级别15背驰", s["reason"])
+        self.assertIn("次级别背驰（15", s["signalNote"])
+        # 黄金分割默认关 → 启用4条件（强分型/均线/站线/次级别背驰）全过：4/3
+        self.assertEqual(s["pickNeed"], 3)
+        self.assertEqual(s["pickGot"], 4)
+
+    def test_div_lower_boundary_tolerance_included(self):
+        # 窗口下界含 1 根 P 周期容差：候选恰在 pt.time − SEC3（次级别与P级极值边界差）→ 通过
+        sigs, _ = self._collect(self._engine(div_lower_on=True), self.pt,
+                                cands=[self._cand(self.pt_time - SEC3)], lower=["15"])
+        self.assertEqual(len(sigs), 1)
+
+    def test_div_lower_old_candidate_blocked_waits(self):
+        # 候选早于窗口下界（点前 2 根）→ 未过；必选 → 拦截且点存活（等待语义）
+        sigs, st = self._collect(self._engine(div_lower_on=True), self.pt,
+                                 cands=[self._cand(self.pt_time - 2 * SEC3)], lower=["15"])
+        self.assertEqual(sigs, [])
+        self.assertNotIn(("3", "2买", self.pt_time), st["fired"])
+
+    def test_div_lower_no_candidate_required_blocks(self):
+        sigs, st = self._collect(self._engine(div_lower_on=True), self.pt,
+                                 cands=[], lower=["15", "3"])
+        self.assertEqual(sigs, [])
+        self.assertNotIn(("3", "2买", self.pt_time), st["fired"])
+
+    def test_div_lower_optional_only_votes(self):
+        # 可选 + N=2：均线破坏、背驰未过 → 强分型+站线 2 票达标仍触发；背驰:否选入 states
+        e = self._engine(div_lower_on=True, ma_req=False, div_lower_req=False)
+        e.cross_min_pts = 1e6
+        e.entry_pick = {"1": 3, "2": 2, "2x": 3, "3": 3, "3x": 3}
+        sigs, _ = self._collect(e, self.pt, cands=[], lower=["15"])
+        self.assertEqual(len(sigs), 1)
+        self.assertEqual(sigs[0]["pickNeed"], 2)
+        self.assertEqual(sigs[0]["pickGot"], 2)
+        self.assertIsNone(sigs[0]["divLowerRes"])
+        self.assertNotIn("次级别", sigs[0]["reason"])
+
+    def test_div_lower_sticky_same_extreme_divergence(self):
+        # 粘性：候选=点同刻背驰（pt.time−100，同极值口径）——首拍无背驰拦下，
+        # 点存活；次拍背驰出现（时间仍在窗口内）即触发
+        closes = self.closes + [self.closes[-1] + 2.0]
+        e = mk_engine(bars_from_closes(0, closes), div_lower_on=True)
+        for b in e.bars["3"]["_list"][:-1]:
+            e._advance_cut(b["time"] + SEC3)
+        e._fx_align()
+        st = e._fx_init_state()
+        last = e.bars["3"]["_list"][-1]
+        cand = self._cand(self.pt_time - 100)
+        with patch.object(FxMaEngine, "_fx_latest_points", lambda s, P: (self.pt, None)), \
+             patch("py_chain.fx_ma.lowerDiverge", lambda pd, X, d: []), \
+             patch("py_chain.fx_ma.levelsBelow", lambda pd, X: ["15"]):
+            self.assertEqual(e._fx_collect(st["allSignals"], st["stats"],
+                                           st["fired"], last["time"]), [])
+            self.assertFalse(st["fired"])   # 无背驰：点存活等待
+        with patch.object(FxMaEngine, "_fx_latest_points", lambda s, P: (self.pt, None)), \
+             patch("py_chain.fx_ma.lowerDiverge",
+                   lambda pd, X, d: [cand] if d == "long" else []), \
+             patch("py_chain.fx_ma.levelsBelow", lambda pd, X: ["15"]):
+            e._advance_cut(last["time"] + SEC3)
+            e._fx_align()
+            sigs = e._fx_collect(st["allSignals"], st["stats"],
+                                 st["fired"], last["time"] + SEC3)
+        self.assertEqual(len(sigs), 1)
+        self.assertEqual(sigs[0]["divLowerTime"], self.pt_time - 100)
+
+    def test_div_lower_no_lower_data_real_path(self):
+        # 真实路径（不补丁）：P=3 且 30S 未加载 → levelsBelow 空、无候选 → 条件永不通过
+        e = self._engine(div_lower_on=True)
+        cands, chain = e._fx_lower_diverge_cands("3", "long", {})
+        self.assertEqual(cands, [])
+        self.assertEqual(chain, [])
+        sigs, st = self._collect(e, self.pt)
+        self.assertEqual(sigs, [])
+        self.assertNotIn(("3", "2买", self.pt_time), st["fired"])
+
+
 # ============================================================
 # 出场状态机
 # ============================================================
@@ -1172,6 +1324,33 @@ class StructureTests(unittest.TestCase):
         self.assertAlmostEqual(exits[0]["exitPrice"], 90.0)
         self.assertAlmostEqual(exits[0]["pnl"], (130.0 - 100.0) * 1 + (90.0 - 100.0) * 1)
         self.assertEqual(st["open_pos"]["long"], [])    # 终局释放容量
+
+    def test_structure_odd_lots_integer(self):
+        # 整手口径（2026-10-08）：lots=5 奇数 → 半仓 ⌊5/2⌋=2 手、1/2类主动止盈
+        # max(1, ⌊2/2⌋)=1 手，全程无小数
+        closes = [100.0] * 5 + [120.0, 131.5, 95.0, 89.0]
+        bars = bars_from_closes(0, closes)
+        e = mk_engine(bars, tp_mode="structure", lots=5, stop_pts=10.0)
+        self.assertEqual(e.lots, 5)
+        e._advance_cut(bars[6]["time"] + SEC3)
+        with patch.object(FxMaEngine, "_fx_prev_bi_end",
+                          lambda self, P, pt_time, d:
+                          {"type": "前高", "time": 500, "price": 130.0}):
+            st = e._fx_init_state()
+            stats = {"executed": 0, "suppressed": 0, "closed": 0, "stopped": 0}
+            e._fx_fill_pending(st["trades"], [self._sig("3", "long")],
+                               st["open_pos"], stats, 1000, 1000, 100.0)
+        tr = st["trades"][0]
+        self.assertEqual(tr["lots"], 2)
+        self.assertEqual(tr["lotsLeft"], 2)
+        self.assertEqual(tr["tpLots"], 1)
+        self.assertIsInstance(tr["tpLots"], int)
+
+    def test_structure_lots_lt2_rejected(self):
+        # structure 半仓整手须 lots≥2（⌊lots/2⌋≥1）
+        bars = bars_from_closes(0, [100.0] * 30)
+        with self.assertRaises(ValueError):
+            mk_engine(bars, tp_mode="structure", lots=1)
 
     def test_class12_trail_raise_only_upward(self):
         # 无前反向点 → 无主动止盈；新3买 @105 → 止损上移 105−滑点1=104；

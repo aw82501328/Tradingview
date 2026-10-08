@@ -162,6 +162,13 @@
   }
   .equity-chart .eq-clock.run { color: var(--accent); }
   .equity-chart .eq-clock:empty { display: none; }
+  /* 回测卡片头部运行时钟（独立于资金曲线：无成交期间也显示，2026-10-08 解耦） */
+  .card h2 .bt-clock {
+    font-size: 12px; font-weight: 600; color: var(--muted); margin-left: 8px;
+    font-variant-numeric: tabular-nums;
+  }
+  .card h2 .bt-clock.run { color: var(--accent); }
+  .card h2 .bt-clock:empty { display: none; }
   .equity-chart .eq-legend {
     display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--muted);
     align-items: center;
@@ -624,7 +631,7 @@ function buildCard(m) {
   </div>`);
   return `
   <div class="card" id="card-${m.id}"${isBt ? ' hidden' : ''}>
-    <h2><span>${m.name}</span><span class="badge" id="badge-${m.id}">idle</span></h2>
+    <h2><span>${m.name}</span><span class="badge" id="badge-${m.id}">idle</span>${isBt ? `<b class="bt-clock" id="clock-${m.id}"></b>` : ''}</h2>
     <div style="font-size:11px;color:var(--muted);">${m.desc}</div>
     <div class="mode-fields">${rows.join('')}</div>
     <div class="progress"><div id="bar-${m.id}"></div></div>
@@ -651,6 +658,7 @@ function signalDirectionKey(r) {
 }
 // 当前回测大图：本轮全部 backtest 行（不受筛选，仅当前策略TAB），回放/实时隐藏
 let equityRedrawTimer = null;
+let btStatusRefreshTimer = null;   // 回测状态迁移后的延时全量 status 补拉（时钟 duration/started_at 就位）
 function scheduleLiveEquity() {
   clearTimeout(equityRedrawTimer);
   equityRedrawTimer = setTimeout(renderLiveEquity, 200);
@@ -667,26 +675,36 @@ function renderLiveEquity() {
     && btRowStrategy(r) === curBtTab && (!fs || r.symbol === fs)));
   if (!pts.length) { host.hidden = true; host.innerHTML = ''; return; }
   drawEquityChart(host, [{ name: '本轮回测', points: pts }], {
-    height: 280, title: '资金曲线', clock: eqClockText(),
+    height: 280, title: '资金曲线', clock: eqClockText(curBtTab),
     note: '出场盈亏累加（含部分平仓）；策略/品种页签生效，状态/策略/方向筛选不影响',
   });
 }
-// 回测运行时钟（当前策略TAB）：运行中从 started_at 走秒，结束后定格 duration_sec；
+// 回测运行时钟文案（每策略）：运行中从 started_at 走秒，结束后定格 duration_sec；
 // 口径=自然墙钟（与后端 duration_sec 一致，暂停不冻结）
-function eqClockText() {
-  const w = state.bt[curBtTab];
+function eqClockText(sid = curBtTab) {
+  const w = state.bt[sid];
   if (!w) return '';
   if (w.duration_sec != null) return `⏱ ${fmtDuration(w.duration_sec)}`;
   if (w.started_at != null && (w.state === 'running' || w.state === 'paused'))
     return `⏱ ${fmtDuration(Math.max(0, Date.now() / 1000 - w.started_at))}`;
   return '';
 }
-// 只更新时钟文本与运行态着色，不重绘图表（曲线重绘频繁，时钟由 1s 定时器独立走秒）
+// 时钟走秒（1s 定时器 + applyBtStatus 触发）：① 每张回测卡头部的独立时钟节点——
+// 与有无成交无关，启动即显示（2026-10-08 解耦：此前寄生在资金曲线头部，首笔平仓前
+// 曲线整块隐藏导致计时器不显示）；② 资金曲线头部时钟沿用（有成交后才存在）
 function updateEqClock() {
+  for (const s of BT_STRATEGIES) {
+    const c = el(`clock-bt-${s.id}`);
+    if (!c) continue;
+    const w = state.bt[s.id];
+    c.textContent = eqClockText(s.id);
+    c.classList.toggle('run', !!(w && w.duration_sec == null && w.started_at != null
+      && (w.state === 'running' || w.state === 'paused')));
+  }
   const c = el('equity-chart')?.querySelector('.eq-clock');
   if (!c) return;
   const w = state.bt[curBtTab];
-  c.textContent = eqClockText();
+  c.textContent = eqClockText(curBtTab);
   c.classList.toggle('run', !!(w && w.duration_sec == null && w.started_at != null
     && (w.state === 'running' || w.state === 'paused')));
 }
@@ -738,10 +756,11 @@ function summaryStats(rows) {
   // 已平仓平均盈利 / 平均亏损绝对值；保本单和持仓浮盈不参与。
   const avgWin = win.length ? win.reduce((s, r) => s + r.pnl, 0) / win.length : 0;
   const avgLoss = lose.length ? -lose.reduce((s, r) => s + r.pnl, 0) / lose.length : 0;
-  const ex = { stopBe: 0, stopSr: 0, close: 0, half: 0, stop: 0, takeProfit: 0, activeTp: 0, trailStop: 0 };
+  const ex = { stopBe: 0, stopSr: 0, close: 0, half: 0, halfMr: 0, stop: 0, takeProfit: 0, activeTp: 0, trailStop: 0 };
   for (const r of rows) {
     if (r.exitType && r.exitType in ex) ex[r.exitType]++;
     ex.half += (r.exits || []).filter(e => e.type === 'half').length;
+    ex.halfMr += (r.exits || []).filter(e => e.type === 'halfMr').length;
   }
   return {
     closed: closed.length, win: win.length, lose: lose.length,
@@ -785,7 +804,7 @@ function summaryHtml(s, opts = {}) {
       + (ex.takeProfit ? ` · 止盈 ${num(ex.takeProfit)}` : '')
       + (ex.activeTp ? ` · 主盈 ${num(ex.activeTp)}` : '')
       + (ex.stop ? ` · 固定止损 ${num(ex.stop)}` : '')
-      + (ex.half ? ` · 够笔 ${num(ex.half)}` : '');
+      + ((ex.half || ex.halfMr) ? ` · 够笔 ${num(ex.half + ex.halfMr)}` : '');
     const tile = (label, value, graph, legend) =>
       `<div class="sum-tile"><span class="sum-label">${label}</span><span class="sum-value">${value}</span><span class="sum-graph">${graph}</span>${legend ? `<span class="sum-legend">${legend}</span>` : ''}</div>`;
     const pairBar = (label, val, txt, color) => `
@@ -824,7 +843,7 @@ function summaryHtml(s, opts = {}) {
       + (s.exits.trailStop ? ` · 跟盈 ${s.exits.trailStop}` : '')
       + (s.exits.takeProfit ? ` · 止盈 ${s.exits.takeProfit}` : '')
       + (s.exits.stop ? ` · 固定止损 ${s.exits.stop}` : '')
-      + (s.exits.half ? ` · 够笔 ${s.exits.half}` : ''),
+      + ((s.exits.half || s.exits.halfMr) ? ` · 够笔 ${(s.exits.half || 0) + (s.exits.halfMr || 0)}` : ''),
   ];
   return parts.map(p => `<span>${p}</span>`).join('');
 }
@@ -1307,7 +1326,17 @@ function connectSSE() {
     if (!MODES.some(x => x.id === d.mode)) return;
     if (d.mode === 'backtest') {
       // 多策略并行：回测 status 带策略 id → 路由到该策略卡片（active 聚合由后端 init 刷新）
-      if (d.strategy) applyBtStatus(d.strategy, { ...(state.bt[d.strategy] || {}), state: d.state });
+      if (d.strategy) {
+        applyBtStatus(d.strategy, { ...(state.bt[d.strategy] || {}), state: d.state });
+        // 状态迁移（启动/暂停/结束）后补拉一次全量 status：duration_sec 在结束事件之后
+        // 才算出（_run 内 set_state(done) → finally 才写 duration_sec）、started_at 只在
+        // start() 重置，增量事件都不带——不补拉则结束后时钟变空、原地重启从旧起点走秒。
+        // 延时 600ms 等服务器侧 duration_sec 落定；状态迁移低频，开销可忽略
+        clearTimeout(btStatusRefreshTimer);
+        btStatusRefreshTimer = setTimeout(() => {
+          fetch('/api/status').then(r => r.json()).then(applyStatus).catch(() => {});
+        }, 600);
+      }
       return;
     }
     applyStatus({ active: state.active, modes: { [d.mode]: { ...state.modes[d.mode], state: d.state } } });
@@ -1605,7 +1634,7 @@ const BT_METRICS = [
     + (s.exits?.trailStop ? ` · 跟盈 ${s.exits.trailStop}` : '')
     + (s.exits?.takeProfit ? ` · 止盈 ${s.exits.takeProfit}` : '')
     + (s.exits?.stop ? ` · 固定止损 ${s.exits.stop}` : '')
-    + (s.exits?.half ? ` · 够笔 ${s.exits.half}` : '')],
+    + ((s.exits?.half || s.exits?.halfMr) ? ` · 够笔 ${(s.exits.half || 0) + (s.exits.halfMr || 0)}` : '')],
   ['信号总数', s => s.rows_total ?? '-'],
   ['未成交信号', s => s.cnt_signal ?? '-'],
   ['持仓中', s => s.cnt_open ?? '-'],
@@ -2055,7 +2084,7 @@ async function init() {
   connectSSE();
   reportModes();
   setInterval(reportModes,1000);
-  setInterval(updateEqClock,1000);   // 资金曲线运行时钟：无信号/长计算期间也走秒
+  setInterval(updateEqClock,1000);   // 回测运行时钟：卡片头部独立节点（无成交期间也走秒）+ 资金曲线头部
 }
 init();
 </script>

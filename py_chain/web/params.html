@@ -64,6 +64,16 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 .prow .keep-fields{display:flex;flex-wrap:wrap;gap:8px 14px}
 .prow .keep-fields.dim{opacity:.45}
 .prow .keep-fields.dim input{pointer-events:none}
+/* 出场方式合卡（够笔止盈两源：背驰周期/检测周期各一行 开关+比例） */
+.prow.exit-group{flex-direction:column;align-items:stretch;gap:6px}
+.prow.exit-group .exit-row{display:flex;align-items:center;gap:8px}
+.prow.exit-group .exit-row .ename{flex:1;min-width:0;color:var(--text);font-size:12.5px}
+.prow.exit-group .exit-row .ename .pdef{margin-left:8px}
+.prow.exit-group .exit-row .zs-keep{display:flex;align-items:center;gap:6px;color:var(--muted);
+  font-size:12px;white-space:nowrap;flex-shrink:0}
+.prow.exit-group .exit-row .zs-keep.dim{opacity:.45}
+.prow.exit-group .exit-row .zs-keep.dim input{pointer-events:none}
+.prow.exit-group .exit-row.lmod .ename{color:var(--warn)}
 /* 滑点行内嵌 ATR 系数小输入框（无独立参数行） */
 .prow .slip-k{display:flex;align-items:center;gap:4px;color:var(--muted);font-size:11.5px;white-space:nowrap;flex-shrink:0}
 .prow .slip-k input{width:64px;text-align:right}
@@ -161,11 +171,12 @@ const FXMA_BASE_KEYS = ['entryRes', 'pointClasses', 'pointValidBars', 'stopPts',
                         'sameBarPriority', 'mutexScope', 'lots', 'upperDirOn'];
 // 进场条件分组：组标题行 + 组内键序；'X+Y'=启用开关+条件性质并入一张卡，'maPairN'=均线对快/慢并卡
 const FXMA_ENTRY_GROUPS = [
-  ['条件组合（四选N）', ['entryPick1', 'entryPick2', 'entryPick2x', 'entryPick3', 'entryPick3x']],
+  ['条件组合（五选N）', ['entryPick1', 'entryPick2', 'entryPick2x', 'entryPick3', 'entryPick3x']],
   ['均线分离', ['maOn+maReq', 'maType', 'maPair1', 'maPair2', 'crossMinPts']],
   ['收盘站线', ['maStandOn+maStandReq', 'maStand1', 'maStand2']],
   ['强分型', ['strongFxOn+strongFxReq', 'strongFxMinPts']],
   ['黄金分割附近', ['fibNearOn+fibReq', 'fibLevels', 'fibNearPts']],
+  ['次级别背驰', ['divLowerOn+divLowerReq']],
 ];
 const TAB_MODULE = { fxmaBase: 'fxma', fxmaEntry: 'fxma' };   // 页签 id → 参数模块 id（缺省=自身）
 const tabModule = (name) => TAB_MODULE[name] || name;
@@ -486,11 +497,12 @@ const CHOICE_LABELS = { trendRes: { '': '关闭', '240': '4小时', 'D': '日线
                         maStandReq: { 'required': '必选', 'optional': '可选' },
                         strongFxReq: { 'required': '必选', 'optional': '可选' },
                         fibReq: { 'required': '必选', 'optional': '可选' },
-                        entryPick1: { '1': '四选一', '2': '四选二', '3': '四选三', '4': '四选四' },
-                        entryPick2: { '1': '四选一', '2': '四选二', '3': '四选三', '4': '四选四' },
-                        entryPick2x: { '1': '四选一', '2': '四选二', '3': '四选三', '4': '四选四' },
-                        entryPick3: { '1': '四选一', '2': '四选二', '3': '四选三', '4': '四选四' },
-                        entryPick3x: { '1': '四选一', '2': '四选二', '3': '四选三', '4': '四选四' } };
+                        divLowerReq: { 'required': '必选', 'optional': '可选' },
+                        entryPick1: { '1': '五选一', '2': '五选二', '3': '五选三', '4': '五选四', '5': '五选五' },
+                        entryPick2: { '1': '五选一', '2': '五选二', '3': '五选三', '4': '五选四', '5': '五选五' },
+                        entryPick2x: { '1': '五选一', '2': '五选二', '3': '五选三', '4': '五选四', '5': '五选五' },
+                        entryPick3: { '1': '五选一', '2': '五选二', '3': '五选三', '4': '五选四', '5': '五选五' },
+                        entryPick3x: { '1': '五选一', '2': '五选二', '3': '五选三', '4': '五选四', '5': '五选五' } };
 const choiceLabel = (key, v) => (CHOICE_LABELS[key] && CHOICE_LABELS[key][v]) || v;
 
 // 三滑点的 ATR 系数键（entry 模块）：系数不独立成行，内嵌进各自滑点行（2026-09-19）
@@ -515,34 +527,56 @@ const ENTRY_GROUPS = [
   ['规则修复（07-07 06:30 案例锚点）', ['divergeReferByZs', 'sinkSkipLevel']],
 ];
 
-// 出场方式：每张卡 = 启用开关 + 平仓比例（比例占剩余仓位%；关闭时比例置灰仍随表单保存）
-const EXIT_MODE_ROWS = [
-  ['exitStopSrOn', 'exitStopSrPct'],
-  ['exitStopBeOn', 'exitStopBePct'],
-  ['exitHalfOn', 'exitHalfPct'],
-  ['exitCloseOn', 'exitClosePct'],
-  ['exitTrailOn', 'exitTrailPct'],
+// 出场方式：每张卡 = 启用开关 + 平仓比例（比例占总仓位=初始手数%；整数手：⌊总手数×比例%⌋ 不足1手平1手；关闭时比例置灰仍随表单保存）。
+// 够笔止盈拆两源（2026-10-08）：背驰周期/检测周期共一张卡（exit-group 两行各自开关+比例）
+const EXIT_MODE_CARDS = [
+  [['exitStopSrOn', 'exitStopSrPct']],
+  [['exitStopBeOn', 'exitStopBePct']],
+  [['exitHalfMrOn', 'exitHalfMrPct'], ['exitHalfOn', 'exitHalfPct']],
+  [['exitCloseOn', 'exitClosePct']],
+  [['exitTrailOn', 'exitTrailPct']],
 ];
-const EXIT_MODE_KEYS = EXIT_MODE_ROWS.flat();
+const EXIT_MODE_PAIRS = EXIT_MODE_CARDS.flat();  // 全部 [开关, 比例] 对（置灰/收集用）
+const EXIT_MODE_KEYS = EXIT_MODE_PAIRS.flat();
+function exitLineHtml(m, onKey, pctKey) {
+  const oSpec = m.schema[onKey], pSpec = m.schema[pctKey];
+  const on = m.effective[onKey], pct = m.effective[pctKey];
+  const lineMod = m.overrides[onKey] !== undefined || m.overrides[pctKey] !== undefined;
+  const defText = `${onSpecDef(oSpec)} · 比例默认 ${pSpec.default}%`;
+  return `<div class="exit-row${lineMod ? ' lmod' : ''}" title="${oSpec.desc}">
+    <input type="checkbox" data-k="${onKey}" ${on ? 'checked' : ''} aria-label="${oSpec.label}">
+    <span class="ename">${oSpec.label}<span class="pdef">${defText}</span></span>
+    <span class="zs-keep" data-keep-for="${onKey}"><input type="number" step="1"
+      min="${pSpec.min}" max="${pSpec.max}" data-k="${pctKey}" value="${pct}">%</span></div>`;
+}
 function exitModeRowsHtml(m) {
-  return EXIT_MODE_ROWS.map(([onKey, pctKey]) => {
-    const oSpec = m.schema[onKey], pSpec = m.schema[pctKey];
-    const on = m.effective[onKey], pct = m.effective[pctKey];
-    const isMod = m.overrides[onKey] !== undefined || m.overrides[pctKey] !== undefined;
-    const defText = `${onSpecDef(oSpec)} · 比例默认 ${pSpec.default}%`;
-    return `<div class="prow ${isMod ? 'mod' : ''}" title="${oSpec.desc}">
+  return EXIT_MODE_CARDS.map(rows => {
+    if (rows.length === 1) {
+      const [onKey, pctKey] = rows[0];
+      const oSpec = m.schema[onKey], pSpec = m.schema[pctKey];
+      const on = m.effective[onKey], pct = m.effective[pctKey];
+      const isMod = m.overrides[onKey] !== undefined || m.overrides[pctKey] !== undefined;
+      const defText = `${onSpecDef(oSpec)} · 比例默认 ${pSpec.default}%`;
+      return `<div class="prow ${isMod ? 'mod' : ''}" title="${oSpec.desc}">
       <input type="checkbox" data-k="${onKey}" ${on ? 'checked' : ''} aria-label="${oSpec.label}">
       <span class="pname"><span class="plabel">${oSpec.label}<span class="badge">已修改</span></span>
       <span class="pdef">${defText} · ${oSpec.desc}</span></span>
       <span class="zs-keep" data-keep-for="${onKey}"><input type="number" step="1"
         min="${pSpec.min}" max="${pSpec.max}" data-k="${pctKey}" value="${pct}">%</span></div>`;
+    }
+    const isMod = rows.some(([onKey, pctKey]) =>
+      m.overrides[onKey] !== undefined || m.overrides[pctKey] !== undefined);
+    return `<div class="prow exit-group${isMod ? ' mod' : ''}">
+      <div class="pname"><span class="plabel">够笔止盈（两源各自开关+比例）<span class="badge">已修改</span></span>
+      <span class="pdef">背驰周期=TP1同事件源（不限顺势）；检测周期=仅顺势末笔够笔（原「够笔止盈」）</span></div>
+      ${rows.map(([onKey, pctKey]) => exitLineHtml(m, onKey, pctKey)).join('')}</div>`;
   }).join('');
 }
 function onSpecDef(spec) { return spec.default ? '默认开' : '默认关'; }
 
 // 出场方式开关关闭时：同卡比例输入置灰；跟踪止盈关闭时滑点组的「跟踪止盈滑点」置灰
 function applyExitModeDim() {
-  for (const [onKey, pctKey] of EXIT_MODE_ROWS) {
+  for (const [onKey, pctKey] of EXIT_MODE_PAIRS) {
     const on = document.querySelector(`#pgrid [data-k="${onKey}"]`);
     const wrap = document.querySelector(`#pgrid .zs-keep[data-keep-for="${onKey}"]`);
     if (!on || !wrap) continue;
@@ -635,7 +669,7 @@ function entryRowsHtml(m) {
   EXIT_MODE_KEYS.forEach(k => grouped.add(k));   // 出场方式键由专用卡片渲染
   return ENTRY_GROUPS.map(([title, keys]) => {
     if (title === '__EXIT_MODES__') {
-      return `<div class="pgroup">出场方式（至少启用一种；比例 = 平剩余仓位%）</div>`
+      return `<div class="pgroup">出场方式（至少启用一种；比例 = 平总仓位[初始手数]%，整数手）</div>`
         + exitModeRowsHtml(m);
     }
     return `<div class="pgroup">${title}</div>`
@@ -864,13 +898,13 @@ function fxmaTpRowsHtml(m) {
   <div class="prow tp-card${mode === 'structure' ? ' sel' : ''}${(modeMod || m.overrides.tpNearPts !== undefined) ? ' mod' : ''}" title="${near.desc}">
     ${dot('structure')}
     <span class="pname"><span class="plabel">主动止盈<span class="tp-tag">组合模式</span><span class="badge">已修改</span></span>
-    <span class="pdef">半仓开仓可叠两笔（同一粗类 1/2/3 不叠加、该类平仓后可再开）· 1/2类入场一半（1/4仓）到前高/前低主动止盈，3类入场全平；目标=入场前最近已确认笔端点（不要求已识别为买卖点；亏损侧不设）</span></span>
+    <span class="pdef">半仓开仓可叠两笔（同一粗类 1/2/3 不叠加、该类平仓后可再开；手数恒整数：半仓=⌊手数/2⌋）· 1/2类入场一半（至少1手）到前高/前低主动止盈，3类入场全平；目标=入场前最近已确认笔端点（不要求已识别为买卖点；亏损侧不设）</span></span>
     <span class="zs-side">${num('tpNearPts', '容差(点)', '到点容差')}</span>
   </div>
   <div class="prow tp-card${mode === 'structure' ? ' sel' : ''}${(modeMod || m.overrides.tpTrailSlipPts !== undefined) ? ' mod' : ''}" title="${slip.desc}">
     ${dot('structure')}
     <span class="pname"><span class="plabel">结构跟踪止损<span class="tp-tag">组合模式</span><span class="badge">已修改</span></span>
-    <span class="pdef">默认 ${slip.default} 点 · 1/2类入场另一半（1/4仓）走跟踪止损：3/类3/4/类4同向点出现止损只上移，触发平剩余全部</span></span>
+    <span class="pdef">默认 ${slip.default} 点 · 1/2类入场另一半走跟踪止损：3/类3/4/类4同向点出现止损只上移，触发平剩余全部</span></span>
     <span class="zs-side">${num('tpTrailSlipPts', '滑点(点)', '提损滑点')}</span>
   </div>
   <input type="hidden" data-k="tpMode" value="${mode}">`;
@@ -975,10 +1009,10 @@ function renderModule(name) {
     chan: '画笔参数按当前品种独立；保存后该品种成笔阈值即时生效（画笔/回测/监控）。有任务运行中时会拒绝保存。',
     points: '标记买卖点按当前品种：邻近合并/保留数/中枢容差在工作台与回测读取；背驰时长可比上限写入该品种 CHAN_CFG。有任务运行中时会拒绝保存。',
     zs: '画中枢按当前品种：各周期是否绘制、以及每周期只保留最近几个中枢。',
-    entry: '标记进出场按当前品种：近支阻、手数、滑点、出场判定、出场方式（开关+平仓比例，至少启用一种）、进场扩展与闸门。进场扩展写入该品种 CHAN_CFG。「当下制够笔K线数」仅回测/监控引擎。有效滑点 = 固定值 + ATR系数×ATR(14)。手数口径：1手=0.01标准手。比例 = 触发时平剩余仓位百分比（每种方式一次性触发，部分平仓后剩余由其它方式了结）；跟踪止盈同强分型均线V1（同向3类/类3类买卖点→止损上移，只上移）。有任务运行中时会拒绝保存。',
+    entry: '标记进出场按当前品种：近支阻、手数、滑点、出场判定、出场方式（开关+平仓比例，至少启用一种；够笔止盈拆背驰周期/检测周期两源，同一张卡）、进场扩展与闸门。进场扩展写入该品种 CHAN_CFG。「当下制够笔K线数」仅回测/监控引擎。有效滑点 = 固定值 + ATR系数×ATR(14)。手数口径：1手=0.01标准手，开/平仓手数恒整数。比例 = 触发时平总仓位（初始手数）百分比（⌊总手数×比例%⌋、不足1手平1手；每种方式一次性触发，部分平仓后剩余由其它方式了结）；跟踪止盈同强分型均线V1（同向3类/类3类买卖点→止损上移，只上移）。有任务运行中时会拒绝保存。',
     plan: '交易计划按当前品种分 3 类：震荡（参考周期闸门 rangeRes——可关闭=每周期自判，与图表口径一致；A 横盘/B 中枢内阈值）/ 顺势（参考周期 trendRes + 方向相位判定）/ 其他（点位分类容差）。工作台/回测/实盘/监控同源读取；详见下方图解。有任务运行中时会拒绝保存。',
     fxmaBase: '强分型均线V1·基本参数（按当前品种）：进出场周期/买卖点类别/点有效期/止损止盈/同根双触/同向互斥/默认手数/上级周期同向。止盈方式三卡单选：固定点数（满仓一笔触价全平）/ 结构组合（每笔半仓、同向容量最多两笔且同一粗类 1/2/3 持仓期间不叠加、该类平仓后可再开——1/2类一半到前一点位主动止盈+另一半走3/4类点提损跟踪，3类只主动止盈）。点有效期=根数+价距双约束（同卡配置）。',
-    fxmaEntry: '强分型均线V1·进场条件（按当前品种）：均线分离/收盘站线/强分型/黄金分割附近 各设「启用+必选/可选」；各类买卖点设条件满足数（四选N）。必选条件不通过该类点不触发；启用条件中通过数≥生效N 才触发（必选通过也计票；生效N=min(N,启用条件数)；四条件全停=点出现即触发）。黄金分割仅2/3类点参与（1类豁免）；上级周期同向在「基本参数」页签（独立硬门槛，不参与计票）。开关关闭时子参数变灰（数值仍随表单保存，只是不参与判定）。',
+    fxmaEntry: '强分型均线V1·进场条件（按当前品种）：均线分离/收盘站线/强分型/黄金分割附近/次级别背驰 各设「启用+必选/可选」；各类买卖点设条件满足数（五选N）。必选条件不通过该类点不触发；启用条件中通过数≥生效N 才触发（必选通过也计票；生效N=min(N,启用条件数)；五条件全停=点出现即触发）。黄金分割仅2/3类点参与（1类豁免）；次级别背驰=缠论V1同源区间套下沉链（次级别/次次级别由结构自动归属，点锚定·粘性窗口；3分钟周期须30秒级别已加载）；上级周期同向在「基本参数」页签（独立硬门槛，不参与计票）。开关关闭时子参数变灰（数值仍随表单保存，只是不参与判定）。',
   }[name] || '';
   const rules = MODULE_RULES[name];
   const rb = $('rulesBlock');
@@ -1074,6 +1108,7 @@ const FXMA_DIM_GROUPS = [
   ['maStandOn', 'maStandReq', ['maStand1', 'maStand2']],
   ['strongFxOn', 'strongFxReq', ['strongFxMinPts']],
   ['fibNearOn', 'fibReq', ['fibLevels', 'fibNearPts']],
+  ['divLowerOn', 'divLowerReq', []],
   ['upperDirOn', null, []],
 ];
 function applyFxmaDim() {

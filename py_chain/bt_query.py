@@ -166,6 +166,12 @@ def fmt_reject(r):
         "fx_upper_no_bi": lambda c: f"上级周期 {c.get('upper')} 无笔（{c.get('ptType')}）",
         "fx_upper_dir_fail": lambda c: (f"上级 {c.get('upper')} 当前笔 {c.get('upperDir')}，"
                                         f"与信号方向相反（{c.get('ptType')}）"),
+        "fx_no_lower_diverge": lambda c: (
+            f"点后未出现次级别/次次级别同向背驰（{c.get('ptType')}；"
+            + (f"已扫级别 {c.get('lower')}，最近候选 {fmtT(c.get('lastDivTime'))}"
+               if c.get("lastDivTime") else
+               ("更低级别无背驰候选" if c.get("lower") else "无更低级别数据（如 3m 须加载 30s）"))
+            + "）"),
     }.get(g)
     body = f"：{detail(ctx)}" if detail else (f"：{ctx}" if ctx else "")
     return f"{fmtT(r.get('t'))} {head}{body}"

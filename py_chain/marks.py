@@ -75,9 +75,10 @@ DEFAULT_EXIT_COLOR = "#FFEB3B"
 # 缠论V1：stopSr/stopBe/close/half/trailStop；强分型均线V1（fx_ma）：stop/takeProfit
 # （固定点数）与 activeTp/trailStop（structure 模式：主动止盈/跟踪止盈）。
 # breakeven（保本）/ trailRaise（跟踪止盈上移）/ 仍持仓不在集合内 → 仅落盘不画图。
-EXIT_SHAPES = {"stopSr": True, "stopBe": True, "close": True, "half": True,
+EXIT_SHAPES = {"stopSr": True, "stopBe": True, "close": True, "half": True, "halfMr": True,
                "stop": True, "takeProfit": True, "activeTp": True, "trailStop": True}
-EXIT_NAMES = {"stopSr": "止损", "stopBe": "保损", "close": "过高低", "half": "够笔",
+EXIT_NAMES = {"stopSr": "止损", "stopBe": "保损", "close": "过高低", "half": "检够笔",
+              "halfMr": "背够笔",
               "stop": "固定止损", "takeProfit": "固定止盈",
               "activeTp": "主动止盈", "trailStop": "跟踪止盈"}
 

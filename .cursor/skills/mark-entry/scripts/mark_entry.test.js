@@ -320,6 +320,83 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
     assert.equal(sim.events[0].price, 4445);
   });
 
+  test("closePct<100：部分平仓只触发一次（closeDone latch，2026-10-08 与 py 引擎同修）", () => {
+    const mrBars = [
+      bar(100, 4450, 4452, 4448, 4451), bar(200, 4450, 4451, 4440, 4445),
+      bar(300, 4445, 4448, 4430, 4436), bar(400, 4445, 4449, 4434, 4440),
+      bar(500, 4440, 4448, 4432, 4444), bar(600, 4444, 4450, 4438, 4446),
+      bar(700, 4446, 4451, 4440, 4448),
+    ];
+    const mr = { bis: [bi("up", 0, 700, 4440, 4455)], bars: mrBars };
+    const px = { bars: altBars([0, 100, 200, 300]),
+                 bis: [bi("down", 0, 50, 4460, 4440), bi("up", 50, 150, 4440, 4450),
+                       bi("down", 150, 250, 4450, 4435), bi("up", 250, 300, 4435, 4445)] };
+    // tp3a（250 破前低）之后每拍都满足——修复前 close 每 markRes bar 重复平 25%
+    // （px 维持 4 根 bar：favSeg5Time 不达标，隔离出纯 close 路径）
+    const sim = simulatePosition(SIG(), 4463, mr, px, { exitCfg: { closePct: 25 } });
+    const closes = sim.events.filter((e) => e.type === "close");
+    assert.equal(closes.length, 1);
+    assert.equal(closes[0].time, 300);
+    assert.equal(closes[0].lots, 1);          // 25% × 4
+    assert.equal(sim.lotsLeft, 3);
+    assert.deepEqual(sim.events.map((e) => e.type), ["close", "stillOpen"]);
+  });
+
+  test("closePct<100 剩余过小舍入为 0 → 取全部剩余（不产 0 手事件/挂死尾仓）", () => {
+    const mr = { bis: [bi("up", 0, 700, 4440, 4455)], bars: MR_BARS };
+    const px = { bars: altBars([0, 100, 200, 300]),
+                 bis: [bi("down", 0, 50, 4460, 4440), bi("up", 50, 150, 4440, 4450),
+                       bi("down", 150, 250, 4450, 4435), bi("up", 250, 300, 4435, 4445)] };
+    const sim = simulatePosition(SIG(), 4463, mr, px, { lots: 0.01, exitCfg: { closePct: 25 } });
+    assert.deepEqual(sim.events.map((e) => e.type), ["close"]);
+    assert.equal(sim.events[0].lots, 0.01);   // 换算不足 1 手 → 封顶剩余=全平剩余
+    assert.equal(sim.closed, true);
+  });
+
+  test("百分比基数=总仓位：half 50% 平2后 close 25% 仍平1（整数手，非剩余0.5）", () => {
+    // 同「同拍 half 优先于 close」场景 + 比例配置：half ⌊4×50%⌋=2、close ⌊4×25%⌋=1
+    // （旧口径按剩余仓位 2×25%=0.5 小数手）
+    const mrBars = [
+      bar(100, 4450, 4452, 4448, 4451), bar(200, 4450, 4451, 4440, 4445),
+      bar(300, 4445, 4448, 4438, 4442), bar(400, 4445, 4449, 4436, 4440),
+      bar(500, 4440, 4448, 4435, 4444), bar(600, 4444, 4450, 4438, 4446),
+      bar(700, 4446, 4451, 4440, 4448),
+    ];
+    const mr = { bis: [bi("up", 0, 700, 4440, 4455)], bars: mrBars };
+    const px = { bars: altBars([0, 100, 200, 300, 400, 500, 600, 700]),
+                 bis: [bi("down", 0, 50, 4460, 4440), bi("up", 50, 150, 4440, 4450),
+                       bi("down", 150, 250, 4450, 4445), bi("up", 250, 300, 4445, 4448),
+                       bi("down", 300, 500, 4448, 4435)] };
+    const sim = simulatePosition(SIG(), 4463, mr, px,
+                                 { exitCfg: { halfPct: 50, closePct: 25 } });
+    assert.deepEqual(sim.events.map((e) => e.type), ["half", "close", "stillOpen"]);
+    assert.equal(sim.events[0].lots, 2);           // ⌊4×50%⌋：总仓位基数、整数手
+    assert.equal(sim.events[1].lots, 1);           // ⌊4×25%⌋=1（非剩余 2×25%=0.5）
+    assert.ok(Number.isInteger(sim.events[0].lots) && Number.isInteger(sim.events[1].lots));
+    assert.equal(sim.lotsLeft, 1);
+  });
+
+  test("halfMr（背驰周期够笔）：tp1 同事件源部分平仓一次；默认关不触发（成对 py）", () => {
+    const mrBars = [
+      bar(100, 4450, 4452, 4448, 4451), bar(200, 4450, 4451, 4440, 4445),
+      bar(300, 4445, 4448, 4438, 4442), bar(400, 4444, 4449, 4436, 4440),
+    ];
+    const mr = { bis: [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)], bars: mrBars };
+    const px = { bis: [bi("up", 50, 300, 4440, 4450)], bars: altBars([0, 100, 200, 300, 400]) };
+    // 默认关：只有 TP1 保本迁移（旧基线可比）
+    const sim0 = simulatePosition(SIG(), 4463, mr, px);
+    assert.ok(!sim0.events.some((e) => e.type === "halfMr"));
+    assert.deepEqual(sim0.events.map((e) => e.type), ["breakeven", "stillOpen"]);
+    // 开启 25%：tp1=200 → halfMr 成交于下一开盘 300，halfMr latch 后不再重复
+    const sim = simulatePosition(SIG(), 4463, mr, px, { exitCfg: { halfMrOn: true, halfMrPct: 25 } });
+    const mrs = sim.events.filter((e) => e.type === "halfMr");
+    assert.equal(mrs.length, 1);
+    assert.equal(mrs[0].time, 300);
+    assert.equal(mrs[0].lots, 1);              // 25% × 4
+    assert.equal(sim.lotsLeft, 3);
+    assert.deepEqual(sim.events.map((e) => e.type), ["breakeven", "halfMr", "stillOpen"]);
+  });
+
   test("stopSr：未保本时盘中破坏止损位（跳空按开盘成交）", () => {
     const mrBars = [
       bar(100, 4450, 4452, 4448, 4451), bar(200, 4450, 4451, 4440, 4445),

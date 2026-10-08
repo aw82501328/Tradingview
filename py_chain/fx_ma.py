@@ -69,8 +69,8 @@ from collections import deque
 from .backtest import (BacktestEngine, close_trade, DEFAULT_WARMUP_BARS,
                        RESYNC_EVERY)
 from .bt_journal import BtJournal, DIR_LABELS, EXIT_LABELS as FX_EXIT_LABELS
-from .chan_core import findBuyPoints, findSellPoints, intervalSecOf, fmtT
-from .mark_entry import DEFAULT_LOTS
+from .chan_core import findBuyPoints, findSellPoints, intervalSecOf, fmtT, lowerResOf
+from .mark_entry import DEFAULT_LOTS, lowerDiverge, levelsBelow
 
 # 进出场周期可选项（多选；30S 仅回测）
 ENTRY_RES_OPTIONS = ("30S", "3", "15", "60")
@@ -116,10 +116,12 @@ FXMA_DEFAULTS = {
     "fibLevels": "0.382,0.5,0.618", # 黄金分割档位（逗号串，各档 0<r<1）
     "fibNearPts": 5.0,              # 黄金分割档位容差（绝对点数）
     "upperDirOn": False,            # 上级周期同向条件开关（独立硬门槛，不参与计票）
+    "divLowerOn": False,            # 次级别/次次级别背驰条件开关（缠论V1 lowerDiverge 同源；参与计票）
+    "divLowerReq": "required",      # 次级别背驰条件性质：required=必选 / optional=可选
     "strongFxOn": True,             # 强分型条件开关（False=停用：不计票不拦截）
     "strongFxReq": "required",      # 强分型条件性质：required=必选 / optional=可选
     "strongFxMinPts": 0.0,          # 强分型实体最小落差（0=现口径）
-    # 各类买卖点条件满足数（四选N；生效N=min(N,启用条件数)，默认3=旧 AND 行为）
+    # 各类买卖点条件满足数（五选N；生效N=min(N,启用条件数)，默认3=旧 AND 行为）
     "entryPick1": "3",
     "entryPick2": "3",
     "entryPick2x": "3",
@@ -250,6 +252,7 @@ class FxMaEngine(BacktestEngine):
                  fib_near_on=False, fib_req=True,
                  fib_near_levels="0.382,0.5,0.618",
                  fib_near_pts=5.0, upper_dir_on=False,
+                 div_lower_on=False, div_lower_req=True,
                  strong_fx_on=True, strong_fx_req=True, strong_fx_min_pts=0.0,
                  entry_pick=None,
                  point_valid_bars=0, point_valid_pts=0.0,
@@ -286,16 +289,18 @@ class FxMaEngine(BacktestEngine):
         if self.fib_near_pts < 0:
             raise ValueError(f"fibNearPts 须 ≥0（收到 {fib_near_pts}）")
         self.upper_dir_on = bool(upper_dir_on)
+        self.div_lower_on = bool(div_lower_on)
+        self.div_lower_req = bool(div_lower_req)
         self.strong_fx_on = bool(strong_fx_on)
         self.strong_fx_req = bool(strong_fx_req)
         self.strong_fx_min_pts = float(strong_fx_min_pts)
-        # 各类买卖点条件满足数（四选N）：sel → 1..4；生效N=min(N, 启用条件数)
+        # 各类买卖点条件满足数（五选N）：sel → 1..5；生效N=min(N, 启用条件数)
         pick = dict.fromkeys(("1", "2", "2x", "3", "3x"), 3)
         for k, v in dict(entry_pick or {}).items():
             if k not in pick:
                 raise ValueError(f"entryPick 键须为 1/2/2x/3/3x（收到 {k!r}）")
-            if int(v) not in (1, 2, 3, 4):
-                raise ValueError(f"entryPick 须为 1/2/3/4（{k}={v!r}）")
+            if int(v) not in (1, 2, 3, 4, 5):
+                raise ValueError(f"entryPick 须为 1/2/3/4/5（{k}={v!r}）")
             pick[k] = int(v)
         self.entry_pick = pick
         self.point_valid_bars = int(point_valid_bars)
@@ -315,8 +320,8 @@ class FxMaEngine(BacktestEngine):
         self.tp_trail_slip_pts = float(tp_trail_slip_pts)
         if self.tp_trail_slip_pts < 0:
             raise ValueError(f"tpTrailSlipPts 须 ≥0（收到 {tp_trail_slip_pts}）")
-        if tp_mode == "structure" and float(lots) / 2.0 < 0.01:
-            raise ValueError(f"structure 模式可开仓手数须 ≥0.02 才能半仓（收到 {lots}）")
+        if tp_mode == "structure" and int(lots) < 2:
+            raise ValueError(f"structure 模式可开仓手数须 ≥2 才能整手半仓（收到 {lots}）")
         if same_bar_priority not in ("stop", "tp"):
             raise ValueError(f"sameBarPriority 须为 stop/tp 之一（收到 {same_bar_priority!r}）")
         self.same_bar_priority = same_bar_priority
@@ -345,9 +350,23 @@ class FxMaEngine(BacktestEngine):
         # findBuyPoints/findSellPoints 记录缓存（chan_core 按 macdArr 对象身份分槽；
         # _resync_bis 重建 macd 时同步清空）
         self._fx_pt_cache = {P: {} for P in self.entry_res}
-        # 结构对齐周期（selected ∪ 上级；structurePeriods 输入）
-        self._fx_align_res = list(dict.fromkeys(
-            [r for r in self.entry_res] + [UPPER_OF[r] for r in self.entry_res]))
+        # 结构对齐周期（selected ∪ 上级；structurePeriods 输入）；次级别背驰条件开启时
+        # 追加各进出场周期的更低级别链（levelsBelow 同映射：lowerResOf 逐级、3 之下挂
+        # 30S、仅含已加载周期）——lowerDiverge 与买卖点共用同一结构过滤视图（缠论V1
+        # compute_entries 同口径）
+        align = [r for r in self.entry_res] + [UPPER_OF[r] for r in self.entry_res]
+        if self.div_lower_on:
+            for r in self.entry_res:
+                cur = r
+                while True:
+                    nxt = lowerResOf(cur)
+                    if nxt is None and str(cur) == "3":
+                        nxt = "30S"
+                    if nxt is None or nxt not in periods:
+                        break
+                    align.append(nxt)
+                    cur = nxt
+        self._fx_align_res = list(dict.fromkeys(align))
 
     # ---------------- 参数中心 → 引擎 kwargs ----------------
 
@@ -374,6 +393,8 @@ class FxMaEngine(BacktestEngine):
             fib_near_levels=pm.get("fibLevels", "0.382,0.5,0.618"),
             fib_near_pts=pm.get("fibNearPts", 5.0),
             upper_dir_on=pm.get("upperDirOn", False),
+            div_lower_on=pm.get("divLowerOn", False),
+            div_lower_req=pm.get("divLowerReq", "required") == "required",
             strong_fx_on=pm.get("strongFxOn", True),
             strong_fx_req=pm.get("strongFxReq", "required") == "required",
             strong_fx_min_pts=pm.get("strongFxMinPts", 0.0),
@@ -490,6 +511,31 @@ class FxMaEngine(BacktestEngine):
         ubis = structure.get(UPPER_OF[P]) or []
         return ubis[-1]["type"] if ubis else None
 
+    def _fx_lower_diverge_cands(self, P, direction, cache):
+        """P 的以下级别背驰候选（缠论V1 lowerDiverge 同源：findDivergePoints 双判据
+        背驰 + sinkChainConfirm 区间套下沉链校验，次级别/次次级别由结构自动归属；
+        笔取 _structure_bis 结构过滤视图，与买卖点识别同口径）。
+
+        periodData 全周期构建一次、候选按 (P, 方向) 各算一次，经 cache 在同一评估拍
+        内跨买卖点共享（cache=None 时每调用现算）。@returns (候选列表·时间降序, 更低
+        级别链)
+        """
+        key = (P, direction)
+        if cache is not None and key in cache:
+            return cache[key]
+        pd_all = None if cache is None else cache.get("__pd__")
+        if pd_all is None:
+            structure = getattr(self, "_structure_bis", None) or self._bis
+            pd_all = {res: {"bis": structure.get(res) or [],
+                            "macdArr": self._macd[res].to_list()}
+                      for res in self.periods}
+            if cache is not None:
+                cache["__pd__"] = pd_all
+        out = (lowerDiverge(pd_all, P, direction), levelsBelow(pd_all, P))
+        if cache is not None:
+            cache[key] = out
+        return out
+
     def _fx_collect(self, allSignals, stats, fired, t):
         """当下评估：各 P 新收K线收盘拍判定 fxma 信号（返回新信号列表）。
 
@@ -499,6 +545,8 @@ class FxMaEngine(BacktestEngine):
         """
         jr = getattr(self, "_journal", None)
         sigs = []
+        # 次级别背驰候选缓存（同拍跨 P/跨点共享：periodData 一次 + (P,方向) 候选各一次）
+        divCache = {} if self.div_lower_on else None
         for P in self.entry_res:
             if not self._fx_sync_ma(P):
                 continue  # 本拍 P 无新收盘K线
@@ -569,10 +617,10 @@ class FxMaEngine(BacktestEngine):
                             jr.reject(t, "fx_point_drift_fail", P, pt["time"], None,
                                       ptType=pt["type"], validPts=self.point_valid_pts)
                         continue
-                # ---- 条件计票（2026-10-08）：均线分离/收盘站线/强分型/黄金分割四条件
-                # 各带 启用开关（*On）+ 必选标志（*Req）。必选不通过 → 按原拒绝码拦截；
+                # ---- 条件计票（2026-10-08）：均线分离/收盘站线/强分型/黄金分割/次级别背驰
+                # 五条件各带 启用开关（*On）+ 必选标志（*Req）。必选不通过 → 按原拒绝码拦截；
                 # 全部启用条件中通过数 ≥ 生效N（=min(entryPickN, 启用数)）才触发
-                # （必选通过也计票）；四条件全停用 = 点属所选类别且未失效即当拍触发
+                # （必选通过也计票）；五条件全停用 = 点属所选类别且未失效即当拍触发
                 # （旧全关行为）。可选条件未通过不单独记拒绝码，只体现在票数中。
                 # 每条件结果：ok=None 停用 / True 通过 / False 未过；rej=(拒绝码, 带策略键?, 附注)
                 # ① 强分型（点之后出现强底/顶分型即算通过——粘性，实体口径）
@@ -673,12 +721,33 @@ class FxMaEngine(BacktestEngine):
                             else:
                                 fib_ok = True
                                 fibGap, fibLevel, fibRef, fibExt = best[0], best[2], prev["price"], ext
+                # ⑤ 次级别/次次级别背驰（divLowerOn=False 跳过；缠论V1 lowerDiverge
+                #    同源，次级别/次次级别由下沉链结构自动归属）。窗口=点锚定·粘性：
+                #    候选背驰点时间 ≥ 点时间−1根P周期K线（容差对齐次级别与P级极值边界
+                #    差，候选列表时间降序故取最新）即通过，之后持续有效直到点作废。
+                #    无更低级别数据（如 P=3 且 30S 未加载）时永不通过（lower 链为空）。
+                divRes = divTime = None
+                div_ok = div_rej = None
+                if self.div_lower_on:
+                    cands, lowerChain = self._fx_lower_diverge_cands(P, direction, divCache)
+                    winStart = pt["time"] - (intervalSecOf(P) or 0)
+                    hit = cands[0] if cands and cands[0]["point"]["time"] >= winStart else None
+                    if hit is not None:
+                        div_ok = True
+                        divRes, divTime = hit["res"], hit["point"]["time"]
+                    else:
+                        div_ok = False
+                        div_rej = ("fx_no_lower_diverge", False,
+                                   dict(ptType=pt["type"], lower=",".join(lowerChain),
+                                        lastDivTime=(cands[0]["point"]["time"]
+                                                     if cands else None)))
                 # 计票：必选硬门槛（原拒绝码）→ 通过票数 ≥ 生效N；不满足点存活等待下拍
                 active = [(n, ok, req, rej) for n, ok, req, rej in (
                     ("强分型", fx_ok, self.strong_fx_req, fx_rej),
                     ("均线分离", ma_ok, self.ma_req, ma_rej),
                     ("收盘站线", stand_ok, self.ma_stand_req, stand_rej),
-                    ("黄金分割", fib_ok, self.fib_req, fib_rej)) if ok is not None]
+                    ("黄金分割", fib_ok, self.fib_req, fib_rej),
+                    ("次级别背驰", div_ok, self.div_lower_req, div_rej)) if ok is not None]
                 pickNeed = pickGot = 0
                 if active:
                     if any(req and not ok for _, ok, req, _ in active):
@@ -700,7 +769,7 @@ class FxMaEngine(BacktestEngine):
                                           f"{n}:{'过' if ok else '否'}{'必' if req else '选'}"
                                           for n, ok, req, _ in active))
                         continue
-                # ⑤ 上级周期同向（upperDirOn=False 跳过；全部类别）：上级周期当前笔
+                # ⑥ 上级周期同向（upperDirOn=False 跳过；全部类别）：上级周期当前笔
                 #    （列表末笔，含形成中）方向须与信号同向（买=up/卖=down）
                 upperDir = None
                 if self.upper_dir_on:
@@ -725,6 +794,7 @@ class FxMaEngine(BacktestEngine):
                     + (["站上均线" if direction == "long" else "站下均线"]
                        if stand_ok else []) \
                     + ([f"黄金分割{fibLevel:g}"] if fibLevel is not None else []) \
+                    + ([f"次级别{divRes}背驰"] if div_ok else []) \
                     + ([f"上级{UPPER_OF[P]}同向"] if self.upper_dir_on else [])
                 note = (f"{pt['type']} @ {fmtT(pt['time'])} {pt['price']:.2f}")
                 if fx_ok:
@@ -739,6 +809,8 @@ class FxMaEngine(BacktestEngine):
                 if fibLevel is not None:
                     note += (f"｜黄金分割 {fibLevel:g} 位（前点 {fibRef:.2f}→极值 "
                              f"{fibExt:.2f}，距 {fibGap:.2f} ≤ {self.fib_near_pts} 点）")
+                if div_ok:
+                    note += f"｜次级别背驰（{divRes} @ {fmtT(divTime)}）"
                 if self.upper_dir_on:
                     note += f"｜上级 {UPPER_OF[P]} 当前笔 {upperDir}"
                 if active:
@@ -755,12 +827,15 @@ class FxMaEngine(BacktestEngine):
                     "pickNeed": pickNeed, "pickGot": pickGot,
                     "fibLevel": fibLevel,
                     "fibGap": round(fibGap, 4) if fibGap is not None else None,
+                    "divLowerRes": divRes,
+                    "divLowerTime": divTime,
                     "upperDir": upperDir,
                     "realtime": True, "reason": "+".join(conds),
                     "strategyLabel": f"{self.ma_type}均线V1·{pt['type']}",
                     "signalNote": note,
-                    # 本笔开仓手数（structure=半仓；实盘 immediate 下单与镜像行用）
-                    "lots": self.lots / 2.0 if self.tp_mode == "structure" else float(self.lots),
+                    # 本笔开仓手数（structure=⌊lots/2⌋ 半仓整手；实盘 immediate 下单
+                    # 与镜像行用，与 _fx_open_positions entryLots 同口径）
+                    "lots": self.lots // 2 if self.tp_mode == "structure" else self.lots,
                     # 信号拍临时 SL/TP（实盘 immediate 下单用；成交拍由引擎 stopRef/tpRef 对齐；
                     # structure 无固定止盈 → tp 不挂，主动止盈由引擎触价事件驱动）
                     "provStop": lastBar["close"] + self.stop_pts if short
@@ -988,7 +1063,9 @@ class FxMaEngine(BacktestEngine):
         同拍同向共振大周期优先成交，闸门/容量不足的其余被压制。
         """
         structure = self.tp_mode == "structure"
-        entryLots = self.lots / 2.0 if structure else float(self.lots)
+        # 开/平仓手数恒整数：structure 半仓 = ⌊lots/2⌋（lots 基类已 int 归一）；
+        # 主动止盈份额见下方 tpLots（1/2类=半份至少 1 手）
+        entryLots = self.lots // 2 if structure else self.lots
 
         def _suppress(s, why):
             stats["suppressed"] += 1
@@ -1063,9 +1140,9 @@ class FxMaEngine(BacktestEngine):
                         else (tgt["price"] - self.tp_near_pts)
                     tpTarget = {"type": tgt["type"], "time": tgt["time"],
                                 "price": tgt["price"]}
-                    # 1/2类：主动止盈半份（entryLots/2），剩余走跟踪止损；
-                    # 3类：触及全平（entryLots）
-                    tpLots = entryLots if cls == 3 else entryLots / 2.0
+                    # 1/2类：主动止盈半份（⌊entryLots/2⌋ 至少 1 手，小手数退化为
+                    # 触及全平），剩余走跟踪止损；3类：触及全平（entryLots）
+                    tpLots = entryLots if cls == 3 else max(1, entryLots // 2)
             if not structure:
                 stopSource = (f"固定点数止损（盘中触价即成交） 进场价"
                               f"{'+' if short else '-'}{self.stop_pts}点")
@@ -1210,6 +1287,7 @@ class FxMaEngine(BacktestEngine):
                 "fibLevels": ",".join(str(r) for r in self.fib_near_levels),
                 "fibNearPts": self.fib_near_pts,
                 "upperDirOn": self.upper_dir_on,
+                "divLowerOn": self.div_lower_on,
                 "strongFxOn": self.strong_fx_on, "strongFxMinPts": self.strong_fx_min_pts,
                 "pointValidBars": self.point_valid_bars,
                 "pointValidPts": self.point_valid_pts,

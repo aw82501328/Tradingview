@@ -82,6 +82,55 @@ class BtStrategySignalLogTests(unittest.TestCase):
         self.assertIsNone(again)   # fxma 键已被过滤：拒收
 
 
+class BtOpenPushbackTests(unittest.TestCase):
+    """回测结束「持仓中」回推必须原位更新，不得追加重复行（2026-10-08 修复）。
+
+    引擎 trade 字典不带 strategy 字段；子进程 done/batch done/线程路径收尾的
+    fill_trade 若不传 worker 的 strategy，行键 (mode, strategy, ...) 不匹配 →
+    走"找不到则追加"分支：每笔期末未平仓交易在 /api/signals 里出现两行
+    （运行中的持仓中旧行 + 一条带完整出场明细的新行）。"""
+
+    SYM = "OANDA:XAUUSD"
+
+    def _worker_with_signal_row(self):
+        app = _FakeApp()
+        w = app.bt_workers["chan_v1"]
+        w._on_signal({"time": 100, "symbol": self.SYM, "periodX": "15",
+                      "direction": "short", "strategyKey": "wait3Sell",
+                      "price": 4172.8}, symbol=self.SYM)
+        return app, w
+
+    OPEN_TR = {"signalTime": 100, "periodX": "15", "direction": "short",
+               "strategyKey": "wait3Sell", "entryTime": 110, "entryPrice": 4172.5,
+               "lots": 4, "state": "open", "pnl": 91.0,
+               "exits": [{"type": "trailStop", "lots": 1.0}]}
+
+    def _assert_single_updated_row(self, app):
+        rows = app.signals.list(mode="backtest")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["strategy"], "chan_v1")
+        self.assertEqual(rows[0]["status"], "持仓中")
+        self.assertEqual(len(rows[0]["exits"]), 1)
+        self.assertEqual(rows[0]["pnl"], 91.0)
+
+    def test_subproc_done_pushback_updates_in_place(self):
+        app, w = self._worker_with_signal_row()
+        done = w._dispatch_single_msg({"kind": "done", "symbol": self.SYM,
+                                       "stats": {"steps": 1},
+                                       "open": [dict(self.OPEN_TR)]})
+        self.assertTrue(done)
+        self._assert_single_updated_row(app)
+
+    def test_batch_done_pushback_updates_in_place(self):
+        app, w = self._worker_with_signal_row()
+        w.batch = {self.SYM: {"state": "running"}}
+        sym = w._dispatch_batch_msg({"kind": "done", "symbol": self.SYM,
+                                     "stats": {"steps": 1},
+                                     "open": [dict(self.OPEN_TR)]})
+        self.assertEqual(sym, self.SYM)
+        self._assert_single_updated_row(app)
+
+
 class BtBackgroundTaskTests(unittest.TestCase):
     """回测固定本地存储后为纯后台任务：不注册模式锁、不占图表（2026-10-07）。
 

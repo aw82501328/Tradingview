@@ -17,9 +17,13 @@
 //        摆动段 = 前一同侧买卖点价格 → 其后至本点前（时间窗 (前点, 本点]）的
 //        P 周期真实K线极值（买取最高/卖取最低），按 fibLevels 算回撤位，
 //        本点价格须落在任一档位 ±fibNearPts（绝对点数）内；无前点/摆动退化不触发
-//     ⑥ 上级周期同向（--upper-dir-on=1 开，默认关；全部类别）：上级周期
+//     ⑥ 次级别/次次级别背驰（--div-lower-on=1 开，默认关；缠论V1 lowerDiverge 同源：
+//        双判据背驰+区间套下沉链校验，落在次级别还是次次级别由结构自动决定）：
+//        窗口=点锚定·粘性——更低级别出现同向背驰点且其时间 ≥ 点时间−1根本周期K线
+//        即通过，之后持续有效直到点作废/反向点；无更低级别数据时永不通过
+//     ⑦ 上级周期同向（--upper-dir-on=1 开，默认关；全部类别）：上级周期
 //        （30S→3→15→60→240）当前笔方向须与信号同向（买=up/卖=down）
-//     ⑦ pointValidBars 根内齐备 + pointValidPts 盘中价距点极值上限（买=评估根最高价
+//     ⑧ pointValidBars 根内齐备 + pointValidPts 盘中价距点极值上限（买=评估根最高价
 //        −买点最低价、卖=卖点最高价−评估根最低价；超距只等待不作废）→ 触发（每点一次）
 //        → 下一根 P 周期K线开盘成交（各条件开关全关=点属所选类别且未失效当拍即触发）
 //   出场：K线盘中价触及 止损(进场∓stopPts)/止盈 → 即时按该触发价成交
@@ -47,7 +51,10 @@ const CDP = require("../../../../server-cdp/node_modules/chrome-remote-interface
 
 const core = require("../../chan-core/scripts/chan_core.js");
 const { calcMACD, intervalSecOf, markWickBars, mergeBars, findFractals,
-        findBuyPoints, findSellPoints, fmtT } = core;
+        findBuyPoints, findSellPoints, fmtT, lowerResOf } = core;
+// 进出场模块（次级别背驰条件复用缠论V1 lowerDiverge 区间套下沉判定；require-safe，
+// module.exports 见 mark_entry.js 尾部）
+const { lowerDiverge } = require("../../mark-entry/scripts/mark_entry.js");
 
 const CACHE_DIR = process.env.CHAN_CACHE_DIR || path.join(__dirname, "..", "..", "..", "..", ".cursor", "cache");
 const cacheFile = (prefix, symbol) => path.join(CACHE_DIR, `${prefix}_${String(symbol).replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
@@ -85,6 +92,8 @@ const FIB_NEAR_ON = getStrArg("fib-near-on", "0") === "1";  // 黄金分割附�
 const FIB_LEVELS = parseFibLevels(getStrArg("fib-levels", "0.382,0.5,0.618"));
 const FIB_NEAR_PTS = getNumArg("fib-near-pts", 5.0);        // 档位容差（绝对点数）
 const UPPER_DIR_ON = getStrArg("upper-dir-on", "0") === "1"; // 上级周期同向条件开关（"1"=开，默认关）
+const DIV_LOWER_ON = getStrArg("div-lower-on", "0") === "1"; // 次级别背驰条件开关（"1"=开，默认关）
+const DIV_LOWER_REQ = getStrArg("div-lower-req", "1") !== "0"; // 条件性质（必选=1/可选=0）
 const STRONG_FX_ON = getStrArg("strong-fx-on", "1") !== "0";  // 强分型条件开关（"0"=关，缺省开）
 const STRONG_FX_MIN_PTS = getNumArg("strong-fx-min-pts", 0.0);
 // 条件性质（必选=1/可选=0；必选不通过该类点不触发，可选仅参与满足数计票）
@@ -92,8 +101,8 @@ const MA_REQ = getStrArg("ma-req", "1") !== "0";
 const MA_STAND_REQ = getStrArg("ma-stand-req", "1") !== "0";
 const STRONG_FX_REQ = getStrArg("strong-fx-req", "1") !== "0";
 const FIB_REQ = getStrArg("fib-req", "1") !== "0";
-// 各类买卖点条件满足数（四选N；生效N=min(N,启用条件数)，缺省3=引擎旧 AND 行为）
-const pickClamp = v => Math.min(4, Math.max(1, Math.round(v)));
+// 各类买卖点条件满足数（五选N；生效N=min(N,启用条件数)，缺省3=引擎旧 AND 行为）
+const pickClamp = v => Math.min(5, Math.max(1, Math.round(v)));
 const ENTRY_PICK = {
   "1": pickClamp(getNumArg("entry-pick-1", 3)),
   "2": pickClamp(getNumArg("entry-pick-2", 3)),
@@ -110,7 +119,7 @@ const TP_NEAR_PTS = Math.max(0, getNumArg("tp-near-pts", 0.0));       // 到点�
 const TP_TRAIL_SLIP_PTS = Math.max(0, getNumArg("tp-trail-slip-pts", 1.0)); // 提损滑点
 const SAME_BAR_PRIORITY = String(getStrArg("same-bar-priority", "stop")) === "tp" ? "tp" : "stop";
 const MUTEX_SCOPE = String(getStrArg("mutex-scope", "global")) === "perPeriod" ? "perPeriod" : "global";
-const LOTS = getNumArg("lots", 4);
+const LOTS = Math.max(1, Math.round(getNumArg("lots", 4))); // 手数整数（开/平仓整手口径）
 const UPPER_OF = { "30S": "3", "3": "15", "15": "60", "60": "240" };
 const POINT_CLASS = {
   "1买": 1, "1卖": 1,
@@ -135,7 +144,8 @@ const MODULE_OPTS = {
   maStandOn: MA_STAND_ON, maStand1: MA_STAND_1, maStand2: MA_STAND_2, maStandReq: MA_STAND_REQ,
   fibNearOn: FIB_NEAR_ON, fibLevels: FIB_LEVELS, fibNearPts: FIB_NEAR_PTS, fibReq: FIB_REQ,
   entryPick: ENTRY_PICK,
-  upperDirOn: UPPER_DIR_ON, pointValidBars: POINT_VALID_BARS, pointValidPts: POINT_VALID_PTS,
+  upperDirOn: UPPER_DIR_ON, divLowerOn: DIV_LOWER_ON, divLowerReq: DIV_LOWER_REQ,
+  pointValidBars: POINT_VALID_BARS, pointValidPts: POINT_VALID_PTS,
   tpMode: TP_MODE, tpNearPts: TP_NEAR_PTS, tpTrailSlipPts: TP_TRAIL_SLIP_PTS,
 };
 
@@ -208,7 +218,7 @@ function strongFxAfter(merged, fractals, t, kind, minPts, barSec) {
  *                    signalPrice, entryIdx, fibLevel, fibGap, upperDir}]（未含互斥过滤；
  *                    entryIdx=成交K线下标）
  */
-function scanPeriodSignals(P, bars, periodBis, upperRes, opts = MODULE_OPTS) {
+function scanPeriodSignals(P, bars, periodBis, upperRes, opts = MODULE_OPTS, lowerCtx = null) {
   const barSec = intervalSecOf(P) || 180;
   const closes = bars.map(b => b.close);
   const f1 = maSeries(closes, opts.maFast1, opts.maType), s1 = maSeries(closes, opts.maSlow1, opts.maType);
@@ -217,6 +227,11 @@ function scanPeriodSignals(P, bars, periodBis, upperRes, opts = MODULE_OPTS) {
   const merged = mergeBars(markWickBars(bars));
   const fractals = findFractals(merged);
   const macdArr = calcMACD(bars);
+  // 次级别背驰候选（缠论V1 lowerDiverge 同源；最终快照一次算好，时间窗过滤逐拍做。
+  // lowerCtx 缺失（无更低级别数据）→ 候选为空 → 条件永不通过，与引擎 P=3 无 30S 同语义）
+  const divCandsByDir = (opts.divLowerOn && lowerCtx)
+    ? { long: lowerDiverge(lowerCtx, P, "long"), short: lowerDiverge(lowerCtx, P, "short") }
+    : null;
   const buys = findBuyPoints(periodBis[P] || [], periodBis[upperRes] || [], macdArr, barSec);
   const sells = findSellPoints(periodBis[P] || [], periodBis[upperRes] || [], macdArr, barSec);
   // 点按时间升序（回放时维护「当前最新点」——引擎语义：只有最新点可触发）
@@ -255,8 +270,8 @@ function scanPeriodSignals(P, bars, periodBis, upperRes, opts = MODULE_OPTS) {
         if (far > opts.pointValidPts) continue;
       }
       // ---- 条件计票（与引擎 fx_ma._fx_collect 同构，2026-10-08）：均线分离/收盘站线/
-      //      强分型/黄金分割 各带 启用开关+必选标志。必选不通过 → 跳过本拍；启用条件
-      //      中通过数 ≥ 生效N（=min(entryPickN, 启用数)）才触发；全停用=点出现即触发。
+      //      强分型/黄金分割/次级别背驰 各带 启用开关+必选标志。必选不通过 → 跳过本拍；
+      //      启用条件中通过数 ≥ 生效N（=min(entryPickN, 启用数)）才触发；全停用=点出现即触发。
       //      可选条件未通过只体现在票数中。每条件 ok=null 停用 / true 通过 / false 未过。
       let fxTime = null, crossGap = null;
       let fxOk = null, maOk = null;
@@ -319,12 +334,25 @@ function scanPeriodSignals(P, bars, periodBis, upperRes, opts = MODULE_OPTS) {
           }
         }
       }
+      // ⑥ 次级别/次次级别背驰（--div-lower-on=1 开，默认关；缠论V1 lowerDiverge 同源，
+      //    级别归属由下沉链结构自动决定）。窗口=点锚定·粘性：候选点时间 ≥ 点时间−1根
+      //    P 周期K线 且 ≤ 本拍收盘（快照口径防未来）即通过，之后持续有效直到点作废
+      let divOk = null;
+      let divRes = null, divTime = null;
+      if (opts.divLowerOn) {
+        const cands = (divCandsByDir && divCandsByDir[direction]) || [];
+        const winStart = pt.time - barSec;
+        const hit = cands.find(c => c.point.time >= winStart && c.point.time <= closeT);
+        if (hit) { divOk = true; divRes = hit.res; divTime = hit.point.time; }
+        else divOk = false;
+      }
       // 计票：必选硬门槛 → 通过票数 ≥ 生效N（不满足点存活，等待后续拍补票）
       {
         const active = [["强分型", fxOk, opts.strongFxReq],
                         ["均线分离", maOk, opts.maReq],
                         ["收盘站线", standOk, opts.maStandReq],
-                        ["黄金分割", fibOk, opts.fibReq]].filter(c => c[1] !== null);
+                        ["黄金分割", fibOk, opts.fibReq],
+                        ["次级别背驰", divOk, opts.divLowerReq]].filter(c => c[1] !== null);
         if (active.length) {
           if (active.some(c => c[2] && !c[1])) continue;   // 必选未过
           const pick = (opts.entryPick && opts.entryPick[sel]) || 3;
@@ -333,7 +361,7 @@ function scanPeriodSignals(P, bars, periodBis, upperRes, opts = MODULE_OPTS) {
           if (got < need) continue;   // 票数不足
         }
       }
-      // ⑥ 上级周期同向（默认关；全部类别）：上级当前笔（startTime ≤ 本根时间的最后一
+      // ⑦ 上级周期同向（默认关；全部类别）：上级当前笔（startTime ≤ 本根时间的最后一
       //    根笔，最终快照口径）方向须与信号同向（买=up/卖=down）
       let upperDir = null;
       if (opts.upperDirOn) {
@@ -350,7 +378,7 @@ function scanPeriodSignals(P, bars, periodBis, upperRes, opts = MODULE_OPTS) {
         strategyKey: `fx${sel}${direction === "long" ? "Buy" : "Sell"}`,
         pointType: pt.type, pointTime: pt.time, pointPrice: pt.price,
         strongFxTime: fxTime, crossGap, standGap,
-        fibLevel, fibGap, upperDir,
+        fibLevel, fibGap, divLowerRes: divRes, divLowerTime: divTime, upperDir,
         signalTime: closeT, signalPrice: closes[i], entryIdx: i + 1,
       });
     }
@@ -403,7 +431,10 @@ function applyMutexAndSimulate(signals, barsByP, contractMult = 1.0, opts = {}) 
     biEndsByP: opts.biEndsByP ?? null,
   };
   const structure = o.tpMode === "structure";
-  const entryLots = structure ? o.lots / 2 : o.lots;
+  if (structure && o.lots < 2)
+    throw new Error(`structure 模式可开仓手数须 ≥2 才能整手半仓（收到 ${o.lots}）`);
+  // 开/平仓手数恒整数：半仓 = ⌊lots/2⌋ 向下取整（引擎 fx_ma entryLots 同口径）
+  const entryLots = structure ? Math.floor(o.lots / 2) : Math.floor(o.lots);
   const trailTypes = new Set(["3买", "类3买", "4买", "类4买", "3卖", "类3卖", "4卖", "类4卖"]);
   const sorted = [...signals].sort((a, b) => a.signalTime - b.signalTime);
   // 容量作用域：global 按方向 / perPeriod 按 (P,方向)；占用 = 终局时刻晚于本信号时刻
@@ -449,7 +480,8 @@ function applyMutexAndSimulate(signals, barsByP, contractMult = 1.0, opts = {}) 
       if (tgt && (short ? tgt.price < entryPrice : tgt.price > entryPrice)) {
         s.tpRef = short ? tgt.price + o.tpNearPts : tgt.price - o.tpNearPts;
         s.tpTarget = { type: short ? "前低" : "前高", time: tgt.time, price: tgt.price };
-        s.tpLots = POINT_CLASS[s.pointType] === 3 ? entryLots : entryLots / 2;
+        // 1/2类主动止盈半份：⌊entryLots/2⌋ 至少 1 手（小手数退化为触及全平）；3类全平
+        s.tpLots = POINT_CLASS[s.pointType] === 3 ? entryLots : Math.max(1, Math.floor(entryLots / 2));
       }
       s.trailRaised = false; s.trailMoves = [];
     }
@@ -573,6 +605,7 @@ async function main() {
       + `，黄金分割附近${FIB_NEAR_ON ? "开" : "关"}`
       + (FIB_NEAR_ON ? `（${FIB_LEVELS.join(",")}±${FIB_NEAR_PTS}点）` : "")
       + `，上级同向${UPPER_DIR_ON ? "开" : "关"}`
+      + `，次级别背驰${DIV_LOWER_ON ? "开" : "关"}`
       + `，止损${STOP_PTS}/止盈${TP_PTS}点`
       + (TP_MODE === "structure"
          ? `（止盈方式=结构组合：每笔 ${LOTS / 2} 手半仓、容差 ${TP_NEAR_PTS}、提损滑点 ${TP_TRAIL_SLIP_PTS}）`
@@ -664,6 +697,47 @@ async function main() {
       return null;
     };
 
+    // 次级别背驰条件：预取各进出场周期更低级别链的K线（lowerDiverge 需要次/次次级别
+    // MACD；链映射与缠论V1 levelsBelow 一致——lowerResOf 逐级、3 之下挂 30S、无笔数据
+    // 则止）。30S 沿用 3 天窗口；MACD 预热取 60 根缓冲。bis 用画笔落盘快照（与上级
+    // 同向条件同口径）；级别归属由 lowerDiverge 下沉链自动决定。
+    const lowerBarsByRes = {};
+    const lowerCtxByP = {};
+    if (DIV_LOWER_ON) {
+      const chainBelow = (res) => {
+        const chain = [];
+        let cur = res;
+        for (;;) {
+          let nxt = lowerResOf(cur);
+          if (nxt === null && String(cur) === "3") nxt = "30S";
+          if (!nxt || !(periodBis[nxt] || []).length) break;
+          chain.push(nxt);
+          cur = nxt;
+        }
+        return chain;
+      };
+      const needed = new Set();
+      for (const P of ENTRY_RES) chainBelow(P).forEach(r => needed.add(r));
+      for (const res of needed) {
+        await ensureResolution(res);
+        const d = await fetchBars(FROM_TS, 60, WINDOW_DAYS[res] || null);
+        if (d && d.bars && d.bars.length) {
+          lowerBarsByRes[res] = d.bars;
+          console.log(`[次级别背驰] 周期 ${res}：${d.bars.length} 根K线（MACD 源）`);
+        } else {
+          console.log(`[次级别背驰] 周期 ${res}：未读到K线，该级别不参与背驰候选`);
+        }
+      }
+      for (const P of ENTRY_RES) {
+        const ctx = {};
+        for (const [res, bis] of Object.entries(periodBis)) ctx[res] = { bis };
+        for (const [res, bars] of Object.entries(lowerBarsByRes)) {
+          ctx[res] = { bis: periodBis[res] || [], macdArr: calcMACD(bars) };
+        }
+        lowerCtxByP[P] = ctx;
+      }
+    }
+
     // 逐周期：取K线 → 扫描信号（ptsByP=全部买卖点供提损扫描；biEndsByP=已确认
     // 笔端点流供主动止盈目标）
     const barsByP = {};
@@ -685,7 +759,7 @@ async function main() {
         ptsByP[P] = collectPeriodPoints(P, d.bars, periodBis, UPPER_OF[P]);
         biEndsByP[P] = collectBiEnds(P, periodBis);
       }
-      const sigs = scanPeriodSignals(P, d.bars, periodBis, UPPER_OF[P]);
+      const sigs = scanPeriodSignals(P, d.bars, periodBis, UPPER_OF[P], MODULE_OPTS, lowerCtxByP[P] || null);
       console.log(`[周期 ${P}] ${d.bars.length} 根K线，信号 ${sigs.length} 个`
         + (WINDOW_DAYS[P] ? `（窗口最近 ${WINDOW_DAYS[P]} 天）` : ""));
       allSignals = allSignals.concat(sigs);
@@ -713,7 +787,7 @@ async function main() {
                 crossMinPts: CROSS_MIN_PTS,
                 maStandOn: MA_STAND_ON, maStand1: MA_STAND_1, maStand2: MA_STAND_2,
                 fibNearOn: FIB_NEAR_ON, fibLevels: FIB_LEVELS, fibNearPts: FIB_NEAR_PTS,
-                upperDirOn: UPPER_DIR_ON,
+                upperDirOn: UPPER_DIR_ON, divLowerOn: DIV_LOWER_ON,
                 strongFxOn: STRONG_FX_ON, strongFxMinPts: STRONG_FX_MIN_PTS,
                 strongFxReq: STRONG_FX_REQ, maReq: MA_REQ,
                 maStandReq: MA_STAND_REQ, fibReq: FIB_REQ, entryPick: ENTRY_PICK,

@@ -848,6 +848,12 @@ class BacktestWorker(ModeWorker):
         # 恰 1 个品种时 normalize_cfg 已折叠回 cfg["symbol"]，走下方原单品种路径
         if len([s for s in (cfg.get("symbols") or []) if s]) > 1:
             return self._run_batch()
+        # 单品种子进程化（2026-10-08，默认开；PY_CHAIN_BT_SUBPROC=0 回退线程路径）：
+        # 回测是纯 CPU 计算，多策略 TAB 的线程并行受 GIL 限制（墙钟≈两策略 CPU 之和）；
+        # 子进程化后 chan/fxma 真并行（墙钟≈最长者），输出与线程路径一致（复用
+        # bt_batch.run_symbol 与批量同一中继/事件机制）。
+        if os.environ.get("PY_CHAIN_BT_SUBPROC", "1") != "0":
+            return self._run_single_subproc()
         # 引擎分发（2026-09-30 第二策略）：fx_ma = 强分型均线V1 独立路径
         # （取数周期/构造参数/日志均不同，不走缠论V1 的 _engine_kwargs_of）
         strategy = module_registry.normalize_strategy(cfg.get("strategy"))
@@ -910,7 +916,8 @@ class BacktestWorker(ModeWorker):
         for tr in result["trades"]:
             if tr.get("state") == "closed":
                 continue
-            row = self.signals.fill_trade(self.MODE, tr, symbol=self.cfg.get('symbol'))
+            row = self.signals.fill_trade(self.MODE, tr, symbol=self.cfg.get('symbol'),
+                                          strategy=self.strategy)
             self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
         st = result["stats"]
         self.log(f"回测完成：{st['steps']} 步，信号 {st['signals']}，成交 {st['executed']}，"
@@ -989,11 +996,147 @@ class BacktestWorker(ModeWorker):
         for tr in result["trades"]:
             if tr.get("state") == "closed":
                 continue
-            row = self.signals.fill_trade(self.MODE, tr, symbol=self.cfg.get('symbol'))
+            row = self.signals.fill_trade(self.MODE, tr, symbol=self.cfg.get('symbol'),
+                                          strategy=self.strategy)
             self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
         st = result["stats"]
         self.log(f"回测完成：{st['steps']} 步，信号 {st['signals']}，成交 {st['executed']}，"
                  f"同向过滤 {st.get('suppressed', 0)}，已平仓 {st.get('closed', 0)}")
+
+    def _run_single_subproc(self):
+        """单品种全量回测子进程化（2026-10-08）：与 _run_batch 同一套 spawn 机制，
+        只跑 cfg["symbol"] 一个品种，事件中继回单品种 UI 流（进度/信号/成交/日志
+        与线程路径同拍）。构造参数：chan 走 _engine_kwargs_of（cfg 显式值优先，
+        与线程路径逐参一致）、fxma 走 fxma_engine_kwargs（lots 显式优先），子进程
+        各自 apply_cfg → CHAN_CFG 进程级隔离。
+        """
+        import multiprocessing as mp
+        from . import bt_batch
+        cfg = self.cfg
+        sym = cfg.get("symbol")
+        strategy = module_registry.normalize_strategy(cfg.get("strategy"))
+        engine_id = module_registry.STRATEGIES[strategy]["engine"]
+        lead_days = int(cfg.get("lead_days") or 0)
+        from_ts = int(cfg.get("from_ts", 0))
+        data_from_ts = max(0, from_ts - lead_days * 86400)
+        start_ts = from_ts if lead_days > 0 else None
+        to_ts = int(cfg.get("to_ts") or 0) or None
+        if lead_days > 0:
+            self.log(f"预热提前 {lead_days} 天：数据起点 {fmtT(data_from_ts)}，交易起点 {fmtT(from_ts)}")
+        if engine_id == "fx_ma":
+            pm_sym = param_center.effective_all(sym)
+            chan_core.apply_cfg(param_center.chan_cfg_effective(sym))
+            periods = engine_dispatch.fxma_load_periods(pm_sym["fxma"]["entryRes"])
+            if cfg.get("lots") is None:
+                cfg["lots"] = pm_sym["fxma"].get("lots") or mark_entry.DEFAULT_LOTS
+            kw = param_center.fxma_engine_kwargs(
+                pm_sym, lots_override=cfg["lots"],
+                contract_mult=mark_entry.contract_mult_of(sym))
+        else:
+            periods = cfg.get("periods") or DEFAULT_PERIODS
+            kw = self._engine_kwargs_of(cfg, periods, log=self.log)
+        child_cfg = {"strategy": strategy,
+                     "chan_cfg": param_center.chan_cfg_effective(sym),
+                     "engine_kwargs": kw, "periods": periods,
+                     "data_from_ts": data_from_ts, "to_ts": to_ts, "start_ts": start_ts}
+        ctx = mp.get_context("spawn")
+        msg_q = ctx.Queue()
+        pause_e = ctx.Event()
+        stop_e = ctx.Event()
+        p = ctx.Process(target=bt_batch.run_symbol,
+                        args=(child_cfg, sym, msg_q, pause_e, stop_e),
+                        name=f"bt-{strategy}-{sym}", daemon=True)
+        p.start()
+        self.log(f"子进程已启动（PID {p.pid}）——多策略 TAB 真并行（GIL 免锁）")
+        terminal = False
+        dying_at = None
+        stop_at = None
+        try:
+            while not terminal:
+                # 控制下发：worker 线程事件镜像到子进程（与 _relay_batch 同口径）
+                if self._pause_evt.is_set():
+                    pause_e.set()
+                else:
+                    pause_e.clear()
+                if self._stop_evt.is_set():
+                    stop_e.set()
+                got = None
+                try:
+                    got = msg_q.get(timeout=0.2)
+                except queue.Empty:
+                    pass
+                while got is not None:
+                    terminal = self._dispatch_single_msg(got)
+                    try:
+                        got = msg_q.get_nowait()
+                    except queue.Empty:
+                        got = None
+                # 崩溃 / 停止兜底（2s 等队列 flush 终结消息；stop 5s 后 terminate）
+                now = time.time()
+                if p.is_alive():
+                    dying_at = None
+                    if stop_e.is_set():
+                        if stop_at is None:
+                            stop_at = now
+                        elif now - stop_at > 5:
+                            p.terminate()
+                elif dying_at is None:
+                    dying_at = now
+                elif now - dying_at > 2.0:
+                    self.error = f"子进程异常退出（exitcode={p.exitcode}）"
+                    self.log(f"运行失败：{self.error}")
+                    self.set_state("error")
+                    terminal = True
+        finally:
+            stop_e.set()
+            if p.is_alive():
+                p.join(5)
+                if p.is_alive():
+                    p.terminate()
+            p.join(2)
+            try:
+                msg_q.close()
+                msg_q.join_thread()
+            except Exception:
+                pass
+
+    def _dispatch_single_msg(self, msg):
+        """单品种子进程消息 → 单品种 UI 流；终结（done/error）返回 True。"""
+        kind = msg.get("kind")
+        sym = msg.get("symbol") or self.cfg.get("symbol")
+        if kind == "log":
+            self.log(str(msg.get("msg", "")))
+        elif kind == "progress":
+            self._on_progress(int(msg.get("current") or 0), int(msg.get("total") or 0))
+        elif kind == "signal":
+            self._on_signal(msg.get("signal") or {}, symbol=sym)
+        elif kind == "trade":
+            self._on_trade(msg.get("trade") or {}, symbol=sym)
+        elif kind == "exit":
+            self._on_exit(msg.get("trade") or {}, symbol=sym)
+        elif kind == "suppressed":
+            self._on_suppressed(msg.get("signal") or {}, symbol=sym)
+        elif kind == "done":
+            if msg.get("journal"):
+                self.cfg["journal"] = msg["journal"]   # bt_runs 保存快照随带日志路径
+                self.log(f"交易日志：{msg['journal']}（bt_query 零重算查询单笔原因）")
+            # 回测结束后回推「持仓中」行（对齐线程路径 _run 收尾口径）
+            for tr in msg.get("open") or []:
+                row = self.signals.fill_trade(self.MODE, tr, symbol=sym,
+                                              strategy=self.strategy)
+                self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
+            st = msg.get("stats") or {}
+            self.log(f"回测完成：{st.get('steps', 0)} 步，信号 {st.get('signals', 0)}，"
+                     f"成交 {st.get('executed', 0)}，同向过滤 {st.get('suppressed', 0)}，"
+                     f"已平仓 {st.get('closed', 0)}")
+            self.set_state("stopped" if msg.get("stopped") else "done")
+            return True
+        elif kind == "error":
+            self.error = str(msg.get("error") or "未知错误")
+            self.log(f"运行失败：{self.error}")
+            self.set_state("error")
+            return True
+        return False
 
     # ---- 多品种批量并行（2026-09-23）----
     def _run_batch(self):
@@ -1122,7 +1265,8 @@ class BacktestWorker(ModeWorker):
             row["duration"] = msg.get("duration")
             # 回测结束后回推「持仓中」行（对齐单品种 _run 收尾口径）
             for tr in msg.get("open") or []:
-                r2 = self.signals.fill_trade(self.MODE, tr, symbol=sym)
+                r2 = self.signals.fill_trade(self.MODE, tr, symbol=sym,
+                                             strategy=self.strategy)
                 self.broadcaster.emit("signal", {"mode": self.MODE, "row": r2})
             st = row["stats"]
             self.log(f"[{sym}] 回测完成：{st.get('steps', 0)} 步，信号 {st.get('signals', 0)}，"

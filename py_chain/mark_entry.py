@@ -93,13 +93,18 @@ TREND_STRATEGY_KEYS = {"wait2Buy", "waitBuy", "wait3Buy", "waitLike2Buy",
                        "wait2Sell", "waitSell", "wait3Sell", "waitLike2Sell"}
 
 # ---- 出场方式配置（2026-10-08 出场方式可配置化；默认 = 现网行为，跟踪止盈默认关） ----
-# 每种离场方式 = 启用开关 + 平仓百分比（占当前剩余仓位 lotsLeft）；至少启用一种
+# 每种离场方式 = 启用开关 + 平仓百分比（占总仓位=初始开仓手数，非剩余仓位；手数恒
+# 整数：⌊总手数×比例%⌋ 不足1手平1手，封顶剩余）；至少启用一种
 # （param_center.normalize 跨键校验）。键名与参数中心/engine module_params 同名直通。
 EXIT_STOP_SR_ON = True     # 支阻止损：初始止损位（支阻±滑点/进场K线外推/最大止损兜底）穿越
 EXIT_STOP_SR_PCT = 100.0
 EXIT_STOP_BE_ON = True     # 保本止损：TP1 保本迁移后保本位 beStop 穿越离场
 EXIT_STOP_BE_PCT = 100.0
-EXIT_HALF_ON = True        # 够笔止盈（原 TP2 半平）：仅顺势，检测周期有利方向够笔
+EXIT_HALF_MR_ON = False    # 背驰周期够笔（2026-10-08 拆分）：背驰周期首笔有利方向笔完成
+                           # （同 TP1 保本事件源，不限顺势）→ 平指定比例，剩余止损移保本位；
+                           # 默认关 = 旧基线可比
+EXIT_HALF_MR_PCT = 50.0
+EXIT_HALF_ON = True        # 检测周期够笔（原 TP2 半平/够笔止盈）：仅顺势，检测周期有利方向够笔
 EXIT_HALF_PCT = 50.0
 EXIT_CLOSE_ON = True       # 过高低点止盈（原 TP3 全平）：顺势破前高/低、逆势成笔预期
 EXIT_CLOSE_PCT = 100.0
@@ -111,14 +116,15 @@ EXIT_TRAIL_SLIP = 1.0      # 跟踪止盈滑点（点）：止损上移到参照
 EXIT_MODE_DEFAULTS = {
     "exitStopSrOn": EXIT_STOP_SR_ON, "exitStopSrPct": EXIT_STOP_SR_PCT,
     "exitStopBeOn": EXIT_STOP_BE_ON, "exitStopBePct": EXIT_STOP_BE_PCT,
+    "exitHalfMrOn": EXIT_HALF_MR_ON, "exitHalfMrPct": EXIT_HALF_MR_PCT,
     "exitHalfOn": EXIT_HALF_ON, "exitHalfPct": EXIT_HALF_PCT,
     "exitCloseOn": EXIT_CLOSE_ON, "exitClosePct": EXIT_CLOSE_PCT,
     "exitTrailOn": EXIT_TRAIL_ON, "exitTrailPct": EXIT_TRAIL_PCT,
     "exitTrailSlip": EXIT_TRAIL_SLIP,
 }
 # 出场方式开关键（「至少启用一种」校验用；exitTrailSlip 非开关不列入）
-EXIT_MODE_ON_KEYS = ("exitStopSrOn", "exitStopBeOn", "exitHalfOn",
-                     "exitCloseOn", "exitTrailOn")
+EXIT_MODE_ON_KEYS = ("exitStopSrOn", "exitStopBeOn", "exitHalfMrOn",
+                     "exitHalfOn", "exitCloseOn", "exitTrailOn")
 # 跟踪止盈参照信号集合：同向 3类买卖点（wait3Buy/wait3Sell=3买/3卖点，
 # waitBuy/waitSell=新买/卖点=3类点强档；fxma 侧对应 3/类3/4/类4 点流，缠论V1 无4类点）
 EXIT_TRAIL_REF_KEYS = {"wait3Buy", "waitBuy", "wait3Sell", "waitSell"}

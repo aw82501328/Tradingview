@@ -255,51 +255,55 @@ class LiveTrader:
                                   c["account"]["server"] or None, require_mode)
         self.log(f"[live] 账号守卫通过：login={acc['login']} server={acc['server']} "
                  f"mode={acc['trade_mode']} margin={acc['margin_mode']}")
-        # ② 规格/手数校验（奇数/半仓守卫按策略分流：fxma 固定半仓口径不变；
-        #   缠论V1 出场比例可配，最小分批守卫移至 ④ 参数中心加载后按配置推导）
+        # ② 规格/手数校验（整手口径 2026-10-08：fxma 半仓=⌊lots/2⌋ 向下取整，
+        #   奇数手自然成立不再拒绝；缠论V1 出场比例可配，最小分批守卫移至
+        #   ④ 参数中心加载后按配置推导）
         spec = self.broker.spec()
         vol = c["lots"] * 0.01
         if vol < spec["volume_min"] or vol > spec["volume_max"]:
             raise RuntimeError(f"手数越界：lots={c['lots']}（{vol} 手）不在 "
                                f"[{spec['volume_min']},{spec['volume_max']}]")
         if c.get("strategy", "chan_v1") == "fxma_v1":
-            if c["lots"] % 2 != 0 and not c["risk"].get("allow_odd_lots"):
-                raise RuntimeError(f"lots={c['lots']} 为奇数：半仓（{vol / 2:.3f} 手）"
-                                   f"低于最小手数，需 half→全平降级才可运行"
+            half_vol = (c["lots"] // 2) * 0.01  # 半仓整手：⌊lots/2⌋
+            if half_vol < spec["volume_min"] and not c["risk"].get("allow_odd_lots"):
+                raise RuntimeError(f"半仓 {half_vol:.3f} 手（⌊lots/2⌋ 整手）"
+                                   f"< volume_min {spec['volume_min']}，"
+                                   f"需 half→全平降级才可运行"
                                    f"（risk.allow_odd_lots=true 显式接受）")
-            if vol / 2 < spec["volume_min"] and not c["risk"].get("allow_odd_lots"):
-                raise RuntimeError(f"半仓 {vol / 2:.3f} 手 < volume_min {spec['volume_min']}")
         # ③ 数据源
         finfo = self.feed.connect()
         self.log(f"[live] 行情源就绪：{finfo}")
         # ④ 参数中心（进程内全局 CHAN_CFG 与引擎 module_params 同 webapp 口径）
         self._pm = param_center.effective_all(c.get("symbol"))
         chan_core.apply_cfg(param_center.chan_cfg_effective(c.get("symbol")))
-        # 缠论V1：出场方式比例驱动的最小分批守卫（启用方式中比例最小者换算出的
-        # 分批手数须 ≥ volume_min，否则部分平仓会触发全平降级——需显式接受）
-        if c.get("strategy", "chan_v1") == "chan_v1":
-            ec = {**EXIT_MODE_DEFAULTS, **self._pm["entry"]}
-            if not any(ec.get(k) for k in EXIT_MODE_ON_KEYS):
-                raise RuntimeError("出场方式至少启用一种（当前参数中心配置全部关闭）")
-            pcts = [float(ec.get(k.replace("On", "Pct"), 100.0) or 100.0)
-                    for k in EXIT_MODE_ON_KEYS if ec.get(k)]
-            min_vol = c["lots"] * 0.01 * min(pcts) / 100.0
-            if min_vol < spec["volume_min"] and not c["risk"].get("allow_odd_lots"):
-                raise RuntimeError(
-                    f"最小分批 {min_vol:.3f} 手（出场比例最小 {min(pcts):.0f}%）"
-                    f"< volume_min {spec['volume_min']}，需部分→全平降级才可运行"
-                    f"（risk.allow_odd_lots=true 显式接受）")
+            # 缠论V1：整手口径下部分平仓手数=⌊总手数×比例%⌋ 不足1手平1手 →
+            # 启用任一比例<100 的方式即存在最小分批=1手（0.01标准手）
+            if c.get("strategy", "chan_v1") == "chan_v1":
+                ec = {**EXIT_MODE_DEFAULTS, **self._pm["entry"]}
+                if not any(ec.get(k) for k in EXIT_MODE_ON_KEYS):
+                    raise RuntimeError("出场方式至少启用一种（当前参数中心配置全部关闭）")
+                pcts = [float(ec.get(k.replace("On", "Pct"), 100.0) or 100.0)
+                        for k in EXIT_MODE_ON_KEYS if ec.get(k)]
+                if any(p < 100 for p in pcts) and spec["volume_min"] > 0.01 \
+                        and not c["risk"].get("allow_odd_lots"):
+                    raise RuntimeError(
+                        f"最小分批 0.01 手（整手口径：⌊总手数×比例%⌋ 不足1手平1手）"
+                        f"< volume_min {spec['volume_min']}，需部分→全平降级才可运行"
+                        f"（risk.allow_odd_lots=true 显式接受）")
             if not (ec.get("exitStopSrOn") or ec.get("exitStopBeOn")
                     or ec.get("exitTrailOn")):
                 self.log("[live] 警告：止损类出场方式全部关闭，持仓无止损兜底"
                          "（仅止盈类离场）")
-        # fxma structure 模式：主动止盈分批=可开仓手数÷4，低于最小手数须显式接受降级
+        # fxma structure 模式：主动止盈分批=⌊半仓/2⌋ 整手（半仓<2手时触及即全平
+        # 无分批），低于最小手数须显式接受降级
         if c.get("strategy") == "fxma_v1" \
                 and self._pm["fxma"].get("tpMode", "points") == "structure":
-            quarter = c["lots"] * 0.01 / 4
-            if quarter < spec["volume_min"] and not c["risk"].get("allow_odd_lots"):
+            entry_lots = c["lots"] // 2
+            min_batch = max(1, entry_lots // 2) * 0.01
+            if entry_lots >= 2 and min_batch < spec["volume_min"] \
+                    and not c["risk"].get("allow_odd_lots"):
                 raise RuntimeError(
-                    f"fxma structure 主动止盈分批 {quarter:.3f} 手 < volume_min "
+                    f"fxma structure 主动止盈分批 {min_batch:.3f} 手 < volume_min "
                     f"{spec['volume_min']}，需部分→全平降级才可运行"
                     f"（risk.allow_odd_lots=true 显式接受）")
         # ⑤ 会话与参数漂移守卫
@@ -937,10 +941,12 @@ class LiveTrader:
                                          "engine_trade_no": no, "half_done": 1})
             return
         left = row["volume_left"] or row["volume_open"]
-        # 够笔止盈分批手数：优先引擎 half 事件的手数（比例可配），旧口径回退 剩余/2
+        # 够笔止盈分批手数：优先引擎 half 事件的手数（比例可配，恒整数），
+        # 旧口径回退 剩余对半、整手向下取整（1回测手=0.01标准手）
         ev_lots = next((e.get("lots") for e in reversed(t.get("exits") or [])
                         if e.get("type") == "half" and e.get("lots")), None)
-        half = round(ev_lots * 0.01, 2) if ev_lots else round(left / 2, 2)
+        half = round(ev_lots * 0.01, 2) if ev_lots else \
+            max(0.01, int(left / 0.02 + 1e-9) * 0.01)
         vmin = self.broker.spec()["volume_min"]
         if half < vmin:   # 分批低于最小手数：全平降级
             r = self.broker.close_position(row["position_ticket"], comment="half_degrade_full")

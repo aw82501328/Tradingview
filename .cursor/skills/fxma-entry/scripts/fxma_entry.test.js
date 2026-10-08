@@ -258,6 +258,28 @@ describe("applyMutexAndSimulate · structure 组合模式（opts 注入）", () 
     assert.equal(t.trailRaised, false);            // 3类不提损
   });
 
+  test("奇数手整手口径：lots=5 → 半仓⌊5/2⌋=2、半份止盈 max(1,⌊2/2⌋)=1（与 py 同口径）", () => {
+    const closes = [100, 101, 102, 130, 131, 128];
+    const bars = mkBars(closes);
+    const ends = [{ time: 0, price: 130, side: "high" }];
+    const done = applyMutexAndSimulate([sig()], { "3": bars }, 1.0,
+      { tpMode: "structure", lots: 5, tpNearPts: 0,
+        ptsByP: { "3": [] }, biEndsByP: { "3": ends } });
+    const t = done[0];
+    assert.equal(t.lots, 2);                       // ⌊5/2⌋ 半仓整手
+    assert.equal(t.tpLots, 1);                     // max(1, ⌊2/2⌋)
+    assert.ok(Number.isInteger(t.lots) && Number.isInteger(t.tpLots));
+    assert.equal(t.exits[0].lots, 1);
+    assert.ok(Number.isInteger(t.lotsLeft));
+  });
+
+  test("structure lots<2 拒绝（半仓整手 ≥1 手）", () => {
+    const closes = [100, 101, 102];
+    const bars = mkBars(closes);
+    assert.throws(() => applyMutexAndSimulate([sig()], { "3": bars }, 1.0,
+      { tpMode: "structure", lots: 1, ptsByP: { "3": [] } }), /须 ≥2/);
+  });
+
   test("目标取笔端点而非反向买卖点：前卖点 125 在场仍取前高 130", () => {
     // trade#11 案例口径：卖点识别滞后，前高笔端点先可用 → 目标必须是笔端点价
     const closes = [100, 101, 102, 130, 131, 128];
@@ -489,4 +511,97 @@ describe("scanPeriodSignals · 黄金分割附近/上级同向（opts 注入，�
       "15": [],
     };
   }
+});
+
+describe("scanPeriodSignals · 次级别/次次级别背驰（opts+lowerCtx 注入，默认关；真实 lowerDiverge）", () => {
+  // 与首组同构行情：2买@ptTime=3780（bars[21]）；pt 前跌到 90、V 反后回调只到 94
+  const closes = [];
+  for (let i = 0; i < 12; i++) closes.push(100 + 2.0 * i);
+  for (let i = 0; i < 10; i++) closes.push(closes[closes.length - 1] - 2.8);
+  closes.push(closes[closes.length - 1] + 9.0);
+  for (let i = 0; i < 10; i++) closes.push(closes[closes.length - 1] + 2.0);
+  const bars = barsFromCloses(0, closes);
+  const ptTime = bars[21].time;
+  const T = (i) => bars[i].time;
+  const periodBis = {
+    "3": [
+      { type: "up", startTime: T(0), endTime: T(1), startPrice: closes[0], endPrice: closes[1] },
+      { type: "down", startTime: T(1), endTime: T(2), startPrice: closes[1], endPrice: 90 },
+      { type: "up", startTime: T(2), endTime: T(3), startPrice: 90, endPrice: closes[3] },
+      { type: "down", startTime: T(3), endTime: ptTime, startPrice: closes[3], endPrice: 94 },
+      { type: "up", startTime: ptTime, endTime: T(32), startPrice: 94, endPrice: closes[32] },
+    ],
+    "15": [],
+  };
+
+  // lowerCtx（真实走 mark_entry.lowerDiverge 区间套下沉链）：P=3，容器 3m down 笔
+  // [t0, t0+780]；30S 容器内 4 段展开（≥3），末段 d2 创新低（104<107）+ DIF 低点抬高
+  // （-0.5 > -3.0）+ 绿柱面积缩小（2.3 < 9.0，时长可比）→ 30S 底背驰点 @t0+780，
+  // 下沉停止级=30S（次级别）。t0=3000 → 背驰点 3780 = 点同刻（同极值口径）。
+  const bi = (type, startTime, endTime, startPrice, endPrice) => ({
+    type, startTime, endTime, startPrice, endPrice, span: Math.abs(endPrice - startPrice),
+  });
+  const macd = (tv) => tv.map(([t, m, d]) => ({ time: t, macd: m, dif: d, dea: 0 }));
+  const mkLowerCtx = (t0) => {
+    const t = (off) => t0 + off;
+    return {
+      "3": { bis: [bi("up", t(-1000), t(0), 100.0, 110.0), bi("down", t(0), t(780), 110.0, 100.0)] },
+      "30S": {
+        // B 开关（divergeReferByZs 默认开）：u1/d2/u2 价格重叠成中枢，d1=入中枢段
+        // （refer，绿柱面积 9.0、difLow -3.0）；d3=离开段创新低 104<107 + 动能衰竭
+        // （面积 2.3、difLow -1.2）→ 底背驰点 @t+780，下沉停止级=30S
+        bis: [
+          bi("down", t(-1000), t(0), 116.0, 114.0),   // 容器外（不计展开）
+          bi("up", t(0), t(200), 114.0, 117.0),
+          bi("down", t(200), t(400), 117.0, 107.0),   // d1 入中枢段（参照）
+          bi("up", t(400), t(460), 107.0, 111.0),     // ┐
+          bi("down", t(460), t(560), 111.0, 107.5),   // │ 中枢（重叠区 107.5~110.5）
+          bi("up", t(560), t(640), 107.5, 110.5),     // ┘
+          bi("down", t(640), t(780), 110.5, 104.0),   // d3 离开段（背驰候选）
+        ],
+        macdArr: macd([
+          [t(250), -5.0, -3.0], [t(350), -4.0, -2.5],          // d1 窗
+          [t(660), -1.0, -1.2], [t(700), -0.8, -0.8], [t(770), -0.5, -0.5],  // d3 窗
+        ]),
+      },
+    };
+  };
+  const divOn = { ...MODULE_OPTS, divLowerOn: true };
+
+  test("必选+命中（背驰点=点同刻，同极值口径）→ 触发，证据字段齐全", () => {
+    const sigs = scanPeriodSignals("3", bars, periodBis, "15", divOn, mkLowerCtx(3000));
+    assert.equal(sigs.length, 1);
+    const s = sigs[0];
+    assert.equal(s.pointTime, ptTime);
+    assert.equal(s.divLowerRes, "30S");
+    assert.equal(s.divLowerTime, ptTime);   // t0+780 = 3780
+  });
+
+  test("默认关：lowerCtx 在场也不影响（与旧基线一致）", () => {
+    assert.equal(scanPeriodSignals("3", bars, periodBis, "15", MODULE_OPTS, mkLowerCtx(3000)).length, 1);
+    assert.equal(scanPeriodSignals("3", bars, periodBis, "15").length, 1);   // 无 lowerCtx 同样放行
+  });
+
+  test("必选+窗口外候选（背驰点早于点前1根）→ 拦下", () => {
+    // t0=2000 → 背驰点 2780 < ptTime−180=3600：点之前的旧背驰不算确认
+    assert.equal(scanPeriodSignals("3", bars, periodBis, "15", divOn, mkLowerCtx(2000)).length, 0);
+  });
+
+  test("必选+无更低级别数据（lowerCtx 缺 30S）→ 拦下（同引擎 P=3 无 30S 语义）", () => {
+    const ctxOnly3 = { "3": mkLowerCtx(3000)["3"] };
+    assert.equal(scanPeriodSignals("3", bars, periodBis, "15", divOn, ctxOnly3).length, 0);
+  });
+
+  test("防未来：快照中的未来背驰点（晚于全部评估拍）不计入 → 拦下", () => {
+    // t0=13000 → 背驰点 13780 > 末拍 closeT（T(32)+180=5940）：逐拍评估时还不可知
+    assert.equal(scanPeriodSignals("3", bars, periodBis, "15", divOn, mkLowerCtx(13000)).length, 0);
+  });
+
+  test("可选+未过+N=2 → 票数口径仍触发（divLowerRes 无值）", () => {
+    const opt = { ...MODULE_OPTS, divLowerOn: true, divLowerReq: false,
+                  entryPick: { ...MODULE_OPTS.entryPick, "2": 2 } };
+    const sigs = scanPeriodSignals("3", bars, periodBis, "15", opt, mkLowerCtx(2000));
+    assert.equal(sigs.length, 1);
+    assert.equal(sigs[0].divLowerRes, null);   // 背驰未过不进证据字段（JS 信号不带 pick 字段）
+  });
 });

@@ -174,14 +174,17 @@ def compute_summary(rows):
     # 已平仓平均盈利 / 平均亏损绝对值；保本单和持仓浮盈不参与
     avg_win = sum(r["pnl"] for r in win) / n_win if n_win else 0.0
     avg_loss = -sum(r["pnl"] for r in lose) / n_lose if n_lose else 0.0
-    # 出场类型计数：缠论V1 stopSr/stopBe/close/trailStop + fxma stop/takeProfit/activeTp/trailStop（half 单列）
-    exits = {"stopBe": 0, "stopSr": 0, "close": 0, "half": 0, "stop": 0,
+    # 出场类型计数：缠论V1 stopSr/stopBe/close/trailStop + fxma stop/takeProfit/activeTp/trailStop
+    # （half/halfMr 事件单列：部分平仓计数，不占终局位）
+    exits = {"stopBe": 0, "stopSr": 0, "close": 0, "half": 0, "halfMr": 0, "stop": 0,
              "takeProfit": 0, "activeTp": 0, "trailStop": 0}
     counts = {s: 0 for s in _STATUSES}
     for r in rows:
         if r.get("exitType") in exits:
             exits[r["exitType"]] += 1
-        exits["half"] += sum(1 for e in (r.get("exits") or []) if e.get("type") == "half")
+        for e in (r.get("exits") or []):
+            if e.get("type") in ("half", "halfMr"):
+                exits[e["type"]] += 1
         if r.get("status") in counts:
             counts[r["status"]] += 1
     return {

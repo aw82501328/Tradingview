@@ -1,6 +1,3 @@
-import os as _os
-_os.environ.setdefault("PY_CHAIN_BT_JOURNAL", "0")  # 引擎测试不落交易日志
-
 # -*- coding: utf-8 -*-
 """bt_runs 单测：compute_summary 汇总口径（对齐前端 renderSummary）与 BtRunStore 读写。
 
@@ -70,7 +67,7 @@ class TestComputeSummary(unittest.TestCase):
         self.assertEqual(s["avg_loss"], 4.0)             # |-4|/1
         self.assertEqual(s["payoff_ratio"], 2.5)
         self.assertEqual(s["exits"], {"stopBe": 2, "stopSr": 1, "close": 1, "half": 1,
-                                      "stop": 0, "takeProfit": 0,
+                                      "halfMr": 0, "stop": 0, "takeProfit": 0,
                                       "activeTp": 0, "trailStop": 0})
         # 强分型均线V1 出场类型（stop/takeProfit/activeTp/trailStop）单独计数
         fx = compute_summary([row("已平仓", pnl=3.0, exitType="takeProfit"),
@@ -95,7 +92,7 @@ class TestComputeSummary(unittest.TestCase):
                              "avg_win": 0.0, "avg_loss": 0.0, "payoff_ratio": None,
                              "realized": 0.0, "floating": 0.0, "total": 0.0,
                              "exits": {"stopBe": 0, "stopSr": 0, "close": 0, "half": 0,
-                                       "stop": 0, "takeProfit": 0,
+                                       "halfMr": 0, "stop": 0, "takeProfit": 0,
                                        "activeTp": 0, "trailStop": 0},
                              "rows_total": 0, "cnt_signal": 0, "cnt_open": 0,
                              "cnt_closed": 0, "cnt_filtered": 0, "equity": []})

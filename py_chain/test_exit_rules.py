@@ -449,11 +449,14 @@ class TestExitModes(unittest.TestCase):
         return pos
 
     def test_exit_lots_helper(self):
+        # 总仓位基数 + 整数手：⌊总手数×pct%⌋ 向下取整、不足1手平1手、封顶剩余
         from py_chain.backtest import _exit_lots
-        self.assertEqual(_exit_lots(4, 100), 4)
-        self.assertEqual(_exit_lots(4, 50), 2)
-        self.assertEqual(_exit_lots(2.8, 50), 1.4)
-        self.assertEqual(_exit_lots(3, 25), 0.75)
+        self.assertEqual(_exit_lots(4, 4, 100), 4)
+        self.assertEqual(_exit_lots(4, 4, 50), 2)
+        self.assertEqual(_exit_lots(4, 3, 50), 2)    # 基数=总仓位4（非剩余3）
+        self.assertEqual(_exit_lots(5, 5, 50), 2)    # floor：⌊2.5⌋ 不进位
+        self.assertEqual(_exit_lots(2, 2, 10), 1)    # 不足1手至少平1手
+        self.assertEqual(_exit_lots(4, 1, 50), 1)    # 封顶剩余手数
 
     def test_stop_sr_off_ignored(self):
         # 支阻止损关闭：穿越不挂起、位计算照旧
@@ -498,24 +501,44 @@ class TestExitModes(unittest.TestCase):
         self.assertIsNone(r)                  # 过高低点止盈关闭：逆势 seg5 不挂起
 
     def test_half_pct_partial_lots_settlement(self):
-        # 够笔止盈 30%：事件带 lots=1.2，剩余 2.8 由 stopBe 终局，pnl 按手数逐段结算
+        # 够笔止盈 30%：整数手 ⌊4×30%⌋=1，剩余 3 由 stopBe 终局，pnl 按手数逐段结算
         pos = self.make(exitCfg=ecfg(exitHalfPct=30))
         mark_bis = [bi("up", 0, 500, 4440, 4455)]
         px_bis = [bi("up", 0, 50, 4440, 4460), bi("down", 50, 300, 4460, 4440)]
         r = advance_exit_decision(pos, 700, bar(700, 4445, 4448, 4440, 4444),
                                   mark_bis, px_bis, T8)
         self.assertEqual(r, "half")
-        self.assertEqual(pos["pendingLots"], 1.2)
+        self.assertEqual(pos["pendingLots"], 1)
         self.assertIsNone(execute_pending_exit(pos, bar(800, 4440, 4445, 4435, 4442)))
-        self.assertEqual(pos["lotsLeft"], 2.8)
+        self.assertEqual(pos["lotsLeft"], 3)
         half_ev = [e for e in pos["exits"] if e["type"] == "half"][0]
-        self.assertEqual(half_ev["lots"], 1.2)
-        # 剩余打掉 beStop → stopBe 终局：pnl = 10×1.2 + (−4)×2.8 = 0.8
+        self.assertEqual(half_ev["lots"], 1)
+        # 剩余打掉 beStop → stopBe 终局：pnl = 10×1 + (−4)×3 = −2
         r = advance_exit_decision(pos, 900, bar(900, 4450, 4456, 4448, 4452),
                                   mark_bis, px_bis, T8)
         self.assertEqual(r, "stopBe")
         tr = execute_pending_exit(pos, bar(1000, 4454, 4458, 4450, 4452))
-        self.assertAlmostEqual(tr["pnl"], 0.8)
+        self.assertAlmostEqual(tr["pnl"], -2)
+
+    def test_pct_base_is_total_not_remaining(self):
+        # 百分比基数=总仓位（初始手数，2026-10-08 整手口径）：half 50% 平 2 后，
+        # close 25% 仍按总仓位平 1（旧口径按剩余 2×25%=0.5 小数手）
+        pos = self.make(exitCfg=ecfg(exitHalfPct=50, exitClosePct=25))
+        mark_bis = [bi("up", 0, 500, 4440, 4455)]
+        px_bis = [bi("up", 0, 50, 4440, 4460), bi("down", 50, 300, 4460, 4440)]
+        r = advance_exit_decision(pos, 700, bar(700, 4445, 4448, 4440, 4444),
+                                  mark_bis, px_bis, T8)
+        self.assertEqual(r, "half")
+        self.assertEqual(pos["pendingLots"], 2)
+        self.assertIsNone(execute_pending_exit(pos, bar(800, 4440, 4445, 4435, 4442)))
+        self.assertEqual(pos["lotsLeft"], 2)
+        px_bis = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 150, 4440, 4450),
+                  bi("down", 150, 250, 4450, 4435), bi("up", 250, 300, 4435, 4445)]
+        r = advance_exit_decision(pos, 900, bar(900, 4440, 4444, 4436, 4442),
+                                  mark_bis, px_bis, T7)
+        self.assertEqual(r, "close")
+        self.assertEqual(pos["pendingLots"], 1)   # ⌊4×25%⌋=1：总仓位基数
+        self.assertEqual(pos["lots"] - pos["pendingLots"] - 2, 1)  # 平完剩 1
 
     def test_stop_partial_latch(self):
         # 支阻止损 50%：部分平仓后 stopSrFired 一次性消费，后续穿越不重触发
@@ -532,6 +555,89 @@ class TestExitModes(unittest.TestCase):
         r = advance_exit_decision(pos, 600, bar(600, 4460, 4465, 4455, 4458),
                                   mark_bis, px_bis, T7)
         self.assertIsNone(r)                  # latch：不再重触发
+
+    def test_close_partial_latch(self):
+        # 过高低点止盈 25%：部分平仓后 closeDone 一次性消费，同一 tp3a 事件后续拍
+        # 不再重复挂起（2026-10-08 trade#6：曾每 3 分钟重复平 25% 直至数据结束）
+        pos = self.make(exitCfg=ecfg(exitClosePct=25))
+        mark_bis = [bi("up", 0, 500, 4440, 4455)]
+        # down(150→250) 终点 4435 破前一同向 down(0→50) 终点 4440（首个匹配事件）
+        px_bis = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 150, 4440, 4450),
+                  bi("down", 150, 250, 4450, 4435), bi("up", 250, 300, 4435, 4445)]
+        r = advance_exit_decision(pos, 300, bar(300, 4440, 4444, 4436, 4442),
+                                  mark_bis, px_bis, T7)
+        self.assertEqual(r, "close")
+        self.assertEqual(pos["pendingLots"], 1.0)   # 25% × 4
+        self.assertTrue(pos["closeDone"])
+        self.assertIsNone(execute_pending_exit(pos, bar(400, 4436, 4440, 4430, 4434)))
+        self.assertEqual(pos["lotsLeft"], 3.0)
+        r = advance_exit_decision(pos, 500, bar(500, 4440, 4444, 4436, 4442),
+                                  mark_bis, px_bis, T7)
+        self.assertIsNone(r)                  # latch：同一 tp3a 不再重触发
+        self.assertEqual(len([e for e in pos["exits"] if e["type"] == "close"]), 1)
+
+    def test_close_partial_latch_countertrend(self):
+        # 逆势 seg5 分支同 latch：部分平仓后形成段持续就绪不再重复挂起
+        pos = self.make(planDirection="多头空", exitCfg=ecfg(exitClosePct=25))
+        mark_bis = [bi("up", 0, 500, 4440, 4455)]
+        px_bis = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 300, 4440, 4450)]
+        r = advance_exit_decision(pos, 700, bar(700, 4445, 4448, 4440, 4444),
+                                  mark_bis, px_bis, T8)
+        self.assertEqual(r, "close")
+        self.assertTrue(pos["closeDone"])
+        self.assertIsNone(execute_pending_exit(pos, bar(800, 4440, 4445, 4435, 4442)))
+        self.assertEqual(pos["lotsLeft"], 3.0)
+        r = advance_exit_decision(pos, 900, bar(900, 4445, 4448, 4440, 4444),
+                                  mark_bis, px_bis, T8)
+        self.assertIsNone(r)                  # seg5 仍就绪但不重触发
+
+    def test_exit_lots_tiny_remaining_takes_all(self):
+        # 剩余手数本身不足 1（旧数据残留小数）→ 封顶即全平剩余，防 0 手空事件与
+        # 永远平不掉的尾仓；pct≤0 防御口径同全平（参数中心下限 1，正常不可达）
+        from py_chain.backtest import _exit_lots
+        self.assertEqual(_exit_lots(4, 0.01, 25), 0.01)
+        self.assertEqual(_exit_lots(4, 0.04, 10), 0.04)
+        self.assertEqual(_exit_lots(4, 4, 0), 4)
+
+    def test_half_mr_fires_on_tp1_event_and_latches(self):
+        # 背驰周期够笔：tp1（markRes 首笔有利方向笔）触发部分平仓，与 TP1 保本同拍
+        # （breakeven 先迁移、halfMr 后挂起）；halfMrDone 一次性消费
+        pos = self.make(exitCfg=ecfg(exitHalfMrOn=True, exitHalfMrPct=25))
+        mark_bis = [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)]
+        px_bis = [bi("up", 50, 300, 4440, 4450)]
+        r = advance_exit_decision(pos, 300, bar(300, 4440, 4445, 4435, 4441),
+                                  mark_bis, px_bis, T7)
+        self.assertEqual(r, "halfMr")
+        self.assertEqual(pos["pendingLots"], 1.0)     # 25% × 4
+        self.assertTrue(pos["halfMrDone"])
+        self.assertTrue(pos["beDone"])                # TP1 保本同拍迁移
+        self.assertEqual(pos["exits"][0]["type"], "breakeven")
+        self.assertIsNone(execute_pending_exit(pos, bar(400, 4436, 4440, 4430, 4434)))
+        self.assertEqual(pos["lotsLeft"], 3.0)
+        r = advance_exit_decision(pos, 500, bar(500, 4440, 4445, 4435, 4441),
+                                  mark_bis, px_bis, T7)
+        self.assertIsNone(r)                  # latch：tp1 持续成立不重触发
+        self.assertEqual(len([e for e in pos["exits"] if e["type"] == "halfMr"]), 1)
+
+    def test_half_mr_not_trend_gated(self):
+        # 逆势（多头空）同样触发（与 TP1 同口径，不限顺势）
+        pos = self.make(planDirection="多头空", exitCfg=ecfg(exitHalfMrOn=True))
+        mark_bis = [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)]
+        px_bis = [bi("up", 50, 300, 4440, 4450)]
+        r = advance_exit_decision(pos, 300, bar(300, 4440, 4445, 4435, 4441),
+                                  mark_bis, px_bis, T7)
+        self.assertEqual(r, "halfMr")
+
+    def test_half_mr_default_off(self):
+        # 默认关：tp1 只触发 TP1 保本迁移，不产生 halfMr 事件（旧基线可比）
+        pos = self.make()   # EXIT_MODE_DEFAULTS：exitHalfMrOn=False
+        mark_bis = [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)]
+        px_bis = [bi("up", 50, 300, 4440, 4450)]
+        r = advance_exit_decision(pos, 300, bar(300, 4440, 4445, 4435, 4441),
+                                  mark_bis, px_bis, T7)
+        self.assertIsNone(r)
+        self.assertFalse(pos.get("halfMrDone"))
+        self.assertTrue(pos["beDone"])
 
     def test_trail_raise_only_tighter_and_trail_stop(self):
         # 跟踪止盈：同向3类点 → 止损只上移；异向/非3类点忽略；穿越后记 trailStop

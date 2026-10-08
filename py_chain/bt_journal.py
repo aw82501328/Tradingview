@@ -34,7 +34,8 @@ FLUSH_EVERY = 500
 # ---- 中文标签单一来源（写侧组句 / 读侧渲染共用） ----
 DIR_LABELS = {"long": "做多", "short": "做空"}
 EXIT_LABELS = {
-    "breakeven": "TP1 保本", "half": "够笔止盈", "close": "过高低点止盈",
+    "breakeven": "TP1 保本", "halfMr": "背驰够笔止盈", "half": "检测够笔止盈",
+    "close": "过高低点止盈",
     "stopSr": "支阻位止损", "stopBe": "保本止损",
     "stop": "固定止损", "takeProfit": "固定止盈",
     "activeTp": "主动止盈", "trailStop": "跟踪止盈", "trailRaise": "跟踪止盈上移",
@@ -190,6 +191,18 @@ def latest_path(symbol=None, strategy=None):
     return best[0] if best else None
 
 
+def _ctx_sig(v):
+    """ctx 去重签名：dict→按键排序的规范元组、list→元组、JSON 标量原值、
+    其余走 repr（与旧 json.dumps(default=str) 同兜底作用）。仅用于相等比较。"""
+    if isinstance(v, dict):
+        return tuple(sorted((k, _ctx_sig(x)) for k, x in v.items()))
+    if isinstance(v, (list, tuple)):
+        return tuple(_ctx_sig(x) for x in v)
+    if isinstance(v, (bool, int, float, str)) or v is None:
+        return v
+    return repr(v)
+
+
 class BtJournal:
     """回测交易日志写入器（零开销口径：缓冲写 + 去重 + 状态变化检测）。
 
@@ -282,13 +295,14 @@ class BtJournal:
     def reject(self, t, gate, period, seg_start=None, strategy_key=None, volatile=(), **ctx):
         """候选被闸门拒绝（去重：同键首次 + ctx 变化才写；ctx 为结构化数字，
         中文渲染在 bt_query）。volatile 列出的 ctx 键不参与变化判定（如均线差值
-        每拍都变的近似数——只随首次记录，避免退化成逐 bar 写）。"""
+        每拍都变的近似数——只随首次记录，避免退化成逐 bar 写）。
+
+        去重签名用规范化元组（原 json.dumps(sort_keys) 字符串）：逐候选逐闸门
+        每拍都要算一次签名，字符串序列化是纯开销；同一 (period, strategyKey,
+        segStart, gate) 键的 ctx 来自同一调用点的字面量构造（键序/类型稳定），
+        元组相等 ⇔ 值相等，与原签名判定一致。"""
         key = (period, strategy_key, seg_start, gate)
-        try:
-            sig = json.dumps({k: v for k, v in ctx.items() if k not in volatile},
-                             sort_keys=True, default=str)
-        except Exception:
-            sig = str(ctx)
+        sig = _ctx_sig({k: v for k, v in ctx.items() if k not in volatile})
         if self._reject_sigs.get(key) == sig:
             return
         self._reject_sigs[key] = sig
