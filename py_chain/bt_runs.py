@@ -31,7 +31,7 @@ import time
 import uuid
 from urllib.parse import parse_qs, urlparse
 
-from . import data_store
+from . import data_store, module_registry
 
 # 方案表建在基础数据库里（同一 SQLite 文件、独立表；bars.db 已在 .gitignore）
 DEFAULT_DB_PATH = data_store.DB_PATH
@@ -203,11 +203,15 @@ def compute_summary(rows):
 
 
 def build_cfg_summary(cfg):
-    """列表/对比表头用的参数摘要：品种 / 周期（+ 连接）/ 起始日期 / 结束日期。"""
+    """列表/对比表头用的参数摘要：策略 / 品种 / 周期（+ 连接）/ 起始日期 / 结束日期。
+
+    strategy：多策略并行（2026-10-02）起 cfg 必带；更早的旧存档缺省 → 默认策略
+    （当时仅缠论V1 一个引擎，等价于历史事实）。"""
     periods = cfg.get("periods") or []
     if isinstance(periods, str):
         periods = [p.strip() for p in periods.split(",") if p.strip()]
     return {
+        "strategy": cfg.get("strategy") or module_registry.DEFAULT_STRATEGY,
         "symbol": cfg.get("symbol"),
         "periods": "+".join(str(p) for p in periods),
         "from": cfg.get("from"),

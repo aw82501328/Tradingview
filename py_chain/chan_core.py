@@ -1358,6 +1358,37 @@ def biStep(ctx, head, k):
        (ctx.fractalRangeClear(last, k) or last.get("gapLocked", False)):
         return _stkCons(k, head)                      # result.append(k)
     elif ctx.isValid(last, k):
+        # 前顶/前底作废（区间极值版，2026-10-09）：k 间隔足够但未通过成笔判据（笔内极值
+        # 冲突/分型范围未脱离）时，若 k 与 prev（result[-2]）同类型且严格更极端，且 prev 的
+        # 前一个端点 prev3（result[-3]）与 k 能构成完整有效笔（间隔/笔内极值/范围脱离全套），
+        # 则 prev 被更高顶/更低底作废、吞掉中间 last，端点推进到 k——否则该更高点将被永久
+        # 吞进 prev 起步的反向笔，笔起点不再是区间极值（例：15m 2026-07-20 顶 16:15
+        # 4030.88 被 19:30 4040.82 突破，17:30→19:30 反弹腿因终点侧反向贯穿不成笔，
+        # 忽略 19:30 顶会使 16:15 起的下跌笔内藏更高点；作废后上涨笔延伸为
+        # 15:00 4002.18 → 19:30 4040.82）。与间隔不足分支的 moreExtreme 顶替互补：
+        # 那边是 last→k 拆不出反弹笔（间隔不足），这边是间隔够但反弹笔被终点侧贯穿
+        # 证伪——两种失败下前顶都应让位于更极端的新极值。
+        # 回溯替换保护（与间隔不足分支同源）：last 比 prev3 更极端（更深回调/更高反弹）
+        # 时 last 是真实转折点，不吞。
+        if _stkLen(head) >= 3 and head[1][0]["type"] == k["type"] and \
+                not head[1][0].get("locked", False) and not last.get("locked", False):
+            prev = head[1][0]
+            prev3 = head[1][1][0]
+            last_deeper = (k["type"] == "top" and last["low"] < prev3["low"]) or \
+                          (k["type"] == "bottom" and last["high"] > prev3["high"])
+            if not last_deeper and \
+                    ((k["type"] == "top" and k["high"] > prev["high"]) or
+                     (k["type"] == "bottom" and k["low"] < prev["low"])) and \
+                    _pair_forms_bi(ctx, prev3, k):
+                if CHAN_CFG["debug"]:
+                    print(f"[阶段二] 前顶/前底作废(区间极值): {'顶' if prev['type']=='top' else '底'}@{prev['mergedIdx']}"
+                          f"({prev['high'] if prev['type']=='top' else prev['low']}) 被 "
+                          f"{'顶' if k['type']=='top' else '底'}@{k['mergedIdx']}"
+                          f"({k['high'] if k['type']=='top' else k['low']}) 突破，k 顶替 prev，移除中间 "
+                          f"{'顶' if last['type']=='top' else '底'}@{last['mergedIdx']}")
+                if prev.get("macdCross", False) is True:
+                    k["macdCross"] = True
+                return _stkCons(k, head[1][1])        # result[-2] = k; pop()
         if CHAN_CFG["debug"]:
             print(f"[阶段二] 忽略 k: {k['mergedIdx']}")
         return head
@@ -1549,6 +1580,103 @@ def lockedPivotsOf(prev_bis):
             arr.append({"dir": "top", "price": b["startPrice"]})
             arr.append({"dir": "bottom", "price": b["endPrice"]})
     return arr
+
+
+def alignBiToUpper(lowerBis, upperBis, upperIntervalSec, lowerBars=None):
+    """区间套强制对齐（与 JS 版 alignBiToUpper 对齐，2026-10-09 移植）。
+
+    把下级周期笔的拐点对齐到上级周期笔的拐点：上级笔每个起点/终点都是明确极值
+    （顶/底），下级必须复现相同极值。当下级因包含关系把上级极值吞掉（如插针
+    低点/高点）时，下级拐点会漂移到次极值上（例：上级底 4311.04 被下级画成
+    4311.27）；本函数把「同方向且时间最近」的下级拐点快照到上级拐点的
+    （时间+价格），实现「上级笔与下级笔同笔」。原地修改并返回 lowerBis。
+
+    :param lowerBars: 本级别原始K线（可选，长影剔除后）。幽灵端点防御用：若上级
+      极值超出上级bar时间跨度内本级别K线的局部价格范围（跨周期数据源聚合差异），
+      跳过对该拐点对齐——不能只校验全局范围，本窗口其他时段可能有更极端的低点
+      （如更早的插针），全局校验会漏判「本局部时段内不存在」的上级极值。
+    """
+    if not lowerBis or not upperBis:
+        return lowerBis
+    tol = upperIntervalSec or 0
+
+    def local_price_range(up):
+        if not lowerBars:
+            return None
+        mn = mx = None
+        t_end = up["time"] + tol
+        for b in lowerBars:
+            if b["time"] < up["time"] or b["time"] >= t_end:
+                continue
+            if mn is None or b["low"] < mn:
+                mn = b["low"]
+            if mx is None or b["high"] > mx:
+                mx = b["high"]
+        return (mn, mx) if mn is not None and mx is not None else None
+
+    # 上级拐点：每笔的起点+终点（方向由笔类型决定）
+    upperPts = []
+    for b in upperBis:
+        if b["type"] == "up":
+            upperPts.append({"time": b["startTime"], "price": b["startPrice"], "dir": "bottom"})
+            upperPts.append({"time": b["endTime"], "price": b["endPrice"], "dir": "top"})
+        else:
+            upperPts.append({"time": b["startTime"], "price": b["startPrice"], "dir": "top"})
+            upperPts.append({"time": b["endTime"], "price": b["endPrice"], "dir": "bottom"})
+
+    # 下级拐点：n 笔 → n+1 个拐点（相邻两笔共享同一拐点）
+    n = len(lowerBis)
+    pts = [None] * (n + 1)
+    for i in range(n + 1):
+        if i == 0:
+            b = lowerBis[0]
+            pts[i] = {"time": b["startTime"], "price": b["startPrice"],
+                      "dir": "bottom" if b["type"] == "up" else "top"}
+        elif i == n:
+            b = lowerBis[n - 1]
+            pts[i] = {"time": b["endTime"], "price": b["endPrice"],
+                      "dir": "top" if b["type"] == "up" else "bottom"}
+        else:
+            b = lowerBis[i]
+            pts[i] = {"time": b["startTime"], "price": b["startPrice"],
+                      "dir": "bottom" if b["type"] == "up" else "top"}
+
+    # 每个上级拐点：找同方向、时间最近（≤tol）且未使用的下级拐点，快照对齐
+    used = [False] * (n + 1)
+    for up in upperPts:
+        best, bestDiff = -1, float("inf")
+        for i in range(n + 1):
+            if used[i] or pts[i]["dir"] != up["dir"]:
+                continue
+            diff = abs(pts[i]["time"] - up["time"])
+            if diff <= tol and diff < bestDiff:
+                bestDiff, best = diff, i
+        if best >= 0:
+            p = pts[best]
+            # 仅当下级拐点「更不极端」（漏掉上级真极值）时才对齐时间+价格；
+            # 否则（下级已找到相同极值）只对齐价格保持严格相等，保留下级更精确的时间
+            lessExtreme = p["price"] > up["price"] if up["dir"] == "bottom" else p["price"] < up["price"]
+            if lessExtreme:
+                r = local_price_range(up)
+                if r:
+                    PRICE_TOL = 0.01  # 价格容差，仅防浮点误差
+                    if up["dir"] == "bottom" and up["price"] < r[0] - PRICE_TOL:
+                        continue
+                    if up["dir"] == "top" and up["price"] > r[1] + PRICE_TOL:
+                        continue
+            used[best] = True
+            p["price"] = up["price"]
+            if lessExtreme:
+                p["time"] = up["time"]
+
+    # 由快照后的拐点重建笔端点
+    for i in range(n):
+        lowerBis[i]["startTime"] = pts[i]["time"]
+        lowerBis[i]["startPrice"] = pts[i]["price"]
+        lowerBis[i]["endTime"] = pts[i + 1]["time"]
+        lowerBis[i]["endPrice"] = pts[i + 1]["price"]
+        lowerBis[i]["span"] = abs(lowerBis[i]["endPrice"] - lowerBis[i]["startPrice"])
+    return lowerBis
 
 
 # 阶段二重放在分型 dict 上派生的一次性旗标（重放前须重置，见 resetBiFlags）

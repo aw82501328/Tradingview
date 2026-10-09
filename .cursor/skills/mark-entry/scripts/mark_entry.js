@@ -857,12 +857,14 @@ function favSeg5Time(pd, isShort, entryT) {
  * @param {number} stopRef stopRefOf 的输出（永不为 null）
  * @param {object} markResData 背驰级别周期数据 {bis, bars}
  * @param {object} periodXData 检测周期数据 {bis, bars}
- * @param {object} [opts] {slipBe, kBe, exitCfg, trailSigs, lots}
+ * @param {object} [opts] {slipBe, kBe, slipFallback, kFallback, exitCfg, trailSigs, lots}
  *   （slipBe/kBe 默认 SLIP_BE / SLIP_BE_ATR_K，有效保本滑点 = slipBe + kBe×markRes ATR；
+ *   slipFallback/kFallback 默认 SLIP_FALLBACK / SLIP_FALLBACK_ATR_K（最大止损硬上限）；
  *   exitCfg 默认 EXIT_CFG 旗标；trailSigs = 同 markRes 全量信号流，跟踪止盈参照点）
  * @returns {{events:Array<{type:string,time:number,price:number|null}>, closed:boolean, beStop:number, lotsLeft:number}}
  *   type: breakeven | trailRaise（仅迁移）| half（够笔止盈）| close（过高低点止盈）|
- *         stopSr（支阻位止损）| stopBe（保本止损）| trailStop（跟踪止盈）| stillOpen；
+ *         stopSr（支阻位止损；含最大止损硬上限兜底全平）| stopBe（保本止损）|
+ *         trailStop（跟踪止盈，门控保本：beDone 前不接管）| stillOpen；
  *   成交型事件带 lots（本次平仓手数）与 final（是否终局——比例<100 时为部分平仓）
  */
 function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
@@ -896,6 +898,11 @@ function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
   const tp1 = findBiEvent(markResData && markResData.bis, entryT, fav);
   const tp3a = trend ? findBiEvent(periodXData && periodXData.bis, entryT, fav, false, true) : null;
   const t5 = favSeg5Time(periodXData, isShort, entryT);
+  // 最大止损价（硬上限，兜底通道用；引擎 _fill_pending maxLoss 同口径：
+  // 进场价 ± 有效兜底滑点 = slipFallback + kFallback×markRes ATR）
+  const slipFbEff = (opts.slipFallback != null ? opts.slipFallback : SLIP_FALLBACK)
+    + (opts.kFallback != null ? opts.kFallback : SLIP_FALLBACK_ATR_K) * ((markResData && markResData.atr) || 0);
+  const maxLoss = entryP + (isShort ? slipFbEff : -slipFbEff);
   // 触发后第一根 markRes bar（half/close 成交价；以最近成交时间为下界——保证成交时序
   // 单调不回退，且进场前已达门槛的视同首拍触发）
   let lastFill = entryT;
@@ -926,7 +933,12 @@ function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
   let be = false, half = false, closed = false, closeDone = false, halfMr = false;
   let trailMark = entryT, trailRaised = false;
   const stopFired = { stopSr: false, stopBe: false, trailStop: false };
-  const trailOn = () => ec.trailOn && trailRaised;
+  // 跟踪止盈门控保本（py 引擎 2026-10-09 同口径）：be（TP1/half/halfMr 置保本位）
+  // 之前不接管止损、不提损；门控开启当拍把水位一次性推进到当拍——保本前的
+  // 参照点（含入场时段）不追溯，防刚进场就被入场时段参照点把止损提到进场价附近
+  let trailGate = 0;
+  const openTrailGate = (t) => { if (be && !trailGate) { trailGate = t; trailMark = t; } };
+  const trailOn = () => ec.trailOn && trailRaised && be;
   // 应用 upto 时刻之前（含）的止盈事件（同拍顺序 保本→够笔止盈→过高低点止盈，且同拍
   // 只挂一个成交型事件——与 py 引擎 advance_exit_decision 的单事件挂起语义一致）：
   //   返回 "close"（终局）| "half"（挂起，本拍跳过止损检查）| null（含仅迁移）
@@ -974,9 +986,10 @@ function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
     return null;
   };
   // 跟踪止盈上移（引擎 trail_raise 同机制：出场判定之后执行、下一拍生效——本函数在
-  // 止损检查之后调用，同 bar 上移下一根生效；只上移，水位 trailMark 只进不退）
+  // 止损检查之后调用，同 bar 上移下一根生效；只上移，水位 trailMark 只进不退；
+  // 门控保本：beDone 之前不执行）
   const trailRaise = (upto) => {
-    if (!ec.trailOn || !trailSigs.length) return;
+    if (!ec.trailOn || !trailGate || !trailSigs.length) return;
     for (const q of trailSigs) {
       if (q.time <= trailMark || q.time > upto) continue;
       trailMark = q.time;
@@ -991,10 +1004,11 @@ function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
   for (const bar of mbars) {
     if (bar.time <= entryT) continue; // 进场当根不计（进场K线自身的高低点）
     const ev = applyTps(bar.time);
+    openTrailGate(bar.time);
     if (ev === "close") { closed = true; break; }
     if (ev === "half") { trailRaise(bar.time); continue; } // 本拍已挂事件，跳过止损检查
+    const typ = trailOn() ? "trailStop" : (be ? "stopBe" : "stopSr");
     if (stop != null) {
-      const typ = trailOn() ? "trailStop" : (be ? "stopBe" : "stopSr");
       const on = typ === "trailStop" ? true : (typ === "stopBe" ? ec.stopBeOn : ec.stopSrOn);
       const pct = typ === "trailStop" ? ec.trailPct : (typ === "stopBe" ? ec.stopBePct : ec.stopSrPct);
       if (on && !stopFired[typ]) {
@@ -1009,10 +1023,18 @@ function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
         }
       }
     }
+    // 最大止损硬上限兜底（py 引擎 2026-10-09 同口径）：止损类通道 latch 后或有效
+    // 止损位比 maxLoss 更宽时，盘中破坏 maxLoss 即全平剩余手数（记 stopSr，永不 latch）
+    if ((stopFired[typ] || stop == null || (isShort ? stop > maxLoss : stop < maxLoss))
+        && (isShort ? bar.high > maxLoss : bar.low < maxLoss)) {
+      const fill = isShort ? Math.max(maxLoss, bar.open) : Math.min(maxLoss, bar.open);
+      if (take("stopSr", bar.time, fill, 100)) { closed = true; break; }
+    }
     trailRaise(bar.time);
   }
   if (!closed) {
     applyTps(Infinity); // 数据末尾仍持仓：补记已触发的止盈事件
+    openTrailGate(mbars.length ? mbars[mbars.length - 1].time : entryT);
     trailRaise(Infinity);
     if (!events.some((e) => e.final)) {
       events.push({ type: "stillOpen", time: mbars.length ? mbars[mbars.length - 1].time : entryT, price: null });

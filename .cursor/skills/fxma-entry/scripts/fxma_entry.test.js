@@ -358,7 +358,7 @@ describe("parseFibLevels", () => {
   });
 });
 
-describe("scanPeriodSignals · 条件计票（必选硬门槛 + 票数≥生效N·四选N，与 py 同构）", () => {
+describe("scanPeriodSignals · 条件组合（三选N：必选硬门槛 + 票数≥生效N，与 py 同构）", () => {
   // 与上组同构行情（上涨→下跌→V反→反弹；2买 @ bars[21]，尾部三条件齐备）
   const closes = [];
   for (let i = 0; i < 12; i++) closes.push(100 + 2.0 * i);
@@ -386,7 +386,7 @@ describe("scanPeriodSignals · 条件计票（必选硬门槛 + 票数≥生效N
     assert.equal(sigs.length, 0);
   });
 
-  test("可选+四选二：破坏均线后 强分型+站线 2 票仍触发", () => {
+  test("可选+三选二：破坏均线后 强分型+站线 2 票仍触发", () => {
     const sigs = scanPeriodSignals("3", bars, periodBis, "15",
                                    { ...MODULE_OPTS, crossMinPts: 1e6,
                                      maReq: false, entryPick: pick(2) });
@@ -408,7 +408,7 @@ describe("scanPeriodSignals · 条件计票（必选硬门槛 + 票数≥生效N
     assert.equal(sigs.length, 1);
   });
 
-  test("四选一 + 单条件：只留强分型 → 1/1 触发", () => {
+  test("三选一 + 单条件：只留强分型 → 1/1 触发", () => {
     const sigs = scanPeriodSignals("3", bars, periodBis, "15",
                                    { ...MODULE_OPTS, maOn: false, maStandOn: false,
                                      entryPick: pick(1) });
@@ -568,7 +568,7 @@ describe("scanPeriodSignals · 次级别/次次级别背驰（opts+lowerCtx 注�
   };
   const divOn = { ...MODULE_OPTS, divLowerOn: true };
 
-  test("必选+命中（背驰点=点同刻，同极值口径）→ 触发，证据字段齐全", () => {
+  test("唯一触发+命中（背驰点=点同刻，同极值口径）→ 触发，证据字段齐全", () => {
     const sigs = scanPeriodSignals("3", bars, periodBis, "15", divOn, mkLowerCtx(3000));
     assert.equal(sigs.length, 1);
     const s = sigs[0];
@@ -582,12 +582,12 @@ describe("scanPeriodSignals · 次级别/次次级别背驰（opts+lowerCtx 注�
     assert.equal(scanPeriodSignals("3", bars, periodBis, "15").length, 1);   // 无 lowerCtx 同样放行
   });
 
-  test("必选+窗口外候选（背驰点早于点前1根）→ 拦下", () => {
+  test("互斥：窗口外候选（背驰点早于点前1根）→ 三条件全过也拦下（不回退条件组合）", () => {
     // t0=2000 → 背驰点 2780 < ptTime−180=3600：点之前的旧背驰不算确认
     assert.equal(scanPeriodSignals("3", bars, periodBis, "15", divOn, mkLowerCtx(2000)).length, 0);
   });
 
-  test("必选+无更低级别数据（lowerCtx 缺 30S）→ 拦下（同引擎 P=3 无 30S 语义）", () => {
+  test("互斥：无更低级别数据（lowerCtx 缺 30S）→ 拦下（同引擎 P=3 无 30S 语义）", () => {
     const ctxOnly3 = { "3": mkLowerCtx(3000)["3"] };
     assert.equal(scanPeriodSignals("3", bars, periodBis, "15", divOn, ctxOnly3).length, 0);
   });
@@ -595,13 +595,5 @@ describe("scanPeriodSignals · 次级别/次次级别背驰（opts+lowerCtx 注�
   test("防未来：快照中的未来背驰点（晚于全部评估拍）不计入 → 拦下", () => {
     // t0=13000 → 背驰点 13780 > 末拍 closeT（T(32)+180=5940）：逐拍评估时还不可知
     assert.equal(scanPeriodSignals("3", bars, periodBis, "15", divOn, mkLowerCtx(13000)).length, 0);
-  });
-
-  test("可选+未过+N=2 → 票数口径仍触发（divLowerRes 无值）", () => {
-    const opt = { ...MODULE_OPTS, divLowerOn: true, divLowerReq: false,
-                  entryPick: { ...MODULE_OPTS.entryPick, "2": 2 } };
-    const sigs = scanPeriodSignals("3", bars, periodBis, "15", opt, mkLowerCtx(2000));
-    assert.equal(sigs.length, 1);
-    assert.equal(sigs[0].divLowerRes, null);   // 背驰未过不进证据字段（JS 信号不带 pick 字段）
   });
 });

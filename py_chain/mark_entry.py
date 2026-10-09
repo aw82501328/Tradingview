@@ -111,6 +111,24 @@ EXIT_CLOSE_PCT = 100.0
 EXIT_TRAIL_ON = False      # 跟踪止盈（新增，同 fxma 结构点驱动）：同向3类点→止损上移
 EXIT_TRAIL_PCT = 100.0
 EXIT_TRAIL_SLIP = 1.0      # 跟踪止盈滑点（点）：止损上移到参照点价∓该值（同 fxma tpTrailSlipPts）
+# 跟踪止盈参照（2026-10-09 双模式 exitTrailSrc，默认 detect）；门控保本（同日）：
+# 保本迁移（beDone：TP1/half/halfMr）前不接管止损、不提损，参照点自保当当拍起算
+# 不追溯——防入场时段参照点抢在「够笔→保本」之前把止损提到进场价附近
+# （2026-08-19 XAUUSD 案例）。止损类部分平仓 latch 后剩余手数由 maxLoss 兜底
+# （advance_exit_decision，记 stopSr 永不 latch）。
+# - detect=检测周期结构点流（findBuyPoints/findSellPoints 的 3/类3/4/类4 类点）：
+#   保本后检测周期出现3买 → 提损至3买位置，跌破即 trailStop（同 fxma 点流口径）。
+#   1/2类点不参与：2买即入场点自身，1类是趋势起点，提损到它们没有跟踪意义。
+# - mark=背驰周期信号流（旧口径）：markRes 信号流中同向 3类买卖点
+#   （wait3Buy/waitBuy/wait3Sell/waitSell，含被同向互斥抑制的）。
+EXIT_TRAIL_SRC = "detect"
+EXIT_TRAIL_POINT_TYPES = ("3买", "类3买", "4买", "类4买",
+                          "3卖", "类3卖", "4卖", "类4卖")
+EXIT_TRAIL_REF_KEYS = {"wait3Buy", "waitBuy", "wait3Sell", "waitSell"}
+EXIT_EXPECT_ON = True      # 出场预期口径（严进宽出，2026-10-09）：检测周期够笔/顺势过
+                           # 高低点用形成段预期触发（合并K够块即够笔、当根收盘K极值越过
+                           # 前一同向笔端点即过前高），不等确认笔；False=确认笔旧口径。
+                           # 进场侧结构判定不变（严进），仅出场放宽（宽出）。
 # 出场方式默认快照（BacktestEngine.exit_cfg 消费；_fill_pending 固化进 pos.exitCfg，
 # advance_exit_decision 纯函数读 pos——三模式（回测/实时/实盘）同一份判定）
 EXIT_MODE_DEFAULTS = {
@@ -121,13 +139,12 @@ EXIT_MODE_DEFAULTS = {
     "exitCloseOn": EXIT_CLOSE_ON, "exitClosePct": EXIT_CLOSE_PCT,
     "exitTrailOn": EXIT_TRAIL_ON, "exitTrailPct": EXIT_TRAIL_PCT,
     "exitTrailSlip": EXIT_TRAIL_SLIP,
+    "exitTrailSrc": EXIT_TRAIL_SRC,
+    "exitExpectOn": EXIT_EXPECT_ON,
 }
 # 出场方式开关键（「至少启用一种」校验用；exitTrailSlip 非开关不列入）
 EXIT_MODE_ON_KEYS = ("exitStopSrOn", "exitStopBeOn", "exitHalfMrOn",
                      "exitHalfOn", "exitCloseOn", "exitTrailOn")
-# 跟踪止盈参照信号集合：同向 3类买卖点（wait3Buy/wait3Sell=3买/3卖点，
-# waitBuy/waitSell=新买/卖点=3类点强档；fxma 侧对应 3/类3/4/类4 点流，缠论V1 无4类点）
-EXIT_TRAIL_REF_KEYS = {"wait3Buy", "waitBuy", "wait3Sell", "waitSell"}
 
 
 # ============================================================
@@ -1561,6 +1578,26 @@ def forming_seg_ready(px_bis, px_merged_times, is_short, min_merged=EXIT_MIN_MER
     if anchor >= len(px_merged_times):
         return False
     return (len(px_merged_times) - 1) - anchor >= min_merged - 1
+
+
+def forming_break_ref(bis, is_short):
+    """预期过前高/破前底参照（严进宽出 2026-10-09）：末笔为不利方向（其后正在走的
+    有利方向形成段尚未确认成笔）时，返回最近一根已确认**同向（有利方向）**笔的
+    端点——形成段运行极值越过该端点即视为「过高低点」，不等形成段收笔确认。
+
+    与 forming_seg_ready 同一门禁（末笔不利方向才存在有利形成段）；末笔已是
+    有利方向时无形成段，返回 None（走 find_bi_event 确认笔口径）。
+    @returns None | {price, time}（参照笔端点价/完成时间）
+    """
+    if not bis:
+        return None
+    fav = "down" if is_short else "up"
+    if bis[-1]["type"] == fav:
+        return None
+    for j in range(len(bis) - 1, -1, -1):
+        if bis[j]["type"] == fav:
+            return {"price": bis[j]["endPrice"], "time": bis[j]["endTime"]}
+    return None
 
 
 def find_bi_event(bis, from_t, bi_type, require_post_start=False, break_prev=False):

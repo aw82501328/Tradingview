@@ -15,6 +15,8 @@
  *   --from=YYYY-MM-DD  指定日线起点日期（从该日期的日K开始画，嵌套到各级别）
  *   --with-30s      启用 30 秒级别（追加 30S 周期：只计算并落盘笔数据，不在图上绘制；
  *                   供 mark-entry --with-30s 的「以下级别背驰」使用。关闭后重跑本脚本即移除 30S 数据）
+ *   --no-tongbi     关闭「同笔」后处理（默认开启）：大小周期笔完全重叠时大周期线重建置顶，
+ *                   并在笔中点标记「同笔60=15」文本（详见主流程同笔后处理注释）
  */
 const fs = require("fs");
 const path = require("path");
@@ -23,7 +25,7 @@ const CDP = require("../../../../server-cdp/node_modules/chrome-remote-interface
 const core = require("../../chan-core/scripts/chan_core.js");
 const {
   markWickBars, mergeBars, findFractals, countRaw, hasGapBetween, buildBi, fixBiExtremes, lockedPivotsOf, alignBiToUpper,
-  calcATR, calcMACD, hasMacdCrossBetween,
+  calcATR, calcMACD, hasMacdCrossBetween, isSameAsUpperBi,
   extendLastBi, lowerResOf, calibrateBiTimes, intervalSecOf, nearDoubleOn,
 } = core;
 
@@ -112,6 +114,14 @@ const CLOSED_ONLY = args.includes("--closed");
 const PERIODS = getStrArg("periods", "D,240,60,15,3")
   .split(",").map(s => s.trim()).filter(Boolean);
 if (WITH_30S && !PERIODS.includes("30S")) PERIODS.push("30S");
+
+// --no-tongbi：关闭「同笔」后处理（默认开启）。大小周期笔完全重叠（同笔，判定与
+// 买卖点「同笔例外」同口径，见 chan-core isSameAsUpperBi）时，把大周期的线
+// 「先建新、验通过、再删旧」重建置顶（TradingView 后创建的 shape 渲染在上层），
+// 并在笔中点画「同笔60=15」文本标记。
+const NO_TONGBI = args.includes("--no-tongbi");
+// 同笔标记的 shape 标签（清理与识别用；与笔的 CHAN_BI_<res> 标签互不干扰）
+const TB_TITLE = "CHAN_BI_TB";
 
 // 内层窗口最小K线数：锚点范围内K线不足时向前扩展
 const MIN_WINDOW_BARS = 20;
@@ -214,6 +224,69 @@ function intervalVisibility(res) {
     default:
       return null; // 未列出的周期不限制可见范围
   }
+}
+
+/**
+ * 同笔分组：检测相邻周期间「完全重叠」的笔，并链式合并成组。
+ * periodsMap：key=周期，value=笔数组（本次运行 allBis 与旧缓存合并后的视图，
+ *   见主流程「同笔后处理」）；ladder：周期阶梯（大到小，如 D,240,60,15,3）。
+ * 只在阶梯相邻两级间检测：非相邻周期的笔受可见范围限制永不同屏，无重叠置顶需求；
+ * COMPUTE_ONLY 周期（30S）不绘制，同样跳过。
+ * 判定复用 chan-core isSameAsUpperBi（±1 根低级别 bar 时间 / ±0.01 价格），
+ * 与买卖点「同笔例外」同口径。链式合并：3=15 且 15=60 → 一组 {60,15,3}。
+ * 返回 [{ members: [{res, bi}] }]，members 大到小（members[0] = 组内最大周期笔），
+ * 组间按「组内最大周期」升序排列（小周期组先处理，后处理重建后大周期线最后创建）。
+ */
+function buildTongBiGroups(periodsMap, ladder) {
+  const groupOfBi = new Map(); // 笔对象 → 所属组（链式关联：下级命中上级笔时并入上级所在组）
+  const groups = [];
+  for (let i = 0; i + 1 < ladder.length; i++) {
+    const upper = String(ladder[i]), lower = String(ladder[i + 1]);
+    if (COMPUTE_ONLY.has(upper) || COMPUTE_ONLY.has(lower)) continue;
+    const upperBis = periodsMap[upper], lowerBis = periodsMap[lower];
+    if (!upperBis || !lowerBis) continue;
+    const lowerSec = intervalSecOf(lower) || 900;
+    for (const bi of lowerBis) {
+      const hit = isSameAsUpperBi(bi, upperBis, lowerSec);
+      if (!hit) continue;
+      let g = groupOfBi.get(hit);
+      if (!g) {
+        g = { members: [{ res: upper, bi: hit }] };
+        groups.push(g);
+        groupOfBi.set(hit, g);
+      }
+      // 同一下级周期只入组一次（防同一上级笔被相邻两根下级笔同时命中的极端情况）
+      if (!g.members.some(m => m.res === lower)) {
+        g.members.push({ res: lower, bi });
+        groupOfBi.set(bi, g);
+      }
+    }
+  }
+  // 组间按「组内最大周期」升序（小周期组先处理，后处理重建时大周期组的线最后创建，
+  // 组间叠放同样保持大周期在上）。注意 ladder 本身从大到小排列，不能直接用其下标排序。
+  groups.sort((a, b) => (intervalSecOf(a.members[0].res) || 0) - (intervalSecOf(b.members[0].res) || 0));
+  return groups;
+}
+
+/**
+ * 多周期可见范围的并集（同笔标记用）：组内任一条线可见的图表周期上，标记也可见。
+ * 各周期 intervalVisibility 是「本周期+低一级」的连续阶梯区间，同组相邻成员的并集仍连续。
+ * 某大类（seconds/minutes/...）只有在至少一个成员开启时才参与 from/to 合并——
+ * 关闭成员的模板默认值（如 minutes 1..59）不得污染范围。
+ */
+function unionIntervalVisibility(resList) {
+  const cfgs = resList.map(intervalVisibility).filter(Boolean);
+  if (cfgs.length === 0) return null;
+  if (cfgs.length === 1) return cfgs[0];
+  const CLASSES = ["seconds", "minutes", "hours", "days", "weeks", "months"];
+  const out = { ticks: cfgs.some(c => c.ticks) };
+  for (const cls of CLASSES) {
+    const on = cfgs.filter(c => c[cls]);
+    out[cls] = on.length > 0;
+    out[cls + "From"] = on.length ? Math.min(...on.map(c => c[cls + "From"])) : 1;
+    out[cls + "To"] = on.length ? Math.max(...on.map(c => c[cls + "To"])) : 1;
+  }
+  return out;
 }
 
 // ============================================================
@@ -1373,6 +1446,274 @@ function intervalVisibility(res) {
       }
       console.log("\n=== 绘制结果 [周期 " + res + "] ===");
       console.log(JSON.stringify(finalResult, null, 2));
+    }
+
+    // ============================================================
+    // 同笔后处理：大小周期笔完全重叠时，大周期线置顶 + 标记「同笔」
+    // TradingView 按「后创建者在上」叠放 shape；主循环从大到小创建，完全重叠处
+    // 小周期线盖住了大周期线。此处在全部创建完成后：检测相邻周期同笔（链式成组），
+    // 把大周期的线「先建新、验通过、再删旧」重建置顶（失败删新留旧，不丢线），
+    // 最后统一画同笔文本标记。--no-tongbi 关闭；--dry 只检测打印不绘图。
+    // ============================================================
+    if (!NO_TONGBI) {
+      // 数据源：本次 allBis 优先；本次未运行的周期用旧缓存补——局部重跑（如
+      // --periods=60）时上级 240 的线仍在图上，其笔数据来自上次运行的落盘
+      const merged = { ...allBis };
+      try {
+        const old = JSON.parse(fs.readFileSync(bisCacheFile(SYMBOL), "utf8"));
+        if (old && old.periods) {
+          for (const [r, list] of Object.entries(old.periods)) {
+            if (!merged[r] && Array.isArray(list) && list.length) merged[r] = list;
+          }
+        }
+      } catch (e) { /* 无旧缓存：只检测本次运行的周期 */ }
+
+      const groups = buildTongBiGroups(merged, PERIODS);
+      console.log(`\n=== 同笔检测：${groups.length} 组大小周期完全重叠 ===`);
+      for (const g of groups) {
+        const t = g.members[0].bi;
+        console.log(`[同笔] ${g.members.map(m => m.res).join("=")} ${t.startPrice}(${toT(t.startTime)}) -> ${t.endPrice}(${toT(t.endTime)})`);
+      }
+
+      if (!DRY) {
+        // 整段降级保护：后处理任何异常只放弃置顶/标记，不影响后续笔数据落盘
+        // （mark-buy-sell 强制依赖 bis 缓存，不能因标记失败而断链）
+        try {
+        // 清除旧同笔标记：标记的可见范围横跨多个周期，须逐周期切换后按 title 清除
+        // （getAllShapes 只返回当前图表周期可见的 shape，与 clearPeriod 同理）
+        const clearTB = async () => {
+          const r = await client.Runtime.evaluate({
+            expression: `(function() {
+              const chart = TradingViewApi.activeChart();
+              const TITLE = "${TB_TITLE}";
+              const out = { cleared: 0 };
+              const readTitle = (id) => {
+                try {
+                  const sh = chart.getShapeById(id);
+                  const props = sh && sh._source && sh._source._properties;
+                  return props && props.title ? String(props.title._value) : '';
+                } catch(e) { return ''; }
+              };
+              try {
+                const shapes = chart.getAllShapes();
+                for (const s of shapes) {
+                  if (readTitle(s.id) === TITLE) {
+                    try { chart.removeEntity(s.id); out.cleared++; } catch(e) {}
+                  }
+                }
+              } catch(e) {}
+              return out;
+            })()`,
+            returnByValue: true, awaitPromise: true, timeout: 30000,
+          });
+          return r.result.value;
+        };
+        let tbCleared = 0;
+        for (const res of PERIODS) {
+          if (COMPUTE_ONLY.has(res)) continue;
+          if (res !== currentRes) {
+            await ensureResolution(res);
+            currentRes = res;
+          }
+          tbCleared += (await clearTB()).cleared;
+        }
+        if (tbCleared > 0) console.log(`[同笔] 清除旧标记 ${tbCleared} 个`);
+
+        // 墙钟偏移探针（同 drawClippedViaReplay 的探针）：TradingView 存储的 shape 锚点是
+        // 「墙钟时间」（bar UTC ts + 图表时区偏移 tzOff，回放图实测 +8h），渲染时再减回。
+        // 回放图上事后读回的 _points 已是偏移后的存储值——用落盘 UTC ts 直接比对会全部
+        // 失配（曾致同笔置顶全部误判「线不存在」），故比对前先测偏移再减回。
+        // 非回放图探针测得 ~0（请求时间即 bar 边界，存储值原样）。
+        const probeTzOff = async () => {
+          const range = await readBarsRange();
+          if (!range || !range.last) return null;
+          const lowerSec = 60;
+          const id = await client.Runtime.evaluate({
+            expression: `(async function(){
+              const chart = TradingViewApi.activeChart();
+              return await chart.createMultipointShape(
+                [{ time: ${range.last - lowerSec}, price: ${range.lastClose} }, { time: ${range.last}, price: ${range.lastClose} }],
+                { shape: 'polyline', lock: false, overrides: { linecolor: '#000000', linewidth: 1, title: 'TB_TZ_PROBE' } });
+            })()`,
+            returnByValue: true, awaitPromise: true, timeout: 20000,
+          }).then(r => r.result && r.result.value).catch(() => null);
+          if (!id) return null;
+          await sleep(2500); // 吸附/换算异步生效，紧跟创建读回是请求值（竞态）
+          let off = null;
+          const pts = await readShapePoints(id);
+          if (pts && pts[1] && typeof pts[1].time === 'number') off = pts[1].time - range.last;
+          await removeShapesByIds([id]);
+          return typeof off === 'number' ? off : null;
+        };
+
+        // 按端点在图上找现有笔 shape：title 匹配 + 两端点容差匹配（口径同回读校验；
+        // 存储值须先减墙钟偏移 tzOff 再与落盘 UTC ts 比对）
+        const findShapesByBi = async (res, bi, tolSec, tzOff) => {
+          const r = await client.Runtime.evaluate({
+            expression: `(function() {
+              const chart = TradingViewApi.activeChart();
+              const TITLE = "CHAN_BI_${res}";
+              const BI = ${JSON.stringify({ t0: bi.startTime, t1: bi.endTime, p0: bi.startPrice, p1: bi.endPrice })};
+              const TOL = ${tolSec};
+              const OFF = ${tzOff || 0};
+              const out = [];
+              try {
+                const shapes = chart.getAllShapes();
+                for (const s of shapes) {
+                  if (s.name !== 'polyline') continue;
+                  try {
+                    const sh = chart.getShapeById(s.id);
+                    const props = sh && sh._source && sh._source._properties;
+                    if (!props || !props.title || String(props.title._value) !== TITLE) continue;
+                    const pts = sh._source._points;
+                    if (!pts || pts.length < 2) continue;
+                    if (Math.abs(pts[0].time - OFF - BI.t0) <= TOL && Math.abs(pts[1].time - OFF - BI.t1) <= TOL &&
+                        Math.abs(pts[0].price - BI.p0) <= 0.01 && Math.abs(pts[1].price - BI.p1) <= 0.01) {
+                      out.push(s.id);
+                    }
+                  } catch(e) { continue; }
+                }
+              } catch(e) {}
+              return out;
+            })()`,
+            returnByValue: true, awaitPromise: true, timeout: 20000,
+          });
+          return (r.result && r.result.value) || [];
+        };
+
+        // 置顶：组按「组内最大周期」升序处理（小周期组先重建、大周期组最后创建，
+        // 组间叠放同样保持大周期在上）。在低一级基准周期上重建（与 createPeriod
+        // 同规则，避免端点被吸附到源周期 bar 边界）；基准周期恰是两条线同屏可见处，
+        // 须同时找到大周期线与直接下级线才处理（其一被裁剪/删除则无重叠可言）。
+        const tzOff = await probeTzOff();
+        if (tzOff === null) console.log("[同笔] 提示: 墙钟偏移探针失败，按 0 偏移比对（非回放图通常为 0）");
+        else if (tzOff !== 0) console.log(`[同笔] 检测到回放图墙钟偏移 ${tzOff}s，端点比对已换算`);
+        let lifted = 0, skipped = 0, failed = 0;
+        const markedGroups = [];
+        for (const g of groups) {
+          const chain = g.members.map(m => m.res).join("=");
+          const top = g.members[0];
+          const partner = g.members[1];
+          const bi = top.bi;
+          const drawRes = lowerResOf(top.res) || top.res;
+          const tol = intervalSecOf(drawRes) || 900;
+          if (drawRes !== currentRes) {
+            await ensureResolution(drawRes);
+            currentRes = drawRes;
+          }
+          const topIds = await findShapesByBi(top.res, bi, tol, tzOff);
+          const partnerIds = partner ? await findShapesByBi(partner.res, partner.bi, tol, tzOff) : [];
+          if (!topIds.length || !partnerIds.length) {
+            skipped++;
+            console.log(`[同笔] 跳过 ${chain}：图上${!topIds.length ? `${top.res} 线不存在` : `${partner.res} 线不存在`}（可能被窗口裁剪/手动删除）`);
+            continue;
+          }
+          // 数据覆盖检查：切换周期后图表可能只加载最近K线，未覆盖时重建会被吸附成无效笔
+          const cover = await ensureBarsCover(drawRes, Math.min(bi.startTime, bi.endTime));
+          if (!cover.covered) {
+            skipped++;
+            console.log(`[同笔] 跳过 ${chain}：${drawRes} 图表数据未覆盖到笔起点（保留原叠放）`);
+            continue;
+          }
+          // 防抢占：创建前确认图表仍在绘制周期（同主循环）
+          const resNow = await client.Runtime.evaluate({
+            expression: `String(TradingViewApi.activeChart().resolution())`,
+            returnByValue: true, awaitPromise: true, timeout: 10000,
+          });
+          if (resNow.result && normRes(resNow.result.value) !== normRes(drawRes)) {
+            await ensureResolution(drawRes);
+            currentRes = drawRes;
+          }
+          // 先建新（后创建 → 渲染在上层），回读校验通过后再删旧；失败则删新留旧。
+          // 创建直传落盘 ts 不补偿（墙钟换算由 TV 渲染层处理）；校验须等 ~2.5s
+          // 吸附/换算沉降后读存储值并减 tzOff（紧跟创建读回是请求值，竞态放行）
+          const create = await createPeriod(top.res, [bi]);
+          const newId = create.created_ids && create.created_ids[0];
+          let ok = false;
+          if (newId) {
+            await sleep(2500);
+            const pts = (await readStrokesByIds([newId]))[0];
+            if (pts && pts[0] && pts[1] &&
+                Math.abs(pts[0].time - (tzOff || 0) - bi.startTime) <= tol && Math.abs(pts[1].time - (tzOff || 0) - bi.endTime) <= tol &&
+                Math.abs(pts[0].price - bi.startPrice) <= 0.01 && Math.abs(pts[1].price - bi.endPrice) <= 0.01) {
+              ok = true;
+            }
+          }
+          if (ok) {
+            await removeShapesByIds(topIds); // 命中的旧线全删（含历史残留重复）
+            lifted++;
+            markedGroups.push(g);
+          } else {
+            if (newId) await removeShapesByIds([newId]);
+            failed++;
+            console.log(`[同笔] 警告: ${chain} 重建未通过回读校验，保留原线（小周期暂在上）`);
+          }
+        }
+
+        // 同笔标记：每组一个 text shape，锚=笔中点，文本=同笔60=15（大到小），
+        // 颜色=最大周期颜色，可见范围=组内各周期并集（凡组内任一线可见处均可见）
+        const drawTBMark = async (g) => {
+          const top = g.members[0];
+          const bi = top.bi;
+          const label = "同笔" + g.members.map(m => m.res).join("=");
+          const r = await client.Runtime.evaluate({
+            expression: `(async function() {
+              const chart = TradingViewApi.activeChart();
+              const MARK = ${JSON.stringify({ time: Math.floor((bi.startTime + bi.endTime) / 2), price: (bi.startPrice + bi.endPrice) / 2 })};
+              const LABEL = ${JSON.stringify(label)};
+              const COLOR = "${resolutionColor(top.res)}";
+              const TITLE = "${TB_TITLE}";
+              const IV_CFG = ${JSON.stringify(unionIntervalVisibility(g.members.map(m => m.res)))};
+              const applyIV = (id) => {
+                if (!IV_CFG) return;
+                try {
+                  const iv = chart.getShapeById(id)._source._properties.intervalsVisibilities;
+                  iv.ticks.setValue(IV_CFG.ticks);
+                  iv.seconds.setValue(IV_CFG.seconds);
+                  iv.secondsFrom.setValue(IV_CFG.secondsFrom);
+                  iv.secondsTo.setValue(IV_CFG.secondsTo);
+                  iv.minutes.setValue(IV_CFG.minutes);
+                  iv.minutesFrom.setValue(IV_CFG.minutesFrom);
+                  iv.minutesTo.setValue(IV_CFG.minutesTo);
+                  iv.hours.setValue(IV_CFG.hours);
+                  iv.hoursFrom.setValue(IV_CFG.hoursFrom);
+                  iv.hoursTo.setValue(IV_CFG.hoursTo);
+                  iv.days.setValue(IV_CFG.days);
+                  iv.daysFrom.setValue(IV_CFG.daysFrom);
+                  iv.daysTo.setValue(IV_CFG.daysTo);
+                  iv.weeks.setValue(IV_CFG.weeks);
+                  iv.weeksFrom.setValue(IV_CFG.weeksFrom);
+                  iv.weeksTo.setValue(IV_CFG.weeksTo);
+                  iv.months.setValue(IV_CFG.months);
+                  iv.monthsFrom.setValue(IV_CFG.monthsFrom);
+                  iv.monthsTo.setValue(IV_CFG.monthsTo);
+                  iv.ranges.setValue(false);
+                } catch(e) {}
+              };
+              try {
+                const id = await chart.createMultipointShape(
+                  [{ time: MARK.time, price: MARK.price }],
+                  { shape: 'text', lock: false, overrides: { text: LABEL, color: COLOR, bold: true, title: TITLE } }
+                );
+                applyIV(id);
+                return { ok: 1 };
+              } catch (e) { return { ok: 0, err: e.message }; }
+            })()`,
+            returnByValue: true, awaitPromise: true, timeout: 30000,
+          });
+          return r.result.value;
+        };
+        let marked = 0;
+        for (const g of markedGroups) {
+          const m = await drawTBMark(g);
+          if (m && m.ok) marked++;
+          else console.log(`[同笔] 标记绘制失败:`, m && m.err);
+        }
+        console.log(`[同笔] 置顶 ${lifted} 组，标记 ${marked} 组，跳过 ${skipped} 组${failed ? `，失败 ${failed} 组` : ""}`);
+        } catch (e) {
+          console.log("[同笔] 后处理异常（放弃剩余置顶/标记，不影响笔数据落盘）:", e.message);
+        }
+      }
     }
 
     // 最后切回原周期

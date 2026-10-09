@@ -21,6 +21,9 @@
     border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 10px;
   }
   .card h2 { font-size: 15px; display: flex; align-items: center; justify-content: space-between; }
+  /* 全量回测卡头部：状态徽标与时钟紧跟标题成组（space-between 会把徽标挤中间、时钟最右） */
+  .card h2.bt-head { justify-content: flex-start; }
+  .card h2.bt-head .badge { margin-left: 8px; }
   .badge {
     font-size: 11px; padding: 2px 8px; border-radius: 10px;
     background: #2a2f3a; color: var(--muted);
@@ -101,6 +104,8 @@
   /* 回测策略TAB（多策略并行，2026-10-02）：每策略一张卡，TAB 切换显示；
      运行中/暂停/失败以左侧状态点标识，运行中带呼吸动画 */
   #bt-tabs { margin-bottom: 10px; }
+  /* 独立TAB页（历史回测方案/典型案例）：排在策略TAB之后，留间隔区隔（无运行状态点） */
+  .bt-page-tab { margin-left: 14px; }
   .bt-tab { display: inline-flex; align-items: center; gap: 6px; }
   .bt-tab .bt-dot {
     width: 8px; height: 8px; border-radius: 50%; background: var(--card-2);
@@ -193,6 +198,8 @@
   }
   .equity-chart .eq-tip.on { display: block; }
   .scroll { max-height: 420px; overflow-y: auto; }
+  /* 独立TAB页（历史回测方案/典型案例）表格：JS 按容器顶位置吃满剩余视口，340px 为无 JS 回落 */
+  .page-scroll { max-height: 340px; }
   #sig-body tr { cursor: pointer; }
   #sig-body tr:hover td { background: var(--card-2); }
   #sig-body tr.selected td { background: color-mix(in srgb, var(--accent) 18%, var(--card)); }
@@ -210,21 +217,6 @@
   }
   #copy-tip.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   #locate-status { padding: 8px 14px; color: var(--muted); font-size: 12px; }
-  /* ---------- 记录区 TAB（进场信号记录 / 历史回测方案） ---------- */
-  .record-tabs {
-    display: flex; gap: 4px; padding: 6px 10px 0;
-    border-bottom: 1px solid var(--border); background: var(--card-2);
-  }
-  .record-tab {
-    background: transparent; color: var(--muted);
-    border: 1px solid transparent; border-bottom: 0;
-    border-radius: 8px 8px 0 0; padding: 7px 16px; font-size: 13px;
-  }
-  .record-tab:hover:not(:disabled) { background: var(--card); color: var(--text); }
-  .record-tab.active {
-    background: var(--card); border-color: var(--border);
-    color: var(--text); font-weight: 600;
-  }
   /* ---------- 典型案例面板：滑动处理开关 + 行状态 ---------- */
   #bt-errors-body tr[data-err-id] { cursor: pointer; }
   #bt-errors-body tr[data-err-id]:hover td { background: var(--card-2); }
@@ -267,22 +259,16 @@
 </head>
 <body>
 <h1>三模式控制台 <a href="/sr.html" style="float:right;font-size:14px;color:var(--accent);text-decoration:none;">支阻位参数调试 →</a></h1>
-<div class="sub">全量回测（纯后台 · 按策略分TAB可多策略同时运行互不干扰） · K线回放 · 实时监控 — 回放/实时与其余任务互斥；进场信号实时记录到下方表格</div>
+<div class="sub">全量回测（纯后台 · 按策略分TAB可多策略同时运行互不干扰；历史回测方案/典型案例为策略TAB后的独立TAB页） · K线回放 · 实时监控 — 回放/实时与其余任务互斥；进场信号实时记录到下方表格</div>
 
 <nav id="mode-nav" class="mode-nav" aria-label="回测与监控功能"></nav>
-<nav id="bt-tabs" class="sym-tabs" aria-label="回测策略（每策略独立TAB，可并行运行）" hidden></nav>
+<nav id="bt-tabs" class="sym-tabs" aria-label="全量回测TAB（每策略独立TAB可并行运行，后接历史回测方案/典型案例两个独立TAB页）" hidden></nav>
 <div class="grid single-mode" id="cards"></div>
-<p class="sub">记录和汇总仅属于当前功能与当前策略TAB。标记操作使用当前功能全部记录；绘制会替换共享 TD 图表上的对应标记，删除标记作用于共享图表。</p>
+<p class="sub" id="record-hint">记录和汇总仅属于当前功能与当前策略TAB。标记操作使用当前功能全部记录；绘制会替换共享 TD 图表上的对应标记，删除标记作用于共享图表。</p>
 
-<!-- 记录区 TAB：进场信号记录（三模式共用）/ 历史回测方案（仅全量回测）/ 典型案例（仅全量回测），切换显示不堆叠 -->
+<!-- 记录区：进场信号记录（三模式共用，随策略TAB显示）；历史回测方案/典型案例为顶部
+     策略TAB后的两个独立TAB页（仅全量回测，选中时替代策略卡与信号表显示） -->
 <div class="table-wrap">
-  <div class="record-tabs" role="tablist" aria-label="记录区">
-    <button class="record-tab active" role="tab" aria-selected="true" data-record-tab="signals">进场信号记录</button>
-    <button class="record-tab" role="tab" aria-selected="false" data-record-tab="bt" id="tab-btn-bt" hidden
-            title="仅全量回测：保存的参数+信号+固化汇总，支持明细/对比/载参数">历史回测方案</button>
-    <button class="record-tab" role="tab" aria-selected="false" data-record-tab="errors" id="tab-btn-errors" hidden
-            title="仅全量回测：右击信号行/方案明细行「复制并加入典型案例」收集的典型交易；滑动开关标记已处理">典型案例</button>
-  </div>
   <section id="record-bt" role="tabpanel" aria-label="历史回测方案" hidden>
     <div class="head">
       <strong>历史回测方案</strong>
@@ -292,11 +278,11 @@
         <button id="btn-bt-compare" disabled title="勾选两个及以上方案后对比汇总结果与参数差异">对比选中 (0)</button>
       </div>
     </div>
-    <div class="scroll" style="max-height:340px;">
+    <div class="scroll page-scroll">
       <table>
         <thead>
           <tr>
-            <th>对比</th><th>名称</th><th>保存时间</th><th>品种</th><th>周期</th><th>起始</th><th>结束</th>
+            <th>对比</th><th>名称</th><th>策略</th><th>保存时间</th><th>品种</th><th>周期</th><th>起始</th><th>结束</th>
             <th>已平仓</th><th>胜率</th><th>盈亏比</th>
             <th id="bt-runs-pnl-header" aria-sort="none"><button type="button" id="sort-bt-runs-pnl" class="sort-button" title="点击按合计盈亏从高到低排序">合计 ↕</button></th>
             <th>信号数</th><th>运行</th><th>操作</th>
@@ -321,7 +307,7 @@
       </div>
     </div>
     <div id="bt-errors-locate" role="status" aria-live="polite"></div>
-    <div class="scroll" style="max-height:340px;">
+    <div class="scroll page-scroll">
       <table>
         <thead>
           <tr>
@@ -430,6 +416,15 @@ let BT_STRATEGIES = [];               // [{id, name}]（catalog 同源；拉取�
 const BT_STRATEGY_FALLBACK = [{ id: 'chan_v1', name: '缠论V1' }];
 let curBtTab = 'chan_v1';             // 当前显示的回测策略 TAB
 const btRowStrategy = r => r.strategy || 'chan_v1';   // 旧行无 strategy 字段回落默认策略
+// 策略TAB后的两个独立TAB页（2026-10-09 起原记录区页签移出）：runs=历史回测方案 /
+// errors=典型案例；选中时替代策略卡与信号表整页显示（仍属全量回测功能）
+let btPage = 'strategy';              // 'strategy'=策略卡+信号表 / 'runs' / 'errors'
+const BT_PAGE_TABS = [
+  { id: 'runs', name: '历史回测方案',
+    title: '保存的参数+信号+固化汇总，支持明细/对比/载参数' },
+  { id: 'errors', name: '典型案例',
+    title: '右击信号行/方案明细行「复制并加入典型案例」收集的典型交易；滑动开关标记已处理' },
+];
 
 const state = { active: null, modes: {}, bt: {} };
 let sigRows = [];
@@ -464,27 +459,60 @@ function selectMode(mode){
   MODES.forEach(m=>{ if(m.id!=='backtest') el('card-'+m.id).hidden = m.id!==mode; });
   el('bt-tabs').hidden = mode!=='backtest';
   if(mode==='backtest') showBtTab();
-  // 历史方案 / 典型案例 TAB 只属于全量回测；切到回放/实时时隐藏并回到信号表
-  el('tab-btn-bt').hidden = mode !== 'backtest';
-  el('tab-btn-errors').hidden = mode !== 'backtest';
-  if(mode !== 'backtest' && activeRecordTab !== 'signals') showRecordTab('signals');
+  // 历史方案 / 典型案例独立TAB页只属于全量回测；切到回放/实时时回到策略卡+信号表
+  if(mode !== 'backtest'){
+    btPage = 'strategy';
+    el('record-bt').hidden = true;
+    el('record-errors').hidden = true;
+    el('record-signals').hidden = false;
+    el('record-hint').hidden = false;
+  }
   el('mode-nav').innerHTML=MODES.map(m=>`<button data-mode="${m.id}" aria-pressed="${m.id===mode}">${m.name}</button>`).join('');
   document.querySelector('h1').firstChild.textContent=modeName(mode)+' ';
   renderTable();
 }
-// 策略TAB切换：显示对应卡片、品种页签回落、信号表按策略过滤重渲染
+// 策略TAB切换：显示对应卡片、品种页签回落、信号表按策略过滤重渲染（从独立TAB页返回亦走此）
 function selectBtTab(sid){
-  if(!BT_STRATEGIES.some(s=>s.id===sid)||sid===curBtTab)return;
-  curBtTab=sid;
-  symTabSel=null;           // 品种页签按新策略的行/批量重算
+  if(!BT_STRATEGIES.some(s=>s.id===sid))return;
+  const backFromPage = btPage!=='strategy';
+  if(sid!==curBtTab){
+    curBtTab=sid;
+    symTabSel=null;         // 品种页签按新策略的行/批量重算
+  }else if(!backFromPage)return;
+  btPage='strategy';
   showBtTab();
   renderTable();
   updateMarkButtons();
 }
-function showBtTab(){
-  BT_STRATEGIES.forEach(s=>{ const c=el(`card-bt-${s.id}`); if(c)c.hidden=s.id!==curBtTab; });
-  renderBtTabs();
+// 独立TAB页切换（历史回测方案/典型案例）：替代策略卡与信号表整页显示
+function selectBtPage(page){
+  if(!BT_PAGE_TABS.some(p=>p.id===page)||page===btPage)return;
+  btPage=page;
+  showBtTab();
 }
+// 回测页可见性权威：strategy=当前策略卡+信号记录（其余记录区面板隐藏）；
+// runs/errors=对应独立TAB页（全部策略卡与信号表隐藏），进入时拉取最新列表
+function showBtTab(){
+  const strategy=btPage==='strategy';
+  BT_STRATEGIES.forEach(s=>{ const c=el(`card-bt-${s.id}`); if(c)c.hidden=!strategy||s.id!==curBtTab; });
+  el('record-bt').hidden=btPage!=='runs';
+  el('record-errors').hidden=btPage!=='errors';
+  el('record-signals').hidden=!strategy;
+  el('record-hint').hidden=!strategy;
+  renderBtTabs();
+  if(btPage!=='strategy')fitPageScroll();
+  if(btPage==='runs')refreshBtRuns();
+  if(btPage==='errors')refreshBtErrors();
+}
+// 独立TAB页表格高度：吃满视口剩余空间（容器顶到视口底，留 body 底衬 24px）；
+// 最低 220px 防小窗塌缩；列表短时 max-height 不撑容器，外观不变
+function fitPageScroll(){
+  for(const box of document.querySelectorAll?.('.page-scroll')||[]){
+    const top=box.getBoundingClientRect().top;
+    box.style.maxHeight=Math.max(window.innerHeight-Math.max(top,8)-24,220)+'px';
+  }
+}
+window.addEventListener('resize',()=>{ if(btPage!=='strategy')fitPageScroll(); });
 function renderBtTabs(){
   const host=el('bt-tabs');
   if(!host||host.hidden)return;
@@ -492,9 +520,11 @@ function renderBtTabs(){
     const st=state.bt[s.id]?.state;
     const cls=st==='running'?' bt-tab-running':st==='paused'?' bt-tab-paused':st==='error'?' bt-tab-error':st==='done'?' bt-tab-done':'';
     const label=st==='running'?' · 运行中':st==='paused'?' · 已暂停':st==='error'?' · 失败':'';
-    return `<button type="button" class="sym-tab bt-tab${s.id===curBtTab?' active':''}${cls}" data-bt-tab="${escAttr(s.id)}"
+    return `<button type="button" class="sym-tab bt-tab${btPage==='strategy'&&s.id===curBtTab?' active':''}${cls}" data-bt-tab="${escAttr(s.id)}"
       title="${escAttr(s.name)} · 独立参数与运行状态，多策略可同时启动互不干扰">${esc(s.name)}<span class="bt-dot"></span>${label}</button>`;
-  }).join('');
+  }).join('')+BT_PAGE_TABS.map(p=>
+    `<button type="button" class="sym-tab bt-page-tab${btPage===p.id?' active':''}" data-bt-page="${escAttr(p.id)}"
+      title="${escAttr(p.title)}">${esc(p.name)}</button>`).join('');
 }
 window.addEventListener('message',e=>{
   if(e.origin!==location.origin||e.source!==parent||e.data?.type!=='select-mode')return;
@@ -631,7 +661,7 @@ function buildCard(m) {
   </div>`);
   return `
   <div class="card" id="card-${m.id}"${isBt ? ' hidden' : ''}>
-    <h2><span>${m.name}</span><span class="badge" id="badge-${m.id}">idle</span>${isBt ? `<b class="bt-clock" id="clock-${m.id}"></b>` : ''}</h2>
+    <h2${isBt ? ' class="bt-head"' : ''}><span>${m.name}</span><span class="badge" id="badge-${m.id}">idle</span>${isBt ? `<b class="bt-clock" id="clock-${m.id}"></b>` : ''}</h2>
     <div style="font-size:11px;color:var(--muted);">${m.desc}</div>
     <div class="mode-fields">${rows.join('')}</div>
     <div class="progress"><div id="bar-${m.id}"></div></div>
@@ -914,6 +944,18 @@ function togglePnlSort() {
   renderTable();
 }
 
+// 定位结果里次级别笔链的状态片段（result.bis：覆盖检测跳过/逐级计数/失败原因）
+function biChainTxt(bi) {
+  if (!bi) return '';
+  if (bi.skipped) return `（笔：${bi.skipped}）`;
+  if (bi.error) return `（笔画线失败：${bi.error}）`;
+  const parts = Object.entries(bi.levels || {}).filter(([, n]) => n > 0).map(([r, n]) => `${r}m×${n}`);
+  if (!parts.length) return '';
+  let t = `并画次级别笔 ${parts.join('+')}`;
+  if (bi.failed) t += `（${bi.failed}根超范围跳过）`;
+  return `（${t}）`;
+}
+
 // 主表行定位的完成处理（明细页有自己的 finishLocate，在 bt_detail.html 内）
 function finishLocate(job) {
   if (!locatePending || job?.jobId !== locatePending.jobId || job.state === 'running') return;
@@ -928,7 +970,7 @@ function finishLocate(job) {
         : mk?.skipped ? `（${mk.skipped}，不画标记）`
         : mk ? `并标记 ${mk.drawn} 个` : '';
       const replayTxt = job.result.replay ? '（K线回放）' : '';
-      setBtErrorsLocate(`#${locatePending.errId} 已定位${replayTxt}${markTxt} · ${job.result.symbol} · ${job.result.markRes} · ${fmtTime(job.result.time)}`);
+      setBtErrorsLocate(`#${locatePending.errId} 已定位${replayTxt}${markTxt}${biChainTxt(job.result.bis)} · ${job.result.symbol} · ${job.result.markRes} · ${fmtTime(job.result.time)}`);
     } else {
       setBtErrorsLocate(`#${locatePending.errId} 定位失败：${job.error || '未知'}`, true);
     }
@@ -944,7 +986,7 @@ function finishLocate(job) {
       : mk?.skipped ? `（${mk.skipped}，不画标记）`
       : mk ? `并标记 ${mk.drawn} 个` : '';
     const replayTxt = job.result.replay ? '（K线回放）' : '';
-    locateMessages[mode] = `${locateLabel(mode, id)} 已定位${replayTxt}${markTxt} · ${job.result.symbol} · ${job.result.markRes} · ${fmtTime(job.result.time)}`;
+    locateMessages[mode] = `${locateLabel(mode, id)} 已定位${replayTxt}${markTxt}${biChainTxt(job.result.bis)} · ${job.result.symbol} · ${job.result.markRes} · ${fmtTime(job.result.time)}`;
   } else {
     locateMessages[mode] = `${locateLabel(mode, id)} 定位失败：${job.error || '未知错误'}`;
   }
@@ -1307,7 +1349,7 @@ function bindBtCard(sid) {
     const host = el('sym-tabs');
     if (!host || host.hidden) return;
     symTabSel = row.dataset.sym;
-    showRecordTab('signals');
+    selectBtTab(curBtTab);      // 从独立TAB页返回策略卡+信号表（已在则无操作）
     renderTable();
     document.getElementById('record-signals')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
@@ -1474,7 +1516,8 @@ async function saveBtRun() {
   if (name === null) return;
   const r = await api('/api/bt/runs/save', { name: name.trim(), symbol: fs || undefined, strategy: sid });
   if (r) {
-    showRecordTab('bt');            // 保存成功后切到历史方案 TAB 直见结果（内部已刷新列表）
+    selectBtPage('runs');           // 保存成功后切到历史回测方案独立TAB页直见结果
+    document.getElementById('record-bt')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 }
 
@@ -1492,24 +1535,7 @@ async function saveAllBtRuns() {
   if (r.skipped?.length) parts.push(`跳过 ${r.skipped.length} 个：` + r.skipped.map(s => `${s.symbol}（${s.reason}）`).join('；'));
   if (r.failed?.length) parts.push(`失败 ${r.failed.length} 个：` + r.failed.map(s => `${s.symbol}（${s.error}）`).join('；'));
   alert(parts.join('\n'));
-  if (r.saved?.length) showRecordTab('bt');
-}
-
-// ---------- 记录区 TAB 切换（进场信号记录 / 历史回测方案 / 典型案例） ----------
-let activeRecordTab = 'signals';
-const RECORD_TAB_PANELS = { signals: 'record-signals', bt: 'record-bt', errors: 'record-errors' };
-function showRecordTab(tab) {
-  activeRecordTab = tab;
-  Object.entries(RECORD_TAB_PANELS).forEach(([name, panelId]) => {
-    el(panelId).hidden = name !== tab;
-  });
-  document.querySelectorAll('[data-record-tab]').forEach(b => {
-    const on = b.dataset.recordTab === tab;
-    b.classList.toggle('active', on);
-    b.setAttribute('aria-selected', String(on));
-  });
-  if (tab === 'bt') refreshBtRuns();
-  if (tab === 'errors') refreshBtErrors();
+  if (r.saved?.length) selectBtPage('runs');
 }
 
 async function refreshBtRuns() {
@@ -1541,7 +1567,7 @@ function renderBtRuns() {
   el('sort-bt-runs-pnl').title = {none:'点击按合计盈亏从高到低排序',descending:'点击按合计盈亏从低到高排序',ascending:'点击恢复默认顺序'}[sort];
   const body = el('bt-runs-body');
   if (!btRuns.length) {
-    body.innerHTML = `<tr><td colspan="14" style="color:var(--muted);white-space:normal;">回测完成后点卡片上的「保存方案」；已保存方案与当前信号表格互不影响</td></tr>`;
+    body.innerHTML = `<tr><td colspan="15" style="color:var(--muted);white-space:normal;">回测完成后点卡片上的「保存方案」；已保存方案与当前信号表格互不影响</td></tr>`;
   } else {
     // 仅排列展示副本；无合计盈亏的方案置后，相同盈亏保持保存时间顺序
     const runs = btRuns.slice();
@@ -1559,6 +1585,7 @@ function renderBtRuns() {
       return `<tr data-id="${r.id}">
         <td><input type="checkbox" data-bt-check="${r.id}"${btCompareSel.has(r.id) ? ' checked' : ''} aria-label="对比勾选 ${esc(r.name)}"></td>
         <td title="${esc(r.name)}">${esc(r.name)}</td>
+        <td title="${esc(btRunStrategyId(r))}">${esc(btStrategyName(btRunStrategyId(r)))}</td>
         <td>${fmtTime(r.saved_at)}</td>
         <td>${esc(r.cfg_summary?.symbol || '-')}</td>
         <td>${esc(r.cfg_summary?.periods || '-')}</td>
@@ -1571,7 +1598,7 @@ function renderBtRuns() {
         <td>${r.signal_count}</td>
         <td title="${esc(btRunStateLabel(r))}">${btRunStateLabel(r)}</td>
         <td class="bt-actions">
-          <button data-bt-act="detail" title="在独立标签页打开方案明细（不遮挡控制台）；未做过亏损归因的方案自动分析一次，重算用明细页的「分析方案」">明细</button>
+          <button data-bt-act="detail" title="每次点击新开一个明细标签（不刷新已打开的明细页）；未做过亏损归因的方案自动分析一次，重算用明细页的「分析方案」">明细</button>
           <button data-bt-act="load" title="把该方案的参数回填到表单（不自动启动）">载参数</button>
           <button data-bt-act="rename">重命名</button>
           <button data-bt-act="delete" class="danger">删除</button>
@@ -1596,9 +1623,8 @@ function onBtRunsClick(e) {
   if (!run) return;
   const act = btn.dataset.btAct;
   if (act === 'detail') {
-    // 明细=独立页面（bt_detail.html）：同名标签复用并置前，控制台不被遮挡
-    const w = window.open('/bt-detail?id=' + encodeURIComponent(run.id), 'bt-detail');
-    if (w) w.focus();
+    // 明细=独立页面（bt_detail.html）：每次点击都新开标签（_blank），已打开的明细页不刷新不跳转
+    window.open('/bt-detail?id=' + encodeURIComponent(run.id), '_blank');
   }
   else if (act === 'load') loadBtCfg(run);
   else if (act === 'rename') renameBtRun(run);
@@ -2016,8 +2042,10 @@ async function init() {
   // 清空表格：回测=当前策略TAB的行（多策略并行互不影响）；回放/实时=该模式全部
   el('btn-clear').onclick = () => clearModeRows(selectedMode, selectedMode === 'backtest' ? curBtTab : undefined);
   el('filter-status').onchange = () => renderTable();
-  // 回测策略TAB：点击切换卡片与信号行过滤
+  // 回测TAB条：策略TAB点击切换卡片与信号行过滤；独立TAB页（历史回测方案/典型案例）整页切换
   el('bt-tabs').addEventListener('click', e => {
+    const p = e.target.closest('[data-bt-page]');
+    if (p) { selectBtPage(p.dataset.btPage); return; }
     const b = e.target.closest('[data-bt-tab]');
     if (b) selectBtTab(b.dataset.btTab);
   });
@@ -2035,10 +2063,6 @@ async function init() {
     renderTable();
   });
   el('sort-pnl').onclick = togglePnlSort;
-  // 记录区 TAB：进场信号记录 / 历史回测方案
-  document.querySelectorAll('[data-record-tab]').forEach(b => {
-    b.onclick = () => showRecordTab(b.dataset.recordTab);
-  });
   bindSignalRows();
   bindBtRuns();
   bindBtErrors();

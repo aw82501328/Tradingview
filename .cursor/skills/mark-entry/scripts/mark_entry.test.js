@@ -399,7 +399,7 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
 
   test("stopSr：未保本时盘中破坏止损位（跳空按开盘成交）", () => {
     const mrBars = [
-      bar(100, 4450, 4452, 4448, 4451), bar(200, 4450, 4451, 4440, 4445),
+      bar(100, 4450, 4452, 4448, 4451), bar(200, 4450, 4451, 4440, 4455),
       bar(300, 4462, 4466, 4455, 4460),
     ];
     const mr = { bis: [bi("up", 0, 700, 4440, 4455)], bars: mrBars };
@@ -407,6 +407,51 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
     const sim = simulatePosition(SIG(), 4463, mr, px);
     assert.deepEqual(sim.events.map(e => e.type), ["stopSr"]);
     assert.equal(sim.events[0].price, 4463); // max(4463, open 4462)
+  });
+
+  test("跟踪止盈门控保本：beDone 前参照点不提损/不接管，保本后参照点才消费（成对 py）", () => {
+    // 门控开启拍=TP1 首次可见的 bar200 → trailMark=200：@150 的更紧参照点（4441）
+    // 不追溯；@250 参照点 4442+1=4443 提损；bar400 破位记 trailStop
+    const mr = { bis: [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)],
+                 bars: [
+                   bar(100, 4450, 4452, 4448, 4451), bar(200, 4450, 4451, 4440, 4445),
+                   bar(300, 4445, 4450, 4442, 4448), bar(400, 4446, 4447, 4440, 4444),
+                 ] };
+    const px = { bis: [bi("up", 50, 300, 4440, 4450)], bars: altBars([0, 100, 200, 300, 400]) };
+    const sigs = [
+      { time: 150, price: 4440, direction: "short", strategyKey: "wait3Sell" }, // 门控前：不追溯
+      { time: 250, price: 4442, direction: "short", strategyKey: "wait3Sell" }, // 4443 < beStop 4455 上移
+    ];
+    const sim = simulatePosition(SIG(), 4463, mr, px,
+                                 { exitCfg: { trailOn: true, trailSlip: 1 },
+                                   trailSigs: sigs });
+    const types = sim.events.map((e) => e.type);
+    assert.deepEqual(types, ["breakeven", "trailRaise", "trailStop"]);
+    assert.equal(sim.events[1].stopTo, 4443);   // 4442+1；@150 未消费（否则 4441）
+    assert.equal(sim.events[2].price, 4446);    // max(4443, 开盘 4446)
+  });
+
+  test("最大止损硬上限兜底：trailStop 25% latch 后，剩余手数在 maxLoss 全平（成对 py）", () => {
+    // 保本→提损 4445→trailStop 1 手（trailFired latch）→价格越过 maxLoss 4460
+    // → 兜底 stopSr 全平剩余 3 手，单手亏损封顶 slip_fallback=10
+    const mr = { bis: [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)],
+                 bars: [
+                   bar(100, 4450, 4452, 4448, 4451), bar(200, 4450, 4451, 4440, 4445),
+                   bar(300, 4450, 4451, 4444, 4450), bar(400, 4444, 4446, 4440, 4445),
+                   bar(500, 4455, 4461, 4450, 4459),
+                 ] };
+    const px = { bis: [bi("up", 50, 300, 4440, 4450)], bars: altBars([0, 100, 200, 300, 400, 500]) };
+    const sigs = [{ time: 250, price: 4444, direction: "short", strategyKey: "wait3Sell" }];
+    const sim = simulatePosition(SIG(), 4463, mr, px,
+                                 { exitCfg: { trailOn: true, trailSlip: 1, trailPct: 25 },
+                                   trailSigs: sigs });
+    const types = sim.events.map((e) => e.type);
+    assert.deepEqual(types, ["breakeven", "trailRaise", "trailStop", "stopSr"]);
+    assert.equal(sim.events[2].lots, 1);        // 25% × 4
+    assert.equal(sim.events[3].lots, 3);        // 兜底全平剩余
+    assert.equal(sim.events[3].price, 4460);    // max(maxLoss 4460, open 4455)
+    assert.equal(sim.lotsLeft, 0);
+    assert.equal(sim.closed, true);
   });
 
   test("同拍 half 优先于 close（与 py 同拍单事件语义一致）", () => {

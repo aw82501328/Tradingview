@@ -276,7 +276,7 @@ def show_signal(j, sid):
     if s.get("note"):
         print(f"注记：{s['note']}")
     print(f"{DIR_LABELS.get(s.get('direction'), '?')} {s.get('strategyKey')}｜"
-          f"检测周期 {s.get('periodX')}｜背驰级别 {s.get('markRes')}｜"
+          f"检测周期 {s.get('periodX')}｜背驰级别 {s.get('markRes') or '-'}｜"
           f"信号 {fmtT(s.get('t'))} @ {_f2(s.get('price'))}"
           + (f"｜近支阻位 {_f2(s.get('nearSr'))}" if s.get("nearSr") else ""))
     flags = [k for k in ("fallback", "nearEqual", "expectBi") if s.get(k)]

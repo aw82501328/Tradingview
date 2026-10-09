@@ -276,20 +276,20 @@ class LiveTrader:
         # ④ 参数中心（进程内全局 CHAN_CFG 与引擎 module_params 同 webapp 口径）
         self._pm = param_center.effective_all(c.get("symbol"))
         chan_core.apply_cfg(param_center.chan_cfg_effective(c.get("symbol")))
-            # 缠论V1：整手口径下部分平仓手数=⌊总手数×比例%⌋ 不足1手平1手 →
-            # 启用任一比例<100 的方式即存在最小分批=1手（0.01标准手）
-            if c.get("strategy", "chan_v1") == "chan_v1":
-                ec = {**EXIT_MODE_DEFAULTS, **self._pm["entry"]}
-                if not any(ec.get(k) for k in EXIT_MODE_ON_KEYS):
-                    raise RuntimeError("出场方式至少启用一种（当前参数中心配置全部关闭）")
-                pcts = [float(ec.get(k.replace("On", "Pct"), 100.0) or 100.0)
-                        for k in EXIT_MODE_ON_KEYS if ec.get(k)]
-                if any(p < 100 for p in pcts) and spec["volume_min"] > 0.01 \
-                        and not c["risk"].get("allow_odd_lots"):
-                    raise RuntimeError(
-                        f"最小分批 0.01 手（整手口径：⌊总手数×比例%⌋ 不足1手平1手）"
-                        f"< volume_min {spec['volume_min']}，需部分→全平降级才可运行"
-                        f"（risk.allow_odd_lots=true 显式接受）")
+        # 缠论V1：整手口径下部分平仓手数=⌊总手数×比例%⌋ 不足1手平1手 →
+        # 启用任一比例<100 的方式即存在最小分批=1手（0.01标准手）
+        if c.get("strategy", "chan_v1") == "chan_v1":
+            ec = {**EXIT_MODE_DEFAULTS, **self._pm["entry"]}
+            if not any(ec.get(k) for k in EXIT_MODE_ON_KEYS):
+                raise RuntimeError("出场方式至少启用一种（当前参数中心配置全部关闭）")
+            pcts = [float(ec.get(k.replace("On", "Pct"), 100.0) or 100.0)
+                    for k in EXIT_MODE_ON_KEYS if ec.get(k)]
+            if any(p < 100 for p in pcts) and spec["volume_min"] > 0.01 \
+                    and not c["risk"].get("allow_odd_lots"):
+                raise RuntimeError(
+                    f"最小分批 0.01 手（整手口径：⌊总手数×比例%⌋ 不足1手平1手）"
+                    f"< volume_min {spec['volume_min']}，需部分→全平降级才可运行"
+                    f"（risk.allow_odd_lots=true 显式接受）")
             if not (ec.get("exitStopSrOn") or ec.get("exitStopBeOn")
                     or ec.get("exitTrailOn")):
                 self.log("[live] 警告：止损类出场方式全部关闭，持仓无止损兜底"

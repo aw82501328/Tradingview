@@ -259,8 +259,10 @@ def _clear_marks(c):
         "try { "
         "  for (const s of chart.getAllShapes()) { "
         "    const p = readPrefix(s.id); "
-        # 排除支阻横线（ML·SR）：箭头按钮只清箭头，与「标记支阻位」按钮互不清除
-        "    if (p.startsWith(PREFIX) && !p.startsWith('" + SR_PREFIX + "')) { "
+        # 排除支阻横线（ML·SR）与定位次级别笔（ML·BI）：箭头按钮只清箭头，
+        # 与「标记支阻位」按钮、点击定位画的笔链互不清除
+        "    if (p.startsWith(PREFIX) && !p.startsWith('" + SR_PREFIX + "') "
+        "        && !p.startsWith('ML·BI')) { "
         "      try { chart.removeEntity(s.id); removed++; } catch (e) {} "
         "    } "
         "  } "
@@ -1036,7 +1038,7 @@ def draw_sr_marks(rows, cfg=None, clear_first=True, colors=None, log=None):
 # 模块自身前缀/键定义保持一致——sr_draw.py 的 SRT_PREFIX/SRT_IDS_KEY/RAW_IDS_KEY 相同值）
 CLEAR_PREFIXES = ["ML·", "BT·", "RT·", "SRT·", "RAW·"]
 CLEAR_IDS_KEYS = ["mark_list_ids", "mark_sr_ids", "mark_single_ids", "bt_arrow_ids",
-                  "rt_arrow_ids", "sr_test_ids", "sr_raw_ids"]
+                  "rt_arrow_ids", "sr_test_ids", "sr_raw_ids", "mark_locate_bi_ids"]
 
 
 def clear_all_marks(cfg=None, log=None):

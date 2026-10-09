@@ -764,6 +764,31 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, res =
     } else if (isValid(last, k)) {
       // 间隔足够但区间内存在更极端的点 或 分型范围未脱离：k 不能作为笔端点，
       // 等待后续更极端的分型或并入更大的笔
+      // 前顶/前底作废（区间极值版，2026-10-09，与 py_chain/chan_core.py biStep 同步）：
+      // k 间隔足够但未通过成笔判据时，若 k 与 prev（result[-2]）同类型且严格更极端，
+      // 且 prev3（result[-3]）与 k 能构成完整有效笔，则 prev 被作废、吞掉中间 last，
+      // 端点推进到 k——否则更高点将被永久吞进 prev 起步的反向笔，笔起点不再是区间
+      // 极值（例：15m 2026-07-20 顶 16:15 4030.88 被 19:30 4040.82 突破，17:30→19:30
+      // 反弹腿因终点侧反向贯穿不成笔，作废后上涨笔延伸为 15:00 4002.18 → 19:30 4040.82）。
+      // 回溯替换保护（与间隔不足分支同源）：last 比 prev3 更极端时不吞。
+      if (result.length >= 3 && result[result.length - 2].type === k.type &&
+          !result[result.length - 2].locked && !last.locked) {
+        const prev = result[result.length - 2];
+        const prev3 = result[result.length - 3];
+        const lastDeeper = (k.type === "top" && last.low < prev3.low) ||
+                           (k.type === "bottom" && last.high > prev3.high);
+        if (!lastDeeper &&
+            ((k.type === "top" && k.high > prev.high) || (k.type === "bottom" && k.low < prev.low)) &&
+            pairFormsBi(prev3, k)) {
+          if (CHAN_CFG.debug) {
+            console.log(`[阶段二] 前顶/前底作废(区间极值): ${prev.type === "top" ? "顶" : "底"}@${prev.mergedIdx}(${prev.type === "top" ? prev.high : prev.low}) 被 ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}(${k.type === "top" ? k.high : k.low}) 突破，k 顶替 prev，移除中间 ${last.type === "top" ? "顶" : "底"}@${last.mergedIdx}`);
+          }
+          if (prev.macdCross === true) k.macdCross = true;
+          result[result.length - 2] = k;
+          result.pop();
+          continue;
+        }
+      }
       if (CHAN_CFG.debug) {
         const fr = fractalRangeClear(last, k);
         const ex = noMoreExtremeInside(last, k);

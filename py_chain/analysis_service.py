@@ -476,14 +476,14 @@ class AnalysisManager:
             command.append("--ma-stand-req=" + ("1" if fx.get("maStandReq", "required") == "required" else "0"))
             command.append("--ma-stand-1=" + str(fx.get("maStand1", 5)))
             command.append("--ma-stand-2=" + str(fx.get("maStand2", 5)))
-            # 新条件开关（JS 侧 "1"=开、缺省关；显式传 0 亦为关）
+            # 新条件开关（JS 侧 "1"=开、缺省关；显式传 0 亦为关）；黄金分割=独立硬门槛
+            # （fibReq 已删）、背驰与条件组合互斥（divLowerReq 已删，2026-10-09）
             command.append("--fib-near-on=" + ("1" if fx.get("fibNearOn", False) else "0"))
-            command.append("--fib-req=" + ("1" if fx.get("fibReq", "required") == "required" else "0"))
             command.append("--fib-levels=" + str(fx.get("fibLevels", "0.382,0.5,0.618")))
             command.append("--fib-near-pts=" + str(fx.get("fibNearPts", 5.0)))
             command.append("--upper-dir-on=" + ("1" if fx.get("upperDirOn", False) else "0"))
             command.append("--div-lower-on=" + ("1" if fx.get("divLowerOn", False) else "0"))
-            command.append("--div-lower-req=" + ("1" if fx.get("divLowerReq", "required") == "required" else "0"))
+            command.append("--div-lower-win-bars=" + str(fx.get("divLowerWinBars", 1)))
             command.append("--strong-fx-on=" + ("1" if fx.get("strongFxOn", True) else "0"))
             command.append("--strong-fx-req=" + ("1" if fx.get("strongFxReq", "required") == "required" else "0"))
             command.append("--strong-fx-min-pts=" + str(fx.get("strongFxMinPts", 0.0)))

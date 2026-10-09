@@ -48,7 +48,13 @@ class SignalLocatorTests(unittest.TestCase):
     def test_bad_metadata_and_mode_never_touch_chart(self):
         with self.assertRaises(LookupError):
             self.manager.start('live', self.row['id'])
-        for changes in ({'symbol': None}, {'time': None}, {'time': float('nan')}, {'time': True}, {'markRes': ''}, {'markRes': 'bad'}):
+        # markRes 为空 → 回退检测周期定位（fxma 条件组合路径行 markRes 空，2026-10-09）
+        symbol, res, stamp = locator.validate_signal({**self.row, 'markRes': ''})
+        self.assertEqual((symbol, res), ('OANDA:XAUUSD', '15'))
+        for changes in ({'symbol': None}, {'time': None}, {'time': float('nan')}, {'time': True},
+                        {'markRes': 'bad'},
+                        {'markRes': '', 'periodX': ''},
+                        {'markRes': None, 'periodX': None}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 locator.validate_signal({**self.row, **changes})
         self.signals.clear('backtest')

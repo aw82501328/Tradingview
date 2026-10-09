@@ -7,8 +7,17 @@ _os.environ.setdefault("PY_CHAIN_BT_JOURNAL", "0")  # 引擎测试不落交易�
 覆盖（与 .cursor/skills/mark-entry/scripts/mark_entry.test.js 的「出场规则」describe 成对同构）：
   - stop_ref_of：支阻位 ± 滑点 / nearSr 错侧重选 / 最大止损硬上限（返回值永不为 None）
   - forming_seg_ready：合并后 ≥5 块门槛 / 末笔方向 / 延伸归零
+  - forming_break_ref：预期过前高参照（末笔不利才有形成段 / 无同向笔 None）
   - advance_exit_decision：TP1→beStop→stopBe / TP2 顺势（检测周期有利方向够笔，无需 TP1）→ half 后止损=beStop /
-    TP3a 顺势 breakPrev / TP3b 逆势 seg5 全平（无 half）/ stopSr / 同拍顺序 half 优先
+    TP3a 顺势 breakPrev / TP3b 逆势 seg5 全平（无 half）/ stopSr / 同拍顺序 half 优先 /
+    预期口径（2026-10-09 严进宽出，默认开）：检测够笔=末笔不利+形成段够块、
+    过高低点=收盘K极值越前一同向笔端点，exitExpectOn=False 回退确认笔旧口径
+  - 跟踪止盈双参照（2026-10-09 exitTrailSrc）：detect=检测周期 3/类3/4/类4 结构点流
+    （默认：保本后出3买提损至3买位置，跌破记 trailStop）；mark=背驰周期信号流
+    同向3类点（wait3Buy/waitBuy/…，旧口径）；门控保本（2026-10-09）——beDone 前
+    不接管止损/不提损，参照点自保本当拍起算不追溯
+  - 最大止损硬上限兜底（2026-10-09）：止损类部分平仓 latch 后剩余手数由 maxLoss
+    全平兜底（记 stopSr，永不 latch），单手亏损封顶最大止损
   - execute_pending_exit：下一开盘成交、half 补 beDone
   - close_trade：lots 盈亏公式（half 加权 / 无 half）
 
@@ -17,7 +26,8 @@ _os.environ.setdefault("PY_CHAIN_BT_JOURNAL", "0")  # 引擎测试不落交易�
 
 import unittest
 
-from py_chain.mark_entry import stop_ref_of, forming_seg_ready, trend_following_of
+from py_chain.mark_entry import (stop_ref_of, forming_seg_ready, forming_break_ref,
+                                 trend_following_of, EXIT_MODE_DEFAULTS)
 from py_chain.backtest import (advance_exit_decision, execute_pending_exit,
                                close_trade, BacktestEngine)
 
@@ -134,6 +144,25 @@ class TestFormingSegReady(unittest.TestCase):
         self.assertTrue(forming_seg_ready(bis, T8, is_short=False))
 
 
+class TestFormingBreakRef(unittest.TestCase):
+    def test_long_returns_prev_up_endpoint(self):
+        # 多单：末笔 down（不利）→ 参照 = 最近一根 up 笔端点
+        bis = [bi("up", 0, 50, 4400, 4460), bi("down", 50, 300, 4460, 4450)]
+        ref = forming_break_ref(bis, is_short=False)
+        self.assertEqual(ref["price"], 4460.0)
+        self.assertEqual(ref["time"], 50)
+
+    def test_last_bi_favorable_returns_none(self):
+        # 末笔已是有利方向 → 无形成段，走确认笔口径
+        bis = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 300, 4440, 4450)]
+        self.assertIsNone(forming_break_ref(bis, is_short=False))
+
+    def test_no_same_direction_bi(self):
+        # 无同向笔 / 空列表 → None（不触发预期分路）
+        self.assertIsNone(forming_break_ref([bi("up", 0, 300, 4440, 4450)], is_short=False))
+        self.assertIsNone(forming_break_ref([], is_short=False))
+
+
 class TestTrendFollowingOf(unittest.TestCase):
     def test_plan_direction(self):
         self.assertTrue(trend_following_of("多头多"))
@@ -175,11 +204,49 @@ class TestAdvanceExit(unittest.TestCase):
     def test_tp2_trend_half_without_tp1(self):
         pos = make_pos()
         mark_bis = [bi("up", 0, 500, 4440, 4455)]  # 无 signalTime 后的有利方向笔 → TP1 未触发
-        # 末笔上涨，其后合并块已满 5：空单要的是下跌够笔，不半平
+        # 末笔 up（空单不利方向）+ 其后下跌形成段：
+        # 预期口径（默认开，2026-10-09 严进宽出）下合并K≥5 块（T8）即「检测周期
+        # 够笔」半平，不等确认笔；未够块（T7）不半平
         px_up = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 300, 4440, 4450)]
         r = advance_exit_decision(pos, 700, bar(700, 4445, 4448, 4440, 4444), mark_bis, px_up, T8)
-        self.assertIsNone(r)
-        self.assertFalse(pos["halfDone"])
+        self.assertEqual(r, "half")
+        self.assertTrue(pos["halfDone"])
+        self.assertIn("预期", pos["pendingWhy"])
+        pos2 = make_pos()
+        r2 = advance_exit_decision(pos2, 700, bar(700, 4445, 4448, 4440, 4444), mark_bis, px_up, T7)
+        self.assertIsNone(r2)
+        self.assertFalse(pos2["halfDone"])
+
+    def test_tp2_expected_half_long_forming_segment(self):
+        # 多单、末笔 down（不利）+ 其后上涨形成段合并K≥5（T8）→ 预期够笔半平
+        pos = make_pos(direction="long", planDirection="多头多", stopRef=4437.0, beStop=4445.0)
+        mark_bis = [bi("down", 0, 500, 4460, 4440)]  # 无 signalTime 后的 up 笔 → 无 TP1
+        px_bis = [bi("up", 0, 50, 4400, 4460), bi("down", 50, 300, 4460, 4450)]
+        r = advance_exit_decision(pos, 700, bar(700, 4455, 4462, 4451, 4458), mark_bis, px_bis, T8)
+        self.assertEqual(r, "half")
+        self.assertTrue(pos["halfDone"])
+        self.assertIn("预期", pos["pendingWhy"])
+        # exitExpectOn=False：回退确认笔旧口径——末笔 down 不算多单够笔，不半平
+        pos2 = make_pos(direction="long", planDirection="多头多", stopRef=4437.0, beStop=4445.0)
+        pos2["exitCfg"] = dict(EXIT_MODE_DEFAULTS, exitExpectOn=False)
+        r2 = advance_exit_decision(pos2, 700, bar(700, 4455, 4462, 4451, 4458), mark_bis, px_bis, T8)
+        self.assertIsNone(r2)
+        self.assertFalse(pos2["halfDone"])
+
+    def test_tp3_expected_close_on_crossing(self):
+        # 预期口径：多单、末笔 down、当根收盘K最高越过前一同向（up）笔端点
+        # → 过高低点止盈，不等收笔确认（T7 形成段未够块；无 tp3a 确认笔事件）
+        pos = make_pos(direction="long", planDirection="多头多", stopRef=4437.0, beStop=4445.0)
+        mark_bis = [bi("down", 0, 500, 4460, 4440)]
+        px_bis = [bi("up", 0, 50, 4400, 4460), bi("down", 50, 300, 4460, 4450)]
+        r = advance_exit_decision(pos, 700, bar(700, 4455, 4462, 4451, 4458), mark_bis, px_bis, T7)
+        self.assertEqual(r, "close")
+        self.assertIn("预期", pos["pendingWhy"])
+        # 最高 4458 未越过 4460 → 不触发
+        pos2 = make_pos(direction="long", planDirection="多头多", stopRef=4437.0, beStop=4445.0)
+        r2 = advance_exit_decision(pos2, 700, bar(700, 4455, 4458, 4451, 4456), mark_bis, px_bis, T7)
+        self.assertIsNone(r2)
+        # exitExpectOn=False：同样未越过不触发口径下关闭预期分路（回到确认笔 tp3a）
 
     def test_tp2_trend_half_when_down_bi_enough(self):
         pos = make_pos()
@@ -640,19 +707,31 @@ class TestExitModes(unittest.TestCase):
         self.assertTrue(pos["beDone"])
 
     def test_trail_raise_only_tighter_and_trail_stop(self):
-        # 跟踪止盈：同向3类点 → 止损只上移；异向/非3类点忽略；穿越后记 trailStop
+        # 跟踪止盈（detect 默认，2026-10-09）：门控保本——TP1（t=300）前参照点不
+        # 提损；门控开启后检测周期点流同向 3/类3/4/类4 点 → 止损只上移；异向/1-2类
+        # 点忽略；穿越后记 trailStop
         pos = self.make(exitCfg=ecfg(exitTrailOn=True, exitTrailSlip=1.0))
-        mark_bis = [bi("up", 0, 500, 4440, 4455)]
+        mark_bis = [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)]
         px_bis = [bi("up", 50, 300, 4440, 4450)]
-        sigs = [
-            {"time": 120, "price": 4442.0, "direction": "long", "strategyKey": "wait3Buy"},    # 异向忽略
-            {"time": 150, "price": 4444.0, "direction": "short", "strategyKey": "wait2Sell"},  # 非3类忽略
-            {"time": 200, "price": 4442.0, "direction": "short", "strategyKey": "wait3Sell"},  # 4443 < 4463 上移
-            {"time": 250, "price": 4445.0, "direction": "short", "strategyKey": "wait3Sell"},  # 4446 > 4443 不上移（水位前进）
-            {"time": 300, "price": 4438.0, "direction": "short", "strategyKey": "waitSell"},   # 3类强档 4439 < 4443 上移
+        pre_pts = [
+            {"time": 120, "price": 4442.0, "type": "3卖"},    # 门控前：不追溯
+            {"time": 150, "price": 4444.0, "type": "2卖"},    # 1/2类点不参与跟踪
+        ]
+        # t=300：TP1 保本迁移（beDone），门控开启、水位重置到 300；此前的点全部忽略
+        r = advance_exit_decision(pos, 300, bar(300, 4440, 4445, 4435, 4441),
+                                  mark_bis, px_bis, T7, trail_pts=pre_pts)
+        self.assertIsNone(r)
+        self.assertTrue(pos["beDone"])
+        self.assertEqual(pos["trailMark"], 300)   # 水位一次性推进到保本当拍
+        self.assertEqual(pos["stopRef"], 4463.0)  # 未提损
+        self.assertFalse(pos["trailRaised"])
+        pts = [
+            {"time": 320, "price": 4442.0, "type": "3卖"},    # 4443 < 4463 上移
+            {"time": 350, "price": 4445.0, "type": "3卖"},    # 4446 > 4443 不上移（水位前进）
+            {"time": 380, "price": 4438.0, "type": "类4卖"},  # 3/4类 4439 < 4443 上移
         ]
         r = advance_exit_decision(pos, 400, bar(400, 4450, 4451, 4448, 4450),
-                                  mark_bis, px_bis, T7, trail_sigs=sigs)
+                                  mark_bis, px_bis, T7, trail_pts=pts)
         self.assertIsNone(r)                  # 当拍仅迁移
         self.assertEqual(pos["stopRef"], 4439.0)
         self.assertTrue(pos["trailRaised"])
@@ -660,30 +739,138 @@ class TestExitModes(unittest.TestCase):
         self.assertEqual(len(raises), 1)      # 同拍多次上移汇总为一条事件
         self.assertEqual(raises[0]["moves"], 2)
         self.assertEqual(len(pos["trailMoves"]), 2)
-        self.assertEqual(pos["trailMark"], 300)  # 水位只进不退
+        self.assertEqual(pos["trailMark"], 380)  # 水位只进不退
+        self.assertIn("检测周期点流", raises[0]["why"])
         # 下一拍穿越上移位 4439 → trailStop（全平默认 100%）
         r = advance_exit_decision(pos, 500, bar(500, 4440, 4441, 4435, 4438),
-                                  mark_bis, px_bis, T7, trail_sigs=sigs)
+                                  mark_bis, px_bis, T7, trail_pts=pts)
         self.assertEqual(r, "trailStop")
         self.assertEqual(pos["pendingLots"], 4.0)
         tr = execute_pending_exit(pos, bar(600, 4438, 4442, 4430, 4435))
         self.assertEqual(tr["exitType"], "trailStop")
         self.assertEqual(tr["pnl"], (4438 - 4450) * (-1) * 4)
 
+    def test_trail_mark_mode_uses_signal_flow(self):
+        # mark 模式（旧口径）：背驰周期信号流 wait3Buy/waitBuy/… 同向3类点驱动；
+        # 同拍的检测周期点流不消费；门控保本——TP1 前的信号点不追溯
+        pos = self.make(exitCfg=ecfg(exitTrailOn=True, exitTrailSlip=1.0,
+                                     exitTrailSrc="mark"))
+        mark_bis = [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)]
+        px_bis = [bi("up", 50, 300, 4440, 4450)]
+        pre_sigs = [{"time": 200, "price": 4442.0, "direction": "short",
+                     "strategyKey": "wait3Sell"}]               # 门控前：不追溯
+        advance_exit_decision(pos, 300, bar(300, 4440, 4445, 4435, 4441),
+                              mark_bis, px_bis, T7, trail_sigs=pre_sigs)
+        self.assertTrue(pos["beDone"])
+        self.assertEqual(pos["stopRef"], 4463.0)
+        sigs = [
+            {"time": 320, "price": 4442.0, "direction": "short", "strategyKey": "wait3Sell"},  # 4443 < 4463 上移
+            {"time": 350, "price": 4438.0, "direction": "short", "strategyKey": "wait2Sell"},  # 非3类忽略
+        ]
+        pts = [{"time": 340, "price": 4435.0, "type": "类3卖"}]  # mark 模式不消费
+        r = advance_exit_decision(pos, 400, bar(400, 4450, 4451, 4448, 4450),
+                                  mark_bis, px_bis, T7, trail_sigs=sigs, trail_pts=pts)
+        self.assertIsNone(r)
+        self.assertEqual(pos["stopRef"], 4443.0)   # 只上移到信号流点 4442+1
+        raises = [e for e in pos["exits"] if e["type"] == "trailRaise"]
+        self.assertEqual(len(raises), 1)
+        self.assertIn("背驰周期信号流", raises[0]["why"])
+
+    def test_trail_detect_long_3buy_story(self):
+        # 2买多单 → 保本迁移后检测周期 3买点出现 → 提损至 3买价−滑点；跌破 → trailStop
+        pos = self.make(direction="long", planDirection="多头多", entryPrice=4450.0,
+                        stopRef=4437.0, beStop=4445.0,
+                        exitCfg=ecfg(exitTrailOn=True, exitTrailSlip=1.0))
+        mark_bis = [bi("down", 0, 100, 4460, 4440), bi("up", 100, 200, 4440, 4455),
+                    bi("down", 200, 500, 4455, 4440)]  # up 笔(100→200) → TP1
+        px_bis = [bi("up", 0, 50, 4400, 4470), bi("down", 50, 300, 4470, 4450)]
+        pre_pts = [{"time": 200, "price": 4458.0, "type": "3买"}]  # 门控前：不追溯
+        r = advance_exit_decision(pos, 300, bar(300, 4462, 4465, 4455, 4460),
+                                  mark_bis, px_bis, T7, trail_pts=pre_pts)
+        self.assertIsNone(r)
+        self.assertTrue(pos["beDone"])
+        self.assertFalse(pos["trailRaised"])
+        pts = [{"time": 320, "price": 4458.0, "type": "3买"}]  # 3买回踩低点 4458
+        r = advance_exit_decision(pos, 400, bar(400, 4462, 4465, 4455, 4460),
+                                  mark_bis, px_bis, T7, trail_pts=pts)
+        self.assertIsNone(r)
+        self.assertEqual(pos["stopRef"], 4457.0)   # 3买位 4458 − 滑点 1
+        self.assertTrue(pos["trailRaised"])
+        # 跌破 3买位 → trailStop
+        r = advance_exit_decision(pos, 500, bar(500, 4455, 4456, 4450, 4452),
+                                  mark_bis, px_bis, T7, trail_pts=pts)
+        self.assertEqual(r, "trailStop")
+
     def test_trail_off_by_default(self):
         # 默认跟踪止盈关闭：同向3类点不引起上移
         pos = self.make()
         mark_bis = [bi("up", 0, 500, 4440, 4455)]
         px_bis = [bi("up", 50, 300, 4440, 4450)]
-        sigs = [{"time": 200, "price": 4442.0, "direction": "short", "strategyKey": "wait3Sell"}]
+        pts = [{"time": 200, "price": 4442.0, "type": "3卖"}]
         advance_exit_decision(pos, 400, bar(400, 4450, 4451, 4448, 4450),
-                              mark_bis, px_bis, T7, trail_sigs=sigs)
+                              mark_bis, px_bis, T7, trail_pts=pts)
         self.assertEqual(pos["stopRef"], 4463.0)
         self.assertFalse(pos["trailRaised"])
+
+    def test_trail_gated_before_breakeven(self):
+        # 门控保本（2026-10-09）：保本迁移（TP1）之前同向参照点不提损、不接管——
+        # 穿越初始止损位记 stopSr 而非 trailStop（2026-08-19 XAUUSD 案例回归）。
+        # beDone 由 TP1/half/halfMr 置位；此处 markRes 无 signalTime 后的有利方向笔
+        pos = self.make(exitCfg=ecfg(exitTrailOn=True, exitTrailSlip=1.0))
+        mark_bis = [bi("up", 0, 500, 4440, 4455)]  # 无 TP1 → beDone 恒 False
+        px_bis = [bi("up", 50, 300, 4440, 4450)]
+        pts = [{"time": 150, "price": 4442.0, "type": "3卖"}]  # 入场时段参照点
+        r = advance_exit_decision(pos, 400, bar(400, 4450, 4464, 4448, 4452),
+                                  mark_bis, px_bis, T7, trail_pts=pts)
+        self.assertEqual(r, "stopSr")            # 穿越初始止损 4463，非跟踪止盈
+        self.assertFalse(pos["trailRaised"])
+        self.assertEqual(pos["stopRef"], 4463.0)
+        self.assertEqual(pos["trailMark"], 100)  # 门控未开，水位不推进
+
+    def test_maxloss_fallback_after_trail_partial(self):
+        # 最大止损硬上限兜底（2026-10-09）：跟踪止盈 25% 平 1 手 latch 死止损通道后，
+        # 价格一路逆向——兜底通道在 maxLoss 全平剩余 3 手，单手亏损封顶 slip_fallback
+        # （修复前：剩余 3 手无保护扛 121 点，-242/-107）
+        pos = self.make(entryPrice=4450.0, stopRef=4460.0, beStop=4455.0,
+                        exitCfg=ecfg(exitTrailOn=True, exitTrailSlip=1.0,
+                                     exitTrailPct=25))
+        pos["maxLoss"] = 4460.0
+        mark_bis = [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)]
+        px_bis = [bi("up", 50, 300, 4440, 4450)]
+        # t=300 TP1 保本；t=400 参照点 4444 → stopRef 4445（收紧）
+        advance_exit_decision(pos, 300, bar(300, 4440, 4445, 4435, 4441),
+                              mark_bis, px_bis, T7)
+        pts = [{"time": 350, "price": 4444.0, "type": "3卖"}]
+        advance_exit_decision(pos, 400, bar(400, 4450, 4451, 4448, 4450),
+                              mark_bis, px_bis, T7, trail_pts=pts)
+        self.assertEqual(pos["stopRef"], 4445.0)
+        self.assertTrue(pos["trailRaised"])
+        # t=500 冲上 4445 → trailStop 25%（1 手），trailFired latch 关闭穿越判定
+        r = advance_exit_decision(pos, 500, bar(500, 4444, 4446, 4440, 4445),
+                                  mark_bis, px_bis, T7)
+        self.assertEqual(r, "trailStop")
+        self.assertEqual(pos["pendingLots"], 1.0)
+        self.assertTrue(pos["trailFired"])
+        self.assertIsNone(execute_pending_exit(pos, bar(600, 4445, 4447, 4442, 4446)))
+        self.assertEqual(pos["lotsLeft"], 3.0)
+        # t=700 反弹越过 maxLoss 4460 → 止损通道已 latch，兜底全平剩余 3 手
+        r = advance_exit_decision(pos, 700, bar(700, 4455, 4461, 4450, 4459),
+                                  mark_bis, px_bis, T7)
+        self.assertEqual(r, "stopSr")
+        self.assertEqual(pos["pendingLots"], 3.0)
+        self.assertIn("兜底", pos["pendingWhy"])
+        tr = execute_pending_exit(pos, bar(800, 4460, 4462, 4455, 4458))
+        self.assertEqual(tr["exitType"], "stopSr")
+        # trailStop 1 手@4445（+5）+ 兜底 3 手@4460（-30）= -25；
+        # 单手最大亏损 10 = slip_fallback 口径
+        self.assertAlmostEqual(tr["pnl"], -25.0)
+        self.assertEqual([e["type"] for e in tr["exits"]],
+                         ["breakeven", "trailRaise", "trailStop", "stopSr"])
 
     def test_trail_partial_latch(self):
         # 跟踪止盈 50%：部分平仓后 trailFired 一次性消费
         pos = self.make(exitCfg=ecfg(exitTrailOn=True, exitTrailSlip=1.0, exitTrailPct=50))
+        pos["beDone"] = True                     # 门控保本：保本后跟踪止盈才接管
         pos["trailRaised"] = True
         pos["stopRef"] = 4439.0
         pos["trailMark"] = 300

@@ -631,17 +631,25 @@ function btRunStateLabel(run) {
   return dur === '—' ? base : `${base} · ${dur}`;
 }
 
+// 策略 id → 显示名（与 module_registry.STRATEGIES 的 title 同源；未知 id 原样显示）
+const BT_STRATEGY_NAMES = { chan_v1: '缠论V1', fxma_v1: '强分型均线V1' };
+const btStrategyName = id => BT_STRATEGY_NAMES[id] || id || '—';
+// 方案所属策略：新存档读 cfg_summary.strategy；旧存档回落 cfg.strategy
+// （2026-10-02 起写入 cfg），更早仅有缠论V1 → 默认 chan_v1
+const btRunStrategyId = run => run.cfg_summary?.strategy || run.cfg?.strategy || 'chan_v1';
+
 // 参数对比展示顺序与汉化（键为保存的规范化 cfg 字段名）
-const BT_CFG_KEYS = ['symbol', 'from', 'to', 'periods', 'data_source', 'lead_days', 'warmup', 'lots', 'contract_mult',
+const BT_CFG_KEYS = ['strategy', 'symbol', 'from', 'to', 'periods', 'data_source', 'lead_days', 'warmup', 'lots', 'contract_mult',
                      'slip_stop', 'slip_stop_atr_k', 'slip_fallback', 'slip_fallback_atr_k', 'slip_be', 'slip_be_atr_k',
                      'near', 'sr_preset', 'diverge_confirm', 'expect_bi', 'entry_macd_shrink', 'stop_entry_bar_floor', 'with_30s'];
-const BT_CFG_LABELS = { symbol: '品种', from: '起始日期', to: '结束日期', periods: '周期', data_source: '数据源',
+const BT_CFG_LABELS = { strategy: '策略', symbol: '品种', from: '起始日期', to: '结束日期', periods: '周期', data_source: '数据源',
                         lead_days: '预热提前(天)', warmup: '预热根数', lots: '手数', contract_mult: '合约乘数', slip_stop: '止损滑点', slip_stop_atr_k: '止损滑点ATR系数',
                         slip_fallback: '最大止损', slip_fallback_atr_k: '最大止损ATR系数',
                         slip_be: '保本滑点', slip_be_atr_k: '保本滑点ATR系数',
                         near: '近支阻阈值', sr_preset: '支阻预设', diverge_confirm: '背驰进场', expect_bi: '检测周期够笔',
                         entry_macd_shrink: '柱缩闸', stop_entry_bar_floor: '止损下限', with_30s: '30秒级别' };
 function btCfgVal(k, v) {
+  if (k === 'strategy') return btStrategyName(v);
   if (k === 'periods') return Array.isArray(v) ? v.join('+') : (v ?? '—');
   if (k === 'data_source') return { store: '本地数据存储', live: '实时拉取', cache: '本地缓存' }[v] || v || '—';
   if (k === 'to') return v || '到最新';

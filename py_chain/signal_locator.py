@@ -5,6 +5,11 @@
 真实时间做锚点、不写周期可见性（回放里 IV 会把箭头藏掉）。
 标记失败不否定定位结果（result['mark'] 带 error 说明）。
 
+标记之后追画次级别笔链（2026-10-09，见 locate_bi 与 _draw_bi_after_locate）：
+开仓时间被工作台缓存的 60/240 大周期笔覆盖时，从 bars.db 现算其下各级笔
+（60→15m+3m、240→60m+15m+3m，逐级区间套锁定），逐级切周期画折线后回到
+定位周期；未覆盖/失败只记 result['bis']，不影响定位与标记。
+
 实时图历史不够时（尤其 30S 约一周、更早只能回放拿到）：用 Bar Replay
 跳到最后出场之后（无出场则进场后再留一段K线），这样进场之后的走势和离场
 标记都在窗口内。跳转成功后图表停在回放态。
@@ -45,9 +50,11 @@ def validate_signal(row):
     stamp = row.get('time')
     if isinstance(stamp, bool) or not isinstance(stamp, (int, float)) or not math.isfinite(stamp) or stamp <= 0:
         raise ValueError('记录缺少有效信号时间，无法定位')
-    res = str(row.get('markRes') or '')
+    # 定位周期：背驰级别优先（chan_v1 画位 / fxma 并列背驰触发行）；为空回退检测
+    # 周期（fxma 条件组合路径行 markRes 为空，2026-10-09）；两者皆缺才无法定位
+    res = str(row.get('markRes') or row.get('periodX') or '')
     if not re.fullmatch(r'(?:[1-9]\d*(?:S|D|W|M)?|D|W|M)', res):
-        raise ValueError('记录缺少有效背驰周期，无法定位')
+        raise ValueError('记录缺少有效背驰/检测周期，无法定位')
     return row['symbol'].strip(), res, stamp
 
 
@@ -263,6 +270,102 @@ def _draw_after_locate(c, row, bar_time, colors=None, last_time=None):
     return r
 
 
+def _center_view(c, symbol, res, t_target, t_until):
+    """把目标K线居中（定位主流程与画笔回切周期后共用）。失败抛异常。"""
+    target = json.dumps({'symbol': symbol, 'res': str(res),
+                         'time': int(t_target), 'until': int(t_until)})
+    return c.evaluate("""(()=>{
+      const target=TARGET,c=TradingViewApi.activeChart(),m=c.chartModel(),s=m.mainSeries();
+      if(c.symbol()!==target.symbol || String(c.resolution())!==target.res || s.isLoading())
+        throw Error('图表已变化，请重新定位');
+      const bars=s.data().m_bars._items;
+      let lo=0,hi=bars.length;
+      while(lo<hi){const mid=(lo+hi)>>1;if(bars[mid].value[0]<=target.time)lo=mid+1;else hi=mid;}
+      const bar=bars[lo-1];if(!bar)throw Error('目标K线不可用');
+      let uLo=0,uHi=bars.length, until=target.until||target.time;
+      while(uLo<uHi){const mid=(uLo+uHi)>>1;if(bars[mid].value[0]<=until)uLo=mid+1;else uHi=mid;}
+      const uBar=bars[uLo-1]||bar;
+      const ts=m.timeScale();
+      if(typeof m.setTimeViewport!=='function')throw Error('当前TradingView版本不支持图表定位');
+      s.priceScale().setMode({autoScale:true});
+      const from=Math.min(bar.index,uBar.index)-50;
+      const to=Math.max(bar.index,uBar.index);
+      m.setTimeViewport(from,to);
+      const range=ts.visibleBarsStrictRange();
+      if(!range || bar.index<range.firstBar() || bar.index>range.lastBar())throw Error('目标K线未进入可视范围');
+      return {symbol:c.symbol(),markRes:String(c.resolution()),time:bar.value[0],
+              index:bar.index,fromIndex:range.firstBar(),toIndex:range.lastBar(),
+              until:uBar.value[0]};
+    })()""".replace('TARGET', target))
+
+
+def _upper_res_of(row, landed):
+    """画次级别笔所依的大周期：优先检测周期 periodX（60/240），缺省回退落地
+    周期的上一级（15→60、60→240）；两者都不在 60/240 内返回 ''。"""
+    upper = str(row.get('periodX') or '')
+    if upper in ('60', '240'):
+        return upper
+    return {'15': '60', '60': '240'}.get(landed, '')
+
+
+def _draw_bi_after_locate(c, row, result, view_until):
+    """单行标记之后：大周期笔覆盖开仓时间时画次级别笔链（240→[60,15,3]、60→[15,3]）。
+
+    覆盖检测用工作台缓存（「更新全部」同源大周期结构），笔链从 bars.db 现算、
+    逐级区间套锁定（首级锁覆盖笔两端点）。TV 折线只能锚定当前图表周期的K线
+    边界，故逐级临时切到该级周期创建，画完切回定位周期并重新居中（箭头全周期
+    可见不受影响）。任何失败只记入返回值，不否定定位本身。
+    """
+    from . import locate_bi
+    landed = str(result.get('markRes') or '')
+    upper = _upper_res_of(row, landed)
+    if upper not in ('60', '240'):
+        return {'drawn': 0, 'failed': 0, 'skipped': '无60/240大周期结构可依'}
+    t_entry = int(row['time'])
+    cover = locate_bi.find_covering_bi(row['symbol'], upper, t_entry)
+    if cover is None:
+        return {'drawn': 0, 'failed': 0, 'skipped': '大周期笔未覆盖开仓时间'}
+    out = locate_bi.compute_lower_chain(row['symbol'], upper, cover, t_entry, view_until)
+    levels = out.get('levels') or {}
+    if not levels:
+        first = next(iter((out.get('errors') or {}).values()), None)
+        return {'drawn': 0, 'failed': 0,
+                'skipped': first or '次级别笔计算失败（bars.db 无数据？）'}
+    # 回放态图表时间轴整体平移：图侧信号K线时间 − 开仓逻辑时间（限幅 ±15h，
+    # 正常图为 0；非整小时平移视为噪声归零）
+    tz = int(result['time']) - t_entry
+    if abs(tz) < 900 or abs(tz) > 15 * 3600:
+        tz = 0
+    counts, drawn_total, failed_total, first_level = {}, 0, 0, True
+    cur = landed
+    try:
+        for res, bis in levels.items():
+            if cur != res:
+                _set_resolution(c, res)
+                locate_bi.wait_resolution(c, res, need_from=bis[0]['startTime'])
+                cur = res
+            r = locate_bi.draw_level(c, res, bis, tz_off=tz, clear_first=first_level)
+            first_level = False
+            counts[res] = int(r.get('drawn') or 0)
+            drawn_total += counts[res]
+            failed_total += int(r.get('failed') or 0)
+    finally:
+        if cur != landed:
+            _set_resolution(c, landed)
+            locate_bi.wait_resolution(c, landed, timeout=20.0)
+    # 回到定位周期后重新居中（切周期改变K线索引；失败只记录不抛）
+    recenter_err = None
+    try:
+        _center_view(c, row['symbol'], landed, t_entry, view_until)
+    except Exception as exc:
+        recenter_err = str(exc)
+    out = {'upper': upper, 'levels': counts, 'drawn': drawn_total,
+           'failed': failed_total, 'errors': out.get('errors') or {}}
+    if recenter_err:
+        out['error'] = f'回切居中失败：{recenter_err}'
+    return out
+
+
 def locate_signal(row, cfg=None, timeout=360, colors=None, after_bars=DEFAULT_AFTER_BARS):
     from .monitor import replay_started
     symbol, res, stamp = validate_signal(row)
@@ -367,29 +470,7 @@ def locate_signal(row, cfg=None, timeout=360, colors=None, after_bars=DEFAULT_AF
         else:
             raise CDPError('历史数据加载超时（360秒），无法定位信号K线')
         # Re-read and locate within one evaluation, as loading can reindex all bars.
-        result = c.evaluate("""(()=>{
-          const target=TARGET,c=TradingViewApi.activeChart(),m=c.chartModel(),s=m.mainSeries();
-          if(c.symbol()!==target.symbol || String(c.resolution())!==target.res || s.isLoading())
-            throw Error('图表已变化，请重新定位');
-          const bars=s.data().m_bars._items;
-          let lo=0,hi=bars.length;
-          while(lo<hi){const mid=(lo+hi)>>1;if(bars[mid].value[0]<=target.time)lo=mid+1;else hi=mid;}
-          const bar=bars[lo-1];if(!bar)throw Error('目标K线不可用');
-          let uLo=0,uHi=bars.length, until=target.until||target.time;
-          while(uLo<uHi){const mid=(uLo+uHi)>>1;if(bars[mid].value[0]<=until)uLo=mid+1;else uHi=mid;}
-          const uBar=bars[uLo-1]||bar;
-          const ts=m.timeScale();
-          if(typeof m.setTimeViewport!=='function')throw Error('当前TradingView版本不支持图表定位');
-          s.priceScale().setMode({autoScale:true});
-          const from=Math.min(bar.index,uBar.index)-50;
-          const to=Math.max(bar.index,uBar.index);
-          m.setTimeViewport(from,to);
-          const range=ts.visibleBarsStrictRange();
-          if(!range || bar.index<range.firstBar() || bar.index>range.lastBar())throw Error('目标K线未进入可视范围');
-          return {symbol:c.symbol(),markRes:String(c.resolution()),time:bar.value[0],
-                  index:bar.index,fromIndex:range.firstBar(),toIndex:range.lastBar(),
-                  until:uBar.value[0]};
-        })()""".replace('TARGET', target))
+        result = _center_view(c, symbol, res, stamp, view_until)
         # 视口已居中：同一 CDP 会话内画该行的单行标记（替换语义，见
         # marks.draw_single_mark）。失败不否定定位本身，只把错误带回 result['mark']。
         if jumped:
@@ -400,6 +481,12 @@ def locate_signal(row, cfg=None, timeout=360, colors=None, after_bars=DEFAULT_AF
                 last_time=data.get('last'))
         except Exception as exc:
             result['mark'] = {'drawn': 0, 'cleared': 0, 'error': str(exc)}
+        # 次级别笔链：大周期笔覆盖开仓时间时画（60/240 → 其下各级至 3m）。
+        # 失败不否定定位本身，只把结果带回 result['bis']。
+        try:
+            result['bis'] = _draw_bi_after_locate(c, row, result, view_until)
+        except Exception as exc:
+            result['bis'] = {'drawn': 0, 'failed': 0, 'error': str(exc)}
         return result
 
 

@@ -13,19 +13,24 @@
 //        --ma-on=0 跳过本条
 //     ④ 收盘站线（按类别选站线均线：1类=maStand1、2/3类=maStand2）：
 //        当拍收盘价 买点须严格站上/卖点须严格站下该均线；--ma-stand-on=0 跳过本条
-//     ⑤ 黄金分割附近（--fib-near-on=1 开，默认关；仅 2/3 类点，1 类点豁免）：
-//        摆动段 = 前一同侧买卖点价格 → 其后至本点前（时间窗 (前点, 本点]）的
-//        P 周期真实K线极值（买取最高/卖取最低），按 fibLevels 算回撤位，
-//        本点价格须落在任一档位 ±fibNearPts（绝对点数）内；无前点/摆动退化不触发
-//     ⑥ 次级别/次次级别背驰（--div-lower-on=1 开，默认关；缠论V1 lowerDiverge 同源：
-//        双判据背驰+区间套下沉链校验，落在次级别还是次次级别由结构自动决定）：
-//        窗口=点锚定·粘性——更低级别出现同向背驰点且其时间 ≥ 点时间−1根本周期K线
-//        即通过，之后持续有效直到点作废/反向点；无更低级别数据时永不通过
-//     ⑦ 上级周期同向（--upper-dir-on=1 开，默认关；全部类别）：上级周期
+//     ⑤ 黄金分割附近（--fib-near-on=1 开，默认关；基本参数·独立硬门槛，不参与计票；
+//        仅 2/3 类点，1 类点豁免）：摆动段 = 前一同侧买卖点价格 → 其后至本点前
+//        （时间窗 (前点, 本点]）的 P 周期真实K线极值（买取最高/卖取最低），按
+//        fibLevels 算回撤位，本点价格须落在任一档位 ±fibNearPts（绝对点数）内；
+//        未通过该点不触发（判定随点固定）
+//     ⑥ 次级别/次次级别背驰（--div-lower-on=1 开，默认关；与条件组合互斥——开=背驰
+//        为唯一触发条件，强分型/均线分离/收盘站线与 entryPick 完全不参与；关=走
+//        三选N条件组合；缠论V1 lowerDiverge 同源：双判据背驰+区间套下沉链校验，
+//        落在次级别还是次次级别由结构自动决定）：
+//        窗口=点锚定·粘性——更低级别出现同向背驰点且其时间 ≥ 点时间−divLowerWinBars
+//        根本周期K线（--div-lower-win-bars，默认1）且 ≤ 本拍收盘（防未来）即通过，
+//        之后持续有效直到点作废/反向点；无更低级别数据时永不通过
+//     ⑦ 上级周期同向（--upper-dir-on=1 开，默认关；全部类别；独立硬门槛）：上级周期
 //        （30S→3→15→60→240）当前笔方向须与信号同向（买=up/卖=down）
 //     ⑧ pointValidBars 根内齐备 + pointValidPts 盘中价距点极值上限（买=评估根最高价
 //        −买点最低价、卖=卖点最高价−评估根最低价；超距只等待不作废）→ 触发（每点一次）
-//        → 下一根 P 周期K线开盘成交（各条件开关全关=点属所选类别且未失效当拍即触发）
+//        → 下一根 P 周期K线开盘成交（divLowerOn 关且三条件全关=点属所选类别且未失效
+//        当拍即触发）
 //   出场：K线盘中价触及 止损(进场∓stopPts)/止盈 → 即时按该触发价成交
 //        （与实盘 MT5 SL/TP 同口径，不等收盘确认、不等下一根开盘；进场那根收盘后即判）；
 //        同根双触按 sameBarPriority（默认止损优先）；期末未触发 mark-to-market。
@@ -92,17 +97,18 @@ const FIB_NEAR_ON = getStrArg("fib-near-on", "0") === "1";  // 黄金分割附�
 const FIB_LEVELS = parseFibLevels(getStrArg("fib-levels", "0.382,0.5,0.618"));
 const FIB_NEAR_PTS = getNumArg("fib-near-pts", 5.0);        // 档位容差（绝对点数）
 const UPPER_DIR_ON = getStrArg("upper-dir-on", "0") === "1"; // 上级周期同向条件开关（"1"=开，默认关）
-const DIV_LOWER_ON = getStrArg("div-lower-on", "0") === "1"; // 次级别背驰条件开关（"1"=开，默认关）
-const DIV_LOWER_REQ = getStrArg("div-lower-req", "1") !== "0"; // 条件性质（必选=1/可选=0）
+const DIV_LOWER_ON = getStrArg("div-lower-on", "0") === "1"; // 次级别背驰条件开关（"1"=开，默认关；
+                                                             // 与条件组合互斥：开=背驰为唯一触发）
+const DIV_LOWER_WIN_BARS = Math.max(1, Math.round(getNumArg("div-lower-win-bars", 1))); // 背驰窗口（根本周期K线，默认1）
 const STRONG_FX_ON = getStrArg("strong-fx-on", "1") !== "0";  // 强分型条件开关（"0"=关，缺省开）
 const STRONG_FX_MIN_PTS = getNumArg("strong-fx-min-pts", 0.0);
 // 条件性质（必选=1/可选=0；必选不通过该类点不触发，可选仅参与满足数计票）
 const MA_REQ = getStrArg("ma-req", "1") !== "0";
 const MA_STAND_REQ = getStrArg("ma-stand-req", "1") !== "0";
 const STRONG_FX_REQ = getStrArg("strong-fx-req", "1") !== "0";
-const FIB_REQ = getStrArg("fib-req", "1") !== "0";
-// 各类买卖点条件满足数（五选N；生效N=min(N,启用条件数)，缺省3=引擎旧 AND 行为）
-const pickClamp = v => Math.min(5, Math.max(1, Math.round(v)));
+// 各类买卖点条件满足数（三选N：强分型/均线分离/收盘站线；生效N=min(N,启用条件数)，
+// 缺省3=引擎旧 AND 行为；divLowerOn 开启时条件组合整体不参与）
+const pickClamp = v => Math.min(3, Math.max(1, Math.round(v)));
 const ENTRY_PICK = {
   "1": pickClamp(getNumArg("entry-pick-1", 3)),
   "2": pickClamp(getNumArg("entry-pick-2", 3)),
@@ -142,9 +148,10 @@ const MODULE_OPTS = {
   maOn: MA_ON, maType: MA_TYPE, crossMinPts: CROSS_MIN_PTS, maReq: MA_REQ,
   maFast1: MA_FAST1, maSlow1: MA_SLOW1, maFast2: MA_FAST2, maSlow2: MA_SLOW2,
   maStandOn: MA_STAND_ON, maStand1: MA_STAND_1, maStand2: MA_STAND_2, maStandReq: MA_STAND_REQ,
-  fibNearOn: FIB_NEAR_ON, fibLevels: FIB_LEVELS, fibNearPts: FIB_NEAR_PTS, fibReq: FIB_REQ,
+  fibNearOn: FIB_NEAR_ON, fibLevels: FIB_LEVELS, fibNearPts: FIB_NEAR_PTS,
   entryPick: ENTRY_PICK,
-  upperDirOn: UPPER_DIR_ON, divLowerOn: DIV_LOWER_ON, divLowerReq: DIV_LOWER_REQ,
+  upperDirOn: UPPER_DIR_ON, divLowerOn: DIV_LOWER_ON,
+  divLowerWinBars: DIV_LOWER_WIN_BARS,
   pointValidBars: POINT_VALID_BARS, pointValidPts: POINT_VALID_PTS,
   tpMode: TP_MODE, tpNearPts: TP_NEAR_PTS, tpTrailSlipPts: TP_TRAIL_SLIP_PTS,
 };
@@ -270,7 +277,8 @@ function scanPeriodSignals(P, bars, periodBis, upperRes, opts = MODULE_OPTS, low
         if (far > opts.pointValidPts) continue;
       }
       // ---- 条件计票（与引擎 fx_ma._fx_collect 同构，2026-10-08）：均线分离/收盘站线/
-      //      强分型/黄金分割/次级别背驰 各带 启用开关+必选标志。必选不通过 → 跳过本拍；
+      //      强分型/黄金分割/次级别背驰 各带 启用开关+性质（必选/可选；背驰另有
+      //      standalone=并列·与条件组合互斥，2026-10-09）。必选不通过 → 跳过本拍；
       //      启用条件中通过数 ≥ 生效N（=min(entryPickN, 启用数)）才触发；全停用=点出现即触发。
       //      可选条件未通过只体现在票数中。每条件 ok=null 停用 / true 通过 / false 未过。
       let fxTime = null, crossGap = null;
@@ -335,24 +343,31 @@ function scanPeriodSignals(P, bars, periodBis, upperRes, opts = MODULE_OPTS, low
         }
       }
       // ⑥ 次级别/次次级别背驰（--div-lower-on=1 开，默认关；缠论V1 lowerDiverge 同源，
-      //    级别归属由下沉链结构自动决定）。窗口=点锚定·粘性：候选点时间 ≥ 点时间−1根
-      //    P 周期K线 且 ≤ 本拍收盘（快照口径防未来）即通过，之后持续有效直到点作废
+      //    级别归属由下沉链结构自动决定）。窗口=点锚定·粘性：候选点时间 ≥ 点时间−
+      //    divLowerWinBars 根 P 周期K线（默认1）且 ≤ 本拍收盘（快照口径防未来）即
+      //    通过，之后持续有效直到点作废
       let divOk = null;
       let divRes = null, divTime = null;
       if (opts.divLowerOn) {
         const cands = (divCandsByDir && divCandsByDir[direction]) || [];
-        const winStart = pt.time - barSec;
+        const winStart = pt.time - barSec * (opts.divLowerWinBars || 1);
         const hit = cands.find(c => c.point.time >= winStart && c.point.time <= closeT);
         if (hit) { divOk = true; divRes = hit.res; divTime = hit.point.time; }
         else divOk = false;
       }
-      // 计票：必选硬门槛 → 通过票数 ≥ 生效N（不满足点存活，等待后续拍补票）
-      {
+      // ---- 触发判定（互斥两路，2026-10-09 与引擎同步：黄金分割入基本参数·独立硬门槛
+      //      + 背驰与条件组合互斥）----
+      // 黄金分割硬门槛：开启且非1类点时未通过 → 本拍不触发（判定随点固定，不会翻转）
+      if (fibOk === false) continue;
+      if (opts.divLowerOn) {
+        // 背驰=唯一触发条件（免计票；不过则等待，不回退条件组合）
+        if (!divOk) continue;
+      } else {
+        // 三选N计票：必选硬门槛 → 通过票数 ≥ 生效N（不满足点存活，等待后续拍补票）
         const active = [["强分型", fxOk, opts.strongFxReq],
                         ["均线分离", maOk, opts.maReq],
-                        ["收盘站线", standOk, opts.maStandReq],
-                        ["黄金分割", fibOk, opts.fibReq],
-                        ["次级别背驰", divOk, opts.divLowerReq]].filter(c => c[1] !== null);
+                        ["收盘站线", standOk, opts.maStandReq]]
+                        .filter(c => c[1] !== null);
         if (active.length) {
           if (active.some(c => c[2] && !c[1])) continue;   // 必选未过
           const pick = (opts.entryPick && opts.entryPick[sel]) || 3;
@@ -790,7 +805,7 @@ async function main() {
                 upperDirOn: UPPER_DIR_ON, divLowerOn: DIV_LOWER_ON,
                 strongFxOn: STRONG_FX_ON, strongFxMinPts: STRONG_FX_MIN_PTS,
                 strongFxReq: STRONG_FX_REQ, maReq: MA_REQ,
-                maStandReq: MA_STAND_REQ, fibReq: FIB_REQ, entryPick: ENTRY_PICK,
+                maStandReq: MA_STAND_REQ, entryPick: ENTRY_PICK,
                 pointValidBars: POINT_VALID_BARS, pointValidPts: POINT_VALID_PTS,
                 stopPts: STOP_PTS, tpPts: TP_PTS,
                 tpMode: TP_MODE, tpNearPts: TP_NEAR_PTS, tpTrailSlipPts: TP_TRAIL_SLIP_PTS,

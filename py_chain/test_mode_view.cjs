@@ -3,7 +3,9 @@ const html=fs.readFileSync('py_chain/web/index.html','utf8');
 let script=[...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].find(m=>m[1].includes('const MODES'))[1].replace(/init\(\);\s*$/, '');
 // 共享渲染核心（el/esc/signalRowsHtml 等）已拆到 bt_common.js，先于页面脚本加载
 const common=fs.readFileSync('py_chain/web/bt_common.js','utf8');
-const nodes=new Map();const node=id=>{if(!nodes.has(id))nodes.set(id,{value:'',textContent:'',innerHTML:'',style:{},hidden:false,setAttribute(){},getAttribute:()=>null,addEventListener(){},removeEventListener(){},querySelector:()=>({textContent:''}),querySelectorAll:()=>[]});return nodes.get(id)};
+// 假节点补 classList：updateEqClock 对卡头时钟与资金曲线头部时钟 toggle('run')（2026-10-08 时钟解耦后必需）
+const classList={toggle(){},add(){},remove(){},contains:()=>false};
+const nodes=new Map();const node=id=>{if(!nodes.has(id))nodes.set(id,{value:'',textContent:'',innerHTML:'',style:{},hidden:false,classList,setAttribute(){},getAttribute:()=>null,addEventListener(){},removeEventListener(){},querySelector:()=>({textContent:'',classList}),querySelectorAll:()=>[]});return nodes.get(id)};
 const ctx={console,URLSearchParams,setTimeout:()=>1,clearTimeout(){},location:{search:'?mode=bad',origin:'http://localhost'},window:{addEventListener(){}},document:{getElementById:node,querySelector:()=>({firstChild:{textContent:''}})}};
 vm.createContext(ctx);vm.runInContext(common,ctx);vm.runInContext(script,ctx);
 // 回测策略TAB（多策略并行）：init 被剥离，手动注入策略清单（catalog 同源形状）
@@ -54,6 +56,23 @@ if(!el('card-bt-fxma_v1').hidden===false&&el('card-bt-chan_v1').hidden===false)t
 selectBtTab('chan_v1');
 if(displayNo(sigRows[0])!==1)throw Error('display no per strategy');
 `,ctx);
+// 独立TAB页（历史回测方案/典型案例，2026-10-09）：排在策略TAB后，选中时整页替代
+// 策略卡与信号表；切回回放/实时复位到策略页
+vm.runInContext(`
+refreshBtRuns=async()=>{};refreshBtErrors=async()=>{};   // 列表拉取打桩（测试环境无 fetch）
+selectBtPage('runs');
+if(!el('card-bt-chan_v1').hidden||el('record-bt').hidden||!el('record-errors').hidden||!el('record-signals').hidden)throw Error('runs page visibility');
+selectBtPage('errors');
+if(!el('card-bt-chan_v1').hidden||!el('record-bt').hidden||el('record-errors').hidden||!el('record-signals').hidden)throw Error('errors page visibility');
+selectBtTab('fxma_v1');
+if(el('card-bt-fxma_v1').hidden||!el('card-bt-chan_v1').hidden||el('record-signals').hidden)throw Error('back to strategy page');
+selectBtPage('runs');
+selectMode('live');
+if(!el('record-bt').hidden||el('record-signals').hidden)throw Error('live resets page tab');
+selectMode('backtest');
+if(el('card-bt-fxma_v1').hidden||el('record-signals').hidden)throw Error('backtest restores strategy page');
+`,ctx);
 console.log('Mode selection, visibility, filter retention, count and summary checks passed');
 console.log('Strategy/direction multi-select filter checks passed');
 console.log('Per-strategy tab isolation checks passed');
+console.log('Standalone page tabs (runs/errors) checks passed');

@@ -107,10 +107,12 @@ class TestComputeSummary(unittest.TestCase):
 
     def test_cfg_summary_and_default_name(self):
         cs = build_cfg_summary(CFG)
-        self.assertEqual(cs, {"symbol": "OANDA:XAUUSD",
+        self.assertEqual(cs, {"strategy": "chan_v1",      # cfg 缺省 → 默认策略（旧档等价）
+                              "symbol": "OANDA:XAUUSD",
                               "periods": "D+240+60+15+3", "from": "2026-07-02",
                               "to": ""})
         self.assertEqual(build_cfg_summary({**CFG, "to": "2026-09-01"})["to"], "2026-09-01")
+        self.assertEqual(build_cfg_summary({**CFG, "strategy": "fxma_v1"})["strategy"], "fxma_v1")
         self.assertTrue(default_name(CFG).startswith("OANDA:XAUUSD 2026-07-02·"))
 
 
