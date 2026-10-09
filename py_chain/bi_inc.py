@@ -6,8 +6,9 @@
 改为尾部续算：
 
 - 阶段一：seq 与各元素的分型 run 起始索引增量维护。分型只在尾部变化
-  （updateFractalsTail 只动 mergedIdx ≥ n-2 的元素），从「首个受影响的
-  run」起重折叠（确定性折叠 → 前缀结果不变）；
+  （updateFractalsTail 以 since= 批量窗口重算：尾部 mergedIdx ≥ n-2 的元素 +
+  窗口内找回的元素，2026-10-10 修复前窗口内分型会被永久跳过），从「首个受
+  影响的 run」起重折叠（确定性折叠 → 前缀结果不变）；
 - 阶段二：结果用不可变栈 (elem, prev, depth) 表示（chan_core._stkCons），
   每个 seq 位置留栈头快照——旧节点永不改动，快照天然有效；分型变化后从
   受影响位置的前一快照重放 biStep（规则体与 buildBi 共用，单一算法源）；
@@ -69,13 +70,16 @@ class BiIncBuilder:
         self._stale = True
 
     def update(self, fractals, merged, macd, atr, nearDouble=False,
-               lockedPivots=None):
+               lockedPivots=None, changed_from=None):
         """分型尾部变化后重建笔列表；返回笔列表（self._bis，同一对象）。
 
         nearDouble/lockedPivots 与 buildBi 同口径（按 nearDoubleOn(res)
         每周期开关的近等双顶/双底、上级笔端点区间套锁定）。
         lockedPivots 变化 → 全量重建（上级端点集变动会重标历史分型的锁定位）；
         不变时增量路径只对本次新折叠的 seq 元素补锁标记（与 buildBi 标记同口径）。
+        changed_from=本拍分型列表的首个变更索引（批处理修复 2026-10-10：一拍并入
+        多根K时 updateFractalsTail(since=…) 在窗口 [since-2, n-2) 内找回的分型
+        位于 n-2 之下，热区须从这里起折叠，否则又被冻结前缀吞掉）；None=旧推导。
 
         锁变化全量重建的必要性（2026-10-07 实证，勿再尝试局部化）：增量栈相对
         batch 存在中段漂移（近等后移的腿终局守卫读后继分型、无有界回看窗，
@@ -96,12 +100,15 @@ class BiIncBuilder:
             return self._bis
         # ATR 跳空布尔翻转 → 从首个受影响 seq 起重放
         atr_rewind = self._atr_gap_rewind_to(atr)
-        # 1) 分型热区：updateFractalsTail 只保留/新增 mergedIdx ≥ n-2 的尾部元素，
-        #    d = 首个热区分型索引（此前的前缀 dict 与索引均已冻结）
+        # 1) 分型热区：尾部重算的分型（mergedIdx ≥ n-2）+ 本拍窗口内找回的分型
+        #    （changed_from 起，批处理修复）；d = 首个热区分型索引（此前的前缀
+        #    dict 与索引均已冻结）
         n2 = len(merged) - 2
         d = len(fractals)
         while d > 0 and fractals[d - 1]["mergedIdx"] >= n2:
             d -= 1
+        if changed_from is not None and changed_from < d:
+            d = changed_from
         # 2) 阶段一尾部重折叠：丢弃 run 起点在热区的 seq 元素；run 可能跨越 d 的
         #    末元素（起点 < d）一并重折叠（确定性折叠，重算结果与首折一致）
         k = len(self._seq_start)

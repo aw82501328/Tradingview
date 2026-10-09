@@ -172,6 +172,11 @@ def fmt_reject(r):
                if c.get("lastDivTime") else
                ("更低级别无背驰候选" if c.get("lower") else "无更低级别数据（如 3m 须加载 30s）"))
             + "）"),
+        "fx_prov_invalidated": lambda c: (
+            f"预判{c.get('ptType')} @ {fmtT(c.get('provTime')) if c.get('provTime') else '?'}"
+            f" {_f2(c.get('provPrice'))} 消失（锚定下跌/上涨段自 "
+            f"{fmtT(c.get('dSegStart')) if c.get('dSegStart') else '?'}；"
+            "收复前低/前高、结构重算或真点接管）"),
     }.get(g)
     body = f"：{detail(ctx)}" if detail else (f"：{ctx}" if ctx else "")
     return f"{fmtT(r.get('t'))} {head}{body}"

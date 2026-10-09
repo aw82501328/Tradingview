@@ -87,6 +87,7 @@ GATE_LABELS = {
     "fx_fib_not_near": "不在黄金分割档位附近",
     "fx_upper_no_bi": "上级周期无笔（同向无法判定）",
     "fx_upper_dir_fail": "上级周期当前笔方向相反",
+    "fx_prov_invalidated": "预判点消失（收复前低/前高、结构重算或真点接管）",
 }
 
 

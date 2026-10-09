@@ -58,10 +58,11 @@ const RANGE_CFG = {
   rangeBiMult: numArg("range-bi-mult", 7.0),
   rangeBreakMult: numArg("range-break-mult", 1.0),
   rangeZsOn: getStrArg("range-zs-on", "1") !== "0",
-  // 2买/2卖 中间档容差 + 3类点强档开关（默认值与 py_chain/trading_plan.py 常量一致）
+  // 2买/2卖 中间档容差 + 3类点强档开关 + 弱档原始点分流（默认值与 py_chain/trading_plan.py 常量一致）
   prevHighNearPts: numArg("prev-high-near-pts", 5.0),
   secondNearPts: numArg("second-near-pts", 5.0),
   thirdStrongTrend: getStrArg("third-strong-trend", "0") !== "0",
+  weakTierByOrigin: getStrArg("weak-tier-by-origin", "1") !== "0",
 };
 // 震荡判定参考周期（对齐 py_chain/trading_plan.py RANGE_RES；WEB 参数中心 plan 模块
 // rangeRes，analysis_service 透传 --range-res）。开启（"240"/"D"）= 参考周期闸门：
@@ -173,13 +174,18 @@ function isRangeBound(bis, bars, atr, cfg) {
  * 方向命名「X头Y」：X = 结构方向，Y = 操作方向。
  * 三档（按序判定）：强档（过左高/左低不背驰）→ 中间档（仅 2买/2卖：前高/前低附近、
  * 或未过前高/前低且回调回到点附近）→ 弱档（多头空/空头多）。
+ * 弱档再分流（2026-10-09，weakTierByOrigin 默认开）：2买/类2买 反弹未过下跌原始点 →
+ * 空头多/等待低点附近的2买（wait2BuyBear）；2卖/类2卖 对称 → 多头空/等待高点附近的2卖
+ * （wait2SellBear）；过原始点维持旧弱档。
  *   1卖 → 空头空（结构空、操作做空），等待反弹后做2卖；
  *   1买 → 多头多（结构多、操作做多），等待回调后做2买；
  *   2买/类2买 → 过左高不背驰：多头多，等待回调后的3买点；
  *               2买 + 前高附近/回到2买点：多头多，等待回调后的类2买点；
+ *               未过原始点：空头多，等待低点附近的2买；
  *               其他：多头空（结构多、逆势等一卖），等待高点附近的一卖；
  *   2卖/类2卖 → 过左低不背驰：空头空，等待反弹后的3卖点；
  *               2卖 + 前低附近/回到2卖点：空头空，等待反弹后的类2卖点；
+ *               未过原始底：多头空，等待高点附近的2卖；
  *               其他：空头多（结构空、逆势等一买），等待低点附近的一买；
  *   3买/类3买 → 过左高不背驰 且 thirdStrongTrend 开：多头多，等待回调后的新买点；
  *               其他（含默认关）：多头空，等待高点附近的一卖；
@@ -202,6 +208,7 @@ function strategyOf(res, type, reason, label, cls, cfg) {
     if (type === "2买" && (cls === "前高附近" || cls === "回到2买点")) {
       return { ...base, direction: "多头多", strategy: "等待回调后的类2买点" };
     }
+    if (cls === "未过原始点") return { ...base, direction: "空头多", strategy: "等待低点附近的2买" };
     return { ...base, direction: "多头空", strategy: "等待高点附近的一卖" };
   }
   if (type === "2卖" || type === "类2卖") {
@@ -209,6 +216,11 @@ function strategyOf(res, type, reason, label, cls, cfg) {
     if (type === "2卖" && (cls === "前低附近" || cls === "回到2卖点")) {
       return { ...base, direction: "空头空", strategy: "等待反弹后的类2卖点" };
     }
+    if (cls === "未过原始底够笔") {
+      // 类2卖 后下跌已够笔：卖点作废，转弱二买（2026-10-09 用户规则）
+      return { ...base, direction: "空头多", strategy: "等待低点附近的2买" };
+    }
+    if (cls === "未过原始底") return { ...base, direction: "多头空", strategy: "等待高点附近的2卖" };
     return { ...base, direction: "空头多", strategy: "等待低点附近的一买" };
   }
   if (type === "3买" || type === "类3买" || type === "4买" || type === "类4买") {
@@ -220,6 +232,45 @@ function strategyOf(res, type, reason, label, cls, cfg) {
     return { ...base, direction: "空头多", strategy: "等待低点附近的一买" };
   }
   return { ...base, direction: "观望", strategy: "趋势中" };
+}
+
+/**
+ * 弱档原始点分流判定（2026-10-09 用户规则，仅 2买/类2买/2卖/类2卖 调用）：
+ *   原始点 = 从点锚定向前回溯反弹高（低）点，遇到第一个比其后所有端点更高（买侧）/
+ * 更低（卖侧）的更早端点即停止——即产生该 2买/2卖 的下跌/上涨段起点；
+ * 回溯到底无支配者则取回溯窗口极值端点。
+ *   分流成立 = 点之后所有反弹高（低）点均未超过（跌破）原始点（结构未扭转）。
+ * 顶/底端点口径与 classifySecond 左高扫描一致；与 py_chain/trading_plan.py
+ * _weak_origin_split 同构。
+ * @param {Array} bis      本周期笔列表
+ * @param {object} p       买卖点 { type, time, price }
+ * @param {boolean} wantUp true=买点侧（找顶）/false=卖点侧（找底）
+ * @returns {boolean} true=未过原始点（应转空头多·等2买 / 多头空·等2卖 档）
+ */
+function weakOriginSplit(bis, p, wantUp) {
+  const before = [];
+  const after = [];
+  for (const b of bis) {
+    const cands = [];
+    if (wantUp) {
+      if (b.type === "up") cands.push([b.endTime, b.endPrice]);       // 顶：上涨笔终点
+      else cands.push([b.startTime, b.startPrice]);                    // 顶：下跌笔起点
+    } else {
+      if (b.type === "down") cands.push([b.endTime, b.endPrice]);     // 底：下跌笔终点
+      else cands.push([b.startTime, b.startPrice]);                    // 底：上涨笔起点
+    }
+    for (const c of cands) (c[0] < p.time ? before : after).push(c);
+  }
+  if (!before.length || !after.length) return false;
+  before.sort((a, b) => a[0] - b[0]);
+  let origin = before[before.length - 1][1];
+  let running = origin;
+  for (let i = before.length - 2; i >= 0; i--) {
+    const price = before[i][1];
+    if (wantUp ? price > running : price < running) { origin = price; break; }
+  }
+  const afterExt = after.reduce((acc, c) => (wantUp ? Math.max(acc, c[1]) : Math.min(acc, c[1])), after[0][1]);
+  return wantUp ? afterExt < origin : afterExt > origin;
 }
 
 /**
@@ -239,8 +290,9 @@ function strategyOf(res, type, reason, label, cls, cfg) {
  * @param {Array} bis      本周期笔列表
  * @param {Array} macdArr  MACD 数组（可为空，为空时 isBiDiverge 视为不背驰）
  * @param {object} p       买卖点 { type, time, price }
- * @param {object} cfg     可选容差覆盖（prevHighNearPts/secondNearPts；缺省 5.0）
- * @returns {string} "过左高不背驰" | "过左低不背驰" | "前高附近" | "前低附近" | "回到2买点" | "回到2卖点" | "其他"
+ * @param {object} cfg     可选容差覆盖（prevHighNearPts/secondNearPts/weakTierByOrigin；缺省 5.0/5.0/开）
+ * @returns {string} "过左高不背驰" | "过左低不背驰" | "前高附近" | "前低附近" | "回到2买点" | "回到2卖点"
+ *                  | "未过原始点" | "未过原始底" | "未过原始底够笔"（弱档分流，仅2/类2点、weakTierByOrigin开） | "其他"
  */
 function classifySecond(bis, macdArr, p, cfg) {
   const pick = (k, def) => (cfg && cfg[k] != null ? cfg[k] : def);
@@ -309,6 +361,20 @@ function classifySecond(bis, macdArr, p, cfg) {
     if (pullback && Math.abs(pullback.endPrice - p.price) <= secondNear) {
       return wantUp ? "回到2买点" : "回到2卖点";
     }
+  }
+  // ④弱档原始点分流（weakTierByOrigin，2026-10-09，默认开；仅 2买/类2买/2卖/类2卖）：
+  // 弱档且点后反弹高（低）点均未过原始点 → 结构未扭转，交由 strategyOf 转
+  // 空头多/等待低点附近的2买（多头空/等待高点附近的2卖）；开关关或过了原始点维持"其他"。
+  // 卖侧补充（同日用户规则）：类2卖 后的下跌一旦够笔（after 笔已确认或合并块数
+  // ≥ expectBiMinBars），该卖点作废——不能再算 2卖，转前面规则定义的弱二买。
+  if (pick("weakTierByOrigin", true) && ["2买", "类2买", "2卖", "类2卖"].includes(p.type)
+      && weakOriginSplit(bis, p, wantUp)) {
+    if (!wantUp) {
+      const minBars = core.CHAN_CFG.expectBiMinBars || 5;
+      const enough = !after._forming || (after.mergedCount != null && after.mergedCount >= minBars);
+      if (enough) return "未过原始底够笔";
+    }
+    return wantUp ? "未过原始点" : "未过原始底";
   }
   return "其他";
 }

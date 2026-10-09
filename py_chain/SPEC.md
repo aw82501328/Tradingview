@@ -80,6 +80,18 @@
     重同步点上严格等于 batch(前缀)；增量 wick 运行均值与全量均值的早期边界漂移由
     `_resync_bis`（每 `RESYNC_EVERY=200` 根 fine bar 全量重同步；2026-09-15 起 1000→200，    最坏漂移窗口 50h→10h，见 backtest.py 常量注释）消除，`run()` 收尾
     最终重同步使末端状态严格等于 batch(全前缀)。
+    **分型批处理窗口修复（2026-10-10）**：`_append_bars` 一拍并入多根细周期K（fine=15m
+    时 3m 每拍 5 根）而 `updateFractalsTail` 旧契约只重算最终 n-2 一个位置——窗口
+    [old-2, n-2) 内成为内部位置的分型被**永久跳过**（XAUUSD 10-5 早盘案例：15 个分型
+    丢失几乎全为底分型 → 上涨段不拆笔 → 顶背驰无参照段 → 背驰候选缺席至下次重同步）。
+    修复：`updateFractalsTail(…, since=本拍前 merged 长度)` 弹出 `≥ since-2` 后重算
+    [since-2, n-2] 全部位置（None=旧单位置行为，`_synth_views` 单根合成不受影响）；
+    `_append_bars` 同步计算首个变更分型索引 `changed_from`（`_frac_new_from[res]`），
+    `bi_inc.update(changed_from=…)` 的热区推导取 min(n-2 推导值, changed_from)——否则
+    找回的分型位于 n-2 之下会被冻结前缀再次吞掉。不变量测试
+    `test_fx_ma.IncrementalFractalWindowTests`（分块喂入 vs `findFractals` 全量逐位一致；
+    旧行为模拟下该测试失败、修复后通过）。**所有旧增量回测基线不可比**（修复改变了
+    两次重同步之间的细周期结构）。
   - **块2 下沉判定**（`mark_entry.py`）：`sinkChainRealtime`/`sinkChainConfirm` 按规则 1
     逐级下沉（次级别 ≥3 笔且末段终点即 P 才下沉，链连续不可跳级，上限=检测周期 X）；
     `realtimeLowerDiverge`/`lowerDiverge` 只在停止级产候选；规则 2 参照 containment
@@ -177,7 +189,7 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 
 #### 2.1.2.1 进场状态从哪来
 
-每个检测周期读取「交易计划」给出的策略，映射到 10 个进场策略键（2026-09-25 起计划文案 1:1 拆分）；计划为震荡 / 数据不足 / 无匹配时，该周期不进场。
+每个检测周期读取「交易计划」给出的策略，映射到 12 个进场策略键（2026-09-25 起计划文案 1:1 拆分；2026-10-09 弱档原始点分流 +2 键）；计划为震荡 / 数据不足 / 无匹配时，该周期不进场。
 
 | 计划策略 | 策略标识 | 方向 |
 |----------|----------|------|
@@ -191,8 +203,11 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 | 等待回调后的类 2 买点（2买 中间档） | `waitLike2Buy` | 做多 |
 | 等待反弹后的 3 卖点（2卖/类2卖 强档） | `wait3Sell` | 做空 |
 | 等待反弹后的类 2 卖点（2卖 中间档） | `waitLike2Sell` | 做空 |
+| 等待低点附近的 2 买（2买/类2买 弱档·未过原始点） | `wait2BuyBear` | 做多 |
+| 等待高点附近的 2 卖（2卖/类2卖 弱档·未过原始底） | `wait2SellBear` | 做空 |
 
 > 2026-09-24 交易计划三档化新增 4 条文案；2026-09-25 键拆分：3买点/3卖点/类2买点/类2卖点 从 `waitBuy`/`waitSell` 拆为独立键（`wait3Buy`/`wait3Sell`/`waitLike2Buy`/`waitLike2Sell`）便于记录溯源，`waitBuy`/`waitSell` 从此仅指「新买点/新卖点」；4 个新键无专属条件，进场校验不变。历史方案旧行保留旧键不迁移。
+> 2026-10-09 弱档原始点分流（`weakTierByOrigin` 默认开）：2买/类2买（2卖/类2卖）弱档且点后反弹高（低）点均未过原始点（产生该点的下跌/上涨段起点，定义见 trading-plan SKILL SPEC §2.3）时，档位转 空头多/等待低点附近的2买（多头空/等待高点附近的2卖），新键专属条件=**抬低/压低**（见 §2.1.2.4），不买破前低的回调（那是1买语义）。**卖侧够笔作废**（同日用户规则）：2卖/类2卖 未过原始底且其后下跌已够笔（after 确认或 ≥expectBiMinBars）→ 卖点作废转弱二买（空头多/等待低点附近的2买，wait2BuyBear）。动因：10-9 00:15 类2买锚定 8h 后才入列致进场过晚。
 
 映射函数 `entryStrategyOf`（`mark_entry.py` / `mark_entry.js`）；计划策略本身由 `trading_plan.strategyOf` 产出。
 
@@ -239,6 +254,8 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 | `wait2Sell` 等待反弹后做 2 卖 | 做空 | **创新低** `brokePrevLow`：最近完成的 down 笔终点跌破更早那笔 down 笔终点 | **DIF 未破 0 轴太多** `macdBelowZero`——`dif < +macdZeroTol`（对称，默认 5；2026-09-16 前为严格 `dif < 0`）：下过 0 轴后反弹没深破 0 轴，空头动能还在 |
 | `wait1Buy` 等待低点附近的一买 | 做多 | **创新低**（同上） | **离开中枢力度变弱** `zsExitWeak(...,"long")`：离开笔必须是 **down（向下离开）**，且比进入笔弱——与进入笔 `isBiDiverge`（DIF 更弱 且（时长可比时）绿柱面积更小）**或** 幅度 `span` 小于进入笔。中枢取 `buildZSByUpper` 最后一个；**中枢尚未被离开 → 不成立** |
 | `wait1Sell` 等待高点附近的一卖 | 做空 | **创新高**（同上） | **离开中枢力度变弱** `zsExitWeak(...,"short")`：离开笔必须是 **up（向上离开）**，其余同上 |
+| `wait2BuyBear` 等待低点附近的2买（空头结构） | 做多 | **抬低**：`brokePrevLow` 为 **false**——末下跌笔终点不破前一根下跌笔终点（2026-10-09 弱档原始点分流；破前低属1买语义不买） | — 无动能要求 |
+| `wait2SellBear` 等待高点附近的2卖（多头结构） | 做空 | **压低**：`brokePrevHigh` 为 **false**——末上涨笔终点不过前一根上涨笔终点 | — 无动能要求 |
 | `waitBuy` / `waitSell` / `wait3Buy` / `wait3Sell` / `waitLike2Buy` / `waitLike2Sell` 新买点 / 新卖点 / 3买点 / 3卖点 / 类2买点 / 类2卖点 | 多 / 空 | — | — **无额外要求**，只要三个公共条件满足 |
 
 > 一句话记忆：**二买/二卖 = 创新高（低）+ MACD 还在正确一侧（未深破 0 轴，容差 5）**；**一买/一卖 = 创新低（高）+ 离开中枢时力气变小了**（后者就是背驰的教科书定义）。
@@ -303,7 +320,7 @@ run() 批量路径成交 bar 当拍未收盘，存在 ≤1 根 fine bar 的微�
 
 - **顺势** = 计划方向 ∈ {多头多, 空头空}（计划结构方向 = 操作方向，`TREND_PLAN_DIRS`）
 - **逆势** = {多头空, 空头多}
-- 计划方向缺失时按 `strategyKey` 兜底：`wait2Buy`/`waitBuy`/`wait3Buy`/`waitLike2Buy` 及卖侧对称 → 顺势，`wait1Buy`/`wait1Sell` → 逆势（`trend_following_of`）
+- 计划方向缺失时按 `strategyKey` 兜底：`wait2Buy`/`waitBuy`/`wait3Buy`/`waitLike2Buy` 及卖侧对称 → 顺势，`wait1Buy`/`wait1Sell`/`wait2BuyBear`/`wait2SellBear` → 逆势（`trend_following_of`）
 - 顺势：阶梯完整——保本 → 够笔止盈 → 破前高/低过高低点止盈
 - 逆势：**没有够笔止盈**——「形成段 ≥5 根 K」一到就**过高低点止盈**快速离场
 
@@ -519,6 +536,19 @@ bt_batch 子进程与 live_trader._build_engine 共用）。2026-10-09「黄金�
    类3买/类3卖→类三（`3x`），**4类不交易**；反向点出现后该点作废。
    策略键按选择键拆分：`fx1Buy…fx3xSell`（类二/类三为 `fx2x*`/`fx3x*`，
    2026-10-07 起与严格 2/3 类分开统计；均线对/站线/金分割豁免仍按粗类 1 与非 1 之分）。
+   **预判2买卖**（`pred2On` 开关，**默认关**，2026-10-09 接入；只修点可见性，闸门链
+   全部照旧）：本级规则——最近**确认**下跌笔 D 跌破前低（D 前最近确认下跌笔终点；买入侧
+   对称：上涨笔突破前高）后，反弹/回调一出笔（forming 段 `enough`≥5 合并块，或已确认笔）
+   即以其终点为**预判2卖/2买**并入尾点评估（`_fx_pred2_points` + `_fx_merge_point`：预判
+   时间更新则替换真点尾、同刻真点优先——真 2卖/2买 同锚入列后 fired 键一致天然去重接管）。
+   **不依赖上级锚定段**（findSellPoints 的 2卖须挂上级下跌笔窗口——10-5 案例该窗口滞后
+   约 3 小时才出现；pred2 使点自反弹够笔即可见）。锚随反弹/回调延伸**漂移**（fired 键/
+   有效期随之重置）；D 后任一反弹终点**收复前低/前高 → 上下文一次性判死**（更近确认笔
+   取代 D 后上下文自然重算，旧预判消失）；预判消失按旧锚一次性落 `fx_prov_invalidated`
+   （ctx 含 provTime/provPrice/dSegStart）。state 行点类型渲染「预判2卖/预判2买」；信号带
+   `pred2=True` 旗标、strategyLabel 加「·预判」、signalNote 前缀「预判｜」（pointType
+   保持原标签——闸门/去重/出场兼容）。预判点比真点多（每个破前低/前高的确认笔都产点），
+   开启后信号集变化大。
 2. **强分型**（`strongFxOn` 开关，默认开）：点之后出现强分型（实体口径，同
    `trading_plan.strong_fractal_after`）：卖点→强顶分型（左肩开盘−右肩收盘 ≥ `strongFxMinPts` 点）、
    买点→强底分型（对称）；0=现口径任意落差。关闭后跳过本条件。
@@ -614,8 +644,9 @@ bt_batch 子进程与 live_trader._build_engine 共用）。2026-10-09「黄金�
 ### 2.3.3 与缠论V1的差异要点
 
 - **无支阻位/交易计划/顺势过滤**——信号条件即全部条件（类别+条件组合三条件（强分型/
-  均线分离/收盘站线）默认开、三选N计票；黄金分割附近/上级周期同向/次级别背驰默认关——
-  黄金分割与上级同向为独立硬门槛、背驰与条件组合互斥，见 §2.3.1）；
+  均线分离/收盘站线）默认开、三选N计票；黄金分割附近/上级周期同向/次级别背驰/预判2买卖
+  默认关——黄金分割与上级同向为独立硬门槛、背驰与条件组合互斥、pred2 只修点可见性，
+  见 §2.3.1）；
 - **买卖点直接消费**（不做邻近合并/一买锚定/跨周期共振染色）；
 - **30S 上的买卖点为本策略新口径**（缠论V1 的 30S 只作背驰级别不进买卖点）；
   30S 仅回测/工作台可用（MT5 实盘行情由 M1 重采样无法生成 30S，`live_trader.load_config`

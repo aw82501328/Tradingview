@@ -54,6 +54,12 @@ CHAN_CFG = {
     # 4111.52 被 06:00 压平上影 4121.69 卡掉高点侧，差 2.00，近等双底候选直接不存在）。
     # 中心K仍用压平结构价（压平语义不变），只修邻侧；不含压平K的块零影响。
     "fractalSideRealWick": False,
+    # 端点内部极值恢复（2026-10-09，默认开）：fixBiExtremes 除原有的「终点分型中心及
+    # 其后」扫描外，增加「笔内部块」（startIdx+1..endIdx-1）后向扫描——被包含合并吞掉
+    # 的更极端真低/真高（如 60m 2026-10-07 20:00 插针 4066.53 被升序合并吃掉后底分型
+    # 落在 21:00 4082.42）恢复为笔端点价/时。只改端点，不动合并结构与分型；关=恢复
+    # 「中心及之后」旧行为。买卖点口径随之变化（该类低点不再按抬高结构标 2买）。
+    "endInnerRecoverOn": True,
     # 顶底分形不能包含（单根长K豁免）：该周期单根K线振幅（高-低）≥ 对应点数时，
     # 不参与分型终点侧三根的反向贯穿检查（证据为实体极值 bodyTop/bodyBottom，
     # 影线刺穿不算，2026-10-01 起）。按周期取值（wideBarPointsOf）；0=该周期不豁免。
@@ -757,24 +763,33 @@ def findFractals(merged):
     return fractals
 
 
-def updateFractalsTail(fractals, merged):
-    """增量分型更新：仅在 merged 尾部新增/修改一根合并K线后调用。
-    只有倒数第二个索引（n-2）的分型可能变化（其右邻 n-1 可能刚更新），
-    之前的索引都已冻结。与 findFractals 在最终 merged 上的结果完全一致。
-    **原地**修改：分型按 mergedIdx 升序，仅从尾部弹出 mergedIdx >= n-2 的
-    分型（至多几根）再补算 n-2，O(尾部长度) 而非 O(F)——30S 级 F 可达数万，
-    每根K线全量过滤会平方级放大。返回入参列表本身。
+def updateFractalsTail(fractals, merged, since=None):
+    """增量分型更新：merged 尾部新增/修改合并K线后调用。
+
+    since=None（旧契约）：仅在尾部新增/修改**一根**合并K线后调用——只有倒数
+    第二个索引（n-2）的分型可能变化（其右邻 n-1 可能刚更新），之前的索引都已
+    冻结，与 findFractals 在最终 merged 上的结果完全一致。
+    since=上次调用时的 merged 长度（批处理修复，2026-10-10）：一次并入多根K线
+    （如 fine=15m 时 3m 每拍 5 根）后，区间 [since-2, n-2) 内的位置会**成为
+    内部位置**——旧实现只重算最终 n-2，这些分型被永久跳过、直到重同步才找回
+    （10-5 早盘吞笔案例：上涨段不拆笔→顶背驰无参照段）。传入 since 后弹出
+    mergedIdx ≥ since-2 的尾部分型并重算 [since-2, n-2] 全部位置，恢复与
+    findFractals 逐位一致。
+    **原地**修改：分型按 mergedIdx 升序，仅从尾部弹出再补算，O(窗口长度+尾部
+    弹出数) 而非 O(F)。返回入参列表本身。
     """
     n = len(merged)
     if n < 3:
         del fractals[:]
         return fractals
-    # 去掉尾部可能变化的分型（mergedIdx >= n-2；升序 → 只从末尾弹出）
-    while fractals and fractals[-1]["mergedIdx"] >= n - 2:
+    lo = n - 2 if since is None else max(1, min(since, n) - 2)
+    # 去掉可能变化的分型（mergedIdx >= lo；升序 → 只从末尾弹出）
+    while fractals and fractals[-1]["mergedIdx"] >= lo:
         fractals.pop()
-    f = fractalAt(merged, n - 2)
-    if f is not None:
-        fractals.append(f)
+    for i in range(lo, n - 1):
+        f = fractalAt(merged, i)
+        if f is not None:
+            fractals.append(f)
     return fractals
 
 
@@ -1787,6 +1802,9 @@ def fixBiExtremes(bis, merged, count_raw=None):
     对每笔检查「终点分型之后、下一笔终点分型之前」的合并K线，若存在「被包含合并掩盖」
     （rawLow<low / rawHigh>high）且比当前端点更极端的真实极值，把本笔终点与下一笔起点
     同步平移到该极值所在K线（保持首尾连续）。只处理被掩盖的极值。
+    endInnerRecoverOn（2026-10-09，默认开）时扫描范围扩为「笔内部块（startIdx+1）起，
+    下一笔终点分型前」——终点分型之前被包含合并吞掉的极值同样恢复（笔端点=笔区间真实
+    极值）；顶分支的分型中心（自身 high 即端点价）仍不扫。
     跳空独立成笔（gapLocked）端点固定在缺口处，不参与修正。原地修改并返回 bis。
     count_raw：可选 (a,b)→原始K线数 回调（bi_inc 增量路径传前缀和查询）。"""
     if not bis or len(bis) == 0 or not merged or len(merged) == 0:
@@ -1803,6 +1821,12 @@ def fixBiExtremes(bis, merged, count_raw=None):
         next_ = bis[i + 1]
         toIdx = next_["endIdx"] - 1  # 不含下一笔终点分型，避免笔退化
         extreme = None
+        # 内部块后向扫描（endInnerRecoverOn，2026-10-09）：被包含合并吞掉的更极端真低/真高
+        # 也可能藏在终点分型**之前**的笔内部块（例：60m 2026-10-07 19:00 被 20:00 插针K线
+        # 包含、升序合并取高低后 4066.53 从结构消失，底分型落在 21:00 4082.42）——笔端点应
+        # 为笔区间真实极值。内部块（startIdx+1..endIdx-1）的原始K线必然属于本笔区间（早于
+        # 本笔的老蜡烛只可能被吞进分型中心块链内，见中心注释），可信任 rawLow/_origLow。
+        inner_on = CHAN_CFG.get("endInnerRecoverOn", True)
         if b["type"] == "down":
             # 终点是底：从 b.endIdx 起扫（含分型中心）——中心合并K线可能因包含合并/长下影
             # 压平把更低的真低藏在自身 low 之下，仅扫 endIdx 之后会漏掉。
@@ -1810,9 +1834,9 @@ def fixBiExtremes(bis, merged, count_raw=None):
             # 候选真低 = _origLow（markWickBars 压平的长下影原低）或 rawLow 原值；
             # 分型中心 bar 只认 _origLow（中心可能因向上合并把早于本笔结构的老蜡烛吞入链内，
             # 其 rawLow 未必属于笔底区间，恢复 rawLow 会过度下移）；中心之后两者都认。
-            k0 = b["endIdx"]
-            if k0 > toIdx:
+            if b["endIdx"] > toIdx:
                 continue
+            k0 = b["startIdx"] + 1 if inner_on else b["endIdx"]
             for k in range(k0, toIdx + 1):
                 mk = merged[k]
                 is_center = k == b["endIdx"]
@@ -1833,8 +1857,14 @@ def fixBiExtremes(bis, merged, count_raw=None):
             # 价；被包含合并掩盖的更高真实高点走 rawHigh 原值，不会把端点平移回已压平的插针价）
             k0 = b["endIdx"] + 1
             if k0 > toIdx:
-                continue
+                if not inner_on:
+                    continue
+                k0 = b["startIdx"] + 1  # 相邻分型（toIdx==endIdx）时内部块仍可扫
+            elif inner_on:
+                k0 = b["startIdx"] + 1
             for k in range(k0, toIdx + 1):
+                if k == b["endIdx"]:
+                    continue  # 分型中心自身 high 即端点价，保持原语义不扫
                 mk = merged[k]
                 if mk.get("rawHigh") is None or mk["rawHigh"] <= mk["high"]:
                     continue  # 未被掩盖

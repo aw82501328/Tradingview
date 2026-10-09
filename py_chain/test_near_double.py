@@ -281,10 +281,14 @@ class NearDoubleReboundTests(unittest.TestCase):
             return c.fixBiExtremes(c.buildBi(c.findFractals(merged), merged, c.calcATR(bars, 14),
                                              c.calcMACD(bars), None, True), merged)
 
-        down = next(b for b in build() if b['endTime'] == new_t)
-        self.assertEqual(down['type'], 'down')
-        self.assertEqual(down['endPrice'], 10000 - 4397.045)  # 后底 5602.955 > 前底 5600.330
+        # 隔离守卫（2026-10-09）：端点内部极值恢复（endInnerRecoverOn，默认开）会把该
+        # 下跌笔端点进一步下移到 9-18 17:00 被包含合并吞掉的真低 5601.8（镜像自原窗口
+        # 9-18 17:00 上影 4398.2）——本用例只验近等后底规则本身，关闭内部恢复。
+        c.apply_cfg({'endInnerRecoverOn': False})
         try:
+            down = next(b for b in build() if b['endTime'] == new_t)
+            self.assertEqual(down['type'], 'down')
+            self.assertEqual(down['endPrice'], 10000 - 4397.045)  # 后底 5602.955 > 前底 5600.330
             c.apply_cfg({'nearDoubleRebound': False})
             self.assertFalse(any(b['endTime'] == new_t for b in build()))
         finally:

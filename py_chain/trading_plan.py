@@ -39,6 +39,10 @@ PREV_HIGH_NEAR_PTS = 5.0  # 前高/前低附近：2买（2卖）后首段上涨�
 SECOND_NEAR_PTS = 5.0     # 回到2买/2卖点：未过前高（前低）时最近一笔回调（反弹）终点距点价 ≤ 该值 → 等回调后的类2买点（类2卖点）
 # ③3类点强档开关：开=3买/类3买（3卖/类3卖）过前高不背驰时顺势「等待回调后的新买点/新卖点」；关=3类点一律弱档。默认关（2026-09-28）
 THIRD_STRONG_TREND = False
+# ④弱档原始点分流（2026-10-09）：2买/类2买（2卖/类2卖）弱档且点后反弹高（低）点
+# 均未超过（跌破）原始点 → 空头多/等待低点附近的2买（多头空/等待高点附近的2卖），
+# 进场键 wait2BuyBear/wait2SellBear（抬低/压低回调，非破前低的1买式抄底）。默认开。
+WEAK_TIER_BY_ORIGIN = True
 
 
 def isRangeBound(bis, bars, atr, cfg=None):
@@ -123,6 +127,11 @@ def strategyOf(res, type_, reason, label, cls, cfg=None):
     方向命名「X头Y」：X = 结构方向，Y = 操作方向。
     三档（按序判定）：强档（过左高/左低不背驰）→ 中间档（仅 2买/2卖：前高/前低附近、
     或未过前高/前低且回调回到点附近）→ 弱档（多头空/空头多）。
+    弱档再分流（2026-10-09，weakTierByOrigin 默认开）：2买/类2买 反弹未过下跌原始点 →
+    空头多/等待低点附近的2买（wait2BuyBear，抬低回调）；2卖/类2卖 对称 →
+    多头空/等待高点附近的2卖（wait2SellBear，压低反弹）；过原始点维持旧弱档。
+    卖侧够笔作废（同日）：2卖/类2卖 后下跌已够笔（after 确认或 ≥expectBiMinBars）
+    → 卖点作废转弱二买（空头多/等待低点附近的2买，wait2BuyBear）。
     3类点强档受 thirdStrongTrend 开关控制（默认关=3类点一律弱档「等一卖/一买」）。"""
     cfg = cfg or {}
     third_strong = cfg.get("thirdStrongTrend", THIRD_STRONG_TREND)
@@ -136,12 +145,19 @@ def strategyOf(res, type_, reason, label, cls, cfg=None):
             return dict(base, direction="多头多", strategy="等待回调后的3买点")
         if type_ == "2买" and cls in ("前高附近", "回到2买点"):
             return dict(base, direction="多头多", strategy="等待回调后的类2买点")
+        if cls == "未过原始点":
+            return dict(base, direction="空头多", strategy="等待低点附近的2买")
         return dict(base, direction="多头空", strategy="等待高点附近的一卖")
     if type_ in ("2卖", "类2卖"):
         if cls == "过左低不背驰":
             return dict(base, direction="空头空", strategy="等待反弹后的3卖点")
         if type_ == "2卖" and cls in ("前低附近", "回到2卖点"):
             return dict(base, direction="空头空", strategy="等待反弹后的类2卖点")
+        if cls == "未过原始底够笔":
+            # 类2卖 后下跌已够笔：卖点作废，转弱二买（2026-10-09 用户规则）
+            return dict(base, direction="空头多", strategy="等待低点附近的2买")
+        if cls == "未过原始底":
+            return dict(base, direction="多头空", strategy="等待高点附近的2卖")
         return dict(base, direction="空头多", strategy="等待低点附近的一买")
     if type_ in ("3买", "类3买", "4买", "类4买"):
         if third_strong and cls == "过左高不背驰":
@@ -152,6 +168,41 @@ def strategyOf(res, type_, reason, label, cls, cfg=None):
             return dict(base, direction="空头空", strategy="等待反弹后的新卖点")
         return dict(base, direction="空头多", strategy="等待低点附近的一买")
     return dict(base, direction="观望", strategy="趋势中")
+
+
+def _weak_origin_split(bis, p, wantUp):
+    """弱档原始点分流判定（2026-10-09 用户规则，仅 2买/类2买/2卖/类2卖 调用）：
+      原始点 = 从点锚定向前回溯反弹高（低）点，遇到第一个比其后所有端点更高（买侧）/
+    更低（卖侧）的更早端点即停止——即产生该 2买/2卖 的下跌/上涨段起点；
+    回溯到底无支配者则取回溯窗口极值端点。
+      分流成立 = 点之后所有反弹高（低）点均未超过（跌破）原始点（结构未扭转）。
+    顶/底端点口径与 classifySecond 左高扫描一致：up笔终点 / down笔起点（买侧）。
+    @returns True=未过原始点（应转空头多·等2买 / 多头空·等2卖 档）"""
+    before, after = [], []
+    for b in bis:
+        cands = []
+        if wantUp:
+            if b["type"] == "up":
+                cands.append((b["endTime"], b["endPrice"]))
+            else:
+                cands.append((b["startTime"], b["startPrice"]))
+        else:
+            if b["type"] == "down":
+                cands.append((b["endTime"], b["endPrice"]))
+            else:
+                cands.append((b["startTime"], b["startPrice"]))
+        for t, price in cands:
+            (before if t < p["time"] else after).append((t, price))
+    if not before or not after:
+        return False
+    before.sort(key=lambda c: c[0])
+    origin = running = before[-1][1]
+    for _t, price in reversed(before[:-1]):
+        if (price > running) if wantUp else (price < running):
+            origin = price
+            break
+    afterExt = max(c[1] for c in after) if wantUp else min(c[1] for c in after)
+    return (afterExt < origin) if wantUp else (afterExt > origin)
 
 
 def classifySecond(bis, macdArr, p, cfg=None):
@@ -166,7 +217,8 @@ def classifySecond(bis, macdArr, p, cfg=None):
                     终点价距点价 ≤ secondNearPts。
       卖点（2卖/类2卖/3卖）：对称判定（左低取时间最近前底、参照取紧邻前一同向笔）。
       注：左高/左低取「时间最近」而非全史价格极值；参照笔不按幅度过滤。
-    @returns "过左高不背驰" | "过左低不背驰" | "前高附近" | "前低附近" | "回到2买点" | "回到2卖点" | "其他"
+    @returns "过左高不背驰" | "过左低不背驰" | "前高附近" | "前低附近" | "回到2买点" | "回到2卖点"
+             | "未过原始点" | "未过原始底" | "未过原始底够笔"（弱档分流，仅2/类2点、weakTierByOrigin开） | "其他"
     """
     cfg = cfg or {}
     prev_high_near = cfg.get("prevHighNearPts", PREV_HIGH_NEAR_PTS)
@@ -240,6 +292,20 @@ def classifySecond(bis, macdArr, p, cfg=None):
                 pullback = b  # 取最近一笔回调/反弹
         if pullback is not None and abs(pullback["endPrice"] - p["price"]) <= second_near:
             return "回到2买点" if wantUp else "回到2卖点"
+    # ④弱档原始点分流（weakTierByOrigin，2026-10-09，默认开；仅 2买/类2买/2卖/类2卖）：
+    # 弱档且点后反弹高（低）点均未过原始点 → 结构未扭转，交由 strategyOf 转
+    # 空头多/等待低点附近的2买（多头空/等待高点附近的2卖）；开关关或过了原始点维持"其他"。
+    # 卖侧补充（同日用户规则）：类2卖 后的下跌一旦够笔（after 笔已确认或合并块数
+    # ≥ expectBiMinBars），该卖点作废——不能再算 2卖，转前面规则定义的弱二买。
+    if (cfg.get("weakTierByOrigin", WEAK_TIER_BY_ORIGIN)
+            and p["type"] in ("2买", "类2买", "2卖", "类2卖")
+            and _weak_origin_split(bis, p, wantUp)):
+        if not wantUp:
+            _enough = (not after.get("_forming")) or \
+                (after.get("mergedCount") or 0) >= int(CHAN_CFG.get("expectBiMinBars", 5) or 5)
+            if _enough:
+                return "未过原始底够笔"
+        return "未过原始点" if wantUp else "未过原始底"
     return "其他"
 
 

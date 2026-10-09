@@ -25,9 +25,10 @@ function signalDirectionName(r) {
   if (directions.includes(r.planDirection)) return r.planDirection;
   // 旧记录未保存 planDirection，按 trading_plan.strategyOf / entryStrategyOf 的固定对应关系显示。
   // 2026-09-25 键拆分：wait3Buy/waitLike2Buy/wait3Sell/waitLike2Sell 均为顺势（多头多/空头空）。
+  // 2026-10-09 弱档原始点分流：wait2BuyBear=空头多、wait2SellBear=多头空。
   return {wait2Buy:'多头多',waitBuy:'多头多',wait3Buy:'多头多',waitLike2Buy:'多头多',
     wait2Sell:'空头空',waitSell:'空头空',wait3Sell:'空头空',waitLike2Sell:'空头空',
-    wait1Sell:'多头空',wait1Buy:'空头多'}[r.strategyKey] || '-';
+    wait1Sell:'多头空',wait1Buy:'空头多',wait2BuyBear:'空头多',wait2SellBear:'多头空'}[r.strategyKey] || '-';
 }
 
 // 信号候选角标（SPEC_divergence_fallback）：回退/近等/预期够笔口径标记

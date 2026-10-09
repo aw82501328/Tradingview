@@ -279,6 +279,91 @@ class TestFixBiExtremesOrigLow(unittest.TestCase):
         self.assertEqual(out[0]["endPrice"], 85)  # 未被 rawLow 下移
 
 
+class TestFixBiExtremesInnerRecover(unittest.TestCase):
+    """端点内部极值恢复（endInnerRecoverOn，2026-10-09）：终点分型**之前**的笔内部块
+    里被包含合并吞掉的更极端真低/真高恢复为笔端点（例：60m 2026-10-07 19:00 被 20:00
+    插针K线包含、升序合并取高低后 4066.53 从结构消失，底分型落在 21:00 4082.42）。"""
+
+    def _bis(self):
+        return [{
+            "type": "down", "startIdx": 0, "endIdx": 5,
+            "startTime": 0, "endTime": 5,
+            "startPrice": 100, "endPrice": 86, "span": 14, "rawCount": 5,
+            "gapLocked": False, "macdCross": False,
+        }, {
+            "type": "up", "startIdx": 5, "endIdx": 7,
+            "startTime": 5, "endTime": 7,
+            "startPrice": 86, "endPrice": 95, "span": 9, "rawCount": 2,
+            "gapLocked": False, "macdCross": False,
+        }]
+
+    def test_inner_masked_low_recovered(self):
+        # 内部块 idx=3 的 rawLow=78 被包含合并吞掉（低于终点分型价 86）→ 恢复为端点
+        merged = [
+            mk(0, 100, 90), mk(1, 96, 88), mk(2, 94, 86),
+            mk(3, 92, 87, rawLow=78, rawLowTime=33),
+            mk(4, 90, 85),
+            mk(5, 91, 86),
+            mk(6, 93, 88), mk(7, 95, 90),
+        ]
+        out = cc.fixBiExtremes(self._bis(), merged)
+        self.assertEqual((out[0]["endPrice"], out[0]["endTime"], out[0]["endIdx"]), (78, 33, 3))
+        self.assertEqual((out[1]["startPrice"], out[1]["startTime"], out[1]["startIdx"]), (78, 33, 3))
+
+    def test_inner_masked_low_off_keeps_old(self):
+        # 开关关 → 只扫「终点分型中心及其后」：内部块不参与（旧行为）
+        merged = [
+            mk(0, 100, 90), mk(1, 96, 88), mk(2, 94, 86),
+            mk(3, 92, 87, rawLow=78, rawLowTime=33),
+            mk(4, 90, 85),
+            mk(5, 91, 86),
+            mk(6, 93, 88), mk(7, 95, 90),
+        ]
+        old = cc.CHAN_CFG.get("endInnerRecoverOn", True)
+        cc.CHAN_CFG["endInnerRecoverOn"] = False
+        try:
+            out = cc.fixBiExtremes(self._bis(), merged)
+        finally:
+            cc.CHAN_CFG["endInnerRecoverOn"] = old
+        self.assertEqual((out[0]["endPrice"], out[0]["endTime"], out[0]["endIdx"]), (86, 5, 5))
+
+    def test_inner_masked_high_recovered(self):
+        # 上涨笔对称：内部块 rawHigh=112 > 终点分型价 103 → 恢复为端点；中心不扫
+        merged = [
+            mk(0, 90, 80), mk(1, 94, 84), mk(2, 96, 85),
+            mk(3, 102, 86, rawHigh=112, rawHighTime=33),
+            mk(4, 104, 88),
+            mk(5, 103, 89),
+            mk(6, 100, 86), mk(7, 98, 84),
+        ]
+        bis = [{
+            "type": "up", "startIdx": 0, "endIdx": 5,
+            "startTime": 0, "endTime": 5,
+            "startPrice": 90, "endPrice": 103, "span": 13, "rawCount": 5,
+            "gapLocked": False, "macdCross": False,
+        }, {
+            "type": "down", "startIdx": 5, "endIdx": 7,
+            "startTime": 5, "endTime": 7,
+            "startPrice": 103, "endPrice": 98, "span": 5, "rawCount": 2,
+            "gapLocked": False, "macdCross": False,
+        }]
+        out = cc.fixBiExtremes(bis, merged)
+        self.assertEqual((out[0]["endPrice"], out[0]["endTime"], out[0]["endIdx"]), (112, 33, 3))
+        self.assertEqual((out[1]["startPrice"], out[1]["startTime"]), (112, 33))
+
+    def test_inner_not_below_endpoint_noop(self):
+        # 内部块被吞真低不低于终点分型价 → 不动
+        merged = [
+            mk(0, 100, 90), mk(1, 96, 88), mk(2, 94, 86),
+            mk(3, 92, 87, rawLow=88, rawLowTime=33),
+            mk(4, 90, 85),
+            mk(5, 91, 86),
+            mk(6, 93, 88), mk(7, 95, 90),
+        ]
+        out = cc.fixBiExtremes(self._bis(), merged)
+        self.assertEqual((out[0]["endPrice"], out[0]["endIdx"]), (86, 5))
+
+
 class TestMacdReplacementExtremes(unittest.TestCase):
     def test_symmetric_boundaries_and_locks(self):
         import copy

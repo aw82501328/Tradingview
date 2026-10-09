@@ -37,7 +37,10 @@
 | footer | run 结束 | stats, wall, rows |
 
 闸门代码→中文见 `bt_journal.GATE_LABELS`（15 个进出场闸门 + 背驰下沉内部原因细分 +
-fxma 专属闸门）。**拒绝行存结构化数字，中文渲染统一在 bt_query**（写侧零格式化开销）。
+fxma 专属闸门；`fx_prov_invalidated`=pred2 预判点消失——收复前低/前高、结构重算或真点
+接管，ctx 含 provTime/provPrice/dSegStart，2026-10-09）。**拒绝行存结构化数字，中文渲染
+统一在 bt_query**（写侧零格式化开销）。fxma state 行的买卖点类型带「预判」前缀
+（如「预判2卖」）= pred2 提前入列的未确认点承担尾点（判定/去重仍用原标签）。
 
 ## 文件与保留
 

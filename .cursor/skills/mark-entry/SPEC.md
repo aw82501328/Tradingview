@@ -57,9 +57,12 @@
 | 等待回调后的类2买点（2买 中间档） | `waitLike2Buy` | long | 向上红箭头 |
 | 等待反弹后的3卖点（2卖/类2卖 强档） | `wait3Sell` | short | 向下绿箭头 |
 | 等待反弹后的类2卖点（2卖 中间档） | `waitLike2Sell` | short | 向下绿箭头 |
+| 等待低点附近的2买（2买/类2买 弱档·未过原始点，2026-10-09） | `wait2BuyBear` | long | 向上红箭头 |
+| 等待高点附近的2卖（2卖/类2卖 弱档·未过原始底，2026-10-09） | `wait2SellBear` | short | 向下绿箭头 |
 | 其他（震荡/数据不足/趋势中无匹配，方向=观望） | 无 | — | 不触发 |
 
 > 2026-09-25 键拆分：此前 3买点/3卖点/类2买点/类2卖点 4 条文案并入 `waitBuy`/`waitSell`，现 1:1 拆为独立键（`wait3Buy`/`wait3Sell`/`waitLike2Buy`/`waitLike2Sell`）便于记录溯源；4 个新键与 `waitBuy`/`waitSell` 同校验（够笔+以下级别背驰+支阻位附近，无专属条件），`waitBuy`/`waitSell` 从此仅指「新买点/新卖点」。进场校验逻辑不变（2026-09-24 三档文案扩展的后续调整）。
+> 2026-10-09 弱档原始点分流：2买/类2买（2卖/类2卖）弱档且点后反弹高（低）点均未过原始点（原始点定义见 trading-plan SPEC §2.3）时，档位由 多头空/等一卖（空头多/等一买）转 空头多/等待低点附近的2买（多头空/等待高点附近的2卖），新键 `wait2BuyBear`/`wait2SellBear` 共 12 键。
 
 ### 2.2 进场条件（evaluateEntry，全部同时满足）
 
@@ -83,6 +86,8 @@
 | `wait2Buy` | `brokePrevHigh`（上涨段过前高）+ `macdAboveZero`（MACD 上0轴后回调不破0轴） |
 | `wait1Sell` | `brokePrevHigh`（够笔且过高点）+ `zsExitWeak(..., "short")`（出中枢力度变弱，离开笔为 up） |
 | `wait1Buy` | `brokePrevLow`（够笔且过低点）+ `zsExitWeak(..., "long")`（出中枢力度变弱，离开笔为 down） |
+| `wait2BuyBear` | 抬低：`brokePrevLow` 为 **false**（末下跌笔终点不破前一根下跌笔终点；破前低属1买语义不买，2026-10-09） |
+| `wait2SellBear` | 压低：`brokePrevHigh` 为 **false**（末上涨笔终点不过前一根上涨笔终点） |
 | `waitBuy` / `waitSell` / `wait3Buy` / `wait3Sell` / `waitLike2Buy` / `waitLike2Sell` | （仅公共条件） |
 
 ### 2.3 关键量定义
@@ -122,7 +127,7 @@
 
 **合并后 ≥5 根K且有成笔预期**（TP2 / 逆势 TP3 条件）：检测周期形成段自段起点合并块起 **≥5 块**（chan_core `isValid` 的 gap≥4 成笔门槛同口径）。JS 用 `favSeg5Time`（`mergeStep` 回放记录每块诞生时间，触发 = 段内第 5 块诞生 bar，成交 = 其后第一根 markRes bar 开盘）；py 引擎用 `forming_seg_ready`（增量 `_merged_times` 按末笔延伸终点二分计数）。**已知近似差异**：形成段达 5 后若被最终笔结构吸收（未成笔），py 引擎当下已触发、JS hindsight 不触发。
 
-**顺势 / 逆势**（决定半平与全平的分支）：**顺势** = 计划方向 ∈ {多头多, 空头空}（计划结构方向 = 操作方向）；**逆势** = {多头空, 空头多}。计划方向缺失时按 `strategyKey` 兜底（`wait2Buy`/`waitBuy`/`wait3Buy`/`waitLike2Buy` 及卖侧对称 → 顺势，`wait1Buy`/`wait1Sell` → 逆势）。**顺势**阶梯完整——保本 → 半平 → 破前高/前低全平；**逆势没有半平**——「形成段 ≥5 根 K」一到就全平快速离场。
+**顺势 / 逆势**（决定半平与全平的分支）：**顺势** = 计划方向 ∈ {多头多, 空头空}（计划结构方向 = 操作方向）；**逆势** = {多头空, 空头多}。计划方向缺失时按 `strategyKey` 兜底（`wait2Buy`/`waitBuy`/`wait3Buy`/`waitLike2Buy` 及卖侧对称 → 顺势，`wait1Buy`/`wait1Sell`/`wait2BuyBear`/`wait2SellBear` → 逆势）。**顺势**阶梯完整——保本 → 半平 → 破前高/前低全平；**逆势没有半平**——「形成段 ≥5 根 K」一到就全平快速离场。
 
 **结算：手数与盈亏**：手数 `--lots` 默认 4（JS 端仅落盘记录，不算盈亏）。平仓盈亏按部分平仓事件逐笔手数结算 + 剩余手数按终局价（默认比例下 = 原 0.5×半平价 + 0.5×终局价 加权口径）；未触发部分平仓则 =（终局价 − 进场价）× 方向 × 手数。已在 Web 控制台显示。
 

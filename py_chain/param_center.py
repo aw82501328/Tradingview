@@ -62,6 +62,7 @@ ZS_DEFAULTS = {
 # CHAN_CFG 键按工作台步骤归属（算法默认值仍在 chan_core.CHAN_CFG_DEFAULTS）
 CHAN_BI_KEYS = (
     "gapFilter", "wickMarkOn", "wickRatio", "wickMinLen", "wickMinRange", "fractalSideRealWick",
+    "endInnerRecoverOn",
     "wideBarOn",
     "wideBarPointsD", "wideBarPoints240", "wideBarPoints60", "wideBarPoints15", "wideBarPoints3",
     "nearDoubleFixed",
@@ -113,6 +114,14 @@ PARAM_MODULES = {
                                     "开后历史段结构重排（五周期笔数约 +2.6%~4.4%），回测基线不可比；"
                                     "注：区间套锁定（上级笔端点）优先于近等后移，上级已定的端点"
                                     "不因此开关移动", None, None),
+            "endInnerRecoverOn": ("端点内部极值恢复",
+                                  "笔端点极值修正扩展：终点分型**之前**的笔内部块里被包含合并"
+                                  "吞掉的更极端真低/真高（如 60m 10-7 20:00 插针 4066.53 被升序"
+                                  "合并吃掉、底分型落在 21:00 4082.42；15m 9-4 21:00 4365.57）"
+                                  "恢复为笔端点价/时——笔端点=笔区间真实极值。只改端点，不动"
+                                  "合并结构与分型。默认开；关闭后回退「终点分型中心及其后」"
+                                  "旧行为；开启状态下低周期（3m）端点变化约 20%，回测基线不可比",
+                                  None, None),
             "wideBarOn": ("单根长K豁免开关",
                           "「顶底分形不能包含」单根长K豁免总开关。关闭后所有周期一律不豁免"
                           "（各周期点数不再生效）", None, None),
@@ -298,6 +307,8 @@ PARAM_MODULES = {
                          0.0, 1000.0),
             "thirdStrongTrend": ("3类点强档顺势", "开=3买/类3买/4买/类4买（3卖/类3卖/4卖/类4卖）过前高不背驰时顺势「等待回调后的新买点/新卖点」；关=这些点一律弱档（多头空/空头多，等一卖/一买）。默认关",
                          None, None),
+            "weakTierByOrigin": ("弱档按原始点分流", "开=2买/类2买（2卖/类2卖）弱档且点后反弹高（低）点均未超过（跌破）原始点（产生该点的下跌/上涨段起点）时转 空头多/等待低点附近的2买（多头空/等待高点附近的2卖），只做抬低（压低）回调、不抄破前低的1买；关或过原始点=旧弱档等一卖/一买。默认开",
+                         None, None),
         },
     },
     "fxma": {
@@ -338,6 +349,10 @@ PARAM_MODULES = {
             "fibNearPts": ("黄金分割容差(点)", "本点价格与最近档位价位的绝对价差上限（点）", 0.0, 100.0),
             "upperDirOn": ("上级周期同向条件", "开启=进出场周期的上级周期（30S→3→15→60→240）当前笔方向须与信号同向（买=上涨笔/卖=下跌笔，全部类别生效，独立硬门槛不参与计票）；"
                                       "关闭=跳过该条件", None, None),
+            "pred2On": ("预判2买卖（提前入列）", "开启=本级规则预判：最近确认下跌笔跌破前低（或上涨笔突破前高）后，反弹/回调一够笔（≥5合并块或已确认）即以其终点为预判2卖/2买提前入列评估——"
+                                    "不依赖上级锚定段（修「点识别滞后」，如 10-5 案例提前约3小时）；闸门链照旧（类别/反向作废/有效期/黄金分割/上级同向/触发条件全部不变，只修点可见性）；"
+                                    "锚随反弹/回调延伸漂移（有效期随之重置）；反弹/回调收复前低/前高即判死（一次性）；真 2卖/2买 同锚入列后接管（同键去重不双发）。"
+                                    "预判点比真点多（每个破前低/前高的确认笔都产点），开启后信号集变化大", None, None),
             "divLowerOn": ("次级别背驰条件", "与条件组合互斥（2026-10-09）：开启=背驰为唯一触发条件——以下级别出现同向背驰即触发，强分型/均线分离/收盘站线与条件满足数完全不参与，不过则等待（不回退计票）；黄金分割/上级同向若开启仍作为基本硬门槛拦一道（缠论V1 lowerDiverge 同源：双判据背驰+区间套下沉链校验，落在次级别还是次次级别由结构自动决定；"
                                      "窗口=点锚定·粘性——背驰段时间≥点时间−「背驰窗口」根本周期K线且≤评估拍（防未来）即通过，之后持续有效直到点作废；3分钟周期须加载30秒级别否则该条件永不通过）；"
                                      "关闭=走条件组合（三选N计票）", None, None),
@@ -429,7 +444,8 @@ def defaults_of(module, symbol=None):
                 "reboundAngleRef": trading_plan.REBOUND_ANGLE_REF,
                 "prevHighNearPts": trading_plan.PREV_HIGH_NEAR_PTS,
                 "secondNearPts": trading_plan.SECOND_NEAR_PTS,
-                "thirdStrongTrend": trading_plan.THIRD_STRONG_TREND}
+                "thirdStrongTrend": trading_plan.THIRD_STRONG_TREND,
+                "weakTierByOrigin": trading_plan.WEAK_TIER_BY_ORIGIN}
     elif module == "fxma":
         base = dict(FXMA_DEFAULTS)
     else:

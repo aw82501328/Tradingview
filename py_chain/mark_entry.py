@@ -536,6 +536,8 @@ def entryStrategyOf(planStrategy):
     震荡/数据不足/趋势中无匹配（方向=观望）等不产生进场策略，返回 None。
     waitBuy/waitSell 仅指「新买点/新卖点」（3类点强档，thirdStrongTrend 开）；
     4 个新键与 waitBuy/waitSell 同校验（够笔+以下级别背驰+支阻位附近，无专属条件）。
+    2026-10-09 弱档原始点分流新增 2 键：wait2BuyBear/wait2SellBear（空头结构2买/
+    多头结构2卖，专属条件=抬低/压低，见 strategyExtraOk），共 12 键。
     @returns None 或 { key, direction, label }
     """
     mapping = {
@@ -549,12 +551,15 @@ def entryStrategyOf(planStrategy):
         "等待回调后的类2买点": {"key": "waitLike2Buy", "direction": "long", "label": "等待回调后类2买点"},
         "等待反弹后的3卖点": {"key": "wait3Sell", "direction": "short", "label": "等待反弹后3卖点"},
         "等待反弹后的类2卖点": {"key": "waitLike2Sell", "direction": "short", "label": "等待反弹后类2卖点"},
+        "等待低点附近的2买": {"key": "wait2BuyBear", "direction": "long", "label": "等待低点附近的2买"},
+        "等待高点附近的2卖": {"key": "wait2SellBear", "direction": "short", "label": "等待高点附近的2卖"},
     }
     return mapping.get(planStrategy)
 
 
 # ============================================================
-# 进场策略的条件判定（纯函数；2026-09-25 起 10 键，专属条件仅 wait1/wait2 系有）
+# 进场策略的条件判定（纯函数；2026-09-25 起 10 键 + 2026-10-09 弱档分流 2 键 = 12 键，
+# 专属条件 wait1/wait2 系 + wait2BuyBear/wait2SellBear 抬低/压低）
 # ============================================================
 
 
@@ -848,6 +853,15 @@ def strategyExtraOk(key, bis, upperBis, macdArr, barSec, zs_exit_weak_ratio=ZS_E
             return "未够笔且过低点"
         if not zsExitWeak(bis, upperBis, macdArr, barSec, zs_exit_weak_ratio, "long"):
             return "出中枢力度未变弱"
+    elif key == "wait2BuyBear":
+        # 空头结构2买（2026-10-09 弱档原始点分流）：只买抬低回调——末下跌笔终点
+        # 不破前一根下跌笔终点；破前低属1买语义，由 空头多/等一买 档负责。
+        if brokePrevLow(bis):
+            return "回调破前低，非抬低2买"
+    elif key == "wait2SellBear":
+        # 多头结构2卖（对称）：只卖压低反弹——末上涨笔终点不过前一根上涨笔终点。
+        if brokePrevHigh(bis):
+            return "反弹过前高，非压低2卖"
     # waitBuy / waitSell / wait3Buy / wait3Sell / waitLike2Buy / waitLike2Sell：
     # 仅需够笔 + 以下级别背驰 + 支阻位附近（无专属条件）
     return None

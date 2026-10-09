@@ -969,6 +969,7 @@ class BacktestWorker(ModeWorker):
                  + (f"（{','.join(str(r) for r in engine.fib_near_levels)}"
                     f"±{engine.fib_near_pts}点）" if engine.fib_near_on else "")
                  + f"，上级同向{'开' if engine.upper_dir_on else '关'}"
+                 + f"，预判2买卖{'开' if engine.pred2_on else '关'}"
                  + (f"，止损{engine.stop_pts}/止盈{engine.tp_pts}点（固定点数）"
                     if engine.tp_mode == "points" else
                     f"，止损{engine.stop_pts}点，止盈=结构组合（半仓{engine.lots / 2:g}手"

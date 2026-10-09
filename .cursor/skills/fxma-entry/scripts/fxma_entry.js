@@ -97,6 +97,8 @@ const FIB_NEAR_ON = getStrArg("fib-near-on", "0") === "1";  // 黄金分割附�
 const FIB_LEVELS = parseFibLevels(getStrArg("fib-levels", "0.382,0.5,0.618"));
 const FIB_NEAR_PTS = getNumArg("fib-near-pts", 5.0);        // 档位容差（绝对点数）
 const UPPER_DIR_ON = getStrArg("upper-dir-on", "0") === "1"; // 上级周期同向条件开关（"1"=开，默认关）
+const PRED2_ON = getStrArg("pred2-on", "0") === "1";          // 预判2买卖开关（"1"=开，默认关；本级规则
+                                                              // 提前入列，闸门链照旧——与引擎 pred2On 同式）
 const DIV_LOWER_ON = getStrArg("div-lower-on", "0") === "1"; // 次级别背驰条件开关（"1"=开，默认关；
                                                              // 与条件组合互斥：开=背驰为唯一触发）
 const DIV_LOWER_WIN_BARS = Math.max(1, Math.round(getNumArg("div-lower-win-bars", 1))); // 背驰窗口（根本周期K线，默认1）
@@ -151,6 +153,7 @@ const MODULE_OPTS = {
   fibNearOn: FIB_NEAR_ON, fibLevels: FIB_LEVELS, fibNearPts: FIB_NEAR_PTS,
   entryPick: ENTRY_PICK,
   upperDirOn: UPPER_DIR_ON, divLowerOn: DIV_LOWER_ON,
+  pred2On: PRED2_ON,
   divLowerWinBars: DIV_LOWER_WIN_BARS,
   pointValidBars: POINT_VALID_BARS, pointValidPts: POINT_VALID_PTS,
   tpMode: TP_MODE, tpNearPts: TP_NEAR_PTS, tpTrailSlipPts: TP_TRAIL_SLIP_PTS,
@@ -257,14 +260,24 @@ function scanPeriodSignals(P, bars, periodBis, upperRes, opts = MODULE_OPTS, low
       const p = pts[pi++];
       if (p.side === "buy") curBuy = p; else curSell = p;
     }
-    for (const [pt, direction, kind] of [[curBuy, "long", "bottom"], [curSell, "short", "top"]]) {
+    // pred2 预判点（与引擎 _fx_merge_point 同式：预判更新则替换，同刻真点优先——
+    // 真 2卖/2买 同锚接管 fired 键一致天然去重）
+    let effBuy = curBuy, effSell = curSell;
+    if (opts.pred2On) {
+      const bis = periodBis[P] || [];
+      const pb = pred2SideAt(bis, bars[i].time, "up", "down", "2买");
+      const ps = pred2SideAt(bis, bars[i].time, "down", "up", "2卖");
+      if (pb && (!curBuy || pb.time > curBuy.time)) effBuy = pb;
+      if (ps && (!curSell || ps.time > curSell.time)) effSell = ps;
+    }
+    for (const [pt, direction, kind] of [[effBuy, "long", "bottom"], [effSell, "short", "top"]]) {
       if (!pt) continue;
       const cls = POINT_CLASS[pt.type];
       const sel = POINT_SEL[pt.type];
       if (cls === undefined || !opts.pointClasses.has(sel)) continue;
       const key = `${P}|${pt.type}|${pt.time}`;
       if (fired.has(key)) continue;
-      const opp = direction === "long" ? curSell : curBuy;
+      const opp = direction === "long" ? effSell : effBuy;
       if (opp && opp.time > pt.time) { fired.add(key); continue; } // 反向点已出现
       if (opts.pointValidBars > 0) {
         let after = 0;
@@ -392,6 +405,7 @@ function scanPeriodSignals(P, bars, periodBis, upperRes, opts = MODULE_OPTS, low
         periodX: P, direction,
         strategyKey: `fx${sel}${direction === "long" ? "Buy" : "Sell"}`,
         pointType: pt.type, pointTime: pt.time, pointPrice: pt.price,
+        pred2: !!pt._prov,
         strongFxTime: fxTime, crossGap, standGap,
         fibLevel, fibGap, divLowerRes: divRes, divLowerTime: divTime, upperDir,
         signalTime: closeT, signalPrice: closes[i], entryIdx: i + 1,
@@ -399,6 +413,38 @@ function scanPeriodSignals(P, bars, periodBis, upperRes, opts = MODULE_OPTS, low
     }
   }
   return signals;
+}
+
+/**
+ * pred2 单侧预判点（与引擎 fx_ma._pred2_side 同式）：最近确认锚向笔（atype，
+ * 卖侧=down）跌破/突破前一同向笔终点后，其后最近反向笔（rtype）终点为预判点；
+ * forming 反弹须 enough；任一反弹终点收复前低/前高 → 一次性判死。
+ * 快照回放口径：endTime ≤ t 的笔前缀上计算（forming 笔端点=最终极值，研究口径差
+ * 见文件头声明）。
+ */
+function pred2SideAt(bis, t, atype, rtype, label) {
+  const vis = [];
+  for (const b of bis) { if (b.endTime <= t) vis.push(b); else break; }
+  let iD = -1, iPrev = -1;
+  for (let i = vis.length - 1; i >= 0; i--) {
+    const b = vis[i];
+    if (b.type !== atype || b._forming) continue;
+    if (iD < 0) iD = i; else { iPrev = i; break; }
+  }
+  if (iD < 0 || iPrev < 0) return null;
+  const ref = vis[iPrev].endPrice;   // 前低（卖侧）/前高（买侧）
+  const D = vis[iD];
+  if (!(atype === "down" ? D.endPrice < ref : D.endPrice > ref)) return null;
+  let last = null;
+  for (let i = iD + 1; i < vis.length; i++) {
+    const b = vis[i];
+    if (b.type !== rtype) continue;
+    if (atype === "down" ? b.endPrice >= ref : b.endPrice <= ref) return null; // 收复判死
+    last = b;
+  }
+  if (!last) return null;
+  if (last._forming && !last.enough) return null;   // 反弹未够笔不可见
+  return { type: label, time: last.endTime, price: last.endPrice, _prov: true };
 }
 
 /** P 周期全部买卖点（含 3/4类；升序，附 side）。提损扫描/信号扫描用。 */
@@ -802,7 +848,7 @@ async function main() {
                 crossMinPts: CROSS_MIN_PTS,
                 maStandOn: MA_STAND_ON, maStand1: MA_STAND_1, maStand2: MA_STAND_2,
                 fibNearOn: FIB_NEAR_ON, fibLevels: FIB_LEVELS, fibNearPts: FIB_NEAR_PTS,
-                upperDirOn: UPPER_DIR_ON, divLowerOn: DIV_LOWER_ON,
+                upperDirOn: UPPER_DIR_ON, pred2On: PRED2_ON, divLowerOn: DIV_LOWER_ON,
                 strongFxOn: STRONG_FX_ON, strongFxMinPts: STRONG_FX_MIN_PTS,
                 strongFxReq: STRONG_FX_REQ, maReq: MA_REQ,
                 maStandReq: MA_STAND_REQ, entryPick: ENTRY_PICK,
@@ -916,8 +962,8 @@ async function main() {
   }
 }
 
-module.exports = { maSeries, strongFxAfter, scanPeriodSignals, collectPeriodPoints,
-                   collectBiEnds, applyMutexAndSimulate,
+module.exports = { maSeries, strongFxAfter, pred2SideAt, scanPeriodSignals,
+                   collectPeriodPoints, collectBiEnds, applyMutexAndSimulate,
                    parseFibLevels, MODULE_OPTS, POINT_CLASS, POINT_SEL, UPPER_OF };
 
 if (require.main === module) {

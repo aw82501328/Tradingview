@@ -13,7 +13,7 @@
  */
 const { describe, test } = require("node:test");
 const assert = require("node:assert/strict");
-const { predictPlan, planGateRow, RANGE_RES, TREND_RES } = require("./trading_plan.js");
+const { predictPlan, planGateRow, RANGE_RES, TREND_RES, strategyOf, classifySecond } = require("./trading_plan.js");
 
 const bi = (type, startTime, endTime, startPrice, endPrice) => ({
   type, startTime, endTime, startPrice, endPrice, span: Math.abs(endPrice - startPrice),
@@ -123,5 +123,82 @@ describe("默认口径（与 py_chain/trading_plan.py 常量一致）", () => {
   test("TREND_RES / RANGE_RES 默认 240（闸门开启，强一致默认）", () => {
     assert.equal(TREND_RES, "240");
     assert.equal(RANGE_RES, "240");
+  });
+});
+
+// ---- 弱档原始点分流（2026-10-09，与 py_chain/test_plan_strategy.py 对齐） ----
+describe("classifySecond 弱档原始点分流", () => {
+  const P = { type: "2买", time: 20, price: 95 };
+  // 2买 @20@95；前高 120；after 涨 104 距前高 16、回调 101 距点 6 → 弱档素材
+  const weakBis = [
+    bi("up", 0, 10, 100, 120), bi("down", 10, 20, 120, 95),
+    bi("up", 20, 30, 95, 104), bi("down", 30, 40, 104, 101),
+  ];
+
+  test("默认开：反弹高点未过原始点 → 未过原始点", () => {
+    assert.equal(classifySecond(weakBis, [], P), "未过原始点");
+  });
+
+  test("weakTierByOrigin=false → 旧「其他」", () => {
+    assert.equal(classifySecond(weakBis, [], P, { weakTierByOrigin: false }), "其他");
+  });
+
+  test("原始点=回溯中第一个支配其后所有反弹高的更早顶（130 而非最近顶 110）", () => {
+    const bis = [
+      bi("up", 0, 10, 100, 130), bi("down", 10, 20, 130, 100),
+      bi("up", 20, 30, 100, 110), bi("down", 30, 40, 110, 95),
+      bi("up", 40, 50, 95, 104),
+    ];
+    assert.equal(classifySecond(bis, [], { type: "2买", time: 40, price: 95 }), "未过原始点");
+  });
+
+  test("后续反弹顶越过原始点 → 翻回「其他」", () => {
+    const bis = weakBis.concat([bi("up", 40, 50, 101, 125)]);
+    assert.equal(classifySecond(bis, [], P), "其他");
+  });
+
+  test("3买 不产生哨兵（分流仅 2买/类2买/2卖/类2卖）", () => {
+    assert.equal(classifySecond(weakBis, [], { type: "3买", time: 20, price: 95 }), "其他");
+  });
+
+  test("卖侧镜像：点后低点未跌破上涨原始点 → 未过原始底（够笔→作废转弱二买）", () => {
+    const bis = [
+      bi("down", 0, 10, 120, 100), bi("up", 10, 20, 100, 125),
+      bi("down", 20, 30, 125, 108), bi("up", 30, 40, 108, 112),
+    ];
+    const forming = [
+      bi("down", 0, 10, 120, 100), bi("up", 10, 20, 100, 125),
+      { ...bi("down", 20, 30, 125, 108), _forming: true, mergedCount: 3 },
+    ];
+    const p = { type: "2卖", time: 20, price: 125 };
+    assert.equal(classifySecond(bis, [], p), "未过原始底够笔");   // after 已确认=够笔→作废
+    assert.equal(classifySecond(forming, [], p), "未过原始底");   // 形成中<5块=未够笔→等2卖
+    assert.equal(classifySecond(bis, [], p, { weakTierByOrigin: false }), "其他");
+    const out = strategyOf("60", "类2卖", "", "", "未过原始底够笔");
+    assert.equal(out.direction, "空头多");
+    assert.equal(out.strategy, "等待低点附近的2买");
+  });
+});
+
+describe("strategyOf 弱档分流档位（2026-10-09）", () => {
+  test("未过原始点 → 空头多/等待低点附近的2买（2买与类2买同）", () => {
+    for (const t of ["2买", "类2买"]) {
+      const out = strategyOf("60", t, "", `趋势|${t}`, "未过原始点");
+      assert.equal(out.direction, "空头多");
+      assert.equal(out.strategy, "等待低点附近的2买");
+    }
+  });
+
+  test("未过原始底 → 多头空/等待高点附近的2卖", () => {
+    for (const t of ["2卖", "类2卖"]) {
+      const out = strategyOf("60", t, "", `趋势|${t}`, "未过原始底");
+      assert.equal(out.direction, "多头空");
+      assert.equal(out.strategy, "等待高点附近的2卖");
+    }
+  });
+
+  test("过了原始点（其他）→ 旧弱档不变", () => {
+    assert.equal(strategyOf("60", "2买", "", "", "其他").strategy, "等待高点附近的一卖");
+    assert.equal(strategyOf("60", "2卖", "", "", "其他").strategy, "等待低点附近的一买");
   });
 });

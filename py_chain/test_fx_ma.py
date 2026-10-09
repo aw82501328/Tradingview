@@ -1648,5 +1648,261 @@ class RunIntegrationTests(unittest.TestCase):
         self.assertEqual(result["stats"]["signals"], 0)
 
 
+# ============================================================
+# pred2 预判点（2026-10-09：本级规则提前入列，默认关）
+# ============================================================
+
+def _bi(type_, st, sp, et, ep, **extra):
+    """合成笔（结构视图形状：type/起终点 + 可选 _forming/enough）。"""
+    return dict({"type": type_, "startTime": st, "startPrice": sp,
+                 "endTime": et, "endPrice": ep}, **extra)
+
+
+class _FakeJournal:
+    """journal 桩：记录 reject 调用（state 静默）。"""
+    enabled = True
+
+    def __init__(self):
+        self.rejects = []
+
+    def reject(self, *a, **kw):
+        self.rejects.append((a, kw))
+
+    def state(self, *a, **kw):
+        pass
+
+
+class Pred2Tests(unittest.TestCase):
+    """10-5 案例形状（价位原样）：前低 4166.015 → 顶 4227.53 → 下跌笔 D 破前低至
+    4125.275 → 反弹。"""
+
+    def setUp(self):
+        closes = [100 + i for i in range(30)]
+        self.engine = mk_engine(bars_from_closes(0, closes), pred2_on=True)
+        self.t = lambda i: i * 900
+        self._set_view()
+
+    def _set_view(self, *tail):
+        base = [
+            _bi("down", self.t(0), 4170.0, self.t(1), 4166.015),   # D_prev（前低）
+            _bi("up", self.t(1), 4166.015, self.t(2), 4227.53),
+            _bi("down", self.t(2), 4227.53, self.t(3), 4125.275),  # D（破前低）
+        ]
+        self.engine._structure_bis = {"3": base + list(tail)}
+
+    def test_default_off_returns_none(self):
+        eng = mk_engine(bars_from_closes(0, [100 + i for i in range(30)]))
+        eng._structure_bis = self.engine._structure_bis
+        self.assertEqual(eng._fx_pred2_points("3"), (None, None))
+
+    def test_forming_enough_drifting_anchor(self):
+        # 相位1：反弹 forming 且 enough → 锚=当前极值；延伸 → 漂移上移
+        self._set_view(_bi("up", self.t(3), 4125.275, self.t(4), 4149.9,
+                           _forming=True, enough=True))
+        buy, sell = self.engine._fx_pred2_points("3")
+        self.assertIsNone(buy)
+        self.assertEqual(sell, {"type": "2卖", "time": self.t(4), "price": 4149.9,
+                                "_prov": True, "_segStart": self.t(2)})
+        self._set_view(_bi("up", self.t(3), 4125.275, self.t(5), 4163.375,
+                           _forming=True, enough=True))
+        _, sell = self.engine._fx_pred2_points("3")
+        self.assertEqual((sell["time"], sell["price"]), (self.t(5), 4163.375))
+
+    def test_forming_not_enough_hidden(self):
+        # 反弹未够笔（<5 合并块）→ 不可见（10-7 19:30 案例）
+        self._set_view(_bi("up", self.t(3), 4125.275, self.t(4), 4149.9,
+                           _forming=True, enough=False))
+        self.assertEqual(self.engine._fx_pred2_points("3"), (None, None))
+
+    def test_confirmed_up_phase2_fixed_anchor(self):
+        # 相位2：反弹笔已确认 → 锚固定；其后 forming 下跌不改变锚（10-5 10:15 案例）
+        self._set_view(_bi("up", self.t(3), 4125.275, self.t(4), 4163.375),
+                       _bi("down", self.t(4), 4163.375, self.t(5), 4152.7,
+                           _forming=True, enough=True))
+        _, sell = self.engine._fx_pred2_points("3")
+        self.assertEqual((sell["time"], sell["price"]), (self.t(4), 4163.375))
+
+    def test_reclaim_kills_permanently(self):
+        # 收复前低（≥4166.015）→ 一次性判死；此后再回落也不复活
+        self._set_view(_bi("up", self.t(3), 4125.275, self.t(4), 4170.0),
+                       _bi("down", self.t(4), 4170.0, self.t(5), 4150.0),
+                       _bi("up", self.t(5), 4150.0, self.t(6), 4155.0))
+        self.assertIsNone(self.engine._fx_pred2_points("3")[1])
+
+    def test_no_break_no_context(self):
+        # D 未破前低 → 无上下文
+        self.engine._structure_bis = {"3": [
+            _bi("down", self.t(0), 4170.0, self.t(1), 4166.015),
+            _bi("up", self.t(1), 4166.015, self.t(2), 4227.53),
+            _bi("down", self.t(2), 4227.53, self.t(3), 4170.0),   # 未破
+        ]}
+        self.assertIsNone(self.engine._fx_pred2_points("3")[1])
+
+    def test_newer_down_resupersedes_context(self):
+        # 更近确认下跌笔 D2 取代 D：D2 也破其前低（4124.75<4125.275），但其后
+        # 反弹已收复 D2 前低（4133>4125.275）→ 判死（破位失败不预判）
+        self._set_view(_bi("up", self.t(3), 4125.275, self.t(4), 4163.375),
+                       _bi("down", self.t(4), 4163.375, self.t(5), 4124.75),
+                       _bi("up", self.t(5), 4124.75, self.t(6), 4133.615,
+                           _forming=True, enough=True))
+        self.assertIsNone(self.engine._fx_pred2_points("3")[1])
+        # 反弹仍在 D2 前低之下（未收复）→ 上下文换锚生效
+        self._set_view(_bi("up", self.t(3), 4125.275, self.t(4), 4163.375),
+                       _bi("down", self.t(4), 4163.375, self.t(5), 4124.75),
+                       _bi("up", self.t(5), 4124.75, self.t(6), 4125.0,
+                           _forming=True, enough=True))
+        _, sell = self.engine._fx_pred2_points("3")
+        self.assertEqual((sell["time"], sell["price"]), (self.t(6), 4125.0))
+
+    def test_buy_side_symmetric(self):
+        # 买入侧：上涨笔 U 突破前高（4227.53>4170）→ 回调确认笔终点 = 预判2买
+        self.engine._structure_bis = {"3": [
+            _bi("up", self.t(0), 4125.275, self.t(1), 4170.0),     # U_prev（前高）
+            _bi("down", self.t(1), 4170.0, self.t(2), 4150.0),
+            _bi("up", self.t(2), 4150.0, self.t(3), 4227.53),      # U（破前高）
+            _bi("down", self.t(3), 4227.53, self.t(4), 4190.0),
+        ]}
+        buy, sell = self.engine._fx_pred2_points("3")
+        self.assertIsNone(sell)
+        self.assertEqual((buy["type"], buy["time"], buy["price"]),
+                         ("2买", self.t(4), 4190.0))
+
+    def test_merge_point_rules(self):
+        real = {"type": "类2卖", "time": 100, "price": 1.0}
+        prov = {"type": "2卖", "time": 200, "price": 2.0, "_prov": True}
+        self.assertIs(FxMaEngine._fx_merge_point(real, None), real)
+        self.assertIs(FxMaEngine._fx_merge_point(None, prov), prov)
+        self.assertIs(FxMaEngine._fx_merge_point(real, prov), prov)        # 预判更新
+        same = {"type": "2卖", "time": 100, "price": 1.0}
+        self.assertIs(FxMaEngine._fx_merge_point(real, same), real)        # 同刻真点接管
+        older = {"type": "2卖", "time": 50, "price": 1.0}
+        self.assertIs(FxMaEngine._fx_merge_point(real, older), real)       # 真点更新
+
+    def test_collect_prov_signal_and_dedup(self):
+        # 全条件停用 + 预判2卖注入 → 当拍触发，pred2 标记齐备；再评不重复
+        closes = signal_bars()
+        bars = bars_from_closes(0, closes)
+        eng = mk_engine(bars, pred2_on=True, strong_fx_on=False, ma_on=False,
+                        ma_stand_on=False, point_valid_bars=0)
+        for b in bars:
+            eng._advance_cut(b["time"] + SEC3)
+        prov = {"type": "2卖", "time": bars[len(bars) // 2]["time"],
+                "price": closes[-1] + 3.0, "_prov": True, "_segStart": 0}
+        t_end = bars[-1]["time"] + SEC3
+        st = eng._fx_init_state()
+        with patch.object(FxMaEngine, "_fx_sync_ma", lambda self, P: True), \
+             patch.object(FxMaEngine, "_fx_latest_points", lambda self, P: (None, None)), \
+             patch.object(FxMaEngine, "_fx_pred2_points", lambda self, P: (None, prov)):
+            sigs = eng._fx_collect(st["allSignals"], st["stats"], st["fired"], t_end,
+                                   pred2=st["pred2"])
+            self.assertEqual(len(sigs), 1)
+            s = sigs[0]
+            self.assertEqual(s["strategyKey"], "fx2Sell")
+            self.assertEqual(s["pointType"], "2卖")           # 原标签（兼容）
+            self.assertTrue(s["pred2"])                       # 预判旗标
+            self.assertIn("预判", s["strategyLabel"])
+            self.assertTrue(s["signalNote"].startswith("预判｜"))
+            self.assertEqual(st["pred2"]["3"]["sell"]["time"], prov["time"])
+            # 再评：fired 键 (P,'2卖',time) 已落 → 不双发
+            self.assertEqual(eng._fx_collect(st["allSignals"], st["stats"],
+                                             st["fired"], t_end + SEC3,
+                                             pred2=st["pred2"]), [])
+
+    def test_prov_disappearance_logged_once(self):
+        # 预判消失（收复/重算）→ fx_prov_invalidated 一次性落盘（按旧锚去重）
+        closes = signal_bars()
+        bars = bars_from_closes(0, closes)
+        eng = mk_engine(bars, pred2_on=True, strong_fx_on=False, ma_on=False,
+                        ma_stand_on=False)
+        for b in bars:
+            eng._advance_cut(b["time"] + SEC3)
+        jr = _FakeJournal()
+        eng._journal = jr
+        prov = {"type": "2卖", "time": bars[len(bars) // 2]["time"],
+                "price": closes[-1] + 3.0, "_prov": True, "_segStart": 0}
+        t_end = bars[-1]["time"] + SEC3
+        st = eng._fx_init_state()
+        with patch.object(FxMaEngine, "_fx_sync_ma", lambda self, P: True), \
+             patch.object(FxMaEngine, "_fx_latest_points", lambda self, P: (None, None)), \
+             patch.object(FxMaEngine, "_fx_pred2_points", lambda self, P: (None, prov)):
+            eng._fx_collect(st["allSignals"], st["stats"], st["fired"], t_end,
+                            pred2=st["pred2"])
+        with patch.object(FxMaEngine, "_fx_sync_ma", lambda self, P: True), \
+             patch.object(FxMaEngine, "_fx_latest_points", lambda self, P: (None, None)), \
+             patch.object(FxMaEngine, "_fx_pred2_points", lambda self, P: (None, None)):
+            eng._fx_collect(st["allSignals"], st["stats"], st["fired"], t_end + SEC3,
+                            pred2=st["pred2"])
+            eng._fx_collect(st["allSignals"], st["stats"], st["fired"], t_end + 2 * SEC3,
+                            pred2=st["pred2"])
+        invalid = [r for r in jr.rejects if r[0][1] == "fx_prov_invalidated"]
+        self.assertEqual(len(invalid), 1)
+        self.assertEqual(invalid[0][0][3], prov["time"])       # segStart=旧锚时间
+        self.assertEqual(invalid[0][1].get("ptType"), "2卖")
+
+    def test_off_keeps_collect_signature_compatible(self):
+        # pred2On 关 + 旧签名调用（不传 pred2）→ 行为不变（既有调用/测试兼容）
+        closes = signal_bars()
+        bars = bars_from_closes(0, closes)
+        eng = mk_engine(bars)
+        for b in bars:
+            eng._advance_cut(b["time"] + SEC3)
+        st = eng._fx_init_state()
+        self.assertEqual(eng._fx_collect(st["allSignals"], st["stats"],
+                                         st["fired"], bars[-1]["time"] + SEC3), [])
+
+
+# ============================================================
+# 增量分型批处理窗口（2026-10-10 吞笔修复：updateFractalsTail since= 参数）
+# ============================================================
+
+class IncrementalFractalWindowTests(unittest.TestCase):
+    """fine=15m 驱动、3m 每拍 5 根——修复前 [old-2, n-2) 内部分型被永久跳过
+    （10-5 早盘吞笔案例：上涨段不拆笔、顶背驰无参照段）。修复后增量分型须与
+    findFractals 全量逐位一致（身份键；dict 上的 macdCross/macdRaw 注释键除外）。"""
+
+    @staticmethod
+    def _identity(fractals):
+        return [(f["mergedIdx"], f["type"], f["high"], f["low"], f["time"])
+                for f in fractals]
+
+    def test_chunked_feed_matches_full_fractals(self):
+        import random
+        from py_chain.chan_core import findFractals
+        rng = random.Random(20261010)
+        # 3m 随机游走（方向感知影线），每 5 根聚成 1 根 15m
+        n3 = 320
+        closes = [4000.0]
+        for _ in range(n3 - 1):
+            closes.append(closes[-1] + rng.uniform(-3.0, 3.0))
+        bars3 = bars_from_closes(0, closes)
+        bars15 = []
+        for i in range(0, n3, 5):
+            seg = bars3[i:i + 5]
+            bars15.append(bar(seg[0]["time"], seg[0]["open"],
+                              max(b["high"] for b in seg), min(b["low"] for b in seg),
+                              seg[-1]["close"]))
+        eng = FxMaEngine({"15": bars15}, entry_res="15")
+        # 引擎 periods 固定含 "3"：补 3m 数据源（构造期缺省为空列表；结构同
+        # __init__ 归一化 {"_list","_times"}，_advance_cut 按 cut 差额取新K——
+        # fine=15 时 3m 每拍并入 5 根，即吞笔 bug 的喂入形态）
+        eng.bars["3"] = {"_list": bars3, "_times": [b["time"] for b in bars3]}
+        eng._times["3"] = eng.bars["3"]["_times"]
+        sec15 = 900
+        for b in bars15:
+            eng._advance_cut(b["time"] + sec15)
+            self.assertEqual(self._identity(eng._fractals["3"]),
+                             self._identity(findFractals(eng._merged["3"])),
+                             msg=f"3m 分型增量≠全量 @拍 {b['time']}")
+            self.assertEqual(self._identity(eng._fractals["15"]),
+                             self._identity(findFractals(eng._merged["15"])))
+        # 笔层不变量：增量 bis 与强制重同步（批量口径）一致（末笔延伸状态也重建）
+        before = [(x["type"], x["startTime"], x["startPrice"],
+                   x["endTime"], x["endPrice"]) for x in eng._bis["3"]]
+        eng._resync_bis("3")
+        after = [(x["type"], x["startTime"], x["startPrice"],
+                  x["endTime"], x["endPrice"]) for x in eng._bis["3"]]
+        self.assertEqual(before, after)
+
+
 if __name__ == "__main__":
     unittest.main()

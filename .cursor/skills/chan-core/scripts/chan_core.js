@@ -39,6 +39,12 @@ const CHAN_CFG = {
   // 中心K仍用压平结构价（压平语义不变），只修邻侧；不含压平K的块零影响。
   // 与 py_chain/chan_core.py CHAN_CFG.fractalSideRealWick 同步。
   fractalSideRealWick: false,
+  // 端点内部极值恢复（2026-10-09，默认开）：fixBiExtremes 除「终点分型中心及其后」外，
+  // 增加「笔内部块」（startIdx+1..endIdx-1）后向扫描——被包含合并吞掉的更极端真低/真高
+  // （如 60m 2026-10-07 20:00 插针 4066.53 被升序合并吃掉后底分型落在 21:00 4082.42）
+  // 恢复为笔端点价/时。只改端点，不动合并结构与分型；关=旧行为。
+  // 与 py_chain/chan_core.py CHAN_CFG.endInnerRecoverOn 同步。
+  endInnerRecoverOn: true,
   // 顶底分形不能包含（单根长K豁免）：该周期单根K线振幅（高-低）≥ 对应点数时，
   // 不参与分型终点侧三根的反向贯穿检查。按周期取值（wideBarPointsOf）；0=该周期不豁免。
   // wideBarOn=false 时所有周期一律不豁免（wideBarPointsOf 直接返回 0）。
@@ -1011,17 +1017,24 @@ function fixBiExtremes(bis, merged) {
     // 不含下一笔终点分型（避免笔退化）；顶/底分支各自决定是否扫本笔端点分型中心：
     const toIdx = next.endIdx - 1;
     let extreme = null;
+    // 内部块后向扫描（endInnerRecoverOn，2026-10-09，与 py_chain/chan_core.py 同步）：
+    // 被包含合并吞掉的更极端真低/真高也可能藏在终点分型**之前**的笔内部块（例：60m
+    // 2026-10-07 19:00 被 20:00 插针K线包含、升序合并取高低后 4066.53 从结构消失，
+    // 底分型落在 21:00 4082.42）——笔端点应为笔区间真实极值。内部块
+    // （startIdx+1..endIdx-1）的原始K线必然属于本笔区间（早于本笔的老蜡烛只可能被吞进
+    // 分型中心块链内，见中心注释），可信任 rawLow/_origLow。
+    const innerOn = CHAN_CFG.endInnerRecoverOn !== false;
     if (b.type === "down") {
       // 终点是底：从 b.endIdx 起扫（含分型中心）——中心合并K线可能因包含合并/长下影
       // 压平把更低的真低藏在自身 low 之下（如 1h 9-2 10:00 底分型中心吞并 11:00
       // 插针 bar，_origLow=4282.625 < 分型价 4287.27），仅扫 endIdx 之后会漏掉。
       // 若真低恰在分型中心上（k === b.endIdx），只改价/时间、idx 不动，笔结构无损。
-      const k0 = b.endIdx;
-      if (k0 > toIdx) continue;
+      if (b.endIdx > toIdx) continue;
       // 候选真低 = _origLow（markWickBars 压平的长下影原低）或 rawLow 原值
       // （探底插针低点允许恢复为端点：60m 7-29 09:00 4010.41 被包含合并吞掉
       //   —— 走 rawLow；1h 9-2 4282.625 被长下影压平 —— 走 _origLow；
       //   240 7-29 底 4009.39 在本次修复后进一步下移到压平真低 3996.055）
+      const k0 = innerOn ? b.startIdx + 1 : b.endIdx;
       for (let k = k0; k <= toIdx; k++) {
         const mk = merged[k];
         // 分型中心 bar（k === b.endIdx）只认 _origLow：中心可能因向上合并把早于
@@ -1045,12 +1058,18 @@ function fixBiExtremes(bis, merged) {
     } else {
       // 终点是顶：保持 endIdx+1 起扫（上影压平不产生 _origHigh，分型中心自身即端点
       // 价，无同类需求；避免影响 4443.715 类历史验收结构）
-      const k0 = b.endIdx + 1;
-      if (k0 > toIdx) continue;
+      let k0 = b.endIdx + 1;
+      if (k0 > toIdx) {
+        if (!innerOn) continue;
+        k0 = b.startIdx + 1; // 相邻分型（toIdx==endIdx）时内部块仍可扫
+      } else if (innerOn) {
+        k0 = b.startIdx + 1;
+      }
       // 被包含合并掩盖的更高真实高点（rawHigh 原值；9-3 16:00 类插针已被
       // markWickBars 压平，其影线价不再出现在 rawHigh 中，不会把 17:00 顶
       // 4442.04 平移回插针价）
       for (let k = k0; k <= toIdx; k++) {
+        if (k === b.endIdx) continue; // 分型中心自身 high 即端点价，保持原语义不扫
         const mk = merged[k];
         if (mk.rawHigh === undefined || mk.rawHigh <= mk.high) continue; // 未被掩盖
         if (mk.rawHigh > b.endPrice + eps && (!extreme || mk.rawHigh > extreme.price)) {

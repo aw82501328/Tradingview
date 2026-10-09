@@ -184,7 +184,8 @@ class ParamCenterTests(unittest.TestCase):
                           "reboundAngleRef": trading_plan.REBOUND_ANGLE_REF,
                           "prevHighNearPts": trading_plan.PREV_HIGH_NEAR_PTS,
                           "secondNearPts": trading_plan.SECOND_NEAR_PTS,
-                          "thirdStrongTrend": trading_plan.THIRD_STRONG_TREND})
+                          "thirdStrongTrend": trading_plan.THIRD_STRONG_TREND,
+                          "weakTierByOrigin": trading_plan.WEAK_TIER_BY_ORIGIN})
 
     def test_plan_cfg_changes_range_verdict(self):
         # 震荡阈值收得很紧（kMult=0.5 必不满足）→ 原本判震荡的窗口变趋势；

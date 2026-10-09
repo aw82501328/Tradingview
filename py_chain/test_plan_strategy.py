@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
-"""交易计划三档策略映射单测（2026-09-24 口径）：
-strategyOf 三档映射（强档=过左高/左低不背驰；中间档仅 2买/2卖；3类点强档开关）、
-classifySecond 4 态分类（含 prevHighNearPts/secondNearPts 容差与 cfg 覆盖）、
-mark_entry.entryStrategyOf 新旧 10 条文案 → 6 个进场 key 的映射。
+"""交易计划三档策略映射单测（2026-09-24 口径 + 2026-10-09 弱档原始点分流）：
+strategyOf 三档映射（强档=过左高/左低不背驰；中间档仅 2买/2卖；3类点强档开关；
+弱档未过原始点/原始底 → 空头多·等2买 / 多头空·等2卖）、
+classifySecond 4 态 + 弱档分流 2 哨兵分类（含 prevHighNearPts/secondNearPts/weakTierByOrigin
+容差与 cfg 覆盖）、mark_entry.entryStrategyOf 12 条文案 → 进场 key 的映射、
+mark_entry.strategyExtraOk wait2BuyBear/wait2SellBear 抬低/压低条件。
 fixtures：macdArr 为空时 isBiDiverge 视为不背驰（与 JS 版一致），强档只需过左高/左低。"""
 import unittest
 
@@ -50,22 +52,69 @@ class ClassifySecondTests(unittest.TestCase):
                          "回到2买点")
 
     def test_back_to_second_point_takes_latest_pullback(self):
-        # 多笔回调时取最近一笔：第一笔回到 97（附近）但最近一笔 101（差 6 >5）→ 其他；
-        # 最近一笔 98（差 3）→ 回到2买点
+        # 多笔回调时取最近一笔：第一笔回到 97（附近）但最近一笔 101（差 6 >5）→ 弱档；
+        # 最近一笔 98（差 3）→ 回到2买点。（关掉弱档分流，专注中间档取最近一笔语义）
         base = [bi("up", 0, 10, 100, 120), bi("down", 10, 20, 120, 95), bi("up", 20, 30, 95, 104)]
         late_far = base + [bi("down", 30, 40, 104, 97), bi("up", 40, 50, 97, 106), bi("down", 50, 60, 106, 101)]
-        self.assertEqual(trading_plan.classifySecond(late_far, [], {"type": "2买", "time": 20, "price": 95}),
+        self.assertEqual(trading_plan.classifySecond(late_far, [], {"type": "2买", "time": 20, "price": 95},
+                                                     {"weakTierByOrigin": False}),
                          "其他")
         late_near = base + [bi("down", 30, 40, 104, 97), bi("up", 40, 50, 97, 106), bi("down", 50, 60, 106, 98)]
         self.assertEqual(trading_plan.classifySecond(late_near, [], {"type": "2买", "time": 20, "price": 95}),
                          "回到2买点")
 
-    def test_weak_when_far_and_no_retest(self):
-        # after 104 距前高 120 太远；回调 101 距 95 差 6 >5 → 其他
+    def test_weak_split_origin_is_dominating_earlier_top(self):
+        # 原始点=回溯中第一个支配其后所有反弹高的更早顶：130@10（其后反弹顶 110@30 均更低）
+        # → 原始点 130 而非最近顶 110；点后反弹 104 < 130 → 未过原始点
+        bis = [bi("up", 0, 10, 100, 130), bi("down", 10, 20, 130, 100),
+               bi("up", 20, 30, 100, 110), bi("down", 30, 40, 110, 95),
+               bi("up", 40, 50, 95, 104)]
+        self.assertEqual(trading_plan.classifySecond(bis, [], {"type": "2买", "time": 40, "price": 95}),
+                         "未过原始点")
+
+    def test_weak_split_flips_back_once_origin_passed(self):
+        # 后续某反弹顶越过原始点（125 > 120）→ 翻回旧弱档「其他」
         bis = [bi("up", 0, 10, 100, 120), bi("down", 10, 20, 120, 95),
-               bi("up", 20, 30, 95, 104), bi("down", 30, 40, 104, 101)]
+               bi("up", 20, 30, 95, 104), bi("down", 30, 40, 104, 101),
+               bi("up", 40, 50, 101, 125)]
         self.assertEqual(trading_plan.classifySecond(bis, [], {"type": "2买", "time": 20, "price": 95}),
                          "其他")
+
+    def test_weak_split_only_second_class_points(self):
+        # 3买 不产生哨兵（原始点分流仅 2买/类2买/2卖/类2卖）：同结构下仍「其他」→ 弱档旧映射
+        bis = [bi("up", 0, 10, 100, 120), bi("down", 10, 20, 120, 95),
+               bi("up", 20, 30, 95, 104), bi("down", 30, 40, 104, 101)]
+        self.assertEqual(trading_plan.classifySecond(bis, [], {"type": "3买", "time": 20, "price": 95}),
+                         "其他")
+
+    def test_weak_split_sell_side_mirror(self):
+        # 2卖 弱档（下跌 108 距前低 100 差 8 >5；反弹 112 距 125 差 13 >5）且
+        # 点后所有低点（108）未跌破上涨原始点（100）→ 卖侧分流。
+        # after（下跌笔）已确认 → 够笔 → 卖点作废转弱二买哨兵；
+        # after 形成中且 mergedCount<5 → 未够笔 → 维持 多头空/等2卖 档。
+        bis = [bi("down", 0, 10, 120, 100), bi("up", 10, 20, 100, 125),
+               bi("down", 20, 30, 125, 108), bi("up", 30, 40, 108, 112)]
+        forming = [bi("down", 0, 10, 120, 100), bi("up", 10, 20, 100, 125),
+                   dict(bi("down", 20, 30, 125, 108), _forming=True, mergedCount=3)]
+        p = {"type": "2卖", "time": 20, "price": 125}
+        self.assertEqual(trading_plan.classifySecond(bis, [], p), "未过原始底够笔")
+        self.assertEqual(trading_plan.classifySecond(forming, [], p), "未过原始底")
+        self.assertEqual(trading_plan.classifySecond(bis, [], p, {"weakTierByOrigin": False}), "其他")
+        # 够笔作废 → 弱二买档（空头多/等待低点附近的2买）
+        out = trading_plan.strategyOf("60", "类2卖", "", "", "未过原始底够笔")
+        self.assertEqual((out["direction"], out["strategy"]), ("空头多", "等待低点附近的2买"))
+        out = trading_plan.strategyOf("60", "2卖", "", "", "未过原始底够笔")
+        self.assertEqual((out["direction"], out["strategy"]), ("空头多", "等待低点附近的2买"))
+
+    def test_weak_when_far_and_no_retest(self):
+        # after 104 距前高 120 太远；回调 101 距 95 差 6 >5 → 弱档。
+        # 2026-10-09 弱档原始点分流默认开：反弹高点 104/106 均未过原始点 120 → 「未过原始点」；
+        # 关掉开关 → 旧「其他」。
+        bis = [bi("up", 0, 10, 100, 120), bi("down", 10, 20, 120, 95),
+               bi("up", 20, 30, 95, 104), bi("down", 30, 40, 104, 101)]
+        p = {"type": "2买", "time": 20, "price": 95}
+        self.assertEqual(trading_plan.classifySecond(bis, [], p), "未过原始点")
+        self.assertEqual(trading_plan.classifySecond(bis, [], p, {"weakTierByOrigin": False}), "其他")
 
     def test_cfg_overrides_tolerances(self):
         # 同一结构：prevHighNearPts=20 → 前高附近；secondNearPts=20 → 回到2买点
@@ -122,6 +171,15 @@ class StrategyOfTests(unittest.TestCase):
         out = self._strategy("2买", "其他")
         self.assertEqual((out["direction"], out["strategy"]), ("多头空", "等待高点附近的一卖"))
 
+    def test_second_buy_weak_origin_split_tier(self):
+        # 2026-10-09 弱档原始点分流：未过原始点 → 空头多/等待低点附近的2买（2买与类2买同）
+        for type_ in ("2买", "类2买"):
+            out = self._strategy(type_, "未过原始点")
+            self.assertEqual((out["direction"], out["strategy"]), ("空头多", "等待低点附近的2买"))
+        for type_ in ("2卖", "类2卖"):
+            out = self._strategy(type_, "未过原始底")
+            self.assertEqual((out["direction"], out["strategy"]), ("多头空", "等待高点附近的2卖"))
+
     def test_quasi_second_buy_skips_middle_tier(self):
         # 类2买不走中间档：中档分类 → 弱档；强档照常
         for cls in ("前高附近", "回到2买点"):
@@ -173,6 +231,8 @@ class EntryStrategyMappingTests(unittest.TestCase):
             "等待回调后的类2买点": ("waitLike2Buy", "long"),  # 2买 中间档
             "等待反弹后的3卖点": ("wait3Sell", "short"),      # 2卖/类2卖 强档
             "等待反弹后的类2卖点": ("waitLike2Sell", "short"),  # 2卖 中间档
+            "等待低点附近的2买": ("wait2BuyBear", "long"),    # 2买/类2买 弱档·未过原始点（2026-10-09）
+            "等待高点附近的2卖": ("wait2SellBear", "short"),  # 2卖/类2卖 弱档·未过原始底（2026-10-09）
         }
         for text, (key, direction) in cases.items():
             s = mark_entry.entryStrategyOf(text)
@@ -181,6 +241,31 @@ class EntryStrategyMappingTests(unittest.TestCase):
         # 观望类文案不产生进场策略
         self.assertIsNone(mark_entry.entryStrategyOf("震荡整理，观望等待方向选择"))
         self.assertIsNone(mark_entry.entryStrategyOf("趋势中无匹配买卖点"))
+
+
+class StrategyExtraOkTests(unittest.TestCase):
+    """wait2BuyBear/wait2SellBear 专属条件（2026-10-09）：抬低/压低——
+    末下跌（上涨）笔终点不破（不过）前一根同向笔终点；其余键沿用既有口径。"""
+
+    def test_wait2_buy_bear_requires_higher_low(self):
+        # 抬低：末 down 笔终点 96 > 前 down 笔终点 92 → 通过；破前低 98 < 92？构造两例
+        higher = [bi("down", 0, 10, 120, 92), bi("up", 10, 20, 92, 110),
+                  bi("down", 20, 30, 110, 96)]
+        self.assertIsNone(mark_entry.strategyExtraOk("wait2BuyBear", higher, [], [], 3600))
+        broke = [bi("down", 0, 10, 120, 92), bi("up", 10, 20, 92, 110),
+                 bi("down", 20, 30, 110, 90)]
+        self.assertEqual(mark_entry.strategyExtraOk("wait2BuyBear", broke, [], [], 3600),
+                         "回调破前低，非抬低2买")
+
+    def test_wait2_sell_bear_requires_lower_high(self):
+        # 压低：末 up 笔终点 108 < 前 up 笔终点 115 → 通过；过前高 118 → 拒
+        lower = [bi("up", 0, 10, 92, 115), bi("down", 10, 20, 115, 100),
+                 bi("up", 20, 30, 100, 108)]
+        self.assertIsNone(mark_entry.strategyExtraOk("wait2SellBear", lower, [], [], 3600))
+        broke = [bi("up", 0, 10, 92, 115), bi("down", 10, 20, 115, 100),
+                 bi("up", 20, 30, 100, 118)]
+        self.assertEqual(mark_entry.strategyExtraOk("wait2SellBear", broke, [], [], 3600),
+                         "反弹过前高，非压低2卖")
 
 
 if __name__ == "__main__":

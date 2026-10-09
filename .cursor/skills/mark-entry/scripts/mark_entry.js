@@ -427,6 +427,7 @@ function sinkChainConfirm(periodData, X, pTime, pDir) {
  * （方向=观望）等不产生进场策略，返回 null。
  * waitBuy/waitSell 仅指「新买点/新卖点」（3类点强档，thirdStrongTrend 开）；
  * 4 个新键与 waitBuy/waitSell 同校验（够笔+以下级别背驰+支阻位附近，无专属条件）。
+ * 2026-10-09 弱档原始点分流新增 2 键：wait2BuyBear/wait2SellBear（专属条件=抬低/压低），共 12 键。
  * @param {string} planStrategy 交易计划 strategy 文本
  * @returns {null|{key:string, direction:string, label:string}} key 策略标识、direction long/short
  */
@@ -452,6 +453,10 @@ function entryStrategyOf(planStrategy) {
       return { key: "wait3Sell", direction: "short", label: "等待反弹后3卖点" };
     case "等待反弹后的类2卖点": // 状态=2卖+前低附近/回到2卖点（中间档）
       return { key: "waitLike2Sell", direction: "short", label: "等待反弹后类2卖点" };
+    case "等待低点附近的2买": // 状态=2买/类2买+未过原始点（弱档分流，2026-10-09）
+      return { key: "wait2BuyBear", direction: "long", label: "等待低点附近的2买" };
+    case "等待高点附近的2卖": // 状态=2卖/类2卖+未过原始底（弱档分流，2026-10-09）
+      return { key: "wait2SellBear", direction: "short", label: "等待高点附近的2卖" };
     default:
       return null;
   }
@@ -674,6 +679,15 @@ function evaluateEntry(ctx, strategy) {
     case "wait1Buy":
       if (!brokePrevLow(bis)) return { ok: false, reason: "未够笔且过低点" };
       if (!zsExitWeak(bis, upperBis, macdArr, barSec, ZS_WEAK_RATIO, "long")) return { ok: false, reason: "出中枢力度未变弱" };
+      break;
+    case "wait2BuyBear":
+      // 空头结构2买（2026-10-09 弱档原始点分流）：只买抬低回调——末下跌笔终点
+      // 不破前一根下跌笔终点；破前低属1买语义，由 空头多/等一买 档负责。
+      if (brokePrevLow(bis)) return { ok: false, reason: "回调破前低，非抬低2买" };
+      break;
+    case "wait2SellBear":
+      // 多头结构2卖（对称）：只卖压低反弹——末上涨笔终点不过前一根上涨笔终点。
+      if (brokePrevHigh(bis)) return { ok: false, reason: "反弹过前高，非压低2卖" };
       break;
     case "waitBuy":
     case "waitSell":

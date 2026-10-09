@@ -736,6 +736,10 @@ class BacktestEngine:
         self._bi_inc = {res: BiIncBuilder(res) for res in self.periods}
         # 数据阶段记录的分型变化标记（_append_bars 写、_rebuild_bis_inc 消费）
         self._frac_changed = {res: False for res in self.periods}
+        # 本拍分型首个变更索引（_append_bars 写、_rebuild_bis_inc 消费后清空；
+        # 批处理修复 2026-10-10：一拍多根K时窗口内找回的分型位于 n-2 之下，
+        # bi_inc 热区须从这里起折叠，否则又被冻结前缀吞掉）
+        self._frac_new_from = {res: None for res in self.periods}
         # bars 前缀缓存：cut 只增不减时原地 extend，避免每次链路重算 O(cut) 切片拷贝
         self._bars_prefix = {res: [] for res in self.periods}
         self._bars_prefix_cut = {res: 0 for res in self.periods}
@@ -913,6 +917,7 @@ class BacktestEngine:
         direction = self._merge_dir[res]
         macd = self._macd[res]
         atr = self._atr[res]
+        old_mlen = len(merged)
         for bar in new_bars:
             p = self._wick_process(res, bar)
             n0 = len(merged)
@@ -929,15 +934,29 @@ class BacktestEngine:
             self._macd_times[res].append(bar["time"])
             atr.append(bar)
         self._merge_dir[res] = direction
-        # updateFractalsTail 原地更新（返回同一列表）：先捕获旧长度/末分型再判变化
+        # updateFractalsTail 原地更新（返回同一列表）：先捕获旧长度/末分型再判变化。
+        # since=本拍并入前的 merged 长度（批处理修复 2026-10-10）：一拍并入多根细周期K
+        # （fine=15m 时 3m 每拍 5 根）会让 [old-2, n-2) 成为内部位置——只重算最终
+        # n-2 会把窗口内分型永久跳过（10-5 早盘吞笔案例：上涨段不拆笔、顶背驰无
+        # 参照段），传 since 后窗口内位置全部重算，与 findFractals 逐位一致。
         old_f = self._fractals[res]
         old_len = len(old_f)
         old_last = old_f[-1] if old_f else None
-        new_f = updateFractalsTail(old_f, merged)
+        lo = max(1, min(old_mlen, len(merged)) - 2)
+        changed_from = old_len
+        while changed_from > 0 and old_f[changed_from - 1]["mergedIdx"] >= lo:
+            changed_from -= 1
+        new_f = updateFractalsTail(old_f, merged, since=old_mlen)
         self._fractals[res] = new_f
-        # 分型是否变化：由后续 _rebuild_bis_inc（外→内顺序）消费，锁端点取当时的上级笔
+        # 首个变更分型索引（本拍弹过旧尾部分型的位置）：bi_inc 热区推导用，
+        # _rebuild_bis_inc 消费后清空（None=回退旧 n-2 推导）
+        self._frac_new_from[res] = changed_from
+        # 分型是否变化：由后续 _rebuild_bis_inc（外→内顺序）消费，锁端点取当时的上级笔；
+        # changed_from < old_len = 窗口内有实际变更（防 len/末元素巧合相同时漏触发重建）
         self._frac_changed[res] = bool(
-            len(new_f) != old_len or (new_f and old_last is not None and new_f[-1] != old_last))
+            len(new_f) != old_len
+            or (new_f and old_last is not None and new_f[-1] != old_last)
+            or changed_from < old_len)
         return True
 
     def _upper_res_of(self, res):
@@ -970,12 +989,17 @@ class BacktestEngine:
         locks = self._locked_pivots_for(res)
         lock_key = tuple((lp["dir"], lp["price"]) for lp in (locks or ()))
         inc = self._bi_inc[res]
+        # 本拍分型首个变更索引（批处理修复：一拍多根K时窗口内分型须进热区）；
+        # 消费即清（后续无新K触发的重建回退 n-2 推导）
+        changed_from = self._frac_new_from.get(res)
+        self._frac_new_from[res] = None
         # 重同步后构建器已失效：下一根即使分型没变，也要全量重建，末根近等才跟得上。
         # 锁端点集变化（上级笔更新）同样要重建——分型没变时锁标记也会重排。
         if bis_changed or (near_double and inc._stale) or lock_key != inc._lock_key:
             self._bis[res] = inc.update(
                 new_f, merged, macd.to_list(), atr.value,
-                nearDouble=near_double, lockedPivots=locks)
+                nearDouble=near_double, lockedPivots=locks,
+                changed_from=changed_from)
         elif near_double and inc.refresh_open(
                 new_f, merged, macd.to_list(), atr.value,
                 nearDouble=True):

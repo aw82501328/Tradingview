@@ -175,7 +175,7 @@ describe("出场规则：stopRefOf（支阻位±滑点/最大止损）", () => {
 });
 
 describe("entryStrategyOf：策略文案 → 进场 key（2026-09-25 起 1:1 拆分）", () => {
-  test("10 条文案 1:1 映射到 10 个进场 key", () => {
+  test("12 条文案 1:1 映射到 12 个进场 key（含 2026-10-09 弱档分流 2 键）", () => {
     const cases = {
       "等待反弹后做2卖": ["wait2Sell", "short"],
       "等待回调后做2买": ["wait2Buy", "long"],
@@ -187,6 +187,8 @@ describe("entryStrategyOf：策略文案 → 进场 key（2026-09-25 起 1:1 拆
       "等待回调后的类2买点": ["waitLike2Buy", "long"],  // 2买 中间档（前高附近/回到2买点）
       "等待反弹后的3卖点": ["wait3Sell", "short"],      // 2卖/类2卖 强档
       "等待反弹后的类2卖点": ["waitLike2Sell", "short"], // 2卖 中间档（前低附近/回到2卖点）
+      "等待低点附近的2买": ["wait2BuyBear", "long"],    // 2买/类2买 弱档·未过原始点（2026-10-09）
+      "等待高点附近的2卖": ["wait2SellBear", "short"],  // 2卖/类2卖 弱档·未过原始底（2026-10-09）
     };
     for (const [text, [key, direction]] of Object.entries(cases)) {
       const s = entryStrategyOf(text);

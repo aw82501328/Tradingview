@@ -14,7 +14,7 @@
  */
 const { describe, test } = require("node:test");
 const assert = require("node:assert/strict");
-const { maSeries, strongFxAfter, scanPeriodSignals, applyMutexAndSimulate,
+const { maSeries, strongFxAfter, pred2SideAt, scanPeriodSignals, applyMutexAndSimulate,
         collectBiEnds, parseFibLevels, MODULE_OPTS } =
   require("./fxma_entry.js");
 
@@ -595,5 +595,73 @@ describe("scanPeriodSignals · 次级别/次次级别背驰（opts+lowerCtx 注�
   test("防未来：快照中的未来背驰点（晚于全部评估拍）不计入 → 拦下", () => {
     // t0=13000 → 背驰点 13780 > 末拍 closeT（T(32)+180=5940）：逐拍评估时还不可知
     assert.equal(scanPeriodSignals("3", bars, periodBis, "15", divOn, mkLowerCtx(13000)).length, 0);
+  });
+});
+
+describe("pred2 预判点（与 py _pred2_side 同式；快照回放口径 endTime≤t 前缀）", () => {
+  const T = (i) => i * 900;
+  const bi = (type, st, sp, et, ep, extra = {}) =>
+    ({ type, startTime: st, startPrice: sp, endTime: et, endPrice: ep, ...extra });
+  const base = () => [
+    bi("down", T(0), 4170.0, T(1), 4166.015),      // D_prev（前低）
+    bi("up", T(1), 4166.015, T(2), 4227.53),
+    bi("down", T(2), 4227.53, T(3), 4125.275),     // D（破前低）
+  ];
+
+  test("相位2 确认反弹终点=锚；反弹确认前/未够笔不可见；forming 够笔=相位1 漂移锚", () => {
+    const bis = [...base(), bi("up", T(3), 4125.275, T(8), 4163.375)];
+    assert.deepEqual(pred2SideAt(bis, T(8) + 1, "down", "up", "2卖"),
+                     { type: "2卖", time: T(8), price: 4163.375, _prov: true });
+    assert.equal(pred2SideAt(bis, T(3), "down", "up", "2卖"), null);   // 反弹未出现
+    const notEnough = [...base(), bi("up", T(3), 4125.275, T(8), 4149.9,
+                                     { _forming: true, enough: false })];
+    assert.equal(pred2SideAt(notEnough, T(8) + 1, "down", "up", "2卖"), null);
+    const enough = [...base(), bi("up", T(3), 4125.275, T(8), 4149.9,
+                                  { _forming: true, enough: true })];
+    assert.deepEqual(pred2SideAt(enough, T(8) + 1, "down", "up", "2卖"),
+                     { type: "2卖", time: T(8), price: 4149.9, _prov: true });
+  });
+
+  test("收复前低一次性判死 / 未破前低无上下文 / 买入侧对称", () => {
+    const reclaim = [...base(),
+      bi("up", T(3), 4125.275, T(4), 4170.0),       // 收复前低
+      bi("down", T(4), 4170.0, T(5), 4150.0),
+      bi("up", T(5), 4150.0, T(6), 4155.0)];        // 再回落也不复活
+    assert.equal(pred2SideAt(reclaim, T(6) + 1, "down", "up", "2卖"), null);
+    const noBreak = [bi("down", T(0), 4170.0, T(1), 4166.015),
+                     bi("up", T(1), 4166.015, T(2), 4227.53),
+                     bi("down", T(2), 4227.53, T(3), 4170.0)];
+    assert.equal(pred2SideAt(noBreak, T(3) + 1, "down", "up", "2卖"), null);
+    const buySide = [bi("up", T(0), 4125.275, T(1), 4170.0),
+                     bi("down", T(1), 4170.0, T(2), 4150.0),
+                     bi("up", T(2), 4150.0, T(3), 4227.53),
+                     bi("down", T(3), 4227.53, T(4), 4190.0)];
+    assert.deepEqual(pred2SideAt(buySide, T(4) + 1, "up", "down", "2买"),
+                     { type: "2买", time: T(4), price: 4190.0, _prov: true });
+  });
+
+  test("scanPeriodSignals：pred2On 注入 → 预判点承担尾点并出信号（真点更旧被替换）", () => {
+    // 条件全停（点出现即触发）；上级一条 down 笔（startPrice 高于全部子笔终点）
+    // → 真卖点=更旧的 2卖@T(2)（fallback 不触发：upperBis 非空）；预判 2卖@T(8)
+    // 更新 → 合并后承担尾点。无 pred2On → 只出旧真点。
+    const closes = [];
+    for (let i = 0; i < 14; i++) closes.push(100 - (i % 3) + i * 0.5);
+    const bars = barsFromCloses(0, closes, 900);
+    const periodBis = {
+      "3": [...base(), bi("up", T(3), 4125.275, T(8), 4140.0)],
+      "15": [bi("down", 0 - 900, 4300.0, T(4), 4100.0)],   // 窗口止于 T(4)：反弹脱离真点窗口，预判独占
+    };
+    const off = { ...MODULE_OPTS, strongFxOn: false, maOn: false, maStandOn: false };
+    const sigsOff = scanPeriodSignals("3", bars, periodBis, "15", off);
+    assert.equal(sigsOff.length, 1);
+    assert.equal(sigsOff[0].pointTime, T(2));            // 旧真点（fx2Sell @T(2)）
+    assert.ok(!sigsOff[0].pred2);
+    const sigsOn = scanPeriodSignals("3", bars, periodBis, "15",
+                                     { ...off, pred2On: true });
+    assert.equal(sigsOn.length, 2);
+    assert.ok(!sigsOn[0].pred2 && sigsOn[0].pointTime === T(2));
+    assert.ok(sigsOn[1].pred2 && sigsOn[1].pointTime === T(8));
+    assert.equal(sigsOn[1].strategyKey, "fx2Sell");
+    assert.equal(sigsOn[1].pointPrice, 4140.0);
   });
 });

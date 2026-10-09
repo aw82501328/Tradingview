@@ -121,6 +121,9 @@ FXMA_DEFAULTS = {
     "fibLevels": "0.382,0.5,0.618", # 黄金分割档位（逗号串，各档 0<r<1）
     "fibNearPts": 5.0,              # 黄金分割档位容差（绝对点数）
     "upperDirOn": False,            # 上级周期同向条件开关（独立硬门槛，不参与计票）
+    "pred2On": False,               # 预判2买卖开关：确认下跌/上涨笔破前低/前高后，反弹/回调
+                                    # 一够笔即预判2卖/2买提前入列（本级规则，不依赖上级锚定段；
+                                    # 闸门链照旧——只修点可见性，不改变其余门槛判定）
     "divLowerOn": False,            # 次级别/次次级别背驰条件开关（缠论V1 lowerDiverge 同源；
                                     # 与条件组合互斥——开启=背驰为唯一触发条件，关闭=走条件组合）
     "divLowerWinBars": 1,           # 背驰窗口(根)：候选背驰点不早于点时间−N根本周期K线；1=旧口径（极值边界差容差）
@@ -258,7 +261,7 @@ class FxMaEngine(BacktestEngine):
                  ma_stand1=5, ma_stand2=5,
                  fib_near_on=False,
                  fib_near_levels="0.382,0.5,0.618",
-                 fib_near_pts=5.0, upper_dir_on=False,
+                 fib_near_pts=5.0, upper_dir_on=False, pred2_on=False,
                  div_lower_on=False, div_lower_win_bars=1,
                  strong_fx_on=True, strong_fx_req=True, strong_fx_min_pts=0.0,
                  entry_pick=None,
@@ -295,6 +298,7 @@ class FxMaEngine(BacktestEngine):
         if self.fib_near_pts < 0:
             raise ValueError(f"fibNearPts 须 ≥0（收到 {fib_near_pts}）")
         self.upper_dir_on = bool(upper_dir_on)
+        self.pred2_on = bool(pred2_on)
         # 与条件组合互斥（2026-10-09）：开启=背驰为唯一触发条件（免计票，不过则等待），
         # 关闭=走三选N条件组合；黄金分割/上级同向作为基本硬门槛始终先行拦截
         self.div_lower_on = bool(div_lower_on)
@@ -403,6 +407,7 @@ class FxMaEngine(BacktestEngine):
             fib_near_levels=pm.get("fibLevels", "0.382,0.5,0.618"),
             fib_near_pts=pm.get("fibNearPts", 5.0),
             upper_dir_on=pm.get("upperDirOn", False),
+            pred2_on=pm.get("pred2On", False),
             div_lower_on=pm.get("divLowerOn", False),
             div_lower_win_bars=pm.get("divLowerWinBars", 1),
             strong_fx_on=pm.get("strongFxOn", True),
@@ -483,6 +488,80 @@ class FxMaEngine(BacktestEngine):
         buys, sells = self._fx_all_points(P)
         return (buys[-1] if buys else None, sells[-1] if sells else None)
 
+    # ---------------- pred2 预判点（2026-10-09，默认关） ----------------
+
+    @staticmethod
+    def _fx_state_type(pt):
+        """state 行点类型渲染：预判点加「预判」前缀（仅展示，判定/去重用原标签）。"""
+        if pt is None:
+            return None
+        return f"预判{pt['type']}" if pt.get("_prov") else pt.get("type")
+
+    @staticmethod
+    def _fx_merge_point(real, prov):
+        """尾点合并（pred2On）：预判点时间更新则替换真点；同刻优先真点——真 2卖
+        同锚接管时 fired 键 (P, type, time) 一致，天然去重不双发。"""
+        if prov is None:
+            return real
+        if real is None or prov["time"] > real["time"]:
+            return prov
+        return real
+
+    def _fx_pred2_points(self, P):
+        """pred2 预判点（本级规则，不依赖上级锚定段；卖出侧，买入侧对称）：
+        上下文 = 最近确认下跌笔 D 跌破前低（D 前最近确认下跌笔终点）；
+        锚 = D 之后最近一条上涨笔终点——forming 须 enough（≥5 合并块，反弹够笔；
+        forming 段挂在视图上的时刻即 D 收笔时刻，语义自洽），确认笔天然够笔
+        （forming 相位随反弹创新高漂移，确认后固定）；
+        判死 = D 后任一上涨笔终点收复前低（≥ 前低，极值只进不退 → 一次性）；
+        更近的确认下跌笔出现后上下文自然重算（旧预判消失，通常已被反向点闸门作废）。
+        @returns (provBuy|None, provSell|None)；dict 同 findBuy/SellPoints 形状
+        （type/time/price + _prov/_segStart 标记）。"""
+        if not self.pred2_on:
+            return None, None
+        structure = getattr(self, "_structure_bis", None) or self._bis
+        bis = structure.get(P) or []
+        if len(bis) < 3:
+            return None, None
+        provSell = self._pred2_side(bis, "down", "up", "2卖")
+        provBuy = self._pred2_side(bis, "up", "down", "2买")
+        return provBuy, provSell
+
+    @staticmethod
+    def _pred2_side(bis, atype, rtype, label):
+        """单侧预判点：atype=锚定确认笔方向（down=卖侧 D / up=买侧 U），rtype=反弹笔方向。"""
+        # 倒序取最近两条确认锚向笔（D 与前一同向笔），通常就在尾部若干根内
+        iD = iPrev = None
+        for i in range(len(bis) - 1, -1, -1):
+            b = bis[i]
+            if b["type"] != atype or b.get("_forming"):
+                continue
+            if iD is None:
+                iD = i
+            else:
+                iPrev = i
+                break
+        if iD is None or iPrev is None:
+            return None
+        ref = bis[iPrev]["endPrice"]  # 前低（卖侧）/前高（买侧）
+        D = bis[iD]
+        if not (D["endPrice"] < ref if atype == "down" else D["endPrice"] > ref):
+            return None  # 未破前低/前高 → 无上下文
+        last = None
+        for b in bis[iD + 1:]:
+            if b["type"] != rtype:
+                continue
+            end = b["endPrice"]
+            if end >= ref if atype == "down" else end <= ref:
+                return None  # 收复前低/前高：极值只进不退，上下文一次性判死
+            last = b
+        if last is None:
+            return None
+        if last.get("_forming") and not last.get("enough"):
+            return None  # 反弹/回调未够笔（<5 合并块）不可见
+        return {"type": label, "time": last["endTime"], "price": last["endPrice"],
+                "_prov": True, "_segStart": D["startTime"]}
+
     def _fx_prev_point(self, P, pt, side):
         """pt 的前一同侧买卖点（time < pt.time 的最近一个；无则 None）。side="buy"|"sell"。"""
         buys, sells = self._fx_all_points(P)
@@ -546,12 +625,14 @@ class FxMaEngine(BacktestEngine):
             cache[key] = out
         return out
 
-    def _fx_collect(self, allSignals, stats, fired, t):
+    def _fx_collect(self, allSignals, stats, fired, t, pred2=None):
         """当下评估：各 P 新收K线收盘拍判定 fxma 信号（返回新信号列表）。
 
         只在 P 有新已收K线时评估（点/分型/均线只随新收K线变化；上级笔变化时刻
-        必为 P 的收盘边界——周期链对齐保证不漏）。交易日志（self._journal，run()
+        必为 P 的收盘边界——周期链对齐保证不漏拍）。交易日志（self._journal，run()
         期间挂载）：各闸门拒绝原因（去重落盘）+ 信号行 + 每 P 状态行。
+        pred2（pred2On 开）：预判点与真点尾合并后同链评估；pred2 记录（跨拍，
+        run/step_to 经 st["pred2"] 传入）用于预判消失事件的一次性落盘。
         """
         jr = getattr(self, "_journal", None)
         sigs = []
@@ -561,13 +642,39 @@ class FxMaEngine(BacktestEngine):
             if not self._fx_sync_ma(P):
                 continue  # 本拍 P 无新收盘K线
             buyPt, sellPt = self._fx_latest_points(P)
+            provBuy = provSell = None
+            if self.pred2_on:
+                provBuy, provSell = self._fx_pred2_points(P)
+                buyPt = self._fx_merge_point(buyPt, provBuy)
+                sellPt = self._fx_merge_point(sellPt, provSell)
+                rec = (pred2 if pred2 is not None else {}).setdefault(
+                    P, {"buy": None, "sell": None})
+                for side, prov in (("sell", provSell), ("buy", provBuy)):
+                    old = rec[side]
+                    if prov is None and old is not None:
+                        # 预判消失：收复前低/前高判死、结构重算（更近确认笔取代）
+                        # 或真点接管后上下文翻页——按旧锚一次性落盘
+                        if jr is not None and jr.enabled:
+                            try:
+                                jr.reject(t, "fx_prov_invalidated", P, old["time"], None,
+                                          ptType=old["type"],
+                                          provTime=old["time"],
+                                          provPrice=old.get("price"),
+                                          dSegStart=old.get("segStart"))
+                            except Exception:
+                                pass
+                        rec[side] = None
+                    elif prov is not None:
+                        rec[side] = {"type": prov["type"], "time": prov["time"],
+                                     "price": prov["price"],
+                                     "segStart": prov.get("_segStart")}
             if jr is not None and jr.enabled:
                 try:
                     st = self._fx_ma[P]["mas"]
                     stateCtx = {
-                        "buyPtType": buyPt.get("type") if buyPt else None,
+                        "buyPtType": self._fx_state_type(buyPt),
                         "buyPtTime": buyPt.get("time") if buyPt else None,
-                        "sellPtType": sellPt.get("type") if sellPt else None,
+                        "sellPtType": self._fx_state_type(sellPt),
                         "sellPtTime": sellPt.get("time") if sellPt else None,
                         # 均线值随行携带但不参与变化判定（每拍都变）：
                         "ma1Fast": round(st[0].value, 4) if st[0].ready else None,
@@ -884,6 +991,12 @@ class FxMaEngine(BacktestEngine):
                     (lastBar["close"] - self.tp_pts if short
                      else lastBar["close"] + self.tp_pts),
                 }
+                if pt.get("_prov"):
+                    # 预判点信号：pointType 保持原标签（闸门/去重/出场兼容），
+                    # 额外旗标与展示前缀区分（真点同锚接管时 fired 键一致不再发）
+                    sig["pred2"] = True
+                    sig["strategyLabel"] += "·预判"
+                    sig["signalNote"] = f"预判｜{sig['signalNote']}"
                 stats["signals"] += 1
                 stats["long"] += int(direction == "long")
                 stats["short"] += int(direction == "short")
@@ -1256,6 +1369,7 @@ class FxMaEngine(BacktestEngine):
             "trades": [],
             "allSignals": {},
             "fired": set(),
+            "pred2": {},       # pred2 预判点跨拍记录（P → {side: {type/time/price/segStart}}）
             "stats": {"steps": 0, "signals": 0, "executed": 0, "suppressed": 0, "closed": 0,
                       "long": 0, "short": 0, "markRes": {}, "strategyKeys": {}},
         }
@@ -1271,7 +1385,8 @@ class FxMaEngine(BacktestEngine):
         """
         exits = self._fx_check_exits(st["open_pos"], st["stats"])
         self._fx_trail_raise(st["open_pos"], t)
-        sigs = self._fx_collect(st["allSignals"], st["stats"], st["fired"], t)
+        sigs = self._fx_collect(st["allSignals"], st["stats"], st["fired"], t,
+                                pred2=st["pred2"])
         st["pending"] += sigs
         fills = []
         if fb_bar is not None and st["pending"]:
@@ -1327,6 +1442,7 @@ class FxMaEngine(BacktestEngine):
                 "fibLevels": ",".join(str(r) for r in self.fib_near_levels),
                 "fibNearPts": self.fib_near_pts,
                 "upperDirOn": self.upper_dir_on,
+                "pred2On": self.pred2_on,
                 "divLowerOn": self.div_lower_on,
                 "divLowerWinBars": self.div_lower_win_bars,
                 "strongFxOn": self.strong_fx_on, "strongFxMinPts": self.strong_fx_min_pts,
