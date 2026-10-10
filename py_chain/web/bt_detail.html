@@ -156,7 +156,11 @@
     background: #2a2340; color: #b39ddb; border: 1px solid #4a3b6b; cursor: help; }
   #bt-detail-sig-body tr[data-signal-id] { cursor: pointer; }
   #bt-detail-sig-body tr[data-signal-id]:hover td { background: var(--card-2); }
+  /* 已加入典型案例的行：浅黄底标识（悬停/选中态由下方规则优先覆盖） */
+  #bt-detail-sig-body tr.in-case td { background: color-mix(in srgb, var(--warn) 26%, var(--card)); }
   #bt-detail-sig-body tr.selected td { background: color-mix(in srgb, var(--accent) 18%, var(--card)); }
+  /* 悬停已加入行：黄加深一档，避免悬停瞬间退回普通底色 */
+  #bt-detail-sig-body tr.in-case:hover td { background: color-mix(in srgb, var(--warn) 38%, var(--card)); }
   #bt-detail-sig-body tr.selected:not(.exit-continuation) td:first-child { box-shadow: inset 3px 0 var(--accent); }
   #bt-detail-sig-body td[rowspan] { vertical-align: middle; }
   #bt-detail-sig-body tr.exit-continuation td { border-top-style: dashed; }
@@ -164,6 +168,8 @@
   table th:first-child, #bt-detail-sig-body tr[data-signal-id]:not(.exit-continuation) td:first-child {
     position: sticky; left: 0; background: var(--card); z-index: 1; min-width: 48px; border-right: 1px solid var(--border); }
   table th:first-child { z-index: 3; }
+  /* 首列 sticky 底色 var(--card) 会盖住浅黄：同特异性后置覆盖（选中态在下一行仍最优先） */
+  #bt-detail-sig-body tr.in-case:not(.exit-continuation) td:first-child { background: color-mix(in srgb, var(--warn) 26%, var(--card)); }
   #bt-detail-sig-body tr.selected:not(.exit-continuation) td:first-child { background: color-mix(in srgb,var(--accent) 18%,var(--card)); }
   td.bt-number, th.bt-number { text-align: right; }
   /* 空态 / 错误 / 复制反馈 */
@@ -235,6 +241,7 @@ let btDetailLocateMsg = '';
 let btDetailRunId = null;
 let btDetailSummary = null;
 let btDetailName = '';
+let btDetailCaseIds = new Set();   // 已加入典型案例的本方案行 id（source_key 前缀 run|<方案id>|）
 let btAnalyzeBusy = false;
 let btDetailPnlSort = 'none';    // 交易记录盈亏：none / descending / ascending
 let btDetailTab = 'overview';
@@ -411,7 +418,7 @@ function fillBtDetail(run, preserve = false) {
       <details id="bt-detail-params" class="bt-params-wrap"><summary>回测参数 · ${paramKeys.length} 项</summary><div class="bt-params">${paramsHtml || '暂无参数快照'}</div></details>
     </section>
     <section id="bt-detail-records" role="tabpanel" aria-labelledby="bt-detail-tab-records" hidden>
-      <div class="bt-record-head"><strong>交易记录 · ${btDetailSignals.length} 条信号</strong><span>分批出场分行展示 · 点击定位 · 右键复制/加入典型案例</span></div>
+      <div class="bt-record-head"><strong>交易记录 · ${btDetailSignals.length} 条信号</strong><span>分批出场分行展示 · 点击定位 · 右键复制/加入典型案例（已加入行浅黄底）</span></div>
       <div id="bt-detail-locate" class="bt-detail-locate" role="status">${esc(btDetailLocateMsg)}</div>
       <div class="scroll" id="bt-detail-table-scroll" tabindex="0" aria-label="交易记录表，可横向滚动"><table>
         <thead><tr>${SIG_TABLE_HEADERS}</tr></thead>
@@ -437,6 +444,21 @@ function fillBtDetail(run, preserve = false) {
 }
 
 // ---------- 加载入口（URL ?id=；失败可重试；迟到响应按 token 丢弃） ----------
+// 已加入典型案例的行 id 集：拉全表按 run|<方案id>| 前缀过滤本方案；加载与右击加入
+// 成功（onAdded）都会重拉。案例若在控制台页删除，已打开的本页高亮保持到下次加载。
+async function loadBtDetailCases() {
+  const runId = btDetailRunId, token = loadToken;
+  try {
+    const d = await (await fetch('/api/bt/errors')).json();
+    if (!d.ok || token !== loadToken || runId !== btDetailRunId) return;
+    const prefix = `run|${runId}|`;
+    btDetailCaseIds = new Set((d.errors || [])
+      .filter(e => e.source_type === 'run' && String(e.source_key || '').startsWith(prefix))
+      .map(e => Number(e.source_key.slice(prefix.length))));
+    renderBtDetailRows();
+  } catch { /* 拉取失败=暂不高亮，右击加入/下次加载时重试 */ }
+}
+
 async function loadDetail(id) {
   const token = ++loadToken;
   btAnalyzeBusy = false;
@@ -467,6 +489,7 @@ async function loadDetail(id) {
   fillBtDetail(run);
   // 未做过亏损归因的方案自动分析一次；失败在卡片内提示，已分析的直接展示快照。
   if (!(run.summary?.loss_analysis?.lookahead != null)) await analyzeBtDetail();
+  loadBtDetailCases();   // 典型案例行底色：后台拉键集补亮（不阻塞页面加载）
 }
 
 // ---------- 亏损归因 ----------
@@ -577,6 +600,7 @@ function btDetailRowsHtml() {
     labelById: btDetailLabelById(),
     showLossReason: true,
     pnlBars: pnlScaleMax(rows),
+    isCase: r => btDetailCaseIds.has(r.id),   // 已加入典型案例 → 浅黄底
   });
 }
 
@@ -731,7 +755,8 @@ function bindDetailPage() {
     if (!tr.closest('#bt-detail-sig-body')) return null;   // 仅交易记录表行上拦截
     const row = btDetailSignals.find(r => r.id === Number(tr.dataset.signalId));
     if (!row) return null;
-    return { row, no: btDetailLabelOf(row.id), sourceType: 'run', runId: btDetailRunId };
+    return { row, no: btDetailLabelOf(row.id), sourceType: 'run', runId: btDetailRunId,
+      onAdded: () => loadBtDetailCases() };   // 加入成功后重拉键集，该行转浅黄底
   });
   if (typeof ResizeObserver !== 'undefined') {
     let width = 0;

@@ -501,9 +501,11 @@ class TestBuildZsPassThroughLeave(unittest.TestCase):
                 for t in range(950, 2001, 50)]
         pts = cc.findBuyPoints(bis, upper, macd, 900, 0.0, 0.0)
         got = [(p["type"], p["time"], p["price"]) for p in pts]
-        # 离枢回踩序列：3买 → 类3买 → 4买；不再误标类2买
+        # 离枢回踩序列：3买 → 类3买 → 4买；不再误标类2买。
+        # 2026-10-10 firstNoDiverge：4056.45 对参照 4071.64 创新低即 1买（与回踩序列并存）
         self.assertEqual(got, [
             ("2买", 1200, 4071.64),
+            ("1买", 1400, 4056.45),
             ("3买", 1600, 4093.86),
             ("类3买", 1800, 4118.91),
             ("4买", 2000, 4121.06),

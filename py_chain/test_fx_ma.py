@@ -187,8 +187,8 @@ class ParamCenterFxmaTests(unittest.TestCase):
         sch = param_center.schema_of("fxma")
         self.assertEqual(sch["maOn"]["type"], "bool")
         self.assertEqual(sch["strongFxOn"]["type"], "bool")
-        self.assertIs(sch["maOn"]["default"], True)
-        self.assertIs(sch["strongFxOn"]["default"], True)
+        self.assertIs(sch["maOn"]["default"], False)
+        self.assertIs(sch["strongFxOn"]["default"], False)
         self.assertIs(param_center.normalize("fxma", {"maOn": False})["maOn"], False)
         with self.assertRaises(ValueError):
             param_center.normalize("fxma", {"strongFxOn": "0"})  # 布尔不接受字符串
@@ -202,7 +202,7 @@ class ParamCenterFxmaTests(unittest.TestCase):
 
     def test_pick_and_req_schema_and_kwargs(self):
         # 条件性质（必选/可选）+ 各类点满足数（三选N）：schema 枚举 + normalize +
-        # kwargs 布尔/整数映射 + 引擎落属性；默认=全必选+全N=3（旧 AND 行为）；
+        # kwargs 布尔/整数映射 + 引擎落属性；默认=全必选+全N=1；
         # fibReq/divLowerReq 已删（黄金分割=硬门槛、背驰与条件组合互斥，2026-10-09）
         sch = param_center.schema_of("fxma")
         for k in ("maReq", "maStandReq", "strongFxReq"):
@@ -215,7 +215,7 @@ class ParamCenterFxmaTests(unittest.TestCase):
                 param_center.normalize("fxma", {gone: "required"})
         for k in ("entryPick1", "entryPick2", "entryPick2x", "entryPick3", "entryPick3x"):
             self.assertEqual(sch[k]["choices"], ["1", "2", "3"])
-            self.assertEqual(sch[k]["default"], "3")
+            self.assertEqual(sch[k]["default"], "1")
         with self.assertRaises(ValueError):
             param_center.normalize("fxma", {"maReq": "必选"})   # 非法枚举
         with self.assertRaises(ValueError):
@@ -244,7 +244,7 @@ class ParamCenterFxmaTests(unittest.TestCase):
         # 收盘站线：开关布尔 + 一类/二三类分开的均线周期（1~500）
         sch = param_center.schema_of("fxma")
         self.assertEqual(sch["maStandOn"]["type"], "bool")
-        self.assertIs(sch["maStandOn"]["default"], True)
+        self.assertIs(sch["maStandOn"]["default"], False)
         self.assertEqual(sch["maStand1"]["type"], "int")
         self.assertEqual((sch["maStand1"]["min"], sch["maStand1"]["max"]), (1, 500))
         self.assertEqual(sch["maStand2"]["default"], 5)
@@ -262,10 +262,10 @@ class ParamCenterFxmaTests(unittest.TestCase):
             FxMaEngine({"3": []}, entry_res="3", ma_stand1=0)  # 引擎侧同校验
 
     def test_fib_upper_schema_and_kwargs(self):
-        # 黄金分割附近/上级同向（2026-10-03 增，默认关）：开关布尔 + 档位多选串 + 容差点数
+        # 黄金分割附近/上级同向：开关布尔 + 档位多选串 + 容差点数（黄金分割默认开，上级同向默认关）
         sch = param_center.schema_of("fxma")
         self.assertEqual(sch["fibNearOn"]["type"], "bool")
-        self.assertIs(sch["fibNearOn"]["default"], False)
+        self.assertIs(sch["fibNearOn"]["default"], True)
         self.assertEqual(sch["fibLevels"]["type"], "multi")
         self.assertEqual(sch["fibLevels"]["default"], "0.382,0.5,0.618")
         self.assertEqual(param_center.normalize("fxma", {"fibLevels": "0.5"})["fibLevels"], "0.5")
@@ -948,7 +948,7 @@ class DivLowerGateTests(unittest.TestCase):
     def test_div_lower_schema_and_kwargs(self):
         sch = param_center.schema_of("fxma")
         self.assertEqual(sch["divLowerOn"]["type"], "bool")
-        self.assertIs(sch["divLowerOn"]["default"], False)
+        self.assertIs(sch["divLowerOn"]["default"], True)
         self.assertIs(param_center.normalize("fxma", {"divLowerOn": True})["divLowerOn"], True)
         kw = FxMaEngine.kwargs_from_params(
             dict(FXMA_DEFAULTS, entryRes="3", divLowerOn=True))
@@ -1053,7 +1053,7 @@ class DivLowerGateTests(unittest.TestCase):
         # （构造不再接受该形参，传入即 TypeError）
         sch = param_center.schema_of("fxma")
         self.assertEqual(sch["divLowerWinBars"]["type"], "int")
-        self.assertEqual(sch["divLowerWinBars"]["default"], 1)
+        self.assertEqual(sch["divLowerWinBars"]["default"], 3)
         self.assertEqual(param_center.normalize("fxma", {"divLowerWinBars": 4}),
                          {"divLowerWinBars": 4})
         with self.assertRaises(ValueError):

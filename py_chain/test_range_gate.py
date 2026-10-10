@@ -174,7 +174,7 @@ class TestComputePlanRangeRes(unittest.TestCase):
         return periodBis, barsByPeriod, periodAtr
 
     def test_default_range_res(self):
-        self.assertEqual(RANGE_RES, "240")
+        self.assertEqual(RANGE_RES, "")
 
     def test_ref_range_blocks_lower_periods(self):
         # 240 自身 A 支震荡（小区间）；更低周期给强趋势数据（自身不会震荡）

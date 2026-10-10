@@ -429,7 +429,8 @@ function signalRowsHtml(rows, opts = {}) {
         : pnlTxt;
       const totalTxt = r.pnl == null ? '-' : Number(r.pnl).toFixed(2);
       const selected = interactive && selectedId === r.id;
-      const classes = [selected ? 'selected' : '', i ? 'exit-continuation' : ''].filter(Boolean).join(' ');
+      const classes = [selected ? 'selected' : '', i ? 'exit-continuation' : '',
+        (opts.inEval && opts.inEval(r)) ? 'in-eval' : ''].filter(Boolean).join(' ');
       const attrs = interactive
         ? ` data-signal-id="${r.id}" tabindex="0" aria-selected="${selected}" title="点击定位信号K线并标记该行进出场"`
         : '';
@@ -555,7 +556,8 @@ function _ensureSigCtxMenu() {
   menu.hidden = true;
   menu.innerHTML = `
   <button type="button" role="menuitem" data-ctx-act="copy">仅复制信息</button>
-  <button type="button" role="menuitem" data-ctx-act="addError">复制并加入典型案例</button>`;
+  <button type="button" role="menuitem" data-ctx-act="addError">复制并加入典型案例</button>
+  <button type="button" role="menuitem" data-ctx-act="addEval" hidden>加入 EVAL 案例</button>`;
   document.body.appendChild(menu);
   menu.onclick = e => {
     const btn = e.target.closest('button[data-ctx-act]');
@@ -563,6 +565,10 @@ function _ensureSigCtxMenu() {
     const ctx = menu._ctx;
     closeSigCtxMenu();
     if (!ctx) return;
+    if (btn.dataset.ctxAct === 'addEval') {
+      if (typeof ctx.onEval === 'function') ctx.onEval();
+      return;
+    }
     if (btn.dataset.ctxAct === 'copy') {
       copyTextToClipboard(signalCopyText(ctx.row, ctx.no))
         .then(ok => showCopyTip(ok ? '已复制交易信息' : '复制失败，请手动复制'));
@@ -600,6 +606,8 @@ function closeSigCtxMenu() {
 function openSigCtxMenu(x, y, ctx) {
   const m = _ensureSigCtxMenu();
   m._ctx = ctx;
+  const evalBtn = m.querySelector('[data-ctx-act="addEval"]');
+  if (evalBtn) evalBtn.hidden = !ctx.addEval;
   m.hidden = false;
   // 先显示量尺寸，再按视口夹紧（8px 边距），防止贴边溢出
   const mw = m.offsetWidth, mh = m.offsetHeight;

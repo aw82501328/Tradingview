@@ -8,8 +8,13 @@ _os.environ.setdefault("PY_CHAIN_BT_JOURNAL", "0")  # 引擎测试不落交易�
   - stop_ref_of：支阻位 ± 滑点 / nearSr 错侧重选 / 最大止损硬上限（返回值永不为 None）
   - forming_seg_ready：合并后 ≥5 块门槛 / 末笔方向 / 延伸归零
   - forming_break_ref：预期过前高参照（末笔不利才有形成段 / 无同向笔 None）
-  - advance_exit_decision：TP1→beStop→stopBe / TP2 顺势（检测周期有利方向够笔，无需 TP1）→ half 后止损=beStop /
-    TP3a 顺势 breakPrev / TP3b 逆势 seg5 全平（无 half）/ stopSr / 同拍顺序 half 优先 /
+  - enough_fav_bars（2026-10-10 够笔统一口径）：向有利方向走出 5 块合并K即够笔，
+    不分顺势逆势、不等确认笔；锚点=末笔延伸终点块与进场块较晚者（进场块下限防
+    末笔延伸提交滞后把末笔自身的块计入=入场拍假就绪）；末笔已确认有利方向→False
+  - advance_exit_decision：TP1→beStop→stopBe / TP2 检测周期够笔（统一口径：预期
+    enough_fav_bars 或确认 lastBiOk，无需 TP1，不限顺势）→ half 后止损=beStop /
+    TP3a 顺势 breakPrev / TP3b 逆势 seg5 快速离场（锚点无进场块下限，half 先触发
+    后 close 跟上，先到先 latch）/ stopSr / 同拍顺序 half 优先 /
     预期口径（2026-10-09 严进宽出，默认开）：检测够笔=末笔不利+形成段够块、
     过高低点=收盘K极值越前一同向笔端点，exitExpectOn=False 回退确认笔旧口径
   - 跟踪止盈双参照（2026-10-09 exitTrailSrc）：detect=检测周期 3/类3/4/类4 结构点流
@@ -27,7 +32,7 @@ _os.environ.setdefault("PY_CHAIN_BT_JOURNAL", "0")  # 引擎测试不落交易�
 import unittest
 
 from py_chain.mark_entry import (stop_ref_of, forming_seg_ready, forming_break_ref,
-                                 trend_following_of, EXIT_MODE_DEFAULTS)
+                                 enough_fav_bars, trend_following_of, EXIT_MODE_DEFAULTS)
 from py_chain.backtest import (advance_exit_decision, execute_pending_exit,
                                close_trade, BacktestEngine)
 
@@ -182,6 +187,43 @@ class TestTrendFollowingOf(unittest.TestCase):
         self.assertFalse(trend_following_of(None, "wait1Sell"))
 
 
+class TestEnoughFavBars(unittest.TestCase):
+    """够笔统一口径（2026-10-10）：向有利方向走出 5 块合并K即够笔。"""
+
+    def test_five_blocks_after_anchor_ready(self):
+        # 空单：末笔 up（不利）终点 300，其后 4 块（含锚点共 5）→ 够笔
+        px = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 300, 4440, 4450)]
+        self.assertTrue(enough_fav_bars(px, T8, 0, is_short=True))
+        self.assertFalse(enough_fav_bars(px, T7, 0, is_short=True))  # 4 块不足
+
+    def test_favorable_last_bi_not_ready(self):
+        # 末笔已是有利方向（无形成段）→ False，走确认笔口径
+        px = [bi("up", 0, 50, 4440, 4460), bi("down", 50, 300, 4460, 4440)]
+        self.assertFalse(enough_fav_bars(px, T8, 0, is_short=True))
+
+    def test_entry_floor_blocks_stale_anchor(self):
+        # 2026-10-01 案例形态：空单进场时末笔（up 不利方向）延伸未提交（终点滞留
+        # 200），锚点后虽有 5 块（全是末笔自身的上涨块）——进场块下限（650）更靠右
+        # → 不够笔（纯 forming_seg_ready 口径会假就绪抢触发）
+        px = [bi("up", 0, 200, 4440, 4450)]
+        self.assertFalse(enough_fav_bars(px, T8, 650, is_short=True))
+        # 进场早于锚点（100 < 200）→ 退化为纯末笔锚点口径，块数够 → 够笔
+        self.assertTrue(enough_fav_bars(px, T8, 100, is_short=True))
+        # entry_time=0：不设下限，同上
+        self.assertTrue(enough_fav_bars(px, T8, 0, is_short=True))
+
+    def test_entry_block_counts_toward_enough(self):
+        # 进场所在块即锚点：其后 4 块 → 够笔（进场拍归零起步、防进场前块计入）
+        px = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 300, 4440, 4450)]
+        self.assertTrue(enough_fav_bars(px, T8, 350, is_short=True))   # 进场在 300 块内
+        self.assertFalse(enough_fav_bars(px, T8, 450, is_short=True))  # 进场在 400 块，其后 3 块
+
+    def test_long_direction_symmetric(self):
+        px = [bi("up", 0, 50, 4400, 4460), bi("down", 50, 300, 4460, 4450)]
+        self.assertTrue(enough_fav_bars(px, T8, 0, is_short=False))
+        self.assertFalse(enough_fav_bars(px, T8, 0, is_short=True))    # 方向反了：末笔 up=空单有利
+
+
 class TestAdvanceExit(unittest.TestCase):
     def test_tp1_moves_stop_to_bestop_then_stopbe(self):
         pos = make_pos()
@@ -282,20 +324,64 @@ class TestAdvanceExit(unittest.TestCase):
         r = advance_exit_decision(pos, 700, bar(700, 4445, 4448, 4440, 4444), mark_bis, px, T8)
         self.assertEqual(r, "half")
 
-    def test_tp2_counter_trend_no_half_close_on_seg5(self):
-        pos = make_pos(planDirection="多头空")  # 逆势（多头计划下的空单）
+    def test_tp2_counter_trend_half_then_close_on_seg5(self):
+        # 2026-10-10 统一口径：逆势（多头空）seg5 状态（末笔 up=不利方向、其后
+        # 下跌形成段 T8 够块）→ 预期口径 half 先触发（同拍顺序 half 在 close 前），
+        # 下一拍 close（快速离场）跟上——先到先 latch、互不阻塞
+        pos = make_pos(planDirection="多头空")
+        pos["exitCfg"] = dict(EXIT_MODE_DEFAULTS, exitClosePct=25)
         mark_bis = [bi("up", 0, 500, 4440, 4455)]
         px_bis = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 300, 4440, 4450)]
         r = advance_exit_decision(pos, 700, bar(700, 4445, 4448, 4440, 4444), mark_bis, px_bis, T8)
-        self.assertEqual(r, "close")  # 逆势：seg5 直接全平，无 half
-        self.assertFalse(pos["halfDone"])
-        tr = execute_pending_exit(pos, bar(800, 4440, 4445, 4435, 4442))
-        self.assertEqual(tr["exitType"], "close")
-        # 无 half → pnl = (4440-4450)*(-1)*4 = 40
-        self.assertEqual(tr["pnl"], 40.0)
+        self.assertEqual(r, "half")
+        self.assertTrue(pos["halfDone"])
+        self.assertIn("逆势", pos["pendingWhy"])
+        self.assertIn("预期口径", pos["pendingWhy"])
+        self.assertEqual(pos["pendingLots"], 2)   # 50% × 4
+        self.assertIsNone(execute_pending_exit(pos, bar(800, 4440, 4445, 4435, 4442)))
+        self.assertTrue(pos["beDone"])            # half 补 beDone
+        # 下一拍：seg5 仍就绪 → close（快速离场）25% × 4 = 1 手
+        r = advance_exit_decision(pos, 810, bar(810, 4440, 4445, 4436, 4442),
+                                  mark_bis, px_bis, T8)
+        self.assertEqual(r, "close")
+        self.assertEqual(pos["pendingLots"], 1)
+        self.assertIsNone(execute_pending_exit(pos, bar(820, 4440, 4445, 4435, 4442)))
+        self.assertEqual(pos["lotsLeft"], 1)
+        # 两个 latch 都已消费：后续拍（未破 beStop=4455 的 bar）不再重复挂起
+        self.assertIsNone(advance_exit_decision(pos, 900, bar(900, 4440, 4448, 4436, 4444),
+                                                mark_bis, px_bis, T8))
+
+    def test_tp2_counter_trend_half_on_confirmed_fav_bi(self):
+        # 确认口径兜底：逆势（空头多）检测周期末笔翻为确认的有利方向（up）笔 →
+        # lastBiOk 触发 half 平 50%，剩余止损移保本位（用户案例 2026-10-01：
+        # 空头多进场，检测周期上涨笔确认时本应再平一部分——旧规则仅顺势跳过）
+        pos = make_pos(direction="long", planDirection="空头多", stopRef=4437.0,
+                       beStop=4445.0)
+        mark_bis = [bi("down", 0, 500, 4460, 4440)]  # 无 signalTime 后的 up 笔 → 无 TP1
+        px_bis = [bi("down", 0, 50, 4460, 4450), bi("up", 50, 300, 4450, 4460)]
+        r = advance_exit_decision(pos, 700, bar(700, 4455, 4462, 4451, 4458),
+                                  mark_bis, px_bis, T8)
+        self.assertEqual(r, "half")
+        self.assertTrue(pos["halfDone"])
+        self.assertIn("逆势", pos["pendingWhy"])
+        self.assertEqual(pos["pendingLots"], 2)   # 50% × 总仓位 4
+        tr = execute_pending_exit(pos, bar(800, 4458, 4462, 4454, 4460))
+        self.assertIsNone(tr)                     # 部分平仓非终局
+        self.assertTrue(pos["beDone"])            # half 补 beDone：剩余 2 手止损 = beStop
+        self.assertEqual(pos["lotsLeft"], 2)
+        # 剩余跌破 beStop 4445 → stopBe 终局
+        r = advance_exit_decision(pos, 900, bar(900, 4450, 4452, 4443, 4446),
+                                  mark_bis, px_bis, T8)
+        self.assertEqual(r, "stopBe")
+        tr = execute_pending_exit(pos, bar(1000, 4446, 4448, 4444, 4445))
+        self.assertEqual(tr["exitType"], "stopBe")
+        # half@4458×2 + 终局@4446×2：pnl = (8×2) + (-4×2) = 8
+        self.assertEqual(tr["pnl"], 8.0)
 
     def test_tp3a_trend_fav_break_prev(self):
+        # 过高低点默认已是 25% 部分平仓；本场景钉全平，断言终局成交
         pos = make_pos()
+        pos["exitCfg"] = dict(EXIT_MODE_DEFAULTS, exitClosePct=100.0)
         mark_bis = [bi("up", 0, 500, 4440, 4455)]
         # px：down(150→250) 终点 4435 破前一同向 down(0→50) 终点 4440（破前底）；末笔 up
         px_bis = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 150, 4440, 4450),
@@ -490,10 +576,70 @@ class TestFillEntryBarSeed(unittest.TestCase):
         self.assertEqual(tr["maxLoss"], 85.0)
 
 
+class TestStopBeMode(unittest.TestCase):
+    """保本位模式（exitStopBeMode，2026-10-10）：
+    entry（默认，0亏损）= 进场价（保本滑点不参与，滑点/ATR 系数均不生效）；
+    extreme = 成交K线极值±保本滑点（含成交 bar 缺失时 开盘价±滑点 兜底）。"""
+
+    def _fill(self, **kw):
+        lows = kw.pop("lows", [100, 98, 97, 96, 88, 90])   # 0,180,...,900（900 低点 90）
+        bars = {"3": [bar(i * 180, 100, 101, lo, 100)
+                      for i, lo in enumerate(lows)]}
+        eng = BacktestEngine(bars, periods=["3"], slip_stop=3.0, slip_be=3.0,
+                             slip_fallback=kw.pop("slip_fallback", 10.0),
+                             module_params=kw.pop("mp", None))
+        sig = {"direction": "long", "periodX": "60", "markRes": "15",
+               "time": 880, "price": 94.0, "nearSr": 94.0, "realtime": True,
+               "strategyKey": "wait2Buy"}
+        trades, stats = [], {"suppressed": 0, "executed": 0}
+        eng._fill_pending(trades, [sig], 95.0, kw.pop("nextTime", 900), stats,
+                          collectT=880, open_pos={})
+        return trades[0]
+
+    def test_extreme_default_uses_fill_bar_low(self):
+        # 默认 entry：beStop = 进场价 95；极值口径须显式指定
+        tr = self._fill()
+        self.assertEqual(tr["beStop"], 95.0)
+        self.assertIn("0亏损", tr["entryWhy"])
+        tr2 = self._fill(mp={"exitStopBeMode": "extreme"})
+        self.assertEqual(tr2["beStop"], 87.0)
+        self.assertIn("保本滑点", tr2["entryWhy"])
+
+    def test_extreme_fallback_when_bar_missing(self):
+        # 成交 bar 不在 fine 轴（nextTime=1080 无K）→ 兜底 进场价−滑点 = 92
+        tr = self._fill(mp={"exitStopBeMode": "extreme"}, nextTime=1080)
+        self.assertEqual(tr["beStop"], 92.0)
+
+    def test_entry_mode_bestop_equals_entry_price(self):
+        # 0亏损：beStop = 进场价 95（滑点 3 不参与；成交K线 low 90 不影响）
+        tr = self._fill(mp={"exitStopBeMode": "entry"})
+        self.assertEqual(tr["beStop"], 95.0)
+        self.assertEqual(tr["entryPrice"], 95.0)
+        self.assertIn("0亏损", tr["entryWhy"])
+
+    def test_entry_mode_bar_missing_same_price(self):
+        tr = self._fill(mp={"exitStopBeMode": "entry"}, nextTime=1080)
+        self.assertEqual(tr["beStop"], 95.0)
+
+    def test_entry_mode_stop_be_exit_zero_pnl(self):
+        # 0亏损语义端到端：beDone 后跌回进场价触发 stopBe，下一开盘恰为进场价 → 盈亏 0
+        pos = make_pos(direction="long", entryPrice=95.0, stopRef=93.0, beStop=95.0,
+                       planDirection="多头多")
+        pos["beDone"] = True
+        r = advance_exit_decision(pos, 400, bar(400, 95, 96, 94.5, 94.8), [], [])
+        self.assertEqual(r, "stopBe")
+        tr = execute_pending_exit(pos, bar(500, 95, 96, 94, 95))
+        self.assertEqual(tr["exitPrice"], 95.0)
+        self.assertEqual(tr["pnl"], 0.0)
+
+
 def ecfg(**over):
-    """出场方式配置快照（EXIT_MODE_DEFAULTS 覆盖）"""
+    """出场方式配置快照。算法场景钉在 2026-10-10 收默认之前的口径
+    （过高低点 100%、跟踪止盈关、保本位极值），调用方显式传入的键仍覆盖。"""
     from py_chain.mark_entry import EXIT_MODE_DEFAULTS
     c = dict(EXIT_MODE_DEFAULTS)
+    c.update(exitClosePct=100.0, exitTrailOn=False, exitTrailPct=100.0,
+             exitStopBeMode="extreme")
     c.update(over)
     return c
 
@@ -560,12 +706,13 @@ class TestExitModes(unittest.TestCase):
         self.assertFalse(pos["halfDone"])
 
     def test_close_off(self):
+        # 过高低点止盈关闭：逆势 seg5 不挂起；统一口径下检测周期够笔（预期）照常触发
         pos = self.make(planDirection="多头空", exitCfg=ecfg(exitCloseOn=False))
         mark_bis = [bi("up", 0, 500, 4440, 4455)]
         px_bis = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 300, 4440, 4450)]
         r = advance_exit_decision(pos, 700, bar(700, 4445, 4448, 4440, 4444),
                                   mark_bis, px_bis, T8)
-        self.assertIsNone(r)                  # 过高低点止盈关闭：逆势 seg5 不挂起
+        self.assertEqual(r, "half")
 
     def test_half_pct_partial_lots_settlement(self):
         # 够笔止盈 30%：整数手 ⌊4×30%⌋=1，剩余 3 由 stopBe 终局，pnl 按手数逐段结算
@@ -644,19 +791,25 @@ class TestExitModes(unittest.TestCase):
         self.assertEqual(len([e for e in pos["exits"] if e["type"] == "close"]), 1)
 
     def test_close_partial_latch_countertrend(self):
-        # 逆势 seg5 分支同 latch：部分平仓后形成段持续就绪不再重复挂起
+        # 逆势 seg5 分支同 latch：统一口径下 half 先消费（预期口径），close 随后
+        # 部分平仓后形成段持续就绪不再重复挂起
         pos = self.make(planDirection="多头空", exitCfg=ecfg(exitClosePct=25))
         mark_bis = [bi("up", 0, 500, 4440, 4455)]
         px_bis = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 300, 4440, 4450)]
         r = advance_exit_decision(pos, 700, bar(700, 4445, 4448, 4440, 4444),
                                   mark_bis, px_bis, T8)
+        self.assertEqual(r, "half")           # 统一口径：预期够笔先触发
+        self.assertIsNone(execute_pending_exit(pos, bar(800, 4440, 4445, 4435, 4442)))
+        self.assertEqual(pos["lotsLeft"], 2.0)
+        r = advance_exit_decision(pos, 810, bar(810, 4440, 4445, 4436, 4442),
+                                  mark_bis, px_bis, T8)
         self.assertEqual(r, "close")
         self.assertTrue(pos["closeDone"])
-        self.assertIsNone(execute_pending_exit(pos, bar(800, 4440, 4445, 4435, 4442)))
-        self.assertEqual(pos["lotsLeft"], 3.0)
-        r = advance_exit_decision(pos, 900, bar(900, 4445, 4448, 4440, 4444),
+        self.assertIsNone(execute_pending_exit(pos, bar(820, 4440, 4445, 4435, 4442)))
+        self.assertEqual(pos["lotsLeft"], 1.0)
+        r = advance_exit_decision(pos, 900, bar(900, 4440, 4448, 4436, 4444),
                                   mark_bis, px_bis, T8)
-        self.assertIsNone(r)                  # seg5 仍就绪但不重触发
+        self.assertIsNone(r)                  # seg5 仍就绪但两个 latch 均不重触发
 
     def test_exit_lots_tiny_remaining_takes_all(self):
         # 剩余手数本身不足 1（旧数据残留小数）→ 封顶即全平剩余，防 0 手空事件与
@@ -685,6 +838,22 @@ class TestExitModes(unittest.TestCase):
                                   mark_bis, px_bis, T7)
         self.assertIsNone(r)                  # latch：tp1 持续成立不重触发
         self.assertEqual(len([e for e in pos["exits"] if e["type"] == "halfMr"]), 1)
+
+    def test_half_mr_expected_path_five_blocks(self):
+        # 2026-10-10 统一口径：背驰周期向有利方向走出 5 块合并K（enough_fav_bars
+        # 预期口径）→ halfMr，不等首笔有利方向确认笔（tp1=None）
+        pos = self.make(exitCfg=ecfg(exitHalfMrOn=True))
+        mark_bis = [bi("up", 0, 300, 4440, 4450)]  # 无 signalTime 后 down 笔 → tp1 None
+        px_bis = [bi("up", 50, 300, 4440, 4450)]  # 检测周期 3 块（T7）不触发 half
+        r = advance_exit_decision(pos, 700, bar(700, 4445, 4448, 4440, 4444),
+                                  mark_bis, px_bis, T7, T8)
+        self.assertEqual(r, "halfMr")
+        self.assertTrue(pos["halfMrDone"])
+        self.assertIn("预期口径", pos["pendingWhy"])
+        self.assertEqual(pos["pendingLots"], 2.0)
+        self.assertFalse(pos["beDone"])   # exp_mr 不伴随 TP1 迁移；成交拍补 beDone
+        self.assertIsNone(execute_pending_exit(pos, bar(800, 4440, 4445, 4435, 4442)))
+        self.assertTrue(pos["beDone"])
 
     def test_half_mr_not_trend_gated(self):
         # 逆势（多头空）同样触发（与 TP1 同口径，不限顺势）
@@ -802,8 +971,8 @@ class TestExitModes(unittest.TestCase):
         self.assertEqual(r, "trailStop")
 
     def test_trail_off_by_default(self):
-        # 默认跟踪止盈关闭：同向3类点不引起上移
-        pos = self.make()
+        # 显式关闭跟踪止盈：同向3类点不引起上移（全局默认已是开）
+        pos = self.make(exitCfg=ecfg(exitTrailOn=False))
         mark_bis = [bi("up", 0, 500, 4440, 4455)]
         px_bis = [bi("up", 50, 300, 4440, 4450)]
         pts = [{"time": 200, "price": 4442.0, "type": "3卖"}]

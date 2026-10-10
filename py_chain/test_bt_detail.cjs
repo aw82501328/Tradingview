@@ -137,5 +137,15 @@ const settle = () => new Promise(resolve=>setImmediate(resolve));
   run(`locatePending={mode:'backtest',id:21,runId:'f',jobId:'cur'};
     finishLocate({jobId:'other',state:'done',result:{symbol:'X',markRes:'3',time:1,mark:null}});`);
   assert.equal(run('locatePending')?.jobId,'cur');
+  // 已加入典型案例的行浅黄底（run 来源）：loadDetail 后台拉 /api/bt/errors，
+  // run|<方案id>|<行id> 前缀命中本方案行 → 该行（整笔交易）标 in-case 类
+  const g=run(`loadDetail('g')`);
+  respond(requests.at(-1),{ok:true,run:fixture('g')});
+  await settle();
+  respond(requests.at(-1),{ok:true,errors:[{source_type:'live',source_key:'live|x'},{source_type:'run',source_key:'run|g|21'}]});
+  await settle();await g;
+  const gRendered=node('bt-detail-sig-body').innerHTML;
+  assert.match(gRendered,/data-signal-id="21"[^>]*class="in-case"/);
+  assert.doesNotMatch(gRendered,/data-signal-id="22"[^>]*class="[^"]*in-case/);
   console.log('PASS: detail page load/token races, retained view state, snapshot equity, locate flow + busy rejection, stale analysis/location, retry superseded');
 })().catch(e=>{console.error(e);process.exitCode=1});

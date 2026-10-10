@@ -44,6 +44,12 @@ tr:last-child td{border-bottom:0}
 .select-bar b{color:#cfe0f8}
 .select-bar input{margin-top:0;min-width:240px;flex:0 1 300px}
 .note{border-left:3px solid #729ee8;background:#1e3049;padding:11px 14px;margin-top:14px;font-size:12.5px;color:#bed0ea}
+.help-link{color:var(--blue);font-size:12px;text-decoration:none}
+.help-link:hover{text-decoration:underline}
+.head-actions{display:flex;gap:14px;align-items:center}
+.help-box{margin:0 0 12px}
+.help-box ol{margin:0;padding-left:1.4em}
+.help-box li{margin:4px 0}
 .bar{height:8px;background:#131c29;border:1px solid var(--line);border-radius:6px;overflow:hidden;margin:6px 0 4px}
 .bar-fill{height:100%;width:0;background:var(--primary);transition:width .4s}
 .summary-row{display:flex;gap:18px;align-items:center;flex-wrap:wrap;font-size:13px;margin:4px 0 10px}
@@ -66,7 +72,7 @@ tr:last-child td{border-bottom:0}
 <body>
 <div class="hero">
   <h1>EVAL 评估</h1>
-  <p class="muted">按周期快照成笔用例 → 多选建立基线（冻结期望笔结果）→ 画笔逻辑调整后跑基线回归，逐用例看通过/差异。</p>
+  <p class="muted">按周期快照成笔用例 → 多选建立基线（冻结期望笔结果）→ 画笔逻辑调整后跑基线回归，逐用例看通过/差异。回测信号表或历史方案右击「加入 EVAL 案例」会另外收成盈利用例：冻住当时的参数和进出场，K 线仍读本地库；跑基线只比合计。</p>
 </div>
 
 <!-- 1 新增用例 -->
@@ -98,7 +104,15 @@ tr:last-child td{border-bottom:0}
 
 <!-- 3 基线列表 -->
 <section class="panel">
-  <div class="panel-head"><h2>③ 基线列表</h2><button class="btn" id="runAllBtn" onclick="act(runAll)">▶ 跑全部基线</button></div>
+  <div class="panel-head"><h2>③ 基线列表</h2><span class="head-actions"><a href="#" class="help-link" id="pnlHelpLink">使用说明</a><button class="btn" id="runAllBtn" onclick="act(runAll)">▶ 跑全部基线</button></span></div>
+  <div class="note help-box" id="pnlHelp" hidden>
+    <ol>
+      <li>回测结束或中途停止后，在当前策略的信号表里右击任意一行，选「加入 EVAL 案例」。不必先保存方案。正在跑的时候不能加。同一次运行再右击不会重复建。</li>
+      <li>已经保存的，在「历史回测方案」里右击那一行，同样加入。已加入的行是浅蓝底。</li>
+      <li>打开「EVAL评估」，勾选这些盈利用例，填基线名，点「以选中用例建立基线」。成笔用例不能和盈利用例放进同一条基线。</li>
+      <li>改完逻辑后点「运行」。每个用例用冻住的参数重跑，先得到新的进出场，再算合计。通过只看合计是否相等。合计变了可以展开两边的进出场。确认新结果正确后，用「更新期望」覆盖冻结值。</li>
+    </ol>
+  </div>
   <div class="table-wrap" id="blTableWrap"></div>
   <p class="hint">「更新期望」＝用当前逻辑重新冻结基线内所有笔与买卖点结果（逻辑有意变更后使用）；「运行」＝用当前逻辑重算并与冻结期望比对（Python build_bis + compute_all_marks，笔 11 字段、买卖点 6 字段逐位）。</p>
 </section>
@@ -154,6 +168,13 @@ async function loadCases(){
   cases=(await api('cases')).cases;
   $('caseCount').textContent=cases.length+' 个用例 · 勾选多个建立基线';
   const rows=cases.map(c=>{
+    if(c.kind==='pnl'){
+      const range=(c.from||c.toTs)?`${esc(c.from||'头')} → ${c.toTs?fmtT(c.toTs):'尾'}`:'—';
+      return `<tr><td><input type="checkbox" class="case-cb" data-id="${esc(c.id)}"></td>
+        <td>${esc(c.name)}</td><td>盈利</td><td>${esc(c.symbol||'—')}</td>
+        <td>${pnlTxt(c.expectedTotal)}</td><td>${range}</td><td>${fmtT(c.createdAt)}</td>
+        <td><button class="btn mini" data-del-case="${esc(c.id)}">删除</button></td></tr>`;
+    }
     const counts=c.barCounts||{};
     const kc=c.res==='ALL'?Object.keys(counts).length+' 周期':`${esc(c.res)}：${num(counts[c.res]??0)} 根`;
     const range=c.fromTs||c.toTs?`<span class="badge">${c.fromTs?fmtT(c.fromTs):'头'} → ${c.toTs?fmtT(c.toTs):'尾'}</span>`:'全量';
@@ -164,7 +185,7 @@ async function loadCases(){
       <td><button class="btn mini" data-del-case="${esc(c.id)}">删除</button></td></tr>`;
   });
   $('caseTableWrap').innerHTML=rows.length
-    ?`<table><thead><tr><th></th><th>名称</th><th>周期</th><th>品种</th><th>K线数</th><th>范围</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${rows.join('')}</tbody></table>`
+    ?`<table><thead><tr><th></th><th>名称</th><th>周期</th><th>品种</th><th>K线 / 合计</th><th>范围</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${rows.join('')}</tbody></table>`
     :'<p class="muted">还没有用例。在上方填名称、选周期（可选起始时间）创建第一个。</p>';
   refreshSel();
 }
@@ -172,7 +193,8 @@ async function loadBaselines(){
   baselines=(await api('baselines')).baselines;
   const rows=baselines.map(b=>{
     const lr=b.lastRun?`<span class="badge ${lrCls(b)}">通过 ${b.lastRun.pass}/${b.lastRun.total}</span> · ${fmtT(b.lastRun.at)}`:'—';
-    return `<tr><td>${esc(b.name)}</td><td>${b.caseIds.length}</td><td>${fmtT(b.updatedAt||b.createdAt)}</td><td>${lr}</td>
+    const kind=b.kind==='pnl'?' <span class="badge">盈利</span>':'';
+    return `<tr><td>${esc(b.name)}${kind}</td><td>${b.caseIds.length}</td><td>${fmtT(b.updatedAt||b.createdAt)}</td><td>${lr}</td>
       <td><button class="btn mini" data-detail="${esc(b.id)}">明细</button>
           <button class="btn mini primary" data-run="${esc(b.id)}">运行</button>
           <button class="btn mini" data-refresh="${esc(b.id)}">更新期望</button>
@@ -259,14 +281,66 @@ function diffDetailHtml(det){
     <div class="diff-section"><h3>标记差异（rawCount / span / gapLocked / macdCross）</h3>${tbl(mark)}</div>
     ${det.marks===undefined?'':`<div style="border-top:1px solid var(--line);margin-top:4px"></div>${marksHtml}`}`;
 }
+function pnlTxt(v){
+  if(v==null||!Number.isFinite(Number(v)))return '—';
+  const n=Number(v);
+  return `<b class="${n>0?'arrow-up':n<0?'arrow-down':''}">${(n>0?'+':'')+n.toFixed(2)}</b>`;
+}
+function posLine(p){
+  if(!p)return '<span class="muted">（无）</span>';
+  const dir=p.direction==='long'?'多':p.direction==='short'?'空':'—';
+  const px=v=>v==null?'—':Number(v).toFixed(2);
+  return `${fmtT(p.time)} ${dir} ${esc(p.periodX||'—')} ${esc(p.strategyKey||'—')} · 进 ${fmtT(p.entryTime)} @ ${px(p.entryPrice)} · 出 ${fmtT(p.exitTime)} @ ${px(p.exitPrice)} ${esc(p.exitType||p.status||'')} · ${pnlTxt(p.pnl)}`;
+}
+function pnlPositionsHtml(rows){
+  if(!rows||!rows.length)return '<p class="muted">没有进出场对照</p>';
+  return `<table class="pair-table"><thead><tr><th>冻结进出场</th><th>本次进出场</th></tr></thead><tbody>${rows.map(r=>{
+    const diff=!r.a||!r.b||r.a.entryTime!==r.b.entryTime||r.a.exitTime!==r.b.exitTime||r.a.pnl!==r.b.pnl;
+    return `<tr${diff?' style="background:#26180f"':''}><td>${posLine(r.a)}</td><td>${posLine(r.b)}</td></tr>`;
+  }).join('')}</tbody></table>`;
+}
+function pnlGroupHtml(g,isRun){
+  const gOk=g.items.filter(i=>i.ok).length;
+  let html=`<div class="bl-group-title">${esc(g.name||g.key)} ${isRun?`<span class="badge ${gOk===g.items.length?'pass':'fail'}">${gOk}/${g.items.length}</span>`:''}</div>
+    <div class="table-wrap"><table><thead><tr><th>用例</th><th>冻结合计</th><th>重算合计</th><th>差额</th><th>状态</th></tr></thead><tbody>`;
+  g.items.forEach(it=>{
+    const d=it.details||{};
+    if(it.state==='error'){
+      html+=`<tr><td>${esc(it.caseName||it.caseId)}</td><td colspan="4" class="err-text">✗ ${esc(it.error||'计算失败')}</td></tr>`;
+      return;
+    }
+    const fail=isRun&&!it.ok;
+    html+=`<tr class="${fail?'case-row':''}"><td>${esc(it.caseName||it.caseId)}</td>
+      <td>${pnlTxt(d.expectedTotal)}</td><td>${pnlTxt(d.actualTotal)}</td>
+      <td>${d.delta?`<span class="chg">${pnlTxt(d.delta)}</span>`:pnlTxt(d.delta)}</td>
+      <td>${isRun?(it.ok?'<span class="badge pass">✓ 通过</span>':'<span class="badge fail">✗ 合计变化</span>'):'<span class="badge pass">已冻结</span>'}
+        ${it.drift?' <span class="badge drift" title="当前参数与加入用例时不同，重算仍用冻住的参数">参数漂移</span>':''}
+        ${fail?' <span class="caption">▾ 展开进出场</span>':''}</td></tr>`;
+    if(fail)html+=`<tr hidden><td colspan="5" style="padding:0"><div class="case-detail">${pnlPositionsHtml(d.positions)}</div></td></tr>`;
+  });
+  return html+'</tbody></table></div>';
+}
+function driftNotice(items){
+  const names=items.filter(i=>i.drift).map(i=>i.caseName||i.caseId);
+  if(!names.length)return '';
+  return `<div class="src-line warn">当前系统参数已调整，与加入用例时不同（${names.map(esc).join('、')}）。本次仍按冻住的参数重算，不用现在的参数。</div>`;
+}
+let lastRunSnap=null;
 function renderResults(){
   const body=$('runBody'),meta=$('runMeta'),title=$('resultTitle');
+  const prevSnap=lastRunSnap;
+  lastRunSnap=runState&&runState.id?{id:runState.id,state:runState.state}:null;
   if(!runState||runState.state==='idle'){body.innerHTML='<p class="muted">尚未运行。点击基线的「运行」或「▶ 跑全部基线」。</p>';meta.textContent='';return}
   const items=runState.items||[];
+  const justFinished=prevSnap&&prevSnap.id===runState.id&&prevSnap.state==='running'&&runState.state!=='running';
+  if(justFinished&&runState.mode==='run'&&items.some(i=>i.drift))
+    toast('当前系统参数已调整，本次重算仍使用加入用例时冻住的参数');
   if(runState.state==='running'){
     const done=items.filter(i=>i.state!=='pending'&&i.state!=='running').length;
     const pct=items.length?done/items.length*100:0;
-    body.innerHTML=`<div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div><p class="caption">${done} / ${items.length} 用例 · 正在重算（Python build_bis）…</p>`;
+    const kinds=new Set(items.map(i=>i.kind||'bi'));
+    const cap=kinds.has('pnl')&&!kinds.has('bi')?'正在重算回测合计…':kinds.has('pnl')?'正在重算…':'正在重算（Python build_bis）…';
+    body.innerHTML=`<div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div><p class="caption">${done} / ${items.length} 用例 · ${cap}</p>${driftNotice(items)}`;
     meta.textContent=runState.mode==='freeze'?('冻结期望 · '+esc(runState.freezeName||'')):'运行基线';
     title.textContent='④ 运行结果';
     return;
@@ -274,9 +348,10 @@ function renderResults(){
   const mode=runState.mode;
   const isRun=mode==='run';
   const okCount=items.filter(i=>i.ok).length;
-  let html=`<div class="summary-row">`+(isRun
-    ?`<span class="badge ${okCount===items.length?'pass':'fail'}">通过 ${okCount} / ${items.length}</span><span class="muted">比对口径：11 字段逐笔（align_check 同款）· 引擎 Python build_bis</span>`
-    :`<span class="badge pass">期望已冻结 · ${items.length} 用例</span><span class="muted">基线「${esc(runState.freezeName||'')}」已用当前逻辑冻结笔 + 买卖点期望</span>${runState.baselineId?`<button class="btn mini" data-detail="${esc(runState.baselineId)}">查看冻结明细</button>`:''}`)+`</div>`;
+  const pnlOnly=items.length&&items.every(i=>i.kind==='pnl');
+  let html=driftNotice(items)+`<div class="summary-row">`+(isRun
+    ?`<span class="badge ${okCount===items.length?'pass':'fail'}">通过 ${okCount} / ${items.length}</span><span class="muted">${pnlOnly?'比对口径：重跑引擎得到进出场后，按原公式加总，只比合计':'比对口径：11 字段逐笔（align_check 同款）· 引擎 Python build_bis'}</span>`
+    :`<span class="badge pass">期望已冻结 · ${items.length} 用例</span><span class="muted">${pnlOnly?`基线「${esc(runState.freezeName||'')}」已冻结合计与进出场`:`基线「${esc(runState.freezeName||'')}」已用当前逻辑冻结笔 + 买卖点期望`}</span>${runState.baselineId?`<button class="btn mini" data-detail="${esc(runState.baselineId)}">查看冻结明细</button>`:''}`)+`</div>`;
   // 按基线分组
   const groups=[];
   for(const it of items){
@@ -285,6 +360,7 @@ function renderResults(){
     g.items.push(it);
   }
   for(const g of groups){
+    if(g.items.some(i=>i.kind==='pnl')){html+=pnlGroupHtml(g,isRun);continue}
     const gOk=g.items.filter(i=>i.ok).length;
     html+=`<div class="bl-group-title">${esc(g.name||g.key)} ${isRun?`<span class="badge ${gOk===g.items.length?'pass':'fail'}">${gOk}/${g.items.length}</span>`:''}</div>
       <div class="table-wrap"><table><thead><tr><th>用例</th><th>周期</th>${isRun?'<th>期望笔数</th><th>实际笔数</th><th>笔首差异</th>':'<th>笔数</th>'}<th>买卖点</th><th>状态</th></tr></thead><tbody>`;
@@ -341,6 +417,18 @@ function biRow(bi,i){
 const BI_TABLE_HEAD='<thead><tr><th>笔#</th><th>向</th><th>起#</th><th>止#</th><th>起价</th><th>止价</th><th>起时间</th><th>止时间</th><th>raw</th><th>span</th><th>GL</th><th>MC</th></tr></thead>';
 async function showBaselineDetail(id){
   const d=await api('bl-bis?id='+encodeURIComponent(id));
+  if(d.kind==='pnl'){
+    $('resultTitle').textContent='④ 基线明细';
+    $('runMeta').textContent=`基线「${d.name}」冻结合计与进出场`;
+    let html='';
+    for(const c of d.cases||[]){
+      html+=`<div class="bl-group-title">${esc(c.caseName)} <span class="badge">${esc(c.symbol||'—')}</span> <span class="caption">合计 ${pnlTxt(c.total)} · 冻结于 ${fmtT(c.frozenAt)}</span></div>`;
+      const lines=(c.positions||[]).map(p=>`<tr><td>${posLine(p)}</td></tr>`).join('');
+      html+=`<div class="table-wrap"><table class="pair-table"><thead><tr><th>冻结进出场</th></tr></thead><tbody>${lines||'<tr><td class="muted">无进出场</td></tr>'}</tbody></table></div>`;
+    }
+    $('runBody').innerHTML=(d.cases||[]).length?html:'<p class="muted">基线内没有可用用例（可能已被删除）。</p>';
+    return;
+  }
   $('resultTitle').textContent='④ 基线明细';
   $('runMeta').textContent=`基线「${d.name}」冻结期望 · 逐笔 11 字段 · 随时可从基线列表重开`;
   let html='';
@@ -406,7 +494,11 @@ async function runAll(){
   await act(async()=>await refreshRunState());
 }
 async function refreshBaseline(id){
-  if(!confirm('将用当前逻辑重新冻结期望笔结果（覆盖基线内全部用例）？\n仅在画笔逻辑有意变更、且已确认新结果正确时使用。'))return;
+  const b=baselines.find(x=>x.id===id);
+  const msg=b&&b.kind==='pnl'
+    ?'将用冻住的参数重新回测，覆盖基线内的合计和进出场？\n仅在确认新结果正确时使用。'
+    :'将用当前逻辑重新冻结期望笔结果（覆盖基线内全部用例）？\n仅在画笔逻辑有意变更、且已确认新结果正确时使用。';
+  if(!confirm(msg))return;
   await api('refresh-baseline',{id});
   toast('正在重新冻结期望…');
   schedulePoll();
@@ -434,6 +526,12 @@ async function deleteCase(id){
 
 /* ---------- 事件 ---------- */
 document.addEventListener('click',e=>{
+  if(e.target.closest('#pnlHelpLink')){
+    e.preventDefault();
+    const box=$('pnlHelp');
+    box.hidden=!box.hidden;
+    return;
+  }
   const b=e.target.closest('button');if(!b)return;
   if(b.dataset.delCase)act(()=>deleteCase(b.dataset.delCase));
   if(b.dataset.detail)act(()=>showBaselineDetail(b.dataset.detail));

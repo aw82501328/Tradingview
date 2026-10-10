@@ -283,7 +283,7 @@ const LOGIC_BODY = `
 <tr><td>2卖</td><td>下跌在前低附近（参数化），或者未过前低，反弹又回到2卖点附近（参数化）</td><td>空头空</td><td>等反弹后的类2卖点</td><td>waitLike2Sell</td></tr>
 <tr><td>2买/类2买</td><td>冲过前高且力度没变弱</td><td>多头多</td><td>等回调后的3买点</td><td>wait3Buy</td></tr>
 <tr><td>2卖/类2卖</td><td>跌破前低且力度没变弱</td><td>空头空</td><td>等反弹后的3卖点</td><td>wait3Sell</td></tr>
-<tr><td>3买/类3买</td><td>冲过前高且力度没变弱（开关「3类点强档顺势」开，默认关）</td><td>多头多</td><td>等回调后的新买点</td><td>waitBuy</td></tr>
+<tr><td>3买/类3买</td><td>冲过前高且力度没变弱（开关「3类点强档顺势」开，默认开）</td><td>多头多</td><td>等回调后的新买点</td><td>waitBuy</td></tr>
 <tr><td>3卖/类3卖</td><td>跌破前低且力度没变弱（开关同上）</td><td>空头空</td><td>等反弹后的新卖点</td><td>waitSell</td></tr>
 </table>
 <p class="lnote">方向命名：前两个字＝现在的结构是涨是跌，后一个字＝做多还是做空。三档按序判定：强档（过前高不背驰）→ 中间档（仅 2买/2卖）→ 弱档。</p>
@@ -493,6 +493,7 @@ const CHOICE_LABELS = { trendRes: { '': '关闭', '240': '4小时', 'D': '日线
                         fibLevels: { '0.236': '回撤23.6%', '0.382': '回撤38.2%', '0.5': '回撤50%', '0.618': '回撤61.8%', '0.786': '回撤78.6%' },
                         sameBarPriority: { 'stop': '止损优先(保守)', 'tp': '止盈优先' },
                         exitTrailSrc: { 'detect': '检测周期', 'mark': '背驰周期' },
+                        exitStopBeMode: { 'extreme': '当前(极值±滑点)', 'entry': '0亏损(进场价)' },
                         mutexScope: { 'global': '全局同向一笔(同缠论V1)', 'perPeriod': '每周期独立互斥' },
                         tpMode: { 'points': '固定点数', 'structure': '结构组合(半仓+主动止盈+跟踪止损)' },
                         maReq: { 'required': '必选', 'optional': '可选' },
@@ -549,6 +550,17 @@ function trailSrcHtml(m) {
         + choiceLabel('exitTrailSrc', c) + `</option>`).join('')
     + `</select> 平仓 `;
 }
+// 保本位模式（2026-10-10 双口径）：并入保本止损卡内联下拉（不单独成行；
+// 同跟踪止盈参照模式），extreme=成交K线极值±保本滑点，entry=0亏损（进场价，默认）
+function beModeHtml(m) {
+  const spec = m.schema.exitStopBeMode;
+  if (!spec) return '';
+  const cur = m.effective.exitStopBeMode || 'extreme';
+  return `<select data-k="exitStopBeMode" title="${spec.desc}" aria-label="保本位模式">`
+    + spec.choices.map(c => `<option value="${c}"${c === cur ? ' selected' : ''}>`
+        + choiceLabel('exitStopBeMode', c) + `</option>`).join('')
+    + `</select> 平仓 `;
+}
 function exitLineHtml(m, onKey, pctKey) {
   const oSpec = m.schema[onKey], pSpec = m.schema[pctKey];
   const on = m.effective[onKey], pct = m.effective[pctKey];
@@ -567,20 +579,23 @@ function exitModeRowsHtml(m) {
       const oSpec = m.schema[onKey], pSpec = m.schema[pctKey];
       const on = m.effective[onKey], pct = m.effective[pctKey];
       const isMod = m.overrides[onKey] !== undefined || m.overrides[pctKey] !== undefined
-        || (onKey === 'exitTrailOn' && m.overrides.exitTrailSrc !== undefined);
+        || (onKey === 'exitTrailOn' && m.overrides.exitTrailSrc !== undefined)
+        || (onKey === 'exitStopBeOn' && m.overrides.exitStopBeMode !== undefined);
       const defText = `${onSpecDef(oSpec)} · 比例默认 ${pSpec.default}%`;
+      const inlineSel = onKey === 'exitTrailOn' ? trailSrcHtml(m)
+        : (onKey === 'exitStopBeOn' ? beModeHtml(m) : '');
       return `<div class="prow ${isMod ? 'mod' : ''}" title="${oSpec.desc}">
       <input type="checkbox" data-k="${onKey}" ${on ? 'checked' : ''} aria-label="${oSpec.label}">
       <span class="pname"><span class="plabel">${oSpec.label}<span class="badge">已修改</span></span>
       <span class="pdef">${defText} · ${oSpec.desc}</span></span>
-      <span class="zs-keep" data-keep-for="${onKey}">${onKey === 'exitTrailOn' ? trailSrcHtml(m) : ''}<input type="number" step="1"
+      <span class="zs-keep" data-keep-for="${onKey}">${inlineSel}<input type="number" step="1"
         min="${pSpec.min}" max="${pSpec.max}" data-k="${pctKey}" value="${pct}">%</span></div>`;
     }
     const isMod = rows.some(([onKey, pctKey]) =>
       m.overrides[onKey] !== undefined || m.overrides[pctKey] !== undefined);
     return `<div class="prow exit-group${isMod ? ' mod' : ''}">
       <div class="pname"><span class="plabel">够笔止盈（两源各自开关+比例）<span class="badge">已修改</span></span>
-      <span class="pdef">背驰周期=TP1同事件源（不限顺势）；检测周期=仅顺势末笔够笔（原「够笔止盈」）</span></div>
+      <span class="pdef">统一口径（2026-10-10）：向有利方向走出5块合并K即够笔（不限顺势，不等确认笔；确认笔兜底）；检测周期锚点含进场块下限</span></div>
       ${rows.map(([onKey, pctKey]) => exitLineHtml(m, onKey, pctKey)).join('')}</div>`;
   }).join('');
 }
@@ -679,6 +694,7 @@ function entryRowsHtml(m) {
   const grouped = new Set(ENTRY_GROUPS.flatMap(([, keys]) => keys));
   EXIT_MODE_KEYS.forEach(k => grouped.add(k));   // 出场方式键由专用卡片渲染
   grouped.add('exitTrailSrc');                   // 跟踪止盈参照：并入跟踪止盈卡，不单独成行
+  grouped.add('exitStopBeMode');                 // 保本位模式：并入保本止损卡，不单独成行
   return ENTRY_GROUPS.map(([title, keys]) => {
     if (title === '__EXIT_MODES__') {
       return `<div class="pgroup">出场方式（至少启用一种；比例 = 平总仓位[初始手数]%，整数手）</div>`

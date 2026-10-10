@@ -37,19 +37,23 @@
   - 最大止损硬上限兜底（2026-10-09）：止损类方式部分平仓 latch 关闭穿越判定后，
     剩余手数由 maxLoss（进场价±最大止损）兜底——盘中破坏即全平剩余（记 stopSr），
     每手最大亏损 ≤ 最大止损 ± 成交滑点；正常穿越判定位不宽于 maxLoss 时兜底不可达；
-  - 保本止损位 beStop：进场成交K线极值 ± slip_be（short: high+ / long: low−；
-    run() 批量路径成交 bar 当拍未收盘，存在 ≤1 根 fine bar 的微前视，step_to 实时
-    路径无前视——研究口径可接受）；
+  - 保本止损位 beStop（exitStopBeMode 双口径，2026-10-10）：extreme =
+    进场成交K线极值 ± slip_be（short: high+ / long: low−；run() 批量路径成交 bar
+    当拍未收盘，存在 ≤1 根 fine bar 的微前视，step_to 实时路径无前视——研究口径
+    可接受）；entry（0亏损）= 进场价（保本滑点不参与；下一开盘成交跳空仍可能略有出入）；
   - TP1 保本（随保本止损开关）：背驰周期（markRes）够笔（进场后首笔有利方向笔完成）→
     止损位上移至 beStop（状态迁移，当拍生效、事件仅落盘）；
-  - 背驰周期够笔（halfMr，默认关）：与 TP1 同事件源（背驰周期首笔有利方向笔完成，
-    不限顺势）→ 下一开盘平指定比例，剩余止损移至 beStop；
-  - 检测周期够笔（half，原「够笔止盈」；仅顺势：计划 direction ∈ {多头多, 空头空}）：
-    检测周期有利方向够笔（空单=末笔下跌、多单=末笔上涨；已完成笔，或形成中笔合并块数
-    达到门槛）→ 下一开盘平指定比例（默认一半），剩余止损移至 beStop（不要求保本先触发）；
-    预期口径（2026-10-09 严进宽出，exitExpectOn 默认开）：末笔为不利方向时，其后
-    有利方向形成段合并K ≥ min_merged 块同样算够笔（forming_seg_ready，与逆势分支
-    同源）——不等确认笔；exitExpectOn=False 恢复「末笔须已确认反向」旧口径；
+  - 背驰周期够笔（halfMr，默认关；2026-10-10 统一口径）：背驰周期向有利方向走出
+    min_merged 块合并K（预期口径 enough_fav_bars，不等确认笔）或首笔有利方向确认笔
+    完成（TP1 同事件源），不限顺势，先到先触发 → 下一开盘平指定比例，剩余止损移至
+    beStop；
+  - 检测周期够笔（half，原「够笔止盈」；2026-10-10 统一口径，不限顺势）：检测周期
+    向有利方向走出 min_merged 块合并K（预期口径 enough_fav_bars——锚点取末笔延伸
+    终点块与进场块较晚者：末笔延伸收盘才提交，纯末笔锚点在入场初段会把末笔自身的
+    块计入=假就绪；进场块下限防进场前已走出的块计入）或末笔翻为有利方向确认笔
+    （lastBiOk，含 M4 形成中够块），先到先触发 → 下一开盘平指定比例（默认一半），
+    剩余止损移至 beStop（不要求保本先触发）；逆势单与快速离场（seg5）构成先后两级
+    部分止盈；exitExpectOn=False 恢复「末笔须已确认反向」旧口径；
   - 过高低点止盈：顺势 = 检测周期有利方向笔破前高/前低（breakPrev）；预期口径下
     另认「形成段运行极值越过前一同向笔端点」（当根收盘K极值判定，不等收笔确认）；
     逆势（多头空/空头多）= 检测周期首个有利方向形成段（合并后 ≥5 根K成笔预期）
@@ -87,8 +91,10 @@ from .trading_plan import (compute_plan, trend_state_of,
                            TREND_RES as DEFAULT_TREND_RES, RANGE_RES as DEFAULT_RANGE_RES,
                            TREND_REBOUND, REBOUND_NEAR_PTS, REBOUND_ANGLE_REF)
 from .mark_entry import (
-    compute_entries, stop_ref_of, sr_of_detect, find_bi_event, filterDetectPeriods,
+    compute_entries, stop_ref_of, sr_of_detect, sr_drop_fib_for_class1,
+    find_bi_event, filterDetectPeriods,
     trend_following_of, forming_seg_ready, forming_break_ref, lastBiOk,
+    enough_fav_bars,
     DEFAULT_LOTS, DEFAULT_SLIP_STOP, DEFAULT_SLIP_FALLBACK, DEFAULT_SLIP_BE,
     DEFAULT_SLIP_STOP_ATR_K, DEFAULT_SLIP_FALLBACK_ATR_K, DEFAULT_SLIP_BE_ATR_K,
     NEAR as DEFAULT_NEAR, EXIT_MIN_MERGED, REALTIME_MIN_BARS, ZS_EXIT_WEAK_RATIO,
@@ -133,7 +139,9 @@ def exit_cfg_desc(ec):
     if ec.get("exitStopSrOn"):
         parts.append(f"支阻止损{float(ec.get('exitStopSrPct', 100)):.0f}%")
     if ec.get("exitStopBeOn"):
-        parts.append(f"保本止损{float(ec.get('exitStopBePct', 100)):.0f}%")
+        parts.append(f"保本止损{float(ec.get('exitStopBePct', 100)):.0f}%"
+                     + ("（0亏损）" if (ec.get("exitStopBeMode") or "extreme") == "entry"
+                        else ""))
     if ec.get("exitHalfMrOn"):
         parts.append(f"背驰够笔{float(ec.get('exitHalfMrPct', 50)):.0f}%")
     if ec.get("exitHalfOn"):
@@ -192,6 +200,7 @@ def trail_raise(pos, refs, t):
 
 
 def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
+                          mark_merged_times=None,
                           min_merged=EXIT_MIN_MERGED, trail_sigs=None, trail_pts=None):
     """出场判定（纯函数，三模式共用）——在「已收盘 bar」上判定一次。
 
@@ -206,12 +215,12 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
         平仓用 stopSrFired/stopBeFired/trailFired latch 防逐拍重触发）；
       - 用 bar 完整 high/low 判止损/保本止损穿越（保本位 = beStop，非进场价）；
         TP1 用 markRes 已确认笔（endTime <= t）；过高低点止盈顺势分支用 periodX 已确认笔
-        （breakPrev）；背驰周期够笔用 TP1 同一事件、检测周期够笔用检测周期有利方向
-        够笔（lastBiOk）；逆势分支仍用
+        （breakPrev）；检测/背驰周期够笔（2026-10-10 统一口径，不分顺势逆势）：
+        确认口径 lastBiOk / TP1 首笔有利方向确认笔 + 预期口径 enough_fav_bars
+        （向有利方向走出 min_merged 块合并K，不等确认笔）先到先触发；逆势快速离场仍用
         检测周期形成段「合并后≥5根K成笔预期」（forming_seg_ready，
         px_merged_times 缺省 None 时跳过形成段判定）；
-        预期口径（exitExpectOn，默认开）叠加两路：检测周期够笔认
-        「末笔不利+形成段合并K≥min_merged」（exp_seg=seg5 复用），顺势过高低点认
+        预期口径（exitExpectOn，默认开）另认顺势过高低点
         「当根收盘K极值越过前一同向笔端点」（forming_break_ref + bar high/low，
         无前视）；
       - 跟踪止盈上移在穿越判定之后执行（本拍上移、下一拍生效，同 fxma 口径）；
@@ -227,6 +236,8 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
     @param bar    该根已收盘 K线（{time,open,high,low,close}）
     @param mark_bis / px_bis  背驰级别 / 检测周期笔快照（endTime ≤ t 已含）
     @param px_merged_times    检测周期合并K线块截止时间数组（升序；None 跳过形成段判定）
+    @param mark_merged_times  背驰周期合并K线块截止时间数组（升序；None 跳过背驰够笔
+                             预期口径，仅剩 TP1 确认笔事件源）
     @param trail_sigs         持仓 markRes 的信号流快照（跟踪止盈 mark 模式参照；None 跳过）
     @param trail_pts          持仓检测周期的结构点流快照 [{type,time,price}]（detect 模式
                              参照，_rebuild_chain 计算；None 跳过）
@@ -245,12 +256,18 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
     seg5 = forming_seg_ready(px_bis, px_merged_times, is_short, min_merged) \
         if px_merged_times else False
     fav_cn = "下跌" if is_short else "上涨"
-    # 预期口径（严进宽出，2026-10-09）：出场侧不等确认笔——末笔为不利方向时其后
-    # 有利方向形成段即事件源：合并K够块（exp_seg，与逆势 TP3b 同源 forming_seg_ready）
-    # = 检测周期够笔；当根收盘K极值越过前一同向笔端点（exp_break）= 顺势过高低点。
+    # 预期口径（严进宽出，2026-10-09；2026-10-10 够笔统一口径）：检测/背驰周期
+    # 「向有利方向走出 min_merged 块合并K」即够笔（enough_fav_bars：末笔锚点 +
+    # 进场块下限，不分顺势逆势、不等确认笔——纯末笔锚点在入场初段会把末笔自身的
+    # 块计入=假就绪，2026-10-01 XAUUSD 案例：08:27 进场锚点滞留 02:00，03:00-07:00
+    # 下跌块被计入）；当根收盘K极值越过前一同向笔端点（exp_break）= 顺势过高低点。
     # exitExpectOn=False 回退确认笔旧口径（lastBiOk / find_bi_event 确认笔）。
     expect_on = bool(ec.get("exitExpectOn"))
-    exp_seg = expect_on and seg5
+    entry_ref = pos.get("entryTime") or pos.get("signalTime") or 0
+    exp_seg = bool(expect_on and px_merged_times and enough_fav_bars(
+        px_bis, px_merged_times, entry_ref, is_short, min_merged))
+    exp_mr = bool(expect_on and mark_merged_times and enough_fav_bars(
+        mark_bis, mark_merged_times, entry_ref, is_short, min_merged))
     exp_break = None
     if expect_on and trend:
         ref = forming_break_ref(px_bis, is_short)
@@ -274,43 +291,53 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
                     f"{fmtT(tp1['time'])} @ {tp1['price']:.2f} 完成（信号 "
                     f"{fmtT(pos['signalTime'])} 之后），止损位上移至保本位 beStop "
                     f"{pos.get('beStop'):.2f}（当拍生效，仅状态迁移不成交）")})
-    if (ec.get("exitHalfMrOn") and tp1 and tp1["time"] <= t
+    if (ec.get("exitHalfMrOn") and ((tp1 and tp1["time"] <= t) or exp_mr)
             and not pos.get("halfMrDone")):
-        # 背驰周期够笔（2026-10-08 够笔止盈拆分）：事件源同 TP1 保本（背驰周期
-        # 首笔有利方向笔完成），不限顺势——逆势单同样给早期部分止盈。
-        # halfMrDone latch 一次性消费（tp1 首个匹配，条件持续成立）
+        # 背驰周期够笔（2026-10-08 够笔止盈拆分；2026-10-10 统一口径）：确认口径
+        # = TP1 同事件源（背驰周期首笔有利方向笔完成）；预期口径 = exp_mr（向有利
+        # 方向走出 min_merged 块合并K，不等确认笔）。不限顺势，先到先触发。
+        # halfMrDone latch 一次性消费（首个匹配，条件持续成立）
         pos["halfMrDone"] = True
         pos["pendingExit"] = "halfMr"
         pct = float(ec.get("exitHalfMrPct", 50.0))
         pos["pendingLots"] = _exit_lots(lots_total, lots_left, pct)
-        pos["pendingWhy"] = (
-            f"背驰周期够笔止盈触发：背驰周期 {pos.get('markRes')} 首笔有利方向"
-            f"（{fav_cn}）笔 {fmtT(tp1['time'])} @ {tp1['price']:.2f} 完成（信号 "
-            f"{fmtT(pos['signalTime'])} 之后），平 {pct:.0f}%（{pos['pendingLots']} 手）"
-            f"挂起；剩余止损移至保本位 beStop {pos.get('beStop'):.2f}")
+        if tp1 and tp1["time"] <= t:
+            pos["pendingWhy"] = (
+                f"背驰周期够笔止盈触发：背驰周期 {pos.get('markRes')} 首笔有利方向"
+                f"（{fav_cn}）笔 {fmtT(tp1['time'])} @ {tp1['price']:.2f} 完成（信号 "
+                f"{fmtT(pos['signalTime'])} 之后），平 {pct:.0f}%（{pos['pendingLots']} 手）"
+                f"挂起；剩余止损移至保本位 beStop {pos.get('beStop'):.2f}")
+        else:
+            pos["pendingWhy"] = (
+                f"背驰周期够笔止盈触发（预期口径）：背驰周期 {pos.get('markRes')} 自进场 "
+                f"{fmtT(entry_ref)} 所在合并块起向有利方向（{fav_cn}）已走 {min_merged} 块"
+                f"合并K（不等确认笔），平 {pct:.0f}%（{pos['pendingLots']} 手）挂起；"
+                f"剩余止损移至保本位 beStop {pos.get('beStop'):.2f}")
         return "halfMr"
     half_conf = lastBiOk(px_bis, fav)
-    if (ec.get("exitHalfOn") and trend and (half_conf or exp_seg)
+    # 够笔止盈（原 TP2 半平；2026-10-10 统一口径不限顺势）：确认口径 lastBiOk
+    # （末笔翻为有利方向，含 M4 形成中够块）与预期口径 exp_seg（向有利方向走出
+    # min_merged 块合并K，不等确认笔）先到先触发；逆势单与快速离场（seg5）构成
+    # 先后两级部分止盈。halfDone latch 一次性消费（首个匹配事件，条件持续成立）。
+    if (ec.get("exitHalfOn") and (half_conf or exp_seg)
             and not pos.get("halfDone")):
-        # 够笔止盈（原 TP2 半平；仅顺势）：检测周期有利方向够笔才触发（空单=下跌
-        # 够笔，多单=上涨够笔）。末笔仍是不利方向（空单上涨）则确认口径不够笔；
-        # 预期口径（2026-10-09）下末笔不利 + 其后形成段合并K≥min_merged 同样算够笔。
-        # halfDone latch 一次性消费（首个匹配事件，条件持续成立）。
         pos["halfDone"] = True
         pos["pendingExit"] = "half"
         pct = float(ec.get("exitHalfPct", 50.0))
         pos["pendingLots"] = _exit_lots(lots_total, lots_left, pct)
+        phase = "顺势" if trend else "逆势"
         if half_conf:
             pos["pendingWhy"] = (
-                f"够笔止盈触发（顺势，计划方向 {pos.get('planDirection')}）：检测周期 "
+                f"够笔止盈触发（{phase}，计划方向 {pos.get('planDirection')}）：检测周期 "
                 f"{pos.get('periodX')} 有利方向（{fav_cn}）已够笔（末笔方向满足 lastBiOk），"
                 f"平 {pct:.0f}%（{pos['pendingLots']} 手）挂起；"
                 f"剩余止损移至保本位 beStop {pos.get('beStop'):.2f}")
         else:
             pos["pendingWhy"] = (
-                f"够笔止盈触发（顺势·预期口径，计划方向 {pos.get('planDirection')}）：检测周期 "
-                f"{pos.get('periodX')} 有利方向（{fav_cn}）形成段合并K≥{min_merged} 块"
-                f"（成笔预期，不等确认笔），平 {pct:.0f}%（{pos['pendingLots']} 手）挂起；"
+                f"够笔止盈触发（{phase}·预期口径，计划方向 {pos.get('planDirection')}）：检测周期 "
+                f"{pos.get('periodX')} 自进场 {fmtT(entry_ref)} 所在合并块起向有利方向"
+                f"（{fav_cn}）已走 {min_merged} 块合并K（不等确认笔），"
+                f"平 {pct:.0f}%（{pos['pendingLots']} 手）挂起；"
                 f"剩余止损移至保本位 beStop {pos.get('beStop'):.2f}")
         return "half"
     tp3a_hit = tp3a if (tp3a and tp3a["time"] <= t) else None
@@ -1263,6 +1290,7 @@ class BacktestEngine:
                                           self._bis.get(pos.get("markRes")) or [],
                                           self._bis.get(pos.get("periodX")) or [],
                                           self._merged_times.get(pos.get("periodX")) or [],
+                                          self._merged_times.get(pos.get("markRes")) or [],
                                           min_merged=self.exit_min_merged,
                                           trail_sigs=st["allSignals"].get(pos.get("markRes")),
                                           trail_pts=self._trail_pts.get(pos.get("periodX")))
@@ -1542,6 +1570,7 @@ class BacktestEngine:
                                       self._bis.get(pos.get("markRes")) or [],
                                       self._bis.get(pos.get("periodX")) or [],
                                       self._merged_times.get(pos.get("periodX")) or [],
+                                      self._merged_times.get(pos.get("markRes")) or [],
                                       min_merged=self.exit_min_merged,
                                       trail_sigs=allSignals.get(pos.get("markRes")),
                                       trail_pts=self._trail_pts.get(pos.get("periodX")))
@@ -2059,8 +2088,10 @@ class BacktestEngine:
             slipStopEff = self.slip_stop + self.slip_stop_atr_k * mrAtr
             slipFbEff = self.slip_fallback + self.slip_fallback_atr_k * mrAtr
             # 止损重选也只看检测周期的支阻位（与近支阻同一口径）；srcInfo 记录来源
-            # （near_sr=信号近支阻沿用 / sr_pick=正确侧重选 / fallback=最大止损兜底）
-            srLevels = sr_of_detect(srAll, s.get("periodX"))
+            # （near_sr=信号近支阻沿用 / sr_pick=正确侧重选 / fallback=最大止损兜底）；
+            # 1类键（wait1Buy/wait1Sell）同闸门口径剔除 fib 位（2026-10-10）
+            srLevels = sr_drop_fib_for_class1(
+                sr_of_detect(srAll, s.get("periodX")), s.get("strategyKey"))
             srcInfo = {}
             stopRef = stop_ref_of(d, entryPrice, s.get("nearSr"), srLevels,
                                   slip_stop=self.slip_stop, slip_fallback=self.slip_fallback,
@@ -2075,16 +2106,25 @@ class BacktestEngine:
                               f"{'+' if d == 'short' else '-'}止损滑点 {slipStopEff:.2f}")
             else:
                 stopSource = f"最大止损兜底 进场价{'+' if d == 'short' else '-'}{slipFbEff:.2f}"
-            # 保本止损位 beStop = 进场成交K线极值 ± 有效保本滑点（short: high+ / long: low−）；
-            # 成交 bar 按 entryTime 定位于 fine 时间轴，取不到时兜底 进场价 ± 有效保本滑点。
-            # 注意：run() 批量路径成交 bar 当拍未收盘（微前视 ≤1 根 fine bar），
-            # step_to 实时路径成交 bar 已收盘、无前视（研究口径可接受，见模块 docstring）。
+            # 保本止损位 beStop（exitStopBeMode 双口径，2026-10-10；默认值=
+            # mark_entry.EXIT_STOP_BE_MODE，当前 entry）：
+            #   extreme（原行为）= 进场成交K线极值 ± 有效保本滑点（short: high+ / long: low−）；
+            #     成交 bar 按 entryTime 定位于 fine 时间轴，取不到时兜底 进场价 ± 有效保本滑点。
+            #     run() 批量路径成交 bar 当拍未收盘（微前视 ≤1 根 fine bar），
+            #     step_to 实时路径无前视（研究口径可接受，见模块 docstring）。
+            #   entry（0亏损）= 进场价（保本滑点不参与；与成交K线极值无关，进行中 bar
+            #     也无需收盘校正）；穿越后仍按下一开盘成交，跳空可能略有出入。
             slip_be_eff = self.slip_be + self.slip_be_atr_k * mrAtr
-            beStop = entryPrice + (slip_be_eff if d == "short" else -slip_be_eff)
-            bi = bisect.bisect_left(fineTimes, entryTime)
-            if bi < len(fine) and fine[bi]["time"] == entryTime:
-                beStop = (fine[bi]["high"] + slip_be_eff) if d == "short" \
-                    else (fine[bi]["low"] - slip_be_eff)
+            be_entry_mode = (self.exit_cfg.get("exitStopBeMode")
+                             or "extreme") == "entry"
+            if be_entry_mode:
+                beStop = entryPrice
+            else:
+                beStop = entryPrice + (slip_be_eff if d == "short" else -slip_be_eff)
+                bi = bisect.bisect_left(fineTimes, entryTime)
+                if bi < len(fine) and fine[bi]["time"] == entryTime:
+                    beStop = (fine[bi]["high"] + slip_be_eff) if d == "short" \
+                        else (fine[bi]["low"] - slip_be_eff)
             # 进场K线止损下限（stopEntryBarFloor，2026-09-23）：止损通常按支阻位逻辑，但
             # 至少在进场时所在背驰周期K线（markRes）极值外侧加滑点处——该K线运行中每创新
             # 低/高，advance_exit_decision 用运行极值同步外推（只放松），收盘后自然冻结；
@@ -2116,11 +2156,13 @@ class BacktestEngine:
                             stopSource += (f"｜进场K线极值下限 {extSeed:.2f}"
                                            f"{'+' if d == 'short' else '-'}滑点夹紧")
             # 进场叙事（交易日志 entryWhy）：信号→口径→止损/保本/最大止损推导全链
+            be_desc = ("进场价·0亏损模式" if be_entry_mode else
+                       f"成交K线极值{'+' if d == 'short' else '-'}保本滑点 {slip_be_eff:.2f}")
             entryWhy = (
                 f"{DIR_LABELS.get(d, d)}｜{s.get('signalNote') or s.get('strategyLabel') or s.get('strategyKey')}"
                 f"｜{FILL_MODE_LABELS.get(fillMode, fillMode)}：{fmtT(entryTime)} @ {entryPrice:.2f} 进场"
                 f"｜止损位 {stopRef:.2f}（{stopSource}）"
-                f"｜保本位 beStop {beStop:.2f}（成交K线极值{'+' if d == 'short' else '-'}保本滑点 {slip_be_eff:.2f}）"
+                f"｜保本位 beStop {beStop:.2f}（{be_desc}）"
                 f"｜最大止损 {maxLoss:.2f}｜{self.lots} 手"
                 f"｜出场 {exit_cfg_desc(self.exit_cfg)}")
             trades.append({

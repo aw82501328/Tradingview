@@ -128,7 +128,7 @@ table.semtab .new{color:var(--warn)}
   </tr>
   <tr>
     <td class="c">够笔止盈</td><td class="c"><span class="tag">half</span></td>
-    <td>仅顺势（多头多/空头空）：检测周期出现有利方向够笔（空单末笔下跌/多单末笔上涨）</td>
+    <td>统一口径不限顺势：向有利方向走出5块合并K（预期口径，不等确认笔）或末笔成确认有利方向笔</td>
     <td class="c">开</td><td class="c">50%</td><td>部分平仓；剩余止损移保本位</td>
   </tr>
   <tr>
@@ -156,7 +156,7 @@ const METHODS = [
   {k:'exitStopBeOn', pct:'exitStopBePct', on:true,  def:100, label:'保本止损', code:'stopBe',
    desc:'TP1保本迁移（首笔有利方向笔完成→止损上移保本位）后穿越保本位离场'},
   {k:'exitHalfOn',   pct:'exitHalfPct',   on:true,  def:50,  label:'够笔止盈', code:'half',
-   desc:'仅顺势：检测周期有利方向够笔 → 平指定比例，剩余止损移保本位'},
+   desc:'统一口径不限顺势：向有利方向走出5块合并K（不等确认笔）或末笔确认笔 → 平指定比例，剩余止损移保本位'},
   {k:'exitCloseOn',  pct:'exitClosePct',  on:true,  def:100, label:'过高低点止盈', code:'close',
    desc:'顺势=有利方向笔破前高/低；逆势=形成段成笔预期 → 平指定比例'},
   {k:'exitTrailOn',  pct:'exitTrailPct',  on:false, def:100, label:'跟踪止盈', code:'trailStop', isNew:true,

@@ -809,6 +809,14 @@ class LiveTrader:
         if t.get("entryTime") is None or t.get("beStop") is None:
             self._be_fix.add(no)
             return
+        # 0亏损模式（exitStopBeMode=entry，2026-10-10）：beStop=进场价=成交bar开盘，
+        # 与成交K线极值无关，无需收盘校正（校正反而会改回极值口径）
+        # 0亏损模式（exitStopBeMode=entry，2026-10-10）：beStop=进场价=成交bar开盘，
+        # 与成交K线极值无关，无需收盘校正（校正反而会改回极值口径）
+        if (getattr(self.engine, "exit_cfg", {}).get("exitStopBeMode")
+                or "extreme") == "entry":
+            self._be_fix.add(no)
+            return
         fine = self.engine.fine_res
         times = self.engine._times.get(fine) or []
         idx = bisect.bisect_left(times, t["entryTime"])

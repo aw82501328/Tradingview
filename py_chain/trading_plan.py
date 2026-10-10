@@ -37,8 +37,8 @@ RANGE_DEFAULTS = {
 # 2买/2卖 中间档「附近」容差默认值（绝对点数；参数中心 plan 模块同名透传，cfg 逐键覆盖）
 PREV_HIGH_NEAR_PTS = 5.0  # 前高/前低附近：2买（2卖）后首段上涨（下跌）终点距前高（前低）≤ 该值 → 等回调后的类2买点（类2卖点）
 SECOND_NEAR_PTS = 5.0     # 回到2买/2卖点：未过前高（前低）时最近一笔回调（反弹）终点距点价 ≤ 该值 → 等回调后的类2买点（类2卖点）
-# ③3类点强档开关：开=3买/类3买（3卖/类3卖）过前高不背驰时顺势「等待回调后的新买点/新卖点」；关=3类点一律弱档。默认关（2026-09-28）
-THIRD_STRONG_TREND = False
+# ③3类点强档开关：开=3买/类3买（3卖/类3卖）过前高不背驰时顺势「等待回调后的新买点/新卖点」；关=3类点一律弱档。默认开（2026-10-10 黄金参数页生效值收成全局默认）
+THIRD_STRONG_TREND = True
 # ④弱档原始点分流（2026-10-09）：2买/类2买（2卖/类2卖）弱档且点后反弹高（低）点
 # 均未超过（跌破）原始点 → 空头多/等待低点附近的2买（多头空/等待高点附近的2卖），
 # 进场键 wait2BuyBear/wait2SellBear（抬低/压低回调，非破前低的1买式抄底）。默认开。
@@ -132,7 +132,7 @@ def strategyOf(res, type_, reason, label, cls, cfg=None):
     多头空/等待高点附近的2卖（wait2SellBear，压低反弹）；过原始点维持旧弱档。
     卖侧够笔作废（同日）：2卖/类2卖 后下跌已够笔（after 确认或 ≥expectBiMinBars）
     → 卖点作废转弱二买（空头多/等待低点附近的2买，wait2BuyBear）。
-    3类点强档受 thirdStrongTrend 开关控制（默认关=3类点一律弱档「等一卖/一买」）。"""
+    3类点强档受 thirdStrongTrend 开关控制（默认开；关=3类点一律弱档「等一卖/一买」）。"""
     cfg = cfg or {}
     third_strong = cfg.get("thirdStrongTrend", THIRD_STRONG_TREND)
     base = {"res": res, "reason": reason, "label": label}
@@ -143,6 +143,10 @@ def strategyOf(res, type_, reason, label, cls, cfg=None):
     if type_ in ("2买", "类2买"):
         if cls == "过左高不背驰":
             return dict(base, direction="多头多", strategy="等待回调后的3买点")
+        # 未定型（点后首段还没走够）：弱档先行（2026-10-10 提前入列）——先武装弱2买，
+        # 点后反弹过左高/原始点时滚动翻档（强→3买/中间→类2买），不再回退前锚。
+        if cls == "未定型":
+            return dict(base, direction="空头多", strategy="等待低点附近的2买")
         if type_ == "2买" and cls in ("前高附近", "回到2买点"):
             return dict(base, direction="多头多", strategy="等待回调后的类2买点")
         if cls == "未过原始点":
@@ -151,6 +155,9 @@ def strategyOf(res, type_, reason, label, cls, cfg=None):
     if type_ in ("2卖", "类2卖"):
         if cls == "过左低不背驰":
             return dict(base, direction="空头空", strategy="等待反弹后的3卖点")
+        # 未定型：弱档先行（对称）——先武装弱2卖，定型后滚动翻档。
+        if cls == "未定型":
+            return dict(base, direction="多头空", strategy="等待高点附近的2卖")
         if type_ == "2卖" and cls in ("前低附近", "回到2卖点"):
             return dict(base, direction="空头空", strategy="等待反弹后的类2卖点")
         if cls == "未过原始底够笔":
@@ -253,18 +260,16 @@ def classifySecond(bis, macdArr, p, cfg=None):
         return "其他"
     # 买卖点后第一笔同向笔（买点后上涨 / 卖点后下跌），起点在买卖点之后
     after = next((b for b in bis if b["startTime"] >= p["time"] and b["type"] == ("up" if wantUp else "down")), None)
-    # A 开关（anchorUndecidedSkip，2026-09-26）：「还没跌/涨」≠「走弱」——after 不存在，
-    # 或 after 为形成中段且点后反向段合并块数 < anchorUndecidedMinBars（默认 2=右肩+1根确认）
-    # 时返回「未定型」哨兵，消费方（predictPlan/trend_direction）据此不接管、回退前锚；
-    # 真弱（after 存在但未破左低）仍走下方既有「其他」→ 弱档语义不变。
-    if CHAN_CFG.get("anchorUndecidedSkip"):
-        if after is None:
+    # 未定型哨兵（2026-09-26 A 开关；2026-10-10 提前入列后开关淘汰、哨兵保留）：
+    # 「还没跌/涨」≠「走弱」——after 不存在，或 after 为形成中段且点后反向段合并块数
+    # < 2（右肩+1根确认）时返回「未定型」。消费方（strategyOf/predictPlan）2026-10-10
+    # 起不再跳过：未定型点接管锚点并按弱档先行路由，定型后滚动修正。
+    if after is None:
+        return "未定型"
+    if after.get("_forming"):
+        mc = after.get("mergedCount")
+        if mc is not None and mc < 2:
             return "未定型"
-        if after.get("_forming"):
-            mc = after.get("mergedCount")
-            min_bars = int(CHAN_CFG.get("anchorUndecidedMinBars", 2) or 2)
-            if mc is not None and mc < min_bars:
-                return "未定型"
     if after is None:
         return "其他"
     # 过左高 / 过左低
@@ -435,52 +440,68 @@ def predictPlan(res, bis, upperBis, macdArr, lastPrice, bars, atr=0, barSec=None
         return None
 
     # 3. 先取最后一笔终点的买卖点；4. 无 → 逐笔向前扫描最近笔端点。
-    #    A 开关（anchorUndecidedSkip，2026-09-26）：分类「未定型」的端点视同无点——
-    #    跳过它继续向前扫描（回退前锚，本义：1卖后的「2卖交易预期」不被刚出生的点打断）；
-    #    无可回退前锚时由未定型点本身接管（维持旧行为，保守）。
+    #    2026-10-10 提前入列（原 anchorUndecidedSkip「未定型回退前锚」淘汰）：
+    #    未定型点（after 未走够）直接接管，strategyOf 按弱档先行路由、定型后滚动翻档。
     def cls_of(p):
         if p["type"] in ("2买", "类2买", "3买", "类3买", "4买", "类4买", "2卖", "类2卖", "3卖", "类3卖", "4卖", "类4卖"):
             return classifySecond(bis, macdArr, p, range_cfg)
         return "其他"
 
-    def undecided(m):
-        return (m is not None and CHAN_CFG.get("anchorUndecidedSkip")
-                and cls_of(m["point"]) == "未定型")
-
     def out_of(m, origin):
         p = m["point"]
         reason = f"找到最近买卖点 {p['type']} @ {fmtT(p['time'])} {p['price']:.2f}（{origin}）"
         out = strategyOf(res, p["type"], reason, f"趋势|{p['type']}", cls_of(p), range_cfg)
+        # 形成中 1买/1卖（末笔仍在新低/新高中、尚未收笔）→ 直接买卖档（wait1Buy/
+        # wait1Sell）：其入场闸门（创新低+出中枢变弱+低级别背驰链）当下正可判；
+        # 确认收笔后才切回调档（wait2Buy/wait2Sell）——避免形成中 1买 接管锚点
+        # 反而提前关掉「直接买一买」窗口（2026-10-10 提前入列配套）。
+        bi = m.get("bi")
+        if bi is not None and bi.get("_forming") and p["type"] in ("1买", "1卖"):
+            if p["type"] == "1买":
+                out = dict(out, direction="空头多", strategy="等待低点附近的一买")
+            else:
+                out = dict(out, direction="多头空", strategy="等待高点附近的一卖")
+            reason += "（形成中·直接档）"
+            out["reason"] = reason
         out["strategyLabel"] = out["strategy"]
         out["pointDesc"] = f"{p['type']}@{fmtT(p['time'])}({p['price']:.2f})"
         return out
 
-    lastMatch = matchAt(len(bis) - 1)
-    fallback = None   # 最近的未定型匹配（无前锚可回退时按旧行为接管）
-    if lastMatch is not None and not undecided(lastMatch):
-        return out_of(lastMatch, "最后一笔端点")
-    if lastMatch is not None:
-        fallback = lastMatch
-    prevMatch = None
-    for j in range(len(bis) - 2, -1, -1):
-        m = matchAt(j)
-        if m is None:
-            continue
-        if undecided(m):
-            if fallback is None:
-                fallback = m
-            continue
-        prevMatch = m
-        break
-    if prevMatch is not None:
-        return out_of(prevMatch, "向前扫描最近笔端点")
-    if fallback is not None:
-        return out_of(fallback, "最后一笔端点")
+    # 3/4. 买卖双侧各自扫锚（2026-10-10 用户规则：两侧独立、互不影响）：
+    #      买侧 = 最新买点族（1买/2买/类2买/3/类3/4/类4买），卖侧对称；
+    #      主侧 = 两锚中点时间更新者（与旧单锚口径一致，兼容图表/单键消费方），
+    #      另一侧附 alt* 字段——评估器两侧并行评估，多空可同时持仓。
+    buy_family = ("1买", "2买", "类2买", "3买", "类3买", "4买", "类4买")
+    sell_family = ("1卖", "2卖", "类2卖", "3卖", "类3卖", "4卖", "类4卖")
 
-    # 5. 趋势但未匹配到买卖点
-    reason = "趋势（非震荡），但最近笔端点均无已确认买卖点"
-    return {"res": res, "direction": "观望", "strategy": "趋势中无匹配买卖点",
-            "reason": reason, "label": "观察"}
+    def matchSide(family):
+        for j in range(len(bis) - 1, -1, -1):
+            m = matchAt(j)
+            if m is not None and m["point"]["type"] in family:
+                return m, ("最后一笔端点" if j == len(bis) - 1 else "向前扫描最近笔端点")
+        return None, None
+
+    buyM, buyOrigin = matchSide(buy_family)
+    sellM, sellOrigin = matchSide(sell_family)
+    sides = []
+    for m, origin in ((buyM, buyOrigin), (sellM, sellOrigin)):
+        if m is not None:
+            row = out_of(m, origin)
+            sides.append((m["point"]["time"], row))
+    if not sides:
+        # 5. 趋势但未匹配到买卖点
+        reason = "趋势（非震荡），但最近笔端点均无已确认买卖点"
+        return {"res": res, "direction": "观望", "strategy": "趋势中无匹配买卖点",
+                "reason": reason, "label": "观察"}
+    sides.sort(key=lambda x: x[0], reverse=True)
+    out = sides[0][1]
+    if len(sides) > 1:
+        alt = sides[1][1]
+        out["altDirection"] = alt["direction"]
+        out["altStrategy"] = alt["strategy"]
+        out["altReason"] = alt["reason"]
+        out["altPointDesc"] = alt.get("pointDesc")
+    return out
 
 
 # ============================================================
@@ -590,6 +611,10 @@ def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=No
             "reason": p.get("reason", ""),
             "pointDesc": p.get("pointDesc", ""),
         }
+        # 2026-10-10 买卖双侧独立：另一侧锚字段透传（评估器主侧+alt 侧并行评估）
+        for _k in ("altDirection", "altStrategy", "altReason", "altPointDesc"):
+            if p.get(_k) is not None:
+                row[_k] = p[_k]
         planRows[res] = row
         if work_cache is not None:
             work_cache[("plan", range_res, res)] = (cache_key, row, curBis)
@@ -601,17 +626,19 @@ def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=No
 # 纯函数：参考周期方向判定（顺势过滤，2026-09-15 口径与用户逐条确认）
 # ============================================================
 
-# 顺势参考周期默认值："" = 关闭；"240" = 4小时；"D" = 日线
+# 顺势参考周期默认值："" = 关闭（2026-10-10 黄金参数页生效值收成全局默认）；
+# "240" = 4小时；"D" = 日线
 # （参数中心 plan 模块 trendRes，Web 交易计划页签可配；mark_entry 进场方向过滤消费）
-TREND_RES = "240"
+TREND_RES = ""
 
 # 震荡判定参考周期（2026-09-16 闸门口径；2026-10-08 增加「关闭」项，参数中心 plan 模块
-# rangeRes 可配）："240" = 4小时（默认）；"D" = 日线；"" = 关闭 → 每周期自判震荡
-# （无参考周期锚、无 regime 传递，与图表 JS trading_plan.js 口径一致）。
+# rangeRes 可配）："" = 关闭（默认，2026-10-10）→ 每周期自判震荡
+# （无参考周期锚、无 regime 传递，与图表 JS trading_plan.js 口径一致）；
+# "240" = 4小时；"D" = 日线。
 # 开启时：更低周期只看该周期 regime（compute_plan → _plan_gate_row →
 # predictPlan(range_gate=…)，参考周期笔不足 → 观望）；参考周期自身与更高周期
 # 固定观望只作锚。
-RANGE_RES = "240"
+RANGE_RES = ""
 
 # 方向相位判定（2026-09-17 与用户确认，图片决策树；参数中心 plan 模块可配）：
 # 锚点确立后、破坏闩锁未触发期间，按「形成段方向 → 够笔 → 位置 → 角度强弱」分相位，
@@ -829,16 +856,10 @@ def trend_direction(res, bis, bars, upperBis, macdArr, tCut=None, rebound=None, 
                     f"{'上涨' if bis[-1]['type'] == 'up' else '下跌'}")
     if not pts:
         return fallback
+    # 2026-10-10 提前入列（原 anchorUndecidedSkip「未定型回退前锚」淘汰）：
+    # 最近点即锚——未定型点也定向（2买→long 等），与计划层弱档先行同口径，
+    # 避免顺势过滤回退前锚反向、拦掉刚武装的新方向。
     p = pts[-1]
-    # A 开关（anchorUndecidedSkip，2026-09-26）：最近点「未定型」（after 不存在/未达根数）
-    # 时与 predictPlan 同口径跳过、锚定前一个定型点；全部未定型 → 维持旧行为取最近点。
-    if CHAN_CFG.get("anchorUndecidedSkip"):
-        for cand in reversed(pts):
-            if (cand["type"] in ("2买", "类2买", "3买", "类3买", "4买", "类4买", "2卖", "类2卖", "3卖", "类3卖", "4卖", "类4卖")
-                    and classifySecond(bis, macdArr, cand) == "未定型"):
-                continue
-            p = cand
-            break
     t_ = p["type"]
     is_buy = t_ in ("1买", "2买", "类2买", "3买", "类3买", "4买", "类4买")
     if t_ in ("1买", "1卖"):

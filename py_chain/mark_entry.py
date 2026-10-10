@@ -33,7 +33,7 @@ SELL_COLOR = "#089981"
 
 # 靠近支阻位阈值（绝对价差，不乘 ATR；2026-09-13 起 ×ATR 语义改为直接输入，
 # 与三个滑点同单位——工作台/回测界面/JS CLI 同参同名同默认）
-NEAR = 10.0
+NEAR = 30.0
 
 # ---- 出场参数（2026-09-09 出场阶梯重构；与 mark_entry.js / CLI / Web 回测界面同名） ----
 # 进场手数（盈亏 = 价格差 × 方向 × lots × 合约乘数；2026-09-23 起统一 MT4/MT5 口径：
@@ -92,7 +92,8 @@ TREND_PLAN_DIRS = {"多头多", "空头空"}
 TREND_STRATEGY_KEYS = {"wait2Buy", "waitBuy", "wait3Buy", "waitLike2Buy",
                        "wait2Sell", "waitSell", "wait3Sell", "waitLike2Sell"}
 
-# ---- 出场方式配置（2026-10-08 出场方式可配置化；默认 = 现网行为，跟踪止盈默认关） ----
+# ---- 出场方式配置（2026-10-08 出场方式可配置化；2026-10-10 跟踪止盈默认开、
+# 过高低点止盈默认平 25%，与当时黄金参数页生效值对齐） ----
 # 每种离场方式 = 启用开关 + 平仓百分比（占总仓位=初始开仓手数，非剩余仓位；手数恒
 # 整数：⌊总手数×比例%⌋ 不足1手平1手，封顶剩余）；至少启用一种
 # （param_center.normalize 跨键校验）。键名与参数中心/engine module_params 同名直通。
@@ -100,16 +101,21 @@ EXIT_STOP_SR_ON = True     # 支阻止损：初始止损位（支阻±滑点/进
 EXIT_STOP_SR_PCT = 100.0
 EXIT_STOP_BE_ON = True     # 保本止损：TP1 保本迁移后保本位 beStop 穿越离场
 EXIT_STOP_BE_PCT = 100.0
+# 保本位模式（2026-10-10 双口径）：extreme=进场成交K线极值±保本滑点（原行为——
+# beStop 天然在进场价亏一侧，被打到至少亏滑点+进场K线逆向波幅）；entry=0亏损
+# （默认，2026-10-10 黄金参数页生效值：beStop=进场价，保本滑点不参与；穿越后下一开盘成交，跳空仍可能略有出入）
+EXIT_STOP_BE_MODE = "entry"
 EXIT_HALF_MR_ON = False    # 背驰周期够笔（2026-10-08 拆分）：背驰周期首笔有利方向笔完成
                            # （同 TP1 保本事件源，不限顺势）→ 平指定比例，剩余止损移保本位；
                            # 默认关 = 旧基线可比
 EXIT_HALF_MR_PCT = 50.0
-EXIT_HALF_ON = True        # 检测周期够笔（原 TP2 半平/够笔止盈）：仅顺势，检测周期有利方向够笔
+EXIT_HALF_ON = True        # 检测周期够笔（原 TP2 半平/够笔止盈）：检测周期有利方向够笔
+                           # （确认口径不限顺势 2026-10-10；预期口径仅顺势）
 EXIT_HALF_PCT = 50.0
 EXIT_CLOSE_ON = True       # 过高低点止盈（原 TP3 全平）：顺势破前高/低、逆势成笔预期
-EXIT_CLOSE_PCT = 100.0
-EXIT_TRAIL_ON = False      # 跟踪止盈（新增，同 fxma 结构点驱动）：同向3类点→止损上移
-EXIT_TRAIL_PCT = 100.0
+EXIT_CLOSE_PCT = 25.0
+EXIT_TRAIL_ON = True       # 跟踪止盈（同 fxma 结构点驱动）：同向3类点→止损上移
+EXIT_TRAIL_PCT = 25.0
 EXIT_TRAIL_SLIP = 1.0      # 跟踪止盈滑点（点）：止损上移到参照点价∓该值（同 fxma tpTrailSlipPts）
 # 跟踪止盈参照（2026-10-09 双模式 exitTrailSrc，默认 detect）；门控保本（同日）：
 # 保本迁移（beDone：TP1/half/halfMr）前不接管止损、不提损，参照点自保当当拍起算
@@ -134,6 +140,7 @@ EXIT_EXPECT_ON = True      # 出场预期口径（严进宽出，2026-10-09）�
 EXIT_MODE_DEFAULTS = {
     "exitStopSrOn": EXIT_STOP_SR_ON, "exitStopSrPct": EXIT_STOP_SR_PCT,
     "exitStopBeOn": EXIT_STOP_BE_ON, "exitStopBePct": EXIT_STOP_BE_PCT,
+    "exitStopBeMode": EXIT_STOP_BE_MODE,
     "exitHalfMrOn": EXIT_HALF_MR_ON, "exitHalfMrPct": EXIT_HALF_MR_PCT,
     "exitHalfOn": EXIT_HALF_ON, "exitHalfPct": EXIT_HALF_PCT,
     "exitCloseOn": EXIT_CLOSE_ON, "exitClosePct": EXIT_CLOSE_PCT,
@@ -180,18 +187,24 @@ def pickDivergeRefer(bis, cur, barSec, parentBi=None):
     zsEnter = (zs.get("enterEndTime") if zs is not None else None)
     if zsEnter is None and zs is not None:
         zsEnter = zs["startTime"]
+    fallback = None  # 容器内最近合格同向段（ZS 回退越界时的兜底参照）
     for j in range(bis.index(cur) - 1, -1, -1):
         cand = bis[j]
         if cand["type"] != cur["type"]:
             continue
         if cand["span"] < cur["span"] * 0.5:
             continue  # 跳过幅度不足的次级别回调
-        if zsEnter is not None and cand["endTime"] > zsEnter:
-            continue  # 中枢内部/之后的段不参与比较 → 回退到入中枢段
         if parentBi is not None and cand["startTime"] < parentBi["startTime"] - (barSec or 0):
-            break  # 参照跨出候选段所属上级笔 → 候选无效（规则 2，不回退更早）
+            break  # 参照跨出候选段所属上级笔（规则 2，不回退更早）
+        if zsEnter is not None and cand["endTime"] > zsEnter:
+            # 中枢内部/之后的段不参与比较 → 优先回退到入中枢段；但若入中枢段与
+            # 候选段反向（或已被容器边界截断），ZS 回退会一路推到容器外作废——
+            # 2026-10-10 用户口径修正：此时退回容器内最近合格同向段作参照
+            # （如 60m wait2BuyBear 10-8 16:00 案例：出中枢末段 vs 中枢构成大段）。
+            fallback = cand  # 保留最外侧（容器起点侧）合格同向段——通常即进中枢大段
+            continue
         return cand
-    return None
+    return fallback
 
 
 def findDivergePoints(bis, macdArr, barSec=None):
@@ -751,6 +764,25 @@ def sr_of_detect(srLevels, res):
             if isinstance(sr, dict) and str(sr.get("level")) == key]
 
 
+# 1类买卖点策略键（wait1Buy=空头结构等一买 / wait1Sell=多头结构等一卖）：
+# 黄金分割支阻对其不生效（2026-10-10）。fib 位由非一类买卖点锚定派生（sr_flip
+# FIB_BUY_TYPES/FIB_SELL_TYPES 白名单，与 fxma fibNearOn「仅2/3类点判定，1类点
+# 豁免」同语义）：1类点创新低/高时旧摆动段的回撤档不再有支撑/压力语义——不参与
+# 「支阻位附近」闸门，也不参与止损重选（backtest sr_pick 同口径剔除）。
+CLASS1_STRATEGY_KEYS = ("wait1Buy", "wait1Sell")
+
+
+def sr_drop_fib_for_class1(srLevels, strategyKey):
+    """1类策略（wait1Buy/wait1Sell）的支阻池剔除黄金分割候选；其余键原样返回。
+
+    fib 候选带 fib=True 标记（srcType 恒 "fib"，该标记永不清理）；非1类键或空池
+    直接返回原列表（零拷贝）。"""
+    if strategyKey not in CLASS1_STRATEGY_KEYS or not srLevels:
+        return srLevels
+    return [sr for sr in srLevels
+            if not (isinstance(sr, dict) and sr.get("fib"))]
+
+
 def nearSr(price, srLevels, nearTol):
     """在支阻位附近：背驰点价与任一 srLevels 支阻位价差 ≤ nearTol。
     调用方须先用 sr_of_detect 收成检测周期。
@@ -880,7 +912,8 @@ def evaluateEntry(ctx, strategy):
     atr = ctx.get("atr", 0)
     barSec = ctx.get("barSec", 0)
     near = ctx.get("near", NEAR)
-    srLevels = sr_of_detect(ctx.get("srLevels"), res)
+    # 1类键（wait1Buy/wait1Sell）豁免黄金分割支阻（闸门口径，2026-10-10）
+    srLevels = sr_drop_fib_for_class1(sr_of_detect(ctx.get("srLevels"), res), key)
     periodData = ctx.get("periodData")
     key = strategy["key"]
     direction = strategy["direction"]
@@ -1147,7 +1180,7 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
                              True=背驰级别最近两根已收K线柱状体（|macd|）变小才出信号
                              （上一根K确认背驰且柱缩，下一根开盘进场；闸未过不消耗
                              段去重键，下一拍自动重评）
-    @param trend_res         顺势参考周期（None→TREND_RES 默认 "240"；""=关闭）。
+    @param trend_res         顺势参考周期（None→TREND_RES，默认关闭；"240"/"D"=开启）。
                              参考周期及以上不作检测周期；方向与信号相反时跳过信号
                              （规则见 trading_plan.trend_direction）。
     @param trend_state       参考周期方向状态（trend_state_of 结果）。本函数无 bars
@@ -1210,142 +1243,154 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
             _rej("res_ge_trend", ctx={"res": X, "trendRes": trend_res})
             continue  # 顺势参考周期及以上不作检测周期（只作方向锚，结构性剔除）
         plan = (planPeriods or {}).get(X)
-        planStrategy = plan.get("strategy") if plan else None
-        if not planStrategy or plan.get("direction") == "观望":
+        # 2026-10-10 买卖双侧独立：主侧 + alt 侧（trading_plan.predictPlan 双锚）并行评估，
+        # 每侧各自过闸（够笔/专属/背驰链/支阻/顺势过滤），互不影响、多空可同时持仓。
+        candidates = []
+        if plan is not None and plan.get("strategy") and plan.get("direction") != "观望":
+            candidates.append(plan)
+        altRow = {"strategy": plan.get("altStrategy") if plan else None,
+                  "direction": plan.get("altDirection") if plan else None,
+                  "reason": plan.get("altReason") if plan else None}
+        if altRow["strategy"] and altRow["direction"] != "观望":
+            candidates.append(altRow)
+        if not candidates:
             _rej("plan_watch", ctx={"planDir": (plan or {}).get("direction"),
-                                    "planStrategy": planStrategy,
+                                    "planStrategy": (plan or {}).get("strategy"),
                                     "reason": (plan or {}).get("reason")})
             continue
-        strategy = entryStrategyOf(planStrategy)
-        if strategy is None:
-            _rej("no_strategy_map", ctx={"planStrategy": planStrategy})
-            continue
-        if trend_dir and trend_dir != strategy["direction"]:
-            _rej("trend_filter", ctx={"trendDir": trend_dir,
-                                      "need": strategy["direction"],
-                                      "trendReason": trend_reason})
-            continue  # 逆参考周期方向的信号跳过（顺势过滤）
-        key = strategy["key"]
-        direction = strategy["direction"]
-        wantType = "up" if direction == "short" else "down"  # 空头等反弹(up)，多头等回调(down)
-        bis = pd["bis"]
-        if not bis:
-            _rej("no_bis", skey=key)
-            continue
-        times = (periodTimes or {}).get(X) or [b["time"] for b in (pd.get("bars") or [])]
-        # ① 够笔（当下制）：最后一笔=形成中段，方向匹配 + 段长门槛；
-        #    预期够笔（expectBiEnabled，页面可选默认开）：末笔方向不符（回调/反弹的反向段
-        #    尚未确认为笔）但末笔端点后已走出 ≥ expectBiMinBars 根本级K线 → 视为回调/反弹中，
-        #    段起点改用末笔端点（分型确认固有 1 根K线滞后，不等右邻收盘）；
-        #    False = 旧口径：末笔必须已是确认的反向笔。
-        merged = _mergedFor(pd, X, tCut)
-        forming = bis[-1].get("_forming", False)
-        expectBi = forming or bis[-1]["type"] != wantType
-        if forming:
-            enabled = CHAN_CFG.get("expectBiEnough") if expectBiEnabled is None else expectBiEnabled
-            if not enabled or bis[-1]["type"] != wantType:
-                _rej("forming_wrong_type", skey=key,
-                     ctx={"lastType": bis[-1]["type"], "want": wantType})
+        for plan in candidates:
+            planStrategy = plan.get("strategy")
+            strategy = entryStrategyOf(planStrategy)
+            if strategy is None:
+                _rej("no_strategy_map", ctx={"planStrategy": planStrategy})
                 continue
-            segStart = bis[-1]["startTime"]
-            eCnt = mergedSegmentCount(merged, segStart, intervalSecOf(X))
-            eNeed = int(CHAN_CFG.get("expectBiMinBars", 5) or 5)
-            if eCnt < eNeed:
-                _rej("expect_min_bars", seg_start=segStart, skey=key,
-                     ctx={"count": eCnt, "need": eNeed})
+            if trend_dir and trend_dir != strategy["direction"]:
+                _rej("trend_filter", ctx={"trendDir": trend_dir,
+                                          "need": strategy["direction"],
+                                          "trendReason": trend_reason})
+                continue  # 逆参考周期方向的信号跳过（顺势过滤，按侧独立过滤）
+            key = strategy["key"]
+            direction = strategy["direction"]
+            wantType = "up" if direction == "short" else "down"  # 空头等反弹(up)，多头等回调(down)
+            bis = pd["bis"]
+            if not bis:
+                _rej("no_bis", skey=key)
                 continue
-        elif expectBi:
-            if not counterMoveQualifies(times, bis[-1], tCut, enabled=expectBiEnabled,
-                                        merged=merged, barSec=intervalSecOf(X)):
-                _rej("counter_move_fail", seg_start=bis[-1]["endTime"], skey=key)
+            times = (periodTimes or {}).get(X) or [b["time"] for b in (pd.get("bars") or [])]
+            # ① 够笔（当下制）：最后一笔=形成中段，方向匹配 + 段长门槛；
+            #    预期够笔（expectBiEnabled，页面可选默认开）：末笔方向不符（回调/反弹的反向段
+            #    尚未确认为笔）但末笔端点后已走出 ≥ expectBiMinBars 根本级K线 → 视为回调/反弹中，
+            #    段起点改用末笔端点（分型确认固有 1 根K线滞后，不等右邻收盘）；
+            #    False = 旧口径：末笔必须已是确认的反向笔。
+            merged = _mergedFor(pd, X, tCut)
+            forming = bis[-1].get("_forming", False)
+            expectBi = forming or bis[-1]["type"] != wantType
+            if forming:
+                enabled = CHAN_CFG.get("expectBiEnough") if expectBiEnabled is None else expectBiEnabled
+                if not enabled or bis[-1]["type"] != wantType:
+                    _rej("forming_wrong_type", skey=key,
+                         ctx={"lastType": bis[-1]["type"], "want": wantType})
+                    continue
+                segStart = bis[-1]["startTime"]
+                eCnt = mergedSegmentCount(merged, segStart, intervalSecOf(X))
+                eNeed = int(CHAN_CFG.get("expectBiMinBars", 5) or 5)
+                if eCnt < eNeed:
+                    _rej("expect_min_bars", seg_start=segStart, skey=key,
+                         ctx={"count": eCnt, "need": eNeed})
+                    continue
+            elif expectBi:
+                if not counterMoveQualifies(times, bis[-1], tCut, enabled=expectBiEnabled,
+                                            merged=merged, barSec=intervalSecOf(X)):
+                    _rej("counter_move_fail", seg_start=bis[-1]["endTime"], skey=key)
+                    continue
+                segStart = bis[-1]["endTime"]
+            else:
+                segStart = bis[-1]["startTime"]
+            mCnt = mergedSegmentCount(merged, segStart, intervalSecOf(X))
+            if mCnt < min_bars:
+                _rej("min_bars", seg_start=segStart, skey=key, ctx={"count": mCnt, "need": min_bars})
                 continue
-            segStart = bis[-1]["endTime"]
-        else:
-            segStart = bis[-1]["startTime"]
-        mCnt = mergedSegmentCount(merged, segStart, intervalSecOf(X))
-        if mCnt < min_bars:
-            _rej("min_bars", seg_start=segStart, skey=key, ctx={"count": mCnt, "need": min_bars})
-            continue
-        # 该 (periodX, strategyKey, segStart) 已在任一 markRes 发过 → 跳过重算背驰链
-        # （形成段延伸不重发；多 markRes 同段在既有口径下也只会命中一次有效进场路径）
-        if firedIndex is not None:
-            if (X, key, segStart) in firedIndex:
+            # 该 (periodX, strategyKey, segStart) 已在任一 markRes 发过 → 跳过重算背驰链
+            # （形成段延伸不重发；多 markRes 同段在既有口径下也只会命中一次有效进场路径）
+            if firedIndex is not None:
+                if (X, key, segStart) in firedIndex:
+                    _rej("fired_dedup", seg_start=segStart, skey=key)
+                    continue
+            elif any(f[0] == X and f[1] == key and f[3] == segStart for f in fired):
                 _rej("fired_dedup", seg_start=segStart, skey=key)
                 continue
-        elif any(f[0] == X and f[1] == key and f[3] == segStart for f in fired):
-            _rej("fired_dedup", seg_start=segStart, skey=key)
-            continue
-        # 策略专属条件（与确认制共用）
-        upRes = upperResOf(X)
-        upperBis = periodData[upRes]["bis"] if (upRes and upRes in periodData) else None
-        extraReason = strategyExtraOk(key, bis, upperBis, pd["macdArr"], intervalSecOf(X),
-                                      zs_ratio)
-        if extraReason is not None:
-            _rej("strategy_extra", seg_start=segStart, skey=key, ctx={"reason": extraReason})
-            continue
-        # ② 当下背驰 + ③ 支阻位附近（候选级别从大到小，命中即出）
-        # 注意循环变量用 hit：near 是本函数参数（绝对价差），曾用 near 接收返回 dict
-        # 导致后续检测周期 nearTol 变 dict（float<=dict 崩溃，2026-09-13 修复）
-        # 支阻只取检测周期 X，背驰级别的价位不参与靠近判定
-        nearTol = near  # 绝对价差（不乘 ATR，恒 > 0）
-        srX = sr_of_detect(srLevels, X)
-        rsn = [] if on_reject is not None else None
-        cands = realtimeLowerDiverge(periodData, X, direction, tCut,
-                                     periodTimes=periodTimes or {},
-                                     divergeConfirm=divergeConfirm,
-                                     expectBiEnabled=expectBiEnabled,
-                                     entryMacdShrink=entryMacdShrink,
-                                     reasons_out=rsn)
-        if not cands and rsn:
-            for r in rsn:
-                _rej(r.pop("gate"), seg_start=r.pop("segStart", None), skey=key, ctx=r)
-        for c in cands:
-            fkey = (X, key, c["res"], c["segStart"])
-            if fkey in fired:
-                _rej("cand_fired", seg_start=c["segStart"], skey=key,
-                     ctx={"markRes": c["res"]})
-                continue  # 该形成段已发过，段延伸不重发
-            # 区间感知闸门（同确认制 evaluateEntry：levels=逐位同 nearSr，
-            # zones=背驰点价落入方向匹配区间）
-            hit = near_zone(c["point"]["price"], srX, direction, nearTol)
-            if hit is None:
-                near2 = nearest_sr(c["point"]["price"], srX)
-                _rej("near_sr_fail", seg_start=c["segStart"], skey=key,
-                     ctx={"markRes": c["res"], "price": c["point"]["price"],
-                          "srPrice": near2[0] if near2 else None,
-                          "dist": round(near2[1], 4) if near2 else None,
-                          "near": nearTol})
+            # 策略专属条件（与确认制共用）
+            upRes = upperResOf(X)
+            upperBis = periodData[upRes]["bis"] if (upRes and upRes in periodData) else None
+            extraReason = strategyExtraOk(key, bis, upperBis, pd["macdArr"], intervalSecOf(X),
+                                          zs_ratio)
+            if extraReason is not None:
+                _rej("strategy_extra", seg_start=segStart, skey=key, ctx={"reason": extraReason})
                 continue
-            fired.add(fkey)
-            # 索引与 fired 只在真正发出处同步维护（预检处绝不加——会把未发段误标已发）
-            if firedIndex is not None:
-                firedIndex.add((fkey[0], fkey[1], fkey[3]))
-            sig = {
-                "periodX": X,
-                "markRes": c["res"],
-                "time": c["point"]["time"],
-                "price": c["point"]["price"],
-                "direction": direction,
-                "strategyKey": key,
-                "strategyLabel": strategy["label"],
-                "signalNote": (
-                    f"{strategy['label']}｜检测周期 {X} 计划："
-                    f"{(plan or {}).get('reason') or plan.get('direction')}"
-                    f"｜背驰 {c['res']} @ {fmtT(c['point']['time'])} {c['point']['price']:.2f}"
-                    f"｜近支阻位 {hit['sr']['price']:.2f}｜形成段自 {fmtT(c['segStart'])}"),
-                "nearSr": hit["sr"]["price"],
-                "planDirection": plan.get("direction"),
-                "realtime": True,
-                "segStart": c["segStart"],
-                "fallback": bool(c.get("fallback", False)),   # M1 回退候选（非停止级命中）
-                "nearEqual": bool(c.get("nearEqual", False)), # M2 近等候选（未严格创新极值）
-                "expectBi": expectBi,                         # M4 检测周期走了预期够笔口径
-            }
-            # 观望态（dir=None 但 reason 非空）也要带注记；方向门控仍只看 dir
-            if trend_dir or trend_reason:
-                sig["trendDirection"] = trend_dir
-                sig["trendReason"] = trend_reason
-            out.append(sig)
+            # ② 当下背驰 + ③ 支阻位附近（候选级别从大到小，命中即出）
+            # 注意循环变量用 hit：near 是本函数参数（绝对价差），曾用 near 接收返回 dict
+            # 导致后续检测周期 nearTol 变 dict（float<=dict 崩溃，2026-09-13 修复）
+            # 支阻只取检测周期 X，背驰级别的价位不参与靠近判定
+            nearTol = near  # 绝对价差（不乘 ATR，恒 > 0）
+            # 1类键（wait1Buy/wait1Sell）豁免黄金分割支阻（同确认制闸门口径，2026-10-10）
+            srX = sr_drop_fib_for_class1(sr_of_detect(srLevels, X), key)
+            rsn = [] if on_reject is not None else None
+            cands = realtimeLowerDiverge(periodData, X, direction, tCut,
+                                         periodTimes=periodTimes or {},
+                                         divergeConfirm=divergeConfirm,
+                                         expectBiEnabled=expectBiEnabled,
+                                         entryMacdShrink=entryMacdShrink,
+                                         reasons_out=rsn)
+            if not cands and rsn:
+                for r in rsn:
+                    _rej(r.pop("gate"), seg_start=r.pop("segStart", None), skey=key, ctx=r)
+            for c in cands:
+                fkey = (X, key, c["res"], c["segStart"])
+                if fkey in fired:
+                    _rej("cand_fired", seg_start=c["segStart"], skey=key,
+                         ctx={"markRes": c["res"]})
+                    continue  # 该形成段已发过，段延伸不重发
+                # 区间感知闸门（同确认制 evaluateEntry：levels=逐位同 nearSr，
+                # zones=背驰点价落入方向匹配区间）
+                hit = near_zone(c["point"]["price"], srX, direction, nearTol)
+                if hit is None:
+                    near2 = nearest_sr(c["point"]["price"], srX)
+                    _rej("near_sr_fail", seg_start=c["segStart"], skey=key,
+                         ctx={"markRes": c["res"], "price": c["point"]["price"],
+                              "srPrice": near2[0] if near2 else None,
+                              "dist": round(near2[1], 4) if near2 else None,
+                              "near": nearTol})
+                    continue
+                fired.add(fkey)
+                # 索引与 fired 只在真正发出处同步维护（预检处绝不加——会把未发段误标已发）
+                if firedIndex is not None:
+                    firedIndex.add((fkey[0], fkey[1], fkey[3]))
+                sig = {
+                    "periodX": X,
+                    "markRes": c["res"],
+                    "time": c["point"]["time"],
+                    "price": c["point"]["price"],
+                    "direction": direction,
+                    "strategyKey": key,
+                    "strategyLabel": strategy["label"],
+                    "signalNote": (
+                        f"{strategy['label']}｜检测周期 {X} 计划："
+                        f"{(plan or {}).get('reason') or plan.get('direction')}"
+                        f"｜背驰 {c['res']} @ {fmtT(c['point']['time'])} {c['point']['price']:.2f}"
+                        f"｜近支阻位 {hit['sr']['price']:.2f}｜形成段自 {fmtT(c['segStart'])}"),
+                    "nearSr": hit["sr"]["price"],
+                    "planDirection": plan.get("direction"),
+                    "realtime": True,
+                    "segStart": c["segStart"],
+                    "fallback": bool(c.get("fallback", False)),   # M1 回退候选（非停止级命中）
+                    "nearEqual": bool(c.get("nearEqual", False)), # M2 近等候选（未严格创新极值）
+                    "expectBi": expectBi,                         # M4 检测周期走了预期够笔口径
+                }
+                # 观望态（dir=None 但 reason 非空）也要带注记；方向门控仍只看 dir
+                if trend_dir or trend_reason:
+                    sig["trendDirection"] = trend_dir
+                    sig["trendReason"] = trend_reason
+                out.append(sig)
     return out
 
 
@@ -1375,7 +1420,7 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
     @param periodMacd    可选：各周期预计算 MACD { 周期: [macdArr] }
     @param periodAtr     可选：各周期预计算 ATR { 周期: atr }
     @param with_30s      启用 30 秒级别（ALL_RES 追加 30S，仍按数据存在性过滤）
-    @param trend_res     顺势参考周期（None→TREND_RES 默认 "240"；""=关闭）。
+    @param trend_res     顺势参考周期（None→TREND_RES，默认关闭；"240"/"D"=开启）。
                          参考周期及以上不作检测周期（只作方向锚，结构性剔除）；
                          参考周期方向与信号方向相反时跳过（规则见
                          trading_plan.trend_direction）。
@@ -1444,14 +1489,17 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
         if trend_sec and (intervalSecOf(res) or 0) >= trend_sec:
             continue  # 顺势参考周期及以上不作检测周期（只作方向锚，结构性剔除）
         plan = planPeriods.get(res)
-        planStrategy = plan.get("strategy") if plan else None
-        if not planStrategy or plan.get("direction") == "观望":
+        # 2026-10-10 买卖双侧独立：主侧 + alt 侧并行评估（与当下制同口径）
+        candidates = []
+        if plan is not None and plan.get("strategy") and plan.get("direction") != "观望":
+            candidates.append(plan)
+        altRow = {"strategy": plan.get("altStrategy") if plan else None,
+                  "direction": plan.get("altDirection") if plan else None,
+                  "reason": plan.get("altReason") if plan else None}
+        if altRow["strategy"] and altRow["direction"] != "观望":
+            candidates.append(altRow)
+        if not candidates:
             continue
-        strategy = entryStrategyOf(planStrategy)
-        if strategy is None:
-            continue
-        if trend_dir and trend_dir != strategy["direction"]:
-            continue  # 逆参考周期方向的信号跳过（顺势过滤）
         upRes = upperResOf(res)
         ctx = {
             "res": res,
@@ -1465,39 +1513,45 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
             "periodData": periodData,
             "zs_exit_weak_ratio": zs_exit_weak_ratio,
         }
-        evalRes = evaluateEntry(ctx, strategy)
-        if not evalRes["ok"]:
-            if on_reject is not None:
-                try:
-                    t_approx = pd["bis"][-1]["endTime"] if pd.get("bis") else None
-                    on_reject("eval_reason", res, None, strategy["key"],
-                              {"reason": evalRes.get("reason")}, t_approx)
-                except Exception:
-                    pass
-            continue
-        # 命中：在背驰级别标记箭头
-        sig = {
-            "periodX": res,
-            "time": evalRes["point"]["time"],
-            "price": evalRes["point"]["price"],
-            "direction": strategy["direction"],
-            "strategyKey": strategy["key"],
-            "strategyLabel": strategy["label"],
-            "signalNote": (
-                f"{strategy['label']}｜检测周期 {res} 计划："
-                f"{(plan or {}).get('reason') or plan.get('direction')}"
-                f"｜背驰 {evalRes['markRes']} @ {fmtT(evalRes['point']['time'])} "
-                f"{evalRes['point']['price']:.2f}｜近支阻位 {evalRes['nearSr']:.2f}"),
-            "nearSr": evalRes["nearSr"],
-            "color": BUY_COLOR if strategy["direction"] == "long" else SELL_COLOR,
-            "markRes": evalRes["markRes"],
-            "planDirection": plan.get("direction"),
-        }
-        # 观望态（dir=None 但 reason 非空）也要带注记；方向门控仍只看 dir
-        if trend_dir or trend_reason:
-            sig["trendDirection"] = trend_dir
-            sig["trendReason"] = trend_reason
-        allEntries.setdefault(evalRes["markRes"], []).append(sig)
+        for plan in candidates:
+            strategy = entryStrategyOf(plan.get("strategy"))
+            if strategy is None:
+                continue
+            if trend_dir and trend_dir != strategy["direction"]:
+                continue  # 逆参考周期方向的信号跳过（顺势过滤，按侧独立过滤）
+            evalRes = evaluateEntry(ctx, strategy)
+            if not evalRes["ok"]:
+                if on_reject is not None:
+                    try:
+                        t_approx = pd["bis"][-1]["endTime"] if pd.get("bis") else None
+                        on_reject("eval_reason", res, None, strategy["key"],
+                                  {"reason": evalRes.get("reason")}, t_approx)
+                    except Exception:
+                        pass
+                continue
+            # 命中：在背驰级别标记箭头
+            sig = {
+                "periodX": res,
+                "time": evalRes["point"]["time"],
+                "price": evalRes["point"]["price"],
+                "direction": strategy["direction"],
+                "strategyKey": strategy["key"],
+                "strategyLabel": strategy["label"],
+                "signalNote": (
+                    f"{strategy['label']}｜检测周期 {res} 计划："
+                    f"{plan.get('reason') or plan.get('direction')}"
+                    f"｜背驰 {evalRes['markRes']} @ {fmtT(evalRes['point']['time'])} "
+                    f"{evalRes['point']['price']:.2f}｜近支阻位 {evalRes['nearSr']:.2f}"),
+                "nearSr": evalRes["nearSr"],
+                "color": BUY_COLOR if strategy["direction"] == "long" else SELL_COLOR,
+                "markRes": evalRes["markRes"],
+                "planDirection": plan.get("direction"),
+            }
+            # 观望态（dir=None 但 reason 非空）也要带注记；方向门控仍只看 dir
+            if trend_dir or trend_reason:
+                sig["trendDirection"] = trend_dir
+                sig["trendReason"] = trend_reason
+            allEntries.setdefault(evalRes["markRes"], []).append(sig)
     return allEntries
 
 
@@ -1592,6 +1646,37 @@ def forming_seg_ready(px_bis, px_merged_times, is_short, min_merged=EXIT_MIN_MER
     if anchor >= len(px_merged_times):
         return False
     return (len(px_merged_times) - 1) - anchor >= min_merged - 1
+
+
+def enough_fav_bars(bis, merged_times, entry_time, is_short, min_merged=EXIT_MIN_MERGED):
+    """够笔统一口径（2026-10-10 用户拍板）：向有利方向走出 min_merged 块合并K即
+    够笔，不分顺势/逆势、不等确认笔。检测周期（half）与背驰周期（halfMr）共用。
+
+    锚点 = 末笔延伸终点块 与 进场时刻所在块 的靠后者，自锚点块起（含）共
+    min_merged 块即触发（与 forming_seg_ready 同计数，多一个进场块下限）：
+    - 末笔锚点：末笔延伸（创新不利极值）时终点推进、锚点右移、计数归零——但
+      延伸仅在周期K收盘提交，入场初段锚点滞留旧端点，会把末笔自身的块计入
+      （2026-10-01 XAUUSD：08:27 进场、锚点滞留 02:00，03:00-07:00 下跌块被计入
+      =入场拍假就绪，与逆势快速离场同拍抢触发）；
+    - 进场块下限：锚点不早于进场时刻所在块——进场前已走出的块不计，进场拍
+      计数归零起步，防刚进场即够笔。
+    末笔已是确认有利方向（无形成段）时返回 False——走 lastBiOk / find_bi_event
+    确认笔口径（先到先触发，halfDone/halfMrDone latch 一次性消费）。
+    @param entry_time  进场时刻（秒；缺省 0=不设下限，退化为 forming_seg_ready 口径）
+    """
+    if not bis or not merged_times:
+        return False
+    fav = "down" if is_short else "up"
+    if bis[-1]["type"] == fav:
+        return False  # 末笔已是有利方向 → 无形成段，走确认笔口径
+    anchor = bisect.bisect_left(merged_times, bis[-1]["endTime"])
+    if entry_time:
+        e = bisect.bisect_right(merged_times, entry_time) - 1
+        if e > anchor:
+            anchor = e
+    if anchor >= len(merged_times):
+        return False
+    return (len(merged_times) - 1) - anchor >= min_merged - 1
 
 
 def forming_break_ref(bis, is_short):

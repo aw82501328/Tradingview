@@ -13,17 +13,17 @@
 //        --ma-on=0 跳过本条
 //     ④ 收盘站线（按类别选站线均线：1类=maStand1、2/3类=maStand2）：
 //        当拍收盘价 买点须严格站上/卖点须严格站下该均线；--ma-stand-on=0 跳过本条
-//     ⑤ 黄金分割附近（--fib-near-on=1 开，默认关；基本参数·独立硬门槛，不参与计票；
+//     ⑤ 黄金分割附近（--fib-near-on=1 开，缺省开；基本参数·独立硬门槛，不参与计票；
 //        仅 2/3 类点，1 类点豁免）：摆动段 = 前一同侧买卖点价格 → 其后至本点前
 //        （时间窗 (前点, 本点]）的 P 周期真实K线极值（买取最高/卖取最低），按
 //        fibLevels 算回撤位，本点价格须落在任一档位 ±fibNearPts（绝对点数）内；
 //        未通过该点不触发（判定随点固定）
-//     ⑥ 次级别/次次级别背驰（--div-lower-on=1 开，默认关；与条件组合互斥——开=背驰
+//     ⑥ 次级别/次次级别背驰（--div-lower-on=1 开，缺省开；与条件组合互斥——开=背驰
 //        为唯一触发条件，强分型/均线分离/收盘站线与 entryPick 完全不参与；关=走
 //        三选N条件组合；缠论V1 lowerDiverge 同源：双判据背驰+区间套下沉链校验，
 //        落在次级别还是次次级别由结构自动决定）：
 //        窗口=点锚定·粘性——更低级别出现同向背驰点且其时间 ≥ 点时间−divLowerWinBars
-//        根本周期K线（--div-lower-win-bars，默认1）且 ≤ 本拍收盘（防未来）即通过，
+//        根本周期K线（--div-lower-win-bars，默认3）且 ≤ 本拍收盘（防未来）即通过，
 //        之后持续有效直到点作废/反向点；无更低级别数据时永不通过
 //     ⑦ 上级周期同向（--upper-dir-on=1 开，默认关；全部类别；独立硬门槛）：上级周期
 //        （30S→3→15→60→240）当前笔方向须与信号同向（买=up/卖=down）
@@ -35,8 +35,8 @@
 //        （与实盘 MT5 SL/TP 同口径，不等收盘确认、不等下一根开盘；进场那根收盘后即判）；
 //        同根双触按 sameBarPriority（默认止损优先）；期末未触发 mark-to-market。
 //        止盈方式 tpMode 两选一（--tp-mode=）：
-//        - points（默认）：止盈=进场±tpPts，触价全平（旧行为）；
-//        - structure：每笔开半仓（可开仓手数÷2），同向容量制叠加（最多两笔）——
+//        - points：止盈=进场±tpPts，触价全平（旧行为）；
+//        - structure（默认）：每笔开半仓（可开仓手数÷2），同向容量制叠加（最多两笔）——
 //          1/2类入场一半到前高/前低主动止盈（activeTp，目标=入场前最近已确认
 //          笔端点（多头前高/空头前低，不要求已识别为买卖点）∓tpNearPts 容差；
 //          亏损侧不设）+ 另一半走跟踪止损（新 3/类3/4/类4 同向点
@@ -81,48 +81,48 @@ const getNumArg = (name, def) => {
 };
 
 const FROM_DATE = getStrArg("from", "");
-const ENTRY_RES = String(getStrArg("entry-res", "3,15,60")).split(",").map(s => s.trim()).filter(Boolean);
-const POINT_CLASSES = new Set(String(getStrArg("point-classes", "1,2,2x,3,3x")).split(",").map(s => s.trim()).filter(Boolean));
-const MA_ON = getStrArg("ma-on", "1") !== "0";       // 均线分离条件开关（"0"=关，缺省开）
+const ENTRY_RES = String(getStrArg("entry-res", "15")).split(",").map(s => s.trim()).filter(Boolean);
+const POINT_CLASSES = new Set(String(getStrArg("point-classes", "1,2,2x,3")).split(",").map(s => s.trim()).filter(Boolean));
+const MA_ON = getStrArg("ma-on", "0") !== "0";       // 均线分离条件开关（"0"=关，缺省关）
 const MA_TYPE = String(getStrArg("ma-type", "SMA")).toUpperCase() === "EMA" ? "EMA" : "SMA";
 const MA_FAST1 = getNumArg("ma-fast-1", 8);
 const MA_SLOW1 = getNumArg("ma-slow-1", 20);
 const MA_FAST2 = getNumArg("ma-fast-2", 5);
 const MA_SLOW2 = getNumArg("ma-slow-2", 8);
 const CROSS_MIN_PTS = getNumArg("cross-min-pts", 2.0);
-const MA_STAND_ON = getStrArg("ma-stand-on", "1") !== "0"; // 收盘站线条件开关（"0"=关，缺省开）
-const MA_STAND_1 = getNumArg("ma-stand-1", 5);              // 一类点站线均线周期
+const MA_STAND_ON = getStrArg("ma-stand-on", "0") !== "0"; // 收盘站线条件开关（"0"=关，缺省关）
+const MA_STAND_1 = getNumArg("ma-stand-1", 8);              // 一类点站线均线周期
 const MA_STAND_2 = getNumArg("ma-stand-2", 5);              // 二三类点站线均线周期
-const FIB_NEAR_ON = getStrArg("fib-near-on", "0") === "1";  // 黄金分割附近条件开关（"1"=开，默认关）
+const FIB_NEAR_ON = getStrArg("fib-near-on", "1") === "1";  // 黄金分割附近条件开关（"1"=开，缺省开）
 const FIB_LEVELS = parseFibLevels(getStrArg("fib-levels", "0.382,0.5,0.618"));
 const FIB_NEAR_PTS = getNumArg("fib-near-pts", 5.0);        // 档位容差（绝对点数）
 const UPPER_DIR_ON = getStrArg("upper-dir-on", "0") === "1"; // 上级周期同向条件开关（"1"=开，默认关）
 const PRED2_ON = getStrArg("pred2-on", "0") === "1";          // 预判2买卖开关（"1"=开，默认关；本级规则
                                                               // 提前入列，闸门链照旧——与引擎 pred2On 同式）
-const DIV_LOWER_ON = getStrArg("div-lower-on", "0") === "1"; // 次级别背驰条件开关（"1"=开，默认关；
+const DIV_LOWER_ON = getStrArg("div-lower-on", "1") === "1"; // 次级别背驰条件开关（"1"=开，缺省开；
                                                              // 与条件组合互斥：开=背驰为唯一触发）
-const DIV_LOWER_WIN_BARS = Math.max(1, Math.round(getNumArg("div-lower-win-bars", 1))); // 背驰窗口（根本周期K线，默认1）
-const STRONG_FX_ON = getStrArg("strong-fx-on", "1") !== "0";  // 强分型条件开关（"0"=关，缺省开）
+const DIV_LOWER_WIN_BARS = Math.max(1, Math.round(getNumArg("div-lower-win-bars", 3))); // 背驰窗口（根本周期K线，默认3）
+const STRONG_FX_ON = getStrArg("strong-fx-on", "0") !== "0";  // 强分型条件开关（"0"=关，缺省关）
 const STRONG_FX_MIN_PTS = getNumArg("strong-fx-min-pts", 0.0);
 // 条件性质（必选=1/可选=0；必选不通过该类点不触发，可选仅参与满足数计票）
 const MA_REQ = getStrArg("ma-req", "1") !== "0";
 const MA_STAND_REQ = getStrArg("ma-stand-req", "1") !== "0";
 const STRONG_FX_REQ = getStrArg("strong-fx-req", "1") !== "0";
 // 各类买卖点条件满足数（三选N：强分型/均线分离/收盘站线；生效N=min(N,启用条件数)，
-// 缺省3=引擎旧 AND 行为；divLowerOn 开启时条件组合整体不参与）
+// 缺省1；3=引擎旧 AND 行为；divLowerOn 开启时条件组合整体不参与）
 const pickClamp = v => Math.min(3, Math.max(1, Math.round(v)));
 const ENTRY_PICK = {
-  "1": pickClamp(getNumArg("entry-pick-1", 3)),
-  "2": pickClamp(getNumArg("entry-pick-2", 3)),
-  "2x": pickClamp(getNumArg("entry-pick-2x", 3)),
-  "3": pickClamp(getNumArg("entry-pick-3", 3)),
-  "3x": pickClamp(getNumArg("entry-pick-3x", 3)),
+  "1": pickClamp(getNumArg("entry-pick-1", 1)),
+  "2": pickClamp(getNumArg("entry-pick-2", 1)),
+  "2x": pickClamp(getNumArg("entry-pick-2x", 1)),
+  "3": pickClamp(getNumArg("entry-pick-3", 1)),
+  "3x": pickClamp(getNumArg("entry-pick-3x", 1)),
 };
-const POINT_VALID_BARS = Math.max(0, Math.round(getNumArg("point-valid-bars", 0)));
+const POINT_VALID_BARS = Math.max(0, Math.round(getNumArg("point-valid-bars", 5)));
 const POINT_VALID_PTS = Math.max(0, getNumArg("point-valid-pts", 0)); // 点有效期（值；0=不限）
 const STOP_PTS = getNumArg("stop-pts", 10.0);
 const TP_PTS = getNumArg("tp-pts", 30.0);
-const TP_MODE = String(getStrArg("tp-mode", "points")) === "structure" ? "structure" : "points";
+const TP_MODE = String(getStrArg("tp-mode", "structure")) === "structure" ? "structure" : "points";
 const TP_NEAR_PTS = Math.max(0, getNumArg("tp-near-pts", 0.0));       // 到点容差（0=精确触价）
 const TP_TRAIL_SLIP_PTS = Math.max(0, getNumArg("tp-trail-slip-pts", 1.0)); // 提损滑点
 const SAME_BAR_PRIORITY = String(getStrArg("same-bar-priority", "stop")) === "tp" ? "tp" : "stop";

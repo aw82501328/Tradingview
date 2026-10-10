@@ -69,7 +69,7 @@ const getStrArg = (name, def) => {
   return a ? a.split("=")[1] : def;
 };
 // 靠近支阻位阈值（×当前周期ATR）
-const NEAR = Math.max(parseFloat(getArg("near", 10)) || 10, 0.01);  // 绝对价差（2026-09-13 起不乘 ATR）
+const NEAR = Math.max(parseFloat(getArg("near", 30)) || 30, 0.01);  // 绝对价差（2026-09-13 起不乘 ATR；2026-10-10 缺省 30，与 py NEAR 对齐）
 // ---- 出场参数（2026-09-09 出场阶梯重构；与 py_chain / CLI / Web 回测界面同名，绝对价格单位） ----
 // 进场手数（仅落盘记录；盈亏口径 = 价格差 × 方向 × 手数，JS 端不算盈亏）
 const LOTS = Math.max(1, Math.round(getArg("lots", 4) || 4));
@@ -107,9 +107,9 @@ const EXIT_CFG = {
   halfOn: boolArg("exit-half-on", true),
   halfPct: getArg("exit-half-pct", 50) || 50,
   closeOn: boolArg("exit-close-on", true),
-  closePct: getArg("exit-close-pct", 100) || 100,
-  trailOn: boolArg("exit-trail-on", false),
-  trailPct: getArg("exit-trail-pct", 100) || 100,
+  closePct: getArg("exit-close-pct", 25) || 25,
+  trailOn: boolArg("exit-trail-on", true),
+  trailPct: getArg("exit-trail-pct", 25) || 25,
   trailSlip: getArg("exit-trail-slip", 1.0),
 };
 // 跟踪止盈参照信号集合：同向 3类买卖点（py_chain EXIT_TRAIL_REF_KEYS 同名；
@@ -219,15 +219,21 @@ function pickDivergeRefer(bis, cur, barSec, parentBi) {
   const zs = core.CHAN_CFG.divergeReferByZs ? zsBeforeSeg(bis, cur.startTime, barSec) : null;
   const zsEnter = zs ? ((zs.enterEndTime != null) ? zs.enterEndTime : zs.startTime) : null;
   const start = bis.indexOf(cur) - 1;
+  let fallback = null; // 容器内最近合格同向段（ZS 回退越界时的兜底参照，2026-10-10）
   for (let j = start; j >= 0; j--) {
     const cand = bis[j];
     if (cand.type !== cur.type) continue;
     if (cand.span < cur.span * 0.5) continue; // 跳过幅度不足的次级别回调
-    if (zsEnter != null && cand.endTime > zsEnter) continue; // 中枢内部/之后的段不参与比较
     if (parentBi && cand.startTime < parentBi.startTime - (barSec || 0)) break; // 参照跨出所属上级笔
+    if (zsEnter != null && cand.endTime > zsEnter) {
+      // 中枢内部/之后的段不参与比较 → 优先回退到入中枢段；若入中枢段与候选段反向
+      // （或被容器边界截断），退回容器内最近合格同向段（与 py_chain 对齐 2026-10-10）。
+      fallback = cand; // 保留最外侧（容器起点侧）合格同向段——通常即进中枢大段
+      continue;
+    }
     return cand;
   }
-  return null;
+  return fallback;
 }
 
 function findDivergePoints(bis, macdArr) {
@@ -1411,20 +1417,18 @@ async function main() {
         console.log(`\n[周期 ${res}] 为顺势参考周期（${TREND_RES}）及以上，不作检测周期，跳过`);
         continue;
       }
-      // 从交易计划结果取该周期状态
+      // 从交易计划结果取该周期状态（2026-10-10 买卖双侧独立：主侧 + alt 侧并行评估，
+      // 每侧各自过闸，多空互不影响——与 py_chain compute_entries 对齐）
       const plan = planPeriods[res];
-      const planStrategy = plan ? plan.strategy : null;
-      if (!planStrategy || plan.direction === "观望") {
-        console.log(`\n[周期 ${res}] 交易计划无进场状态（${planStrategy || "无策略"}），跳过`);
-        continue;
-      }
-      const strategy = entryStrategyOf(planStrategy);
-      if (!strategy) {
-        console.log(`\n[周期 ${res}] 交易计划策略「${planStrategy}」无对应进场策略，跳过`);
-        continue;
-      }
-      if (trendDir && trendDir !== strategy.direction) {
-        console.log(`\n[周期 ${res}] 策略「${strategy.label}」与参考周期方向（${trendReason}）相反，顺势过滤跳过`);
+      const candidates = [];
+      if (plan && plan.strategy && plan.direction !== "观望") candidates.push(plan);
+      const altRow = { strategy: plan ? plan.altStrategy : null,
+                       direction: plan ? plan.altDirection : null,
+                       reason: plan ? plan.altReason : null };
+      if (altRow.strategy && altRow.direction !== "观望") candidates.push(altRow);
+      if (!candidates.length) {
+        console.log(`
+[周期 ${res}] 交易计划无进场状态（${plan ? plan.strategy || "无策略" : "无计划"}），跳过`);
         continue;
       }
       const ctx = {
@@ -1438,30 +1442,45 @@ async function main() {
         srLevels,
         periodData,
       };
-      const evalRes = evaluateEntry(ctx, strategy);
-      if (!evalRes.ok) {
-        console.log(`\n[周期 ${res}] 策略「${strategy.label}」条件未满足：${evalRes.reason}`);
-        continue;
+      for (const prow of candidates) {
+        const strategy = entryStrategyOf(prow.strategy);
+        if (!strategy) {
+          console.log(`
+[周期 ${res}] 交易计划策略「${prow.strategy}」无对应进场策略，跳过`);
+          continue;
+        }
+        if (trendDir && trendDir !== strategy.direction) {
+          console.log(`
+[周期 ${res}] 策略「${strategy.label}」与参考周期方向（${trendReason}）相反，顺势过滤跳过`);
+          continue;
+        }
+        const evalRes = evaluateEntry(ctx, strategy);
+        if (!evalRes.ok) {
+          console.log(`
+[周期 ${res}] 策略「${strategy.label}」条件未满足：${evalRes.reason}`);
+          continue;
+        }
+        // 命中：在背驰级别标记箭头
+        const sig = {
+          periodX: res,
+          time: evalRes.point.time,
+          price: evalRes.point.price,
+          direction: strategy.direction,
+          strategyKey: strategy.key,
+          nearSr: evalRes.nearSr,
+          planDirection: prow.direction,
+          color: strategy.direction === "long" ? BUY_COLOR : SELL_COLOR,
+        };
+        if (trendDir || trendReason) {
+          sig.trendDirection = trendDir;
+          sig.trendReason = trendReason;
+        }
+        (allEntries[evalRes.markRes] = allEntries[evalRes.markRes] || []).push(sig);
+        const dirName = sig.direction === "long" ? "买点(向上)" : "卖点(向下)";
+        const colorName = sig.direction === "long" ? "红" : "绿";
+        console.log(`
+[周期 ${res}] 策略「${strategy.label}」命中：背驰级别 ${evalRes.markRes}，${toT(sig.time)} @ ${sig.price.toFixed(2)} [${dirName} ${colorName}] 靠近支阻位 ${sig.nearSr.toFixed(2)}`);
       }
-      // 命中：在背驰级别标记箭头
-      const sig = {
-        periodX: res,
-        time: evalRes.point.time,
-        price: evalRes.point.price,
-        direction: strategy.direction,
-        strategyKey: strategy.key,
-        nearSr: evalRes.nearSr,
-        planDirection: plan.direction,
-        color: strategy.direction === "long" ? BUY_COLOR : SELL_COLOR,
-      };
-      if (trendDir || trendReason) {
-        sig.trendDirection = trendDir;
-        sig.trendReason = trendReason;
-      }
-      (allEntries[evalRes.markRes] = allEntries[evalRes.markRes] || []).push(sig);
-      const dirName = sig.direction === "long" ? "买点(向上)" : "卖点(向下)";
-      const colorName = sig.direction === "long" ? "红" : "绿";
-      console.log(`\n[周期 ${res}] 策略「${strategy.label}」命中：背驰级别 ${evalRes.markRes}，${toT(sig.time)} @ ${sig.price.toFixed(2)} [${dirName} ${colorName}] 靠近支阻位 ${sig.nearSr.toFixed(2)}`);
     }
     // ============================================================
     // 同向持仓互斥 + 出场模拟（多空各自独立状态机，互不影响）

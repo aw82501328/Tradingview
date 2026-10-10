@@ -669,7 +669,7 @@ describe("biMacdMetrics 笔区间 MACD 指标", () => {
   });
 });
 
-describe("isBiDiverge MACD 背驰判定（2026-10-01 起双判据 AND：面积+DIF；时长不可比时 DIF 单判据兜底）", () => {
+describe("isBiDiverge MACD 背驰判定（2026-10-10 恢复旧口径：面积/DIF/柱高 三项 OR 任一命中；面积受时长门约束）", () => {
   test("底背驰：绿柱面积变小 → true", () => {
     const bi = { type: "down", startTime: 2000, endTime: 3000 };
     const refer = { type: "down", startTime: 1000, endTime: 1500 };
@@ -680,15 +680,15 @@ describe("isBiDiverge MACD 背驰判定（2026-10-01 起双判据 AND：面积+D
     assert.equal(core.isBiDiverge(bi, refer, macdArr), true);
   });
 
-  test("底背驰：仅 DIF 抬高、面积未变小（时长可比）→ false", () => {
+  test("底背驰：仅 DIF 抬高、面积未变小（时长可比）→ true（旧口径 OR 任一命中）", () => {
     const bi = { type: "down", startTime: 2000, endTime: 3000 };
     const refer = { type: "down", startTime: 1000, endTime: 1500 };
     const macdArr = [
       { time: 1000, macd: -2, dif: 1 }, { time: 1500, macd: -2, dif: 1 },
       { time: 2000, macd: -2, dif: 3 }, { time: 3000, macd: -2, dif: 3 },
     ];
-    // 时长比 2≤3（面积可比）；面积相等（未变小）且 difLow 抬高 → 双判据需同时成立 → false
-    assert.equal(core.isBiDiverge(bi, refer, macdArr), false);
+    // 时长比 2≤3（面积可比）；面积相等（未变小）但 difLow 抬高 → OR 任一命中即背驰
+    assert.equal(core.isBiDiverge(bi, refer, macdArr), true);
   });
 
   test("底背驰：时长比>3（面积不计入）→ DIF 单判据兜底 → true", () => {
@@ -877,9 +877,19 @@ describe("同笔 1买/1卖（上级笔已结束 → 纯结构标记）", () => {
     assert.equal(pts.find(p => p.type === "1买"), undefined);
   });
 
-  test("非同笔（破坏重合）→ 普通路径仍需背驰，无 1买", () => {
+  test("非同笔（破坏重合）→ 默认创新低即 1买；关 firstNoDiverge 回退需背驰", () => {
+    // 2026-10-10 用户规则：firstNoDiverge 默认开——普通路径创新低即 1买，背驰不计
     const pts = core.findBuyPoints(BI_BUY, UPPER_MISS, MACD_NO_DIVERGE, 900);
-    assert.equal(pts.find(p => p.type === "1买"), undefined);
+    assert.deepEqual(pts.find(p => p.type === "1买"), { type: "1买", time: 4000, price: 4324.68 });
+    // 关=回退旧口径：创新低 + 背驰 AND（MACD_NO_DIVERGE 不背驰 → 无 1买）
+    const saved = core.CHAN_CFG.firstNoDiverge;
+    core.CHAN_CFG.firstNoDiverge = false;
+    try {
+      const ptsOld = core.findBuyPoints(BI_BUY, UPPER_MISS, MACD_NO_DIVERGE, 900);
+      assert.equal(ptsOld.find(p => p.type === "1买"), undefined);
+    } finally {
+      core.CHAN_CFG.firstNoDiverge = saved;
+    }
   });
 
   // 卖侧镜像：同笔上涨段 4324.68→4436.23，锚定管线应锚回同一端点（无漂移）
@@ -1173,8 +1183,10 @@ describe("buildZS 穿越式离开与零重叠回踩（2026-10-07）", () => {
     const macd = [];
     for (let t = 950; t <= 2000; t += 50) macd.push({ time: t, dif: 0, dea: 0, macd: 0 });
     const pts = core.findBuyPoints(bis(), upper, macd, 900, 0, 0);
+    // 2026-10-10 firstNoDiverge：4056.45 对参照 4071.64 创新低即 1买（与离枢回踩序列并存）
     assert.deepEqual(pts.map(p => [p.type, p.time, p.price]), [
       ["2买", 1200, 4071.64],
+      ["1买", 1400, 4056.45],
       ["3买", 1600, 4093.86],
       ["类3买", 1800, 4118.91],
       ["4买", 2000, 4121.06],

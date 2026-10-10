@@ -61,14 +61,14 @@ const RANGE_CFG = {
   // 2买/2卖 中间档容差 + 3类点强档开关 + 弱档原始点分流（默认值与 py_chain/trading_plan.py 常量一致）
   prevHighNearPts: numArg("prev-high-near-pts", 5.0),
   secondNearPts: numArg("second-near-pts", 5.0),
-  thirdStrongTrend: getStrArg("third-strong-trend", "0") !== "0",
+  thirdStrongTrend: getStrArg("third-strong-trend", "1") !== "0",
   weakTierByOrigin: getStrArg("weak-tier-by-origin", "1") !== "0",
 };
 // 震荡判定参考周期（对齐 py_chain/trading_plan.py RANGE_RES；WEB 参数中心 plan 模块
 // rangeRes，analysis_service 透传 --range-res）。开启（"240"/"D"）= 参考周期闸门：
 // 更低周期不自判 A/B、只听参考周期 regime，参考周期及以上只作锚不交易；
-// ""（off）= 关闭 → 每周期自判震荡（旧行为，与 Python 关闭口径一致，2026-10-08 对齐）
-const RANGE_RES_ARG = getStrArg("range-res", "240");
+// ""（off，默认）= 关闭 → 每周期自判震荡（与 Python RANGE_RES 关闭口径一致）
+const RANGE_RES_ARG = getStrArg("range-res", "");
 const RANGE_RES = (RANGE_RES_ARG === "off" || RANGE_RES_ARG === "") ? "" : RANGE_RES_ARG;
 
 // 参数中心（WEB 参数配置页）整体覆盖；未知键在 JS 侧闲置无害
@@ -188,7 +188,7 @@ function isRangeBound(bis, bars, atr, cfg) {
  *               未过原始底：多头空，等待高点附近的2卖；
  *               其他：空头多（结构空、逆势等一买），等待低点附近的一买；
  *   3买/类3买 → 过左高不背驰 且 thirdStrongTrend 开：多头多，等待回调后的新买点；
- *               其他（含默认关）：多头空，等待高点附近的一卖；
+ *               其他（含开关关）：多头空，等待高点附近的一卖；
  *   3卖/类3卖 → 过左低不背驰 且 thirdStrongTrend 开：空头空，等待反弹后的新卖点；
  *               其他（含开关关）：空头多，等待低点附近的一买。
  * @param {string} res       周期名
@@ -205,6 +205,9 @@ function strategyOf(res, type, reason, label, cls, cfg) {
   if (type === "1买") return { ...base, direction: "多头多", strategy: "等待回调后做2买" };
   if (type === "2买" || type === "类2买") {
     if (cls === "过左高不背驰") return { ...base, direction: "多头多", strategy: "等待回调后的3买点" };
+    // 未定型（点后首段还没走够）：弱档先行（2026-10-10 提前入列）——先武装弱2买，
+    // 定型后滚动翻档，不再回退前锚。
+    if (cls === "未定型") return { ...base, direction: "空头多", strategy: "等待低点附近的2买" };
     if (type === "2买" && (cls === "前高附近" || cls === "回到2买点")) {
       return { ...base, direction: "多头多", strategy: "等待回调后的类2买点" };
     }
@@ -213,6 +216,8 @@ function strategyOf(res, type, reason, label, cls, cfg) {
   }
   if (type === "2卖" || type === "类2卖") {
     if (cls === "过左低不背驰") return { ...base, direction: "空头空", strategy: "等待反弹后的3卖点" };
+    // 未定型：弱档先行（对称）。
+    if (cls === "未定型") return { ...base, direction: "多头空", strategy: "等待高点附近的2卖" };
     if (type === "2卖" && (cls === "前低附近" || cls === "回到2卖点")) {
       return { ...base, direction: "空头空", strategy: "等待反弹后的类2卖点" };
     }
@@ -323,15 +328,13 @@ function classifySecond(bis, macdArr, p, cfg) {
   if (extreme.time === -1) return "其他";
   // 买卖点后第一笔同向笔（买点后上涨 / 卖点后下跌），起点在买卖点之后
   const after = bis.find(b => b.startTime >= p.time && b.type === (wantUp ? "up" : "down"));
-  // A 开关（anchorUndecidedSkip）：「还没跌/涨」≠「走弱」——after 不存在或形成中且
-  // 合并块数 < anchorUndecidedMinBars → 返回「未定型」，消费方不接管、回退前锚；
-  // 真弱（after 存在但未破左低）仍走「其他」→ 弱档语义不变（与 py_chain 对齐 2026-09-26）
-  if (core.CHAN_CFG.anchorUndecidedSkip) {
-    if (!after) return "未定型";
-    if (after._forming) {
-      const minBars = core.CHAN_CFG.anchorUndecidedMinBars || 2;
-      if (after.mergedCount != null && after.mergedCount < minBars) return "未定型";
-    }
+  // 未定型哨兵（2026-09-26 A 开关；2026-10-10 提前入列后开关淘汰、哨兵保留）：
+  // 「还没跌/涨」≠「走弱」——after 不存在或形成中且合并块数 < 2 → 「未定型」。
+  // 消费方（strategyOf/predictPlan）2026-10-10 起不再跳过：未定型点接管锚点并
+  // 按弱档先行路由，定型后滚动修正（与 py_chain 对齐）。
+  if (!after) return "未定型";
+  if (after._forming) {
+    if (after.mergedCount != null && after.mergedCount < 2) return "未定型";
   }
   if (!after) return "其他";
   // 过左高 / 过左低
@@ -496,47 +499,61 @@ function predictPlan(opts) {
   };
 
   // 3. 先取最后一笔终点的买卖点；4. 无 → 逐笔向前扫描。
-  //    A 开关（anchorUndecidedSkip）：分类「未定型」的端点视同无点——跳过继续向前扫描；
-  //    无可回退前锚时由未定型点本身接管（维持旧行为，保守；与 py_chain 对齐 2026-09-26）。
+  //    2026-10-10 提前入列（原 anchorUndecidedSkip「未定型回退前锚」淘汰）：未定型点
+  //    直接接管，strategyOf 弱档先行路由、定型后滚动翻档（与 py_chain 对齐）。
   const clsOf = (p) => (/^(2买|类2买|3买|类3买|4买|类4买|2卖|类2卖|3卖|类3卖|4卖|类4卖)$/.test(p.type)
     ? classifySecond(bis, macdArr, p, RANGE_CFG) : "其他");
-  const undecided = (m) => !!(m && core.CHAN_CFG.anchorUndecidedSkip && clsOf(m.point) === "未定型");
   const outOf = (m, origin) => {
     const p = m.point;
-    const reason = `找到最近买卖点 ${p.type} @ ${fmtT(p.time)} ${p.price.toFixed(2)}（${origin}）`;
-    const out = strategyOf(res, p.type, reason, `趋势|${p.type}`, clsOf(p), RANGE_CFG);
+    let reason = `找到最近买卖点 ${p.type} @ ${fmtT(p.time)} ${p.price.toFixed(2)}（${origin}）`;
+    let out = strategyOf(res, p.type, reason, `趋势|${p.type}`, clsOf(p), RANGE_CFG);
+    // 形成中 1买/1卖（末笔仍在新低/新高中）→ 直接买卖档（wait1Buy/wait1Sell）：
+    // 其入场闸门当下正可判；确认收笔后才切回调档（wait2Buy/wait2Sell）。
+    const bi = m.bi;
+    if (bi && bi._forming && (p.type === "1买" || p.type === "1卖")) {
+      if (p.type === "1买") out = { ...out, direction: "空头多", strategy: "等待低点附近的一买" };
+      else out = { ...out, direction: "多头空", strategy: "等待高点附近的一卖" };
+      reason += "（形成中·直接档）";
+      out.reason = reason;
+    }
     out.strategyLabel = out.strategy;
     out.pointDesc = `${p.type}@${fmtT(p.time)}(${p.price.toFixed(2)})`;
     return out;
   };
-  const lastMatch = matchAt(bis.length - 1);
-  if (DEBUG) console.log(`[计划] ${res} 最后一笔终点 ${fmtT(bis[bis.length - 1].endTime)}(${bis[bis.length - 1].endPrice.toFixed(2)}) -> ${lastMatch ? lastMatch.point.type : "无"}`);
-  if (lastMatch && !undecided(lastMatch)) return outOf(lastMatch, "最后一笔端点");
-  let fallback = lastMatch || null;
-  let prevMatch = null;
-  for (let j = bis.length - 2; j >= 0; j--) {
-    const m = matchAt(j);
-    if (!m) continue;
-    if (undecided(m)) { if (!fallback) fallback = m; continue; }
-    prevMatch = m;
-    break;
+  // 3/4. 买卖双侧各自扫锚（2026-10-10 用户规则：两侧独立、互不影响，与 py_chain 对齐）：
+  //      主侧 = 两锚中点时间更新者（兼容旧单键口径），另一侧附 alt* 字段并行评估。
+  const BUY_FAMILY = /^(1买|2买|类2买|3买|类3买|4买|类4买)$/;
+  const SELL_FAMILY = /^(1卖|2卖|类2卖|3卖|类3卖|4卖|类4卖)$/;
+  const matchSide = (family) => {
+    for (let j = bis.length - 1; j >= 0; j--) {
+      const m = matchAt(j);
+      if (m && family.test(m.point.type)) {
+        return { m, origin: j === bis.length - 1 ? "最后一笔端点" : "向前扫描最近笔端点" };
+      }
+    }
+    return null;
+  };
+  const buyHit = matchSide(BUY_FAMILY);
+  const sellHit = matchSide(SELL_FAMILY);
+  const sides = [];
+  for (const hit of [buyHit, sellHit]) {
+    if (hit) sides.push({ t: hit.m.point.time, row: outOf(hit.m, hit.origin) });
   }
-  if (DEBUG) console.log(`[计划] ${res} 向前扫描最近买卖点 -> ${prevMatch ? prevMatch.point.type + "@" + fmtT(prevMatch.point.time) : "无"}`);
-  if (prevMatch) return outOf(prevMatch, "向前扫描最近笔端点");
-  if (fallback) return outOf(fallback, "最后一笔端点");
-  if (false) {
-    const p = prevMatch.point;
-    const reason = `找到最近买卖点 ${p.type} @ ${fmtT(p.time)} ${p.price.toFixed(2)}（向前扫描最近笔端点）`;
-    const cls = /^(2买|类2买|3买|类3买|4买|类4买|2卖|类2卖|3卖|类3卖|4卖|类4卖)$/.test(p.type) ? classifySecond(bis, macdArr, p, RANGE_CFG) : "其他";
-    const out = strategyOf(res, p.type, reason, `趋势|${p.type}`, cls, RANGE_CFG);
-    out.strategyLabel = out.strategy;
-    out.pointDesc = `${p.type}@${fmtT(p.time)}(${p.price.toFixed(2)})`;
-    return out;
+  if (DEBUG) console.log(`[计划] ${res} 双侧锚 -> 买:${buyHit ? buyHit.m.point.type + "@" + fmtT(buyHit.m.point.time) : "无"} 卖:${sellHit ? sellHit.m.point.type + "@" + fmtT(sellHit.m.point.time) : "无"}`);
+  if (!sides.length) {
+    return { res, direction: "观望", strategy: "趋势中无匹配买卖点",
+             reason: "趋势（非震荡），但最近笔端点均无已确认买卖点", label: "观察" };
   }
-
-  // 5. 趋势但未匹配到买卖点
-  const reason = `趋势（非震荡），但最近笔端点均无已确认买卖点`;
-  return { res, direction: "观望", strategy: "趋势中无匹配买卖点", reason, label: "观察" };
+  sides.sort((a, b) => b.t - a.t);
+  const out = sides[0].row;
+  if (sides.length > 1) {
+    const alt = sides[1].row;
+    out.altDirection = alt.direction;
+    out.altStrategy = alt.strategy;
+    out.altReason = alt.reason;
+    out.altPointDesc = alt.pointDesc;
+  }
+  return out;
 }
 
 // ============================================================
@@ -624,9 +641,9 @@ function printPlanTable(rows) {
 // 与 py_chain/trading_plan.py 同步维护，规则文本另见 WEB 参数页交易计划页签）
 // ============================================================
 
-// 顺势参考周期默认值："" = 关闭；"240" = 4小时；"D" = 日线
+// 顺势参考周期默认值："" = 关闭（2026-10-10 与 py TREND_RES 对齐）；"240" = 4小时；"D" = 日线
 // （WEB 参数中心 plan 模块 trendRes；mark-entry 进场方向过滤消费）
-const TREND_RES = "240";
+const TREND_RES = "";
 
 // 周期 → 中文名（方向成因展示用，如「4小时2买」「日线1卖」）
 const RES_NAME_CN = { "D": "日线", "240": "4小时", "60": "1小时", "30": "30分钟", "15": "15分钟", "3": "3分钟", "30S": "30秒" };

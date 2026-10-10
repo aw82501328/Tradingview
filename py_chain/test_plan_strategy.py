@@ -197,18 +197,18 @@ class StrategyOfTests(unittest.TestCase):
         out = self._strategy("类2卖", "前低附近")
         self.assertEqual((out["direction"], out["strategy"]), ("空头多", "等待低点附近的一买"))
 
-    def test_third_strong_tier_default_off_and_switch_on(self):
-        # 默认（关）：3类点一律弱档
+    def test_third_strong_tier_default_on_and_switch_off(self):
+        # 默认（开）：3类点过前高不背驰走强档
         out = self._strategy("3买", "过左高不背驰")
-        self.assertEqual((out["direction"], out["strategy"]), ("多头空", "等待高点附近的一卖"))
+        self.assertEqual((out["direction"], out["strategy"]), ("多头多", "等待回调后的新买点"))
         out = self._strategy("3卖", "过左低不背驰")
-        self.assertEqual((out["direction"], out["strategy"]), ("空头多", "等待低点附近的一买"))
-        # 开关开：3类点强档
-        for type_, cls in (("3买", "过左高不背驰"), ("类3买", "过左高不背驰")):
-            out = self._strategy(type_, cls, {"thirdStrongTrend": True})
-            self.assertEqual((out["direction"], out["strategy"]), ("多头多", "等待回调后的新买点"))
-        out = self._strategy("类3卖", "过左低不背驰", {"thirdStrongTrend": True})
         self.assertEqual((out["direction"], out["strategy"]), ("空头空", "等待反弹后的新卖点"))
+        # 开关关：3类点一律弱档
+        for type_, cls in (("3买", "过左高不背驰"), ("类3买", "过左高不背驰")):
+            out = self._strategy(type_, cls, {"thirdStrongTrend": False})
+            self.assertEqual((out["direction"], out["strategy"]), ("多头空", "等待高点附近的一卖"))
+        out = self._strategy("类3卖", "过左低不背驰", {"thirdStrongTrend": False})
+        self.assertEqual((out["direction"], out["strategy"]), ("空头多", "等待低点附近的一买"))
         # 3类点弱分类（开关无关）→ 弱档
         out = self._strategy("3买", "前高附近")
         self.assertEqual((out["direction"], out["strategy"]), ("多头空", "等待高点附近的一卖"))

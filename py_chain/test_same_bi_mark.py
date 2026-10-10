@@ -92,9 +92,17 @@ class TestSameBiFirstBuy(unittest.TestCase):
         self.assertFalse([p for p in pts if p["type"] == "1买"])
 
     def test_non_same_bi_still_requires_divergence(self):
-        """非同笔（破坏重合）→ 参照/创新低/背驰普通路径：无背驰数据下不产 1买。"""
+        """非同笔（破坏重合）→ 默认创新低即 1买（firstNoDiverge，2026-10-10）；关=回退需背驰。"""
         pts = cc.findBuyPoints(BI_BUY, UPPER_MISS, MACD_NO_DIVERGE, 900)
-        self.assertFalse([p for p in pts if p["type"] == "1买"])
+        self.assertEqual([p for p in pts if p["type"] == "1买"],
+                         [{"type": "1买", "time": 4000, "price": 4324.68}])
+        saved = cc.CHAN_CFG.get("firstNoDiverge")
+        cc.CHAN_CFG["firstNoDiverge"] = False
+        try:
+            pts_old = cc.findBuyPoints(BI_BUY, UPPER_MISS, MACD_NO_DIVERGE, 900)
+            self.assertFalse([p for p in pts_old if p["type"] == "1买"])
+        finally:
+            cc.CHAN_CFG["firstNoDiverge"] = saved
 
     def test_isSameAsUpperBi_returns_matched_object(self):
         """新契约：命中返回 upperBis 内同一 dict 引用；未命中/空表返回 None。"""

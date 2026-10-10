@@ -73,6 +73,13 @@ CHAN_CFG = {
     "wideBarPoints3": 30.0,
     "divergeDurRatio": 3,  # 背驰面积判据的时长可比上限：面积Σ=柱高×K线根数、与区间时长线性相关，
                            # 两段时长比 > 该值时不具可比性，面积项不计入背驰（只用 DIF/柱高判据）
+    # 1买/1卖 创新低/新高即标记（2026-10-10 用户规则，默认开）：下跌笔对参照笔创新低即 1买、
+    # 上涨笔创新高即 1卖，本级 MACD 背驰不再是硬门槛（多空两侧各自标记、由实际走势修正：
+    # 更新的点接管计划锚点，前顶/前底与够笔作废规则照旧）。参照笔选择（幅度 ≥50% 过滤）、
+    # 同笔例外、_forming 跳过、锚定均不变；isBiDiverge 本身不动（收笔/出入场背驰闸门照旧），
+    # 画笔链路零影响。关=回退旧口径（创新低/新高 + 背驰 AND）。
+    # 与 .cursor/skills/chan-core/scripts/chan_core.js CHAN_CFG.firstNoDiverge 同步。
+    "firstNoDiverge": True,
     "nearDoubleFixed": 2.0,  # 近等双顶/双底固定容差（品种报价单位的绝对价差，如黄金 2.0=2 美元）；
                              # thr = 该值（2026-10-02 起取消 ATR 项/价格比例项/15m双动能确认）。
                              # 比较顺序：先影线（更极端直接替换后移），影线不满足再比实体——
@@ -123,11 +130,10 @@ CHAN_CFG = {
                                   # 2卖 dif < +tol 视为「上/下过 0 轴后回调/反弹未破 0 轴太多」，
                                   # 动能还在（原严格口径 dif>0 / dif<0，tol=0 即回退）
     # ---- 三处规则修复（2026-09-26 用户逐条确认；详见 plan/三处规则修复）----
-    "anchorUndecidedSkip": True,   # A 未定型不接管：2/3类点 after（点后第一笔同向段）不存在、
-                                   # 或 after 为形成中段且合并块数 < anchorUndecidedMinBars 时，
-                                   # 该点视同端点无点——计划/顺势锚点继续向前扫描（回退前锚）
-    "anchorUndecidedMinBars": 2,   # A 定型阈值：点后反向段的本级合并块数（默认 2=右肩+1根确认；
-                                   # 1=分型即定型；5=与 expectBiMinBars 同参的够笔口径）
+    # anchorUndecidedSkip/anchorUndecidedMinBars（A 开关）已于 2026-10-10 淘汰：
+    # 「未定型不接管」被「提前入列」取代——未定型点接管锚点并按弱档先行路由
+    # （strategyOf cls="未定型"），档位随点后走势滚动修正；classifySecond 的
+    # 未定型哨兵仍保留（定型阈值固定 2 合并块），仅供路由与展示。
     "divergeReferByZs": True,      # B 背驰中枢参照：参照笔=入中枢段——跳过 F 之前紧邻中枢
                                    # 内部/之后的同向笔（用户规则：背驰=入中枢段 vs 出中枢段，
                                    # 中枢内部振荡段不参与比较）。默认开（2026-09-28）
@@ -2370,22 +2376,22 @@ def _areaDurComparable(a, b):
 
 
 def isBiDiverge(bi, refer, macdArr):
-    """MACD 背驰判定（2026-10-01 起双判据 AND，与 JS 一致）：
-    底背驰（对应一买，下跌笔）：黄白线低点抬高 且（时长可比时）绿柱面积变小；
-    顶背驰（对应一卖，上涨笔）：黄白线高点变低 且（时长可比时）红柱面积变小。
-    面积受 _areaDurComparable 时长门约束：两段时长不可比时面积不计入，DIF 单判据兜底。
-    （旧口径为 面积/DIF/单根最大柱高 三项 OR 任一命中——柱高项已废除并收紧为 AND。）"""
+    """MACD 背驰判定（2026-10-10 恢复旧口径：三项 OR，满足其一即算背驰，与 JS 一致）：
+    底背驰（对应一买，下跌笔）：绿柱面积变小 或 黄白线低点抬高 或 绿柱最大高度变小；
+    顶背驰（对应一卖，上涨笔）：红柱面积变小 或 黄白线高点变低 或 红柱最大高度变小。
+    面积两项受 _areaDurComparable 时长门约束（两段时长不可比时仅用 DIF/柱高判据）。
+    （2026-10-01 曾收紧为 双判据 AND 并废除柱高项——2026-10-10 用户规则改回。）"""
     cur = biMacdMetrics(bi, macdArr)
     ref = biMacdMetrics(refer, macdArr)
     if cur is None or ref is None:
         return False
     if bi["type"] == "down":
-        if not cur["difLow"] > ref["difLow"]:
-            return False
-        return (not _areaDurComparable(bi, refer)) or cur["greenArea"] < ref["greenArea"]
-    if not cur["difHigh"] < ref["difHigh"]:
-        return False
-    return (not _areaDurComparable(bi, refer)) or cur["redArea"] < ref["redArea"]
+        return ((_areaDurComparable(bi, refer) and cur["greenArea"] < ref["greenArea"])
+                or cur["difLow"] > ref["difLow"]
+                or cur["greenMax"] < ref["greenMax"])
+    return ((_areaDurComparable(bi, refer) and cur["redArea"] < ref["redArea"])
+            or cur["difHigh"] < ref["difHigh"]
+            or cur["redMax"] < ref["redMax"])
 
 
 # ============================================================
@@ -2937,6 +2943,9 @@ def _firstPointsLoop(bis, idxArr, upperByType, knownUpper, macdArr, barSec, reco
         sameUpper = None
         kind = 0
         payload = None
+        # 同笔例外仅确认笔；forming 段（列表已过滤为 enough ≥5 合并块）直接走
+        # 参照/创新低路径——2026-10-10 提前入列：新低/新高的 1买/1卖 当下即可见
+        # （端点随行情漂移，尾段在 _FIND1_MARGIN 内逐拍重算，非冻结前缀）。
         if not cur.get("_forming"):
             sameUpper = isSameAsUpperBi(cur, upperByType.get(cur["type"]) or [], barSec) \
                 if upperByType is not None else None
@@ -2955,37 +2964,40 @@ def _firstPointsLoop(bis, idxArr, upperByType, knownUpper, macdArr, barSec, reco
                               f"结构同笔标记1{'卖' if is_sell else '买'}")
                     out.append(payload)
                     kind = 1
-            else:
-                refer = None
-                for j in range(k - 1, -1, -1):
-                    cand = bis[idxArr[j]]
-                    if cand["span"] < cur["span"] * 0.5:
-                        continue
-                    refer = cand
-                    break
-                if refer is not None and ((cur["endPrice"] > refer["endPrice"]) if is_sell
-                                          else (cur["endPrice"] < refer["endPrice"])):
-                    diverge = isBiDiverge(cur, refer, macdArr)
-                    if CHAN_CFG["debug"]:
-                        cm = biMacdMetrics(cur, macdArr)
-                        rm = biMacdMetrics(refer, macdArr)
-                        if is_sell:
-                            print(f"[一卖候选] {fmtT(cur['endTime'])}({cur['endPrice']}) vs 参照 "
-                                  f"{fmtT(refer['endTime'])}({refer['endPrice']}) "
-                                  f"| 创新高={cur['endPrice'] > refer['endPrice']} "
-                                  f"| 红柱面积 {cm['redArea']:.2f} vs {rm['redArea']:.2f} "
-                                  f"| DIF高点 {cm['difHigh']:.3f} vs {rm['difHigh']:.3f} | 背驰={diverge}")
-                        else:
-                            print(f"[一买候选] {fmtT(cur['endTime'])}({cur['endPrice']}) vs 参照 "
-                                  f"{fmtT(refer['endTime'])}({refer['endPrice']}) "
-                                  f"| 创新低={cur['endPrice'] < refer['endPrice']} "
-                                  f"| 绿柱面积 {cm['greenArea']:.2f} vs {rm['greenArea']:.2f} "
-                                  f"| DIF低点 {cm['difLow']:.3f} vs {rm['difLow']:.3f} | 背驰={diverge}")
-                    if diverge:
-                        payload = {"biIdx": idxArr[k], "time": cur["endTime"],
-                                   "price": cur["endPrice"]}
-                        out.append(payload)
-                        kind = 1
+        if sameUpper is None:
+            refer = None
+            for j in range(k - 1, -1, -1):
+                cand = bis[idxArr[j]]
+                if cand["span"] < cur["span"] * 0.5:
+                    continue
+                refer = cand
+                break
+            if refer is not None and ((cur["endPrice"] > refer["endPrice"]) if is_sell
+                                      else (cur["endPrice"] < refer["endPrice"])):
+                diverge = isBiDiverge(cur, refer, macdArr)
+                # firstNoDiverge（2026-10-10，默认开）：创新低/新高即 1买/1卖，背驰不计
+                plain = bool(CHAN_CFG.get("firstNoDiverge", True))
+                if CHAN_CFG["debug"]:
+                    cm = biMacdMetrics(cur, macdArr)
+                    rm = biMacdMetrics(refer, macdArr)
+                    note = "（firstNoDiverge：创新新极值即标记，背驰不计）" if plain else ""
+                    if is_sell:
+                        print(f"[一卖候选] {fmtT(cur['endTime'])}({cur['endPrice']}) vs 参照 "
+                              f"{fmtT(refer['endTime'])}({refer['endPrice']}) "
+                              f"| 创新高={cur['endPrice'] > refer['endPrice']} "
+                              f"| 红柱面积 {cm['redArea']:.2f} vs {rm['redArea']:.2f} "
+                              f"| DIF高点 {cm['difHigh']:.3f} vs {rm['difHigh']:.3f} | 背驰={diverge}{note}")
+                    else:
+                        print(f"[一买候选] {fmtT(cur['endTime'])}({cur['endPrice']}) vs 参照 "
+                              f"{fmtT(refer['endTime'])}({refer['endPrice']}) "
+                              f"| 创新低={cur['endPrice'] < refer['endPrice']} "
+                              f"| 绿柱面积 {cm['greenArea']:.2f} vs {rm['greenArea']:.2f} "
+                              f"| DIF低点 {cm['difLow']:.3f} vs {rm['difLow']:.3f} | 背驰={diverge}{note}")
+                if diverge or plain:
+                    payload = {"biIdx": idxArr[k], "time": cur["endTime"],
+                               "price": cur["endPrice"]}
+                    out.append(payload)
+                    kind = 1
         if idxArr[k] <= freezeIdx:
             records.append((idxArr[k], cur, sameUpper, kind, payload))
     return out

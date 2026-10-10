@@ -111,18 +111,18 @@ class TestTrendDirection(unittest.TestCase):
                          (None, ""))
 
     def test_second_buy_immediate_long(self):
-        # 末笔 down 上的 2买点后还没有上涨段 → 未定型，不接管。
-        # 前一个已走出下跌段的 2卖接管 → 空。
+        # 2026-10-10 提前入列：末笔 down 上的 2买点虽未定型（点后无上涨段）也接管定向
+        # → 多（原「未定型回退前锚 2卖→空」行为淘汰，与计划层弱档先行同口径）。
         bars = [bar(t * S240, 100, 96) for t in range(5)]
         d, r = tp.trend_direction("240", bottom_fixture_bis(), bars, None, [])
-        self.assertEqual((d, r), ("short", "4小时2卖"))
+        self.assertEqual((d, r), ("long", "4小时2买"))
 
     def test_break_latch(self):
-        # 锚是已定型的 2卖（108）。其后收盘涨破 108 → 上涨延续
+        # 锚是 2买（95，未定型接管）。其后收盘跌破 95 → 下跌延续
         bis = bottom_fixture_bis()
-        bars = [bar(4 * S240, 108, 109)]
+        bars = [bar(4 * S240, 94, 93)]
         d, r = tp.trend_direction("240", bis, bars, None, [])
-        self.assertEqual((d, r), ("long", "4小时上涨延续"))
+        self.assertEqual((d, r), ("short", "4小时下跌延续"))
 
     def test_no_points_fallback_last_bi(self):
         # 无任何买卖点 → 回退末笔方向（末笔 down → 空）
@@ -165,8 +165,8 @@ class TestTrendDirection(unittest.TestCase):
             self.assertEqual((d, r), ("long", f"4小时{t_}"))
 
     def test_sell_mirror(self):
-        # 末笔 up 上的 2卖点后还没有下跌段 → 未定型，不接管。
-        # 前一个已走出上涨段的 2买（105）接管 → 多。
+        # 2026-10-10 提前入列：末笔 up 上的 2卖点虽未定型也接管定向 → 空（原「回退
+        # 前锚 2买→多」淘汰）。收盘涨破 2卖 108 → 上涨延续。
         bis = [
             bi("down", 0, S240, 110, 100),
             bi("up", S240, 2 * S240, 100, 111),    # b1 结构顶 111
@@ -175,11 +175,10 @@ class TestTrendDirection(unittest.TestCase):
         ]
         bars_ok = [bar(t * S240, 107, 106) for t in range(5)]
         d, r = tp.trend_direction("240", bis, bars_ok, None, [])
-        self.assertEqual((d, r), ("long", "4小时2买"))
-        # 收盘跌破该 2买 105 → 下跌延续
-        bars_break = [bar(4 * S240, 105, 104)]
+        self.assertEqual((d, r), ("short", "4小时2卖"))
+        bars_break = [bar(4 * S240, 109, 110)]
         d, r = tp.trend_direction("240", bis, bars_break, None, [])
-        self.assertEqual((d, r), ("short", "4小时下跌延续"))
+        self.assertEqual((d, r), ("long", "4小时上涨延续"))
 
 
 def rb_cfg(enabled=True, near=5.0, angle=5.0, min_bars=5):

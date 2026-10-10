@@ -72,6 +72,20 @@ if(!el('record-bt').hidden||el('record-signals').hidden)throw Error('live resets
 selectMode('backtest');
 if(el('card-bt-fxma_v1').hidden||el('record-signals').hidden)throw Error('backtest restores strategy page');
 `,ctx);
+// 已加入典型案例的行浅黄底（live 来源）：btCaseKeyOf 与后端 derive_source_key 同口径，
+// 键集命中的行（含其分批出场续行）标 in-case 类
+vm.runInContext(`
+sigFilterValues = n => [];
+sigRows=[{id:21,mode:'backtest',status:'已平仓',pnl:10,symbol:'OANDA:XAUUSD',time:1750000000,periodX:'15',direction:'long',strategyKey:'wait2Buy'},
+  {id:22,mode:'backtest',status:'已平仓',pnl:-5,symbol:'OANDA:XAUUSD',time:1750000600,periodX:'15',direction:'short',strategyKey:'wait2Sell'}];
+curBtTab='chan_v1';   // 上一块停在 fxma_v1 TAB：行无 strategy 回落 chan_v1，先切回再渲染
+if(btCaseKeyOf(sigRows[0])!=='live|backtest|OANDA:XAUUSD|1750000000|15|long|wait2Buy')throw Error('case key format');
+btCaseKeys=new Set([btCaseKeyOf(sigRows[0])]);
+renderTable();
+`,ctx);
+assert.match(node('sig-body').innerHTML,/data-signal-id="21"[^>]*class="in-case"/);
+assert.doesNotMatch(node('sig-body').innerHTML,/data-signal-id="22"[^>]*class="[^"]*in-case/);
+console.log('Typical-case row highlight (in-case) checks passed');
 console.log('Mode selection, visibility, filter retention, count and summary checks passed');
 console.log('Strategy/direction multi-select filter checks passed');
 console.log('Per-strategy tab isolation checks passed');

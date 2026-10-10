@@ -483,7 +483,7 @@ class AnalysisManager:
             command.append("--fib-levels=" + str(fx.get("fibLevels", "0.382,0.5,0.618")))
             command.append("--fib-near-pts=" + str(fx.get("fibNearPts", 5.0)))
             command.append("--upper-dir-on=" + ("1" if fx.get("upperDirOn", False) else "0"))
-            command.append("--pred2-on=" + ("1" if fx.get("pred2On", False) else "0"))
+            command.append("--pred2-on=1")  # 2026-10-10 提前入列：pred2 常开
             command.append("--div-lower-on=" + ("1" if fx.get("divLowerOn", False) else "0"))
             command.append("--div-lower-win-bars=" + str(fx.get("divLowerWinBars", 1)))
             command.append("--strong-fx-on=" + ("1" if fx.get("strongFxOn", True) else "0"))

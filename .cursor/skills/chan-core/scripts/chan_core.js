@@ -57,6 +57,13 @@ const CHAN_CFG = {
   wideBarPoints3: 30,
   divergeDurRatio: 3, // 背驰面积判据的时长可比上限：面积Σ = 柱高×K线根数、与区间时长线性相关，
                       // 两段时长比 > 该值时不具可比性，面积项不计入背驰（只用 DIF/柱高判据）
+  // 1买/1卖 创新低/新高即标记（2026-10-10 用户规则，默认开）：下跌笔对参照笔创新低即 1买、
+  // 上涨笔创新高即 1卖，本级 MACD 背驰不再是硬门槛（多空两侧各自标记、由实际走势修正：
+  // 更新的点接管计划锚点，前顶/前底与够笔作废规则照旧）。参照笔选择（幅度 ≥50% 过滤）、
+  // 同笔例外、_forming 跳过、锚定均不变；isBiDiverge 本身不动（收笔/出入场背驰闸门照旧），
+  // 画笔链路零影响。关=回退旧口径（创新低/新高 + 背驰 AND）。
+  // 与 py_chain/chan_core.py CHAN_CFG.firstNoDiverge 同步。
+  firstNoDiverge: true,
   debug: false,   // 调试打印（buildBi / 买卖点识别过程）
   nearDoubleFixed: 2.0, // 近等双顶/双底固定容差（品种报价单位绝对价差，如黄金 2.0=2 美元）；
                         // thr = 该值（2026-10-02 起取消 ATR 项/价格比例项/15m双动能确认）。
@@ -82,8 +89,8 @@ const CHAN_CFG = {
   // 与 py_chain/chan_core.py CHAN_CFG.nearDoubleShiftLocked 同步。
   nearDoubleShiftLocked: false,
   // ---- 三处规则修复 + 跨级下沉（2026-09-26；与 py_chain/chan_core.py 对齐）----
-  anchorUndecidedSkip: true,    // A 未定型不接管：2/3类点 after 不存在/未达根数时不接管锚点（默认开）
-  anchorUndecidedMinBars: 2,    // A 定型阈值（点后反向段本级合并块数；2=右肩+1根确认）
+  // anchorUndecidedSkip/anchorUndecidedMinBars 已淘汰（2026-10-10 提前入列：未定型点接管锚点、
+  // 弱档先行路由；classifySecond 未定型哨兵保留、定型阈值固定 2 合并块）。
   divergeReferByZs: true,       // B 背驰中枢参照：中枢内部段不参与比较，参照=入中枢段（默认开）
   sinkSkipLevel: true,          // D 跨级下沉：次级展开<3笔/方向不符/端点含糊时跳级继续向下（默认开）
   pointEnoughForming: true,     // C-2 成笔可能够笔：形成段 enough 计数只到极值块（默认开）
@@ -1404,18 +1411,23 @@ function areaDurComparable(a, b) {
 // 2026-10-01 起双判据 AND（与 Python 一致）：
 //   底背驰（下跌笔）：黄白线低点抬高 且（时长可比时）绿柱面积变小；
 //   顶背驰（上涨笔）：黄白线高点变低 且（时长可比时）红柱面积变小。
-// 面积受 areaDurComparable 时长门约束：两段时长不可比时面积不计入，DIF 单判据兜底。
-// （旧口径 面积/DIF/单根最大柱高 三项 OR 任一命中——柱高项已废除并收紧为 AND。）
+// 2026-10-10 恢复旧口径（三项 OR，满足其一即算背驰）：
+// 底背驰：绿柱面积变小（时长可比时）或 黄白线低点抬高 或 绿柱最大高度变小；
+// 顶背驰：红柱面积变小（时长可比时）或 黄白线高点变低 或 红柱最大高度变小。
+// （2026-10-01 曾收紧为双判据 AND 并废除柱高项——2026-10-10 用户规则改回。
+//   与 py_chain/chan_core.py 同步。）
 function isBiDiverge(bi, refer, macdArr) {
   const cur = biMacdMetrics(bi, macdArr);
   const ref = biMacdMetrics(refer, macdArr);
   if (!cur || !ref) return false;
   if (bi.type === "down") {
-    if (!(cur.difLow > ref.difLow)) return false;
-    return !areaDurComparable(bi, refer) || cur.greenArea < ref.greenArea;
+    return ((areaDurComparable(bi, refer) && cur.greenArea < ref.greenArea)
+            || cur.difLow > ref.difLow
+            || cur.greenMax < ref.greenMax);
   }
-  if (!(cur.difHigh < ref.difHigh)) return false;
-  return !areaDurComparable(bi, refer) || cur.redArea < ref.redArea;
+  return ((areaDurComparable(bi, refer) && cur.redArea < ref.redArea)
+          || cur.difHigh < ref.difHigh
+          || cur.redMax < ref.redMax);
 }
 
 // ============================================================
@@ -1751,10 +1763,14 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) 
   const firstBuys = [];
   for (let k = 1; k < downIdx.length; k++) {
     const cur = bis[downIdx[k]];
-    if (cur._forming) continue;
-    const sameUpper = upperByType != null
-      ? isSameAsUpperBi(cur, upperByType[cur.type] || [], barSec)
-      : null;
+    // 同笔例外仅确认笔；forming 段（列表已过滤为 enough ≥5 合并块）直接走参照/创新低
+    // 路径——2026-10-10 提前入列：新低的 1买 当下可见（与 py_chain/chan_core.py 同步）
+    let sameUpper = null;
+    if (!cur._forming) {
+      sameUpper = upperByType != null
+        ? isSameAsUpperBi(cur, upperByType[cur.type] || [], barSec)
+        : null;
+    }
     if (sameUpper) {
       if (sameUpper === knownUpper[knownUpper.length - 1]) {
         if (CHAN_CFG.debug) console.log(`[一买跳过-上级末笔延伸中] ${fmtT(cur.endTime)}(${cur.endPrice}) 与上级末笔重合，上级反向笔未确认`);
@@ -1773,17 +1789,19 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) 
     }
     if (refer && cur.endPrice < refer.endPrice) {
       const diverge = isBiDiverge(cur, refer, macdArr);
+      const plain = CHAN_CFG.firstNoDiverge !== false; // 创新低即1买，背驰不计（2026-10-10）
       if (CHAN_CFG.debug) {
         const cm = biMacdMetrics(cur, macdArr);
         const rm = biMacdMetrics(refer, macdArr);
+        const note = plain ? "（firstNoDiverge：创新低即1买，背驰不计）" : "";
         console.log(
           `[一买候选] ${fmtT(cur.endTime)}(${cur.endPrice}) vs 参照 ${fmtT(refer.endTime)}(${refer.endPrice}) ` +
           `| 创新低=${cur.endPrice < refer.endPrice} ` +
           `| 绿柱面积 ${cm ? cm.greenArea.toFixed(2) : "-"} vs ${rm ? rm.greenArea.toFixed(2) : "-"} ` +
-          `| DIF低点 ${cm ? cm.difLow.toFixed(3) : "-"} vs ${rm ? rm.difLow.toFixed(3) : "-"} | 背驰=${diverge}`
+          `| DIF低点 ${cm ? cm.difLow.toFixed(3) : "-"} vs ${rm ? rm.difLow.toFixed(3) : "-"} | 背驰=${diverge}${note}`
         );
       }
-      if (diverge) firstBuys.push({ biIdx: downIdx[k], time: cur.endTime, price: cur.endPrice });
+      if (diverge || plain) firstBuys.push({ biIdx: downIdx[k], time: cur.endTime, price: cur.endPrice });
     }
   }
   const firstBuy = firstBuys.length ? firstBuys[firstBuys.length - 1] : null;
@@ -1942,10 +1960,14 @@ function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol)
   const firstSells = [];
   for (let k = 1; k < upIdx.length; k++) {
     const cur = bis[upIdx[k]];
-    if (cur._forming) continue;
-    const sameUpper = upperByType != null
-      ? isSameAsUpperBi(cur, upperByType[cur.type] || [], barSec)
-      : null;
+    // 同笔例外仅确认笔；forming 段（enough ≥5 合并块）直接走参照/创新高路径
+    // （2026-10-10 提前入列，与 py_chain/chan_core.py 同步）
+    let sameUpper = null;
+    if (!cur._forming) {
+      sameUpper = upperByType != null
+        ? isSameAsUpperBi(cur, upperByType[cur.type] || [], barSec)
+        : null;
+    }
     if (sameUpper) {
       if (sameUpper === knownUpper[knownUpper.length - 1]) {
         if (CHAN_CFG.debug) console.log(`[一卖跳过-上级末笔延伸中] ${fmtT(cur.endTime)}(${cur.endPrice}) 与上级末笔重合，上级反向笔未确认`);
@@ -1964,17 +1986,19 @@ function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol)
     }
     if (refer && cur.endPrice > refer.endPrice) {
       const diverge = isBiDiverge(cur, refer, macdArr);
+      const plain = CHAN_CFG.firstNoDiverge !== false; // 创新高即1卖，背驰不计（2026-10-10）
       if (CHAN_CFG.debug) {
         const cm = biMacdMetrics(cur, macdArr);
         const rm = biMacdMetrics(refer, macdArr);
+        const note = plain ? "（firstNoDiverge：创新高即1卖，背驰不计）" : "";
         console.log(
           `[一卖候选] ${fmtT(cur.endTime)}(${cur.endPrice}) vs 参照 ${fmtT(refer.endTime)}(${refer.endPrice}) ` +
           `| 创新高=${cur.endPrice > refer.endPrice} ` +
           `| 红柱面积 ${cm ? cm.redArea.toFixed(2) : "-"} vs ${rm ? rm.redArea.toFixed(2) : "-"} ` +
-          `| DIF高点 ${cm ? cm.difHigh.toFixed(3) : "-"} vs ${rm ? rm.difHigh.toFixed(3) : "-"} | 背驰=${diverge}`
+          `| DIF高点 ${cm ? cm.difHigh.toFixed(3) : "-"} vs ${rm ? rm.difHigh.toFixed(3) : "-"} | 背驰=${diverge}${note}`
         );
       }
-      if (diverge) firstSells.push({ biIdx: upIdx[k], time: cur.endTime, price: cur.endPrice });
+      if (diverge || plain) firstSells.push({ biIdx: upIdx[k], time: cur.endTime, price: cur.endPrice });
     }
   }
   const firstSell = firstSells.length ? firstSells[firstSells.length - 1] : null;

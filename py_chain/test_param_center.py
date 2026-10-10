@@ -292,15 +292,15 @@ class ParamCenterTests(unittest.TestCase):
         schema = param_center.schema_of("plan")["trendRes"]
         self.assertEqual(schema["type"], "str")
         self.assertEqual(schema["choices"], ["", "240", "D"])
-        # 保存-生效往返（"" = 显式关闭，不被默认值覆盖）
-        param_center.update("plan", {"trendRes": ""})
-        self.assertEqual(param_center.effective("plan")["trendRes"], "")
-        param_center.reset("plan")
+        # 保存-生效往返：非默认 "240" 落覆盖，复位回到默认关闭
+        param_center.update("plan", {"trendRes": "240"})
         self.assertEqual(param_center.effective("plan")["trendRes"], "240")
+        param_center.reset("plan")
+        self.assertEqual(param_center.effective("plan")["trendRes"], "")
 
     def test_range_res_enum_with_off(self):
         # plan.rangeRes 字符串枚举（2026-10-08 起含关闭项）：240/D 开启闸门、"" 关闭
-        # （每周期自判震荡）；其他非法值 raise；默认 = RANGE_RES（240，闸门开启）
+        # （每周期自判震荡）；其他非法值 raise；默认 = RANGE_RES（关闭）
         self.assertEqual(param_center.defaults_of("plan")["rangeRes"],
                          trading_plan.RANGE_RES)
         self.assertEqual(param_center.normalize("plan", {"rangeRes": "D"}), {"rangeRes": "D"})
@@ -311,11 +311,11 @@ class ParamCenterTests(unittest.TestCase):
         schema = param_center.schema_of("plan")["rangeRes"]
         self.assertEqual(schema["type"], "str")
         self.assertEqual(schema["choices"], ["", "240", "D"])
-        # 保存-生效往返（"" = 显式关闭，不被默认值覆盖）
-        param_center.update("plan", {"rangeRes": ""})
-        self.assertEqual(param_center.effective("plan")["rangeRes"], "")
-        param_center.reset("plan")
+        # 保存-生效往返：非默认 "240" 落覆盖，复位回到默认关闭
+        param_center.update("plan", {"rangeRes": "240"})
         self.assertEqual(param_center.effective("plan")["rangeRes"], "240")
+        param_center.reset("plan")
+        self.assertEqual(param_center.effective("plan")["rangeRes"], "")
 
     def test_slip_atr_k_keys(self):
         # 滑点 ATR 系数（2026-09-19）：默认 0（关闭）、允许 0、范围 [0, 10]、override 往返

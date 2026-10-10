@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """强分型均线V1（fxma_v1）策略引擎：缠论买卖点 + 强分型 + 均线分离 + 收盘站线
-+ 可选黄金分割附近（基本参数·硬门槛）/上级周期同向/次级别背驰（默认关）
-+ 固定点数止损止盈。
++ 黄金分割附近（基本参数·硬门槛，默认开）/上级周期同向（默认关）/次级别背驰（默认开）
++ 结构组合止盈（默认）或固定点数止损止盈。
 
 与缠论V1（BacktestEngine 链路）并行的新策略，复用其增量笔机制
 （_advance_cut/BiIncBuilder/合并K/分型/MACD/ATR 累加器/回退保护），
@@ -19,7 +19,7 @@
   4. 收盘站线：按类别选站线均线周期（1类=maStand1；2/3类=maStand2，SMA/EMA
      同 maType，按 P 周期收盘价），当拍收盘价 买点须站上（严格大于）/卖点须站下
      （严格小于）该均线；maStandOn=False 跳过本条；
-  5. 黄金分割附近（fibNearOn，默认关；基本参数·独立硬门槛，2026-10-09 起不参与
+  5. 黄金分割附近（fibNearOn，默认开；基本参数·独立硬门槛，2026-10-09 起不参与
      计票；仅 2/3 类点，1 类点豁免）：摆动段 = 前一同侧买卖点价格 → 其后至本点前
      （时间窗 (前点, 本点]）的 P 周期真实K线极值（买取最高价/卖取最低价），按
      fibLevels（默认 0.382,0.5,0.618）算回撤位（买 H−r×(H−L)/卖 L+r×(H−L)），
@@ -35,8 +35,8 @@
      三选N计票：均线分离/收盘站线/强分型三条件各带启用开关（*On）与必选标志
      （*Req，默认必选），必选不通过 → 该类点当拍不触发（原拒绝码保留），全部启用
      条件中通过数 ≥ 生效N 才触发（必选通过也计票），生效N = min(entryPickN,
-     启用条件数)，entryPick1/2/2x/3/3x 为各类买卖点的条件满足数（默认 3，与旧
-     AND 行为一致）；三条件全停用 = 点属所选类别且未失效即当拍触发（旧全关行为）。
+     启用条件数)，entryPick1/2/2x/3/3x 为各类买卖点的条件满足数（默认 1；3 为旧
+     AND 行为）；三条件全停用 = 点属所选类别且未失效即当拍触发（旧全关行为）。
      黄金分割（⑤）与上级周期同向（⑥）为基本硬门槛，两路下均先行/后置拦截。
      首个满足拍出信号（每个点只触发一次；pointValidBars 根内未满足作废）
      → 下一根 P 周期K线开盘价成交。
@@ -106,42 +106,43 @@ TRAIL_POINT_TYPES = ("3买", "类3买", "4买", "类4买",
 
 # 参数中心 fxma 模块默认值（单一来源；param_center.defaults_of 活取）
 FXMA_DEFAULTS = {
-    "entryRes": "3,15,60",          # 多选：30S/3/15/60（30S 仅回测）
-    "pointClasses": "1,2,2x,3,3x",  # 多选：1/2/2x/3/3x（2x=类2买卖、3x=类3买卖）
-    "maOn": True,                   # 均线分离条件开关（False=停用：不计票不拦截）
+    # 2026-10-10 把当时黄金参数页生效值收成全局默认
+    "entryRes": "15",               # 多选：30S/3/15/60（30S 仅回测）
+    "pointClasses": "1,2,2x,3",     # 多选：1/2/2x/3/3x（2x=类2买卖、3x=类3买卖）
+    "maOn": False,                  # 均线分离条件开关（False=停用：不计票不拦截）
     "maReq": "required",            # 均线分离条件性质：required=必选 / optional=可选（仅计票）
     "maType": "SMA",                # 枚举：SMA/EMA
     "maFast1": 8, "maSlow1": 20,    # 一类点均线对
     "maFast2": 5, "maSlow2": 8,     # 二三类点均线对
     "crossMinPts": 2.0,             # 均线上下穿确认点数（快慢线间距≥该值）
-    "maStandOn": True,              # 收盘站线条件开关（False=停用：不计票不拦截）
+    "maStandOn": False,             # 收盘站线条件开关（False=停用：不计票不拦截）
     "maStandReq": "required",       # 收盘站线条件性质：required=必选 / optional=可选
-    "maStand1": 5, "maStand2": 5,   # 站线均线周期：一类点 / 二三类点（买站上、卖站下）
-    "fibNearOn": False,             # 黄金分割附近条件开关（基本参数·独立硬门槛；仅2/3类点，1类豁免）
+    "maStand1": 8, "maStand2": 5,   # 站线均线周期：一类点 / 二三类点（买站上、卖站下）
+    "fibNearOn": True,              # 黄金分割附近条件开关（基本参数·独立硬门槛；仅2/3类点，1类豁免）
     "fibLevels": "0.382,0.5,0.618", # 黄金分割档位（逗号串，各档 0<r<1）
     "fibNearPts": 5.0,              # 黄金分割档位容差（绝对点数）
     "upperDirOn": False,            # 上级周期同向条件开关（独立硬门槛，不参与计票）
-    "pred2On": False,               # 预判2买卖开关：确认下跌/上涨笔破前低/前高后，反弹/回调
-                                    # 一够笔即预判2卖/2买提前入列（本级规则，不依赖上级锚定段；
-                                    # 闸门链照旧——只修点可见性，不改变其余门槛判定）
-    "divLowerOn": False,            # 次级别/次次级别背驰条件开关（缠论V1 lowerDiverge 同源；
+    # pred2On（预判2买卖开关）已于 2026-10-10 淘汰：提前入列为默认行为（常开）——
+    # 确认下跌/上涨笔破前低/前高后，反弹/回调一够笔即预判2卖/2买提前入列（本级规则，
+    # 不依赖上级锚定段；闸门链照旧——只修点可见性，不改变其余门槛判定）
+    "divLowerOn": True,             # 次级别/次次级别背驰条件开关（缠论V1 lowerDiverge 同源；
                                     # 与条件组合互斥——开启=背驰为唯一触发条件，关闭=走条件组合）
-    "divLowerWinBars": 1,           # 背驰窗口(根)：候选背驰点不早于点时间−N根本周期K线；1=旧口径（极值边界差容差）
-    "strongFxOn": True,             # 强分型条件开关（False=停用：不计票不拦截）
+    "divLowerWinBars": 3,           # 背驰窗口(根)：候选背驰点不早于点时间−N根本周期K线；1=旧口径（极值边界差容差）
+    "strongFxOn": False,            # 强分型条件开关（False=停用：不计票不拦截）
     "strongFxReq": "required",      # 强分型条件性质：required=必选 / optional=可选
     "strongFxMinPts": 0.0,          # 强分型实体最小落差（0=现口径）
     # 各类买卖点条件满足数（三选N：强分型/均线分离/收盘站线；生效N=min(N,启用条件数)，
-    # 默认3=旧 AND 行为；divLowerOn 开启时条件组合整体不参与）
-    "entryPick1": "3",
-    "entryPick2": "3",
-    "entryPick2x": "3",
-    "entryPick3": "3",
-    "entryPick3x": "3",
-    "pointValidBars": 0,            # 点有效期（根；0=不限直到反向点）
+    # 默认1；3=旧 AND 行为；divLowerOn 开启时条件组合整体不参与）
+    "entryPick1": "1",
+    "entryPick2": "1",
+    "entryPick2x": "1",
+    "entryPick3": "1",
+    "entryPick3x": "1",
+    "pointValidBars": 5,            # 点有效期（根；0=不限直到反向点）
     "pointValidPts": 0.0,           # 点有效期（值；盘中价距点极值上限，0=不限；超距等待回范围）
     "stopPts": 10.0,                # 止损点数（绝对价差；盘中触价即成交，与实盘 MT5 SL 同口径）
     "tpPts": 30.0,                  # 止盈点数（同口径；tpMode=points 时生效）
-    "tpMode": "points",             # 止盈方式：points=固定点数满仓一笔 / structure=结构组合（半仓开仓+主动止盈+跟踪止损）
+    "tpMode": "structure",          # 止盈方式：points=固定点数满仓一笔 / structure=结构组合（半仓开仓+主动止盈+跟踪止损）
     "tpNearPts": 0.0,               # 到点容差（点）：主动止盈价=前一点位价向入场侧偏移，0=精确触价
     "tpTrailSlipPts": 1.0,          # 提损滑点（点）：止损上移到 3/4类点极值价再向不利侧偏移
     "sameBarPriority": "stop",      # 同根双触优先级：stop/tp
@@ -298,7 +299,8 @@ class FxMaEngine(BacktestEngine):
         if self.fib_near_pts < 0:
             raise ValueError(f"fibNearPts 须 ≥0（收到 {fib_near_pts}）")
         self.upper_dir_on = bool(upper_dir_on)
-        self.pred2_on = bool(pred2_on)
+        # 2026-10-10 提前入列：pred2 常开（原 pred2On 参数淘汰，kwarg 仅为兼容保留）
+        self.pred2_on = True
         # 与条件组合互斥（2026-10-09）：开启=背驰为唯一触发条件（免计票，不过则等待），
         # 关闭=走三选N条件组合；黄金分割/上级同向作为基本硬门槛始终先行拦截
         self.div_lower_on = bool(div_lower_on)
@@ -407,7 +409,6 @@ class FxMaEngine(BacktestEngine):
             fib_near_levels=pm.get("fibLevels", "0.382,0.5,0.618"),
             fib_near_pts=pm.get("fibNearPts", 5.0),
             upper_dir_on=pm.get("upperDirOn", False),
-            pred2_on=pm.get("pred2On", False),
             div_lower_on=pm.get("divLowerOn", False),
             div_lower_win_bars=pm.get("divLowerWinBars", 1),
             strong_fx_on=pm.get("strongFxOn", True),

@@ -50,7 +50,8 @@ class CfgSwitch:
 
 
 class AnchorUndecidedTests(unittest.TestCase):
-    """A：未定型不接管。"""
+    """A：未定型哨兵与提前入列（2026-10-10 起 anchorUndecidedSkip 淘汰——未定型点
+    接管锚点并按弱档先行路由，定型后滚动翻档；哨兵保留，定型阈值固定 2 合并块）。"""
 
     def setUp(self):
         # 结构：down(前底) -> up(形成中，2卖挂在端点) —— 点后无任何下跌笔
@@ -60,29 +61,23 @@ class AnchorUndecidedTests(unittest.TestCase):
         ]
         self.p2sell = {"type": "2卖", "time": 100, "price": 12.0}
 
-    def test_off_keeps_other(self):
-        with CfgSwitch(anchorUndecidedSkip=False):
-            self.assertEqual(TP.classifySecond(self.bis, [], self.p2sell), "其他")
+    def test_after_missing_marks_undecided(self):
+        self.assertEqual(TP.classifySecond(self.bis, [], self.p2sell), "未定型")
 
-    def test_on_after_missing_marks_undecided(self):
-        with CfgSwitch(anchorUndecidedSkip=True):
-            self.assertEqual(TP.classifySecond(self.bis, [], self.p2sell), "未定型")
-
-    def test_on_forming_after_below_minbars(self):
+    def test_forming_after_below_minbars(self):
         bis = self.bis + [_bi("down", 100, 130, 12.0, 11.0, _forming=True,
                               phase="expected", mergedCount=1)]
-        with CfgSwitch(anchorUndecidedSkip=True, anchorUndecidedMinBars=2):
-            self.assertEqual(TP.classifySecond(bis, [], self.p2sell), "未定型")
+        self.assertEqual(TP.classifySecond(bis, [], self.p2sell), "未定型")
 
     def test_true_weak_keeps_flip(self):
-        # after 存在（形成中、达 2 块）且未破左低 8.0 → 真弱仍走「其他」→ 弱档翻多语义不变
+        # after 存在（形成中、达 2 块）且未破左低 8.0 → 定型（真弱走中间档/其他，翻多语义不变）
         bis = self.bis + [_bi("down", 100, 160, 12.0, 11.0, _forming=True,
                               phase="running", mergedCount=2)]
-        with CfgSwitch(anchorUndecidedSkip=True, anchorUndecidedMinBars=2):
-            self.assertEqual(TP.classifySecond(bis, [], self.p2sell), "前低附近")
+        self.assertEqual(TP.classifySecond(bis, [], self.p2sell), "前低附近")
 
-    def test_predict_plan_falls_back_to_prev_anchor(self):
-        # 端点 100 上挂未定型 2卖；前一笔端点 50 上挂 1买 → 开关开应锚定 1卖（wait2Buy 语义）
+    def test_undecided_takes_over_weak_first(self):
+        # 端点 100 上挂未定型 2卖；前一笔端点 50 上挂 1买 → 提前入列：未定型点接管，
+        # 弱档先行路由 wait2SellBear（等待高点附近的2卖），不再回退前锚 1买。
         bis = [
             _bi("up", -100, 0, 8.5, 10.0),
             _bi("down", 0, 50, 10.0, 8.0),
@@ -90,7 +85,6 @@ class AnchorUndecidedTests(unittest.TestCase):
         ]
         buy_pts = [{"type": "1买", "time": 50, "price": 8.0}]
         sell_pts = [{"type": "2卖", "time": 100, "price": 12.0}]
-        orig_buy = ME.findBuyPoints if hasattr(ME, "findBuyPoints") else None
         import py_chain.chan_core as cc
         saved = (cc.findBuyPoints, cc.findSellPoints)
         cc.findBuyPoints = lambda *a, **k: buy_pts
@@ -98,14 +92,71 @@ class AnchorUndecidedTests(unittest.TestCase):
         try:
             TP.findBuyPoints = cc.findBuyPoints
             TP.findSellPoints = cc.findSellPoints
-            with CfgSwitch(anchorUndecidedSkip=True, anchorUndecidedMinBars=2):
-                out = TP.predictPlan(res="60", bis=bis, upperBis=[], macdArr=[],
-                                     lastPrice=11.0, bars=[], atr=2.0, barSec=3600)
-            self.assertIn("等待回调后做2买", out["strategy"])
-            self.assertIn("1买", out["pointDesc"])
+            out = TP.predictPlan(res="60", bis=bis, upperBis=[], macdArr=[],
+                                 lastPrice=11.0, bars=[], atr=2.0, barSec=3600)
+            self.assertIn("等待高点附近的2卖", out["strategy"])
+            self.assertIn("2卖", out["pointDesc"])
         finally:
             cc.findBuyPoints, cc.findSellPoints = saved
             TP.findBuyPoints, TP.findSellPoints = saved
+
+    def test_forming_first_buy_routes_wait1buy(self):
+        # 形成中 1买（末笔仍在新低中）→ 直接档 wait1Buy，不切回调档 wait2Buy。
+        bis = [
+            _bi("down", -200, -120, 16.0, 13.0),
+            _bi("up", -120, -20, 13.0, 17.0),
+            _bi("down", -20, 60, 17.0, 9.0, _forming=True, phase="running", mergedCount=6),
+        ]
+        buy_pts = [{"type": "1买", "time": 60, "price": 9.0}]
+        import py_chain.chan_core as cc
+        saved = (cc.findBuyPoints, cc.findSellPoints)
+        cc.findBuyPoints = lambda *a, **k: buy_pts
+        cc.findSellPoints = lambda *a, **k: []
+        try:
+            TP.findBuyPoints = cc.findBuyPoints
+            TP.findSellPoints = cc.findSellPoints
+            out = TP.predictPlan(res="60", bis=bis, upperBis=[], macdArr=[],
+                                 lastPrice=9.5, bars=[], atr=2.0, barSec=3600)
+            self.assertIn("等待低点附近的一买", out["strategy"])
+        finally:
+            cc.findBuyPoints, cc.findSellPoints = saved
+            TP.findBuyPoints, TP.findSellPoints = saved
+
+
+class DualSideAnchorTests(unittest.TestCase):
+    """2026-10-10 买卖双侧独立：各自维护锚、互不影响，多空可同时评估。"""
+
+    def test_both_sides_anchored(self):
+        # 买侧锚 = 最新买点（1买@50），卖侧锚 = 最新卖点（2卖@100，更新）→ 主侧=卖，
+        # alt=买侧 wait2Buy 不因更新的卖点消失。
+        bis = [
+            _bi("up", -150, -60, 12.0, 15.0),
+            _bi("down", -60, 0, 15.0, 10.0),
+            _bi("up", 0, 50, 10.0, 14.0),     # 1买挂在 50 端点（down 终点 10.0）
+            _bi("down", 50, 100, 14.0, 13.0),  # 2卖挂 100 端点
+        ]
+        buy_pts = [{"type": "1买", "time": 50, "price": 10.0}]
+        sell_pts = [{"type": "2卖", "time": 100, "price": 14.0}]
+        import py_chain.chan_core as cc
+        saved = (cc.findBuyPoints, cc.findSellPoints)
+        cc.findBuyPoints = lambda *a, **k: buy_pts
+        cc.findSellPoints = lambda *a, **k: sell_pts
+        saved_rv = TP._rangeVerdict
+        TP._rangeVerdict = lambda *a, **k: None  # 绕过自身 A/B 震荡判定（专注双侧锚语义）
+        try:
+            TP.findBuyPoints = cc.findBuyPoints
+            TP.findSellPoints = cc.findSellPoints
+            out = TP.predictPlan(res="60", bis=bis, upperBis=[], macdArr=[],
+                                 lastPrice=13.5, bars=[], atr=1.0, barSec=3600)
+            # 主侧 = 更新的卖点族（2卖@100，无 after → 未定型弱档先行 wait2SellBear）；alt = 买侧
+            self.assertEqual(out["direction"], "多头空")
+            self.assertIn("2卖", out["strategy"])
+            self.assertEqual(out["altStrategy"], "等待回调后做2买")
+            self.assertEqual(out["altDirection"], "多头多")
+        finally:
+            cc.findBuyPoints, cc.findSellPoints = saved
+            TP.findBuyPoints, TP.findSellPoints = saved
+            TP._rangeVerdict = saved_rv
 
 
 class DivergeReferZsTests(unittest.TestCase):
@@ -135,7 +186,10 @@ class DivergeReferZsTests(unittest.TestCase):
         self.assertEqual(ref["startTime"], 0)   # 入中枢段（结束于中枢起点 30/enterEndTime）
 
     def test_on_even_zs_without_same_dir_entering(self):
-        # 偶数笔中枢（b1 反向）：无同向入中枢段 → 无参照（也不回退中枢内部段）
+        # 偶数笔中枢（b1 反向）：无同向入中枢段 → 2026-10-10 用户口径修正：
+        # 回退取容器内最外侧合格同向段（中枢构成大段）作参照，不再返回 None
+        # （60m wait2BuyBear 10-8 案例：入中枢大段被 buildZS 吸收为构成笔、
+        #   进入笔成反向段，ZS 回退被推出容器 → 原判 no_refer 一次比较都没做）。
         bis = [
             _bi("down", 0, 30, 12.0, 9.0),
             _bi("up", 30, 60, 9.0, 11.0),
@@ -144,7 +198,8 @@ class DivergeReferZsTests(unittest.TestCase):
         ]
         with CfgSwitch(divergeReferByZs=True):
             ref = ME.pickDivergeRefer(bis, bis[-1], self.barSec)
-        self.assertIsNone(ref)
+        self.assertIsNotNone(ref)
+        self.assertEqual(ref["startTime"], 30)  # 容器内最外侧合格同向段（本例唯一候选 30→60）
 
 
 class PointEnoughFormingTests(unittest.TestCase):

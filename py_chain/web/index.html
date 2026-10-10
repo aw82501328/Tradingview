@@ -201,8 +201,16 @@
   /* 独立TAB页（历史回测方案/典型案例）表格：JS 按容器顶位置吃满剩余视口，340px 为无 JS 回落 */
   .page-scroll { max-height: 340px; }
   #sig-body tr { cursor: pointer; }
+  /* 已加入典型案例的行：浅黄底标识（悬停/选中态由下方规则优先覆盖） */
+  #sig-body tr.in-case td { background: color-mix(in srgb, var(--warn) 26%, var(--card)); }
   #sig-body tr:hover td { background: var(--card-2); }
   #sig-body tr.selected td { background: color-mix(in srgb, var(--accent) 18%, var(--card)); }
+  /* 悬停已加入行：黄加深一档，避免悬停瞬间退回普通底色 */
+  #sig-body tr.in-case:hover td { background: color-mix(in srgb, var(--warn) 38%, var(--card)); }
+  /* 已加入 EVAL 的当次回测行：浅蓝底，和典型案例的浅黄分开 */
+  #sig-body tr.in-eval td { background: color-mix(in srgb, var(--accent) 16%, var(--card)); }
+  #sig-body tr.in-eval:hover td { background: color-mix(in srgb, var(--accent) 28%, var(--card)); }
+  #bt-runs-body tr.in-eval td { background: color-mix(in srgb, var(--accent) 16%, var(--card)); }
   #sig-body tr.selected:not(.exit-continuation) td:first-child { box-shadow: inset 3px 0 var(--accent); }
   #sig-body td[rowspan] { vertical-align: middle; }
   #sig-body tr.exit-continuation td { border-top-style: dashed; }
@@ -425,7 +433,7 @@ const BT_PAGE_TABS = [
   { id: 'runs', name: '历史回测方案',
     title: '保存的参数+信号+固化汇总，支持明细/对比/载参数' },
   { id: 'errors', name: '典型案例',
-    title: '右击信号行/方案明细行「复制并加入典型案例」收集的典型交易；滑动开关标记已处理' },
+    title: '右击信号行/方案明细行「复制并加入典型案例」收集的典型交易；滑动开关标记已处理；已加入的行在信号表/明细表以浅黄底标识' },
 ];
 
 const state = { active: null, modes: {}, bt: {} };
@@ -483,7 +491,7 @@ function selectBtTab(sid){
   }else if(!backFromPage)return;
   btPage='strategy';
   showBtTab();
-  renderTable();
+  refreshEvalFlags().then(renderTable);
   updateMarkButtons();
 }
 // 独立TAB页切换（历史回测方案/典型案例）：替代策略卡与信号表整页显示
@@ -932,6 +940,8 @@ function renderTable() {
     selectedId: selectedSignal[selectedMode],
     noOf: displayNo,
     showSym,
+    isCase: r => btCaseKeys.has(btCaseKeyOf(r)),   // 已加入典型案例 → 浅黄底
+    inEval: r => selectedMode === 'backtest' && btEvalLive && r.id > btEvalMinId,
   });
   const modeCount=sigRows.filter(r=>r.mode===selectedMode
     &&(selectedMode!=='backtest'||btRowStrategy(r)===curBtTab)).length;
@@ -1070,12 +1080,15 @@ function bindSignalRows() {
   };
   el('sig-body').onclick = activate;
   el('sig-body').onkeydown = activate;
-  // 右击菜单（共享组件 bt_common.js）：仅复制 / 复制并加入典型案例；表头/空白处保持浏览器默认。
-  // 三模式右击均可加入（条目持久化到 bars.db），典型案例 TAB 仅全量回测显示。
+  // 右击菜单（共享组件 bt_common.js）：复制 / 加入典型案例；回测结束或中途停止后多一项「加入 EVAL 案例」。
+  // 三模式右击均可加入典型案例（条目持久化到 bars.db），典型案例 TAB 仅全量回测显示。
   attachSignalContextMenu(el('sig-body'), tr => {
     const row = sigRows.find(r => r.id === Number(tr.dataset.signalId) && r.mode === selectedMode);
     if (!row) return null;
-    return { row, no: displayNo(row), sourceType: 'live', onAdded: refreshBtErrors };
+    const btState = state.bt[curBtTab]?.state;
+    return { row, no: displayNo(row), sourceType: 'live', onAdded: refreshBtErrors,
+      addEval: selectedMode === 'backtest' && (btState === 'done' || btState === 'stopped'),
+      onEval: addLiveEvalCase };
   });
 }
 
@@ -1467,6 +1480,9 @@ function connectSSE() {
 
 // ---------- 历史回测方案（仅全量回测：保存/列表/明细/对比/载参数） ----------
 let btRuns = [];                 // 列表缓存（/api/bt/runs，不含信号行）
+let btEvalRunIds = new Set();    // 已加入 EVAL 的历史方案 id
+let btEvalLive = false;          // 当前策略这次回测是否已加入 EVAL
+let btEvalMinId = 0;             // 本次运行开始前的信号 id，大于它的行才算这次回测
 const btCompareSel = new Set();  // 对比勾选的方案 id
 let btRunsPnlSort = 'none';      // 方案列表合计盈亏：none / descending / ascending
 
@@ -1540,12 +1556,89 @@ async function saveAllBtRuns() {
   if (r.saved?.length) selectBtPage('runs');
 }
 
+async function refreshEvalFlags() {
+  try {
+    const d = await (await fetch('/api/eval/pnl-flags?strategy=' + encodeURIComponent(curBtTab))).json();
+    if (!d.ok) return;
+    btEvalRunIds = new Set(d.runIds || []);
+    btEvalLive = !!d.live;
+    btEvalMinId = Number(d.minId) || 0;
+  } catch { /* 拉不到标志就不标底色 */ }
+}
+async function addLiveEvalCase() {
+  const st = state.bt[curBtTab]?.state;
+  if (st === 'running' || st === 'paused') {
+    alert('回测尚未结束，不能加入 EVAL');
+    return;
+  }
+  try {
+    const r = await fetch('/api/eval/create-pnl-case', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'live', strategy: curBtTab }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.status === 409) { showCopyTip('该回测已在 EVAL 案例'); return; }
+    if (!r.ok || !d.ok) throw Error(d.error || '请求失败');
+    const total = Number(d.case?.expectedTotal);
+    showCopyTip('已加入 EVAL 案例' + (Number.isFinite(total) ? '（合计 ' + total.toFixed(2) + '）' : ''));
+    await refreshEvalFlags();
+    renderTable();
+  } catch (e) {
+    alert('加入 EVAL 案例失败：' + e.message);
+  }
+}
+async function addRunEvalCase(run) {
+  try {
+    const r = await fetch('/api/eval/create-pnl-case', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ runId: run.id }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.status === 409) { showCopyTip('该方案已在 EVAL 案例'); return; }
+    if (!r.ok || !d.ok) throw Error(d.error || '请求失败');
+    showCopyTip('已加入 EVAL 案例');
+    await refreshEvalFlags();
+    renderBtRuns();
+  } catch (e) {
+    alert('加入 EVAL 案例失败：' + e.message);
+  }
+}
+let _runsEvalMenu = null;
+function onBtRunsContextMenu(event) {
+  const tr = event.target.closest('tr[data-id]');
+  if (!tr) return;
+  const run = btRuns.find(r => r.id === tr.dataset.id);
+  if (!run) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (!_runsEvalMenu) {
+    _runsEvalMenu = document.createElement('div');
+    _runsEvalMenu.style.cssText = 'position:fixed;z-index:80;min-width:160px;padding:4px;background:var(--card);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.45)';
+    _runsEvalMenu.innerHTML = '<button type="button" style="display:block;width:100%;text-align:left;background:transparent;border:0;color:var(--text);padding:7px 12px;font-size:13px;border-radius:5px;cursor:pointer">加入 EVAL 案例</button>';
+    document.body.appendChild(_runsEvalMenu);
+    _runsEvalMenu.onclick = ev => {
+      ev.stopPropagation();
+      const picked = _runsEvalMenu._run;
+      _runsEvalMenu.hidden = true;
+      if (picked) addRunEvalCase(picked);
+    };
+    document.addEventListener('click', () => { if (_runsEvalMenu) _runsEvalMenu.hidden = true; });
+    document.addEventListener('keydown', ev => {
+      if (ev.key === 'Escape' && _runsEvalMenu) _runsEvalMenu.hidden = true;
+    });
+  }
+  _runsEvalMenu._run = run;
+  _runsEvalMenu.hidden = false;
+  _runsEvalMenu.style.left = Math.max(8, event.clientX) + 'px';
+  _runsEvalMenu.style.top = Math.max(8, event.clientY) + 'px';
+}
 async function refreshBtRuns() {
   try {
     const d = await (await fetch('/api/bt/runs')).json();
     if (!d.ok) throw Error(d.error || '未知错误');
     btRuns = d.runs || [];
     [...btCompareSel].forEach(id => { if (!btRuns.some(r => r.id === id)) btCompareSel.delete(id); });
+    await refreshEvalFlags();
     renderBtRuns();
   } catch (e) {
     el('bt-runs-status').textContent = '列表加载失败：' + e.message;
@@ -1584,7 +1677,8 @@ function renderBtRuns() {
     }
     body.innerHTML = runs.map(r => {
       const s = r.summary || {};
-      return `<tr data-id="${r.id}">
+      const evalCls = btEvalRunIds.has(r.id) ? ' class="in-eval"' : '';
+      return `<tr data-id="${r.id}"${evalCls} title="${btEvalRunIds.has(r.id) ? '已加入 EVAL 案例' : ''}">
         <td><input type="checkbox" data-bt-check="${r.id}"${btCompareSel.has(r.id) ? ' checked' : ''} aria-label="对比勾选 ${esc(r.name)}"></td>
         <td title="${esc(r.name)}">${esc(r.name)}</td>
         <td title="${esc(btRunStrategyId(r))}">${esc(btStrategyName(btRunStrategyId(r)))}</td>
@@ -1808,6 +1902,7 @@ function bindBtRuns() {
   el('sort-bt-runs-pnl').onclick = toggleBtRunsPnlSort;
   el('bt-runs-body').onclick = onBtRunsClick;
   el('bt-runs-body').onchange = onBtRunsCheck;
+  el('bt-runs-body').addEventListener('contextmenu', onBtRunsContextMenu);
   // 明细弹窗相关绑定已随弹窗一起迁到独立页 bt_detail.html
 }
 
@@ -1815,12 +1910,23 @@ function bindBtRuns() {
 let btErrors = [];
 let btErrorsFilter = '';
 let btErrorsSelected = null;   // 单击选中的条目 id（仅展示态，不落库）
+let btCaseKeys = new Set();    // 已加入典型案例的 live 行内容键集（source_key，两页共用存储）
+
+// 行 → live 内容键：与后端 bt_errors.derive_source_key 同口径
+// （live|mode|symbol|time|periodX|direction|strategyKey），判定该行是否已加入典型案例
+function btCaseKeyOf(r) {
+  return 'live|' + ['mode', 'symbol', 'time', 'periodX', 'direction', 'strategyKey']
+    .map(k => r[k] == null ? '' : String(r[k])).join('|');
+}
 
 async function refreshBtErrors() {
   try {
     const d = await (await fetch('/api/bt/errors')).json();
     if (!d.ok) throw Error(d.error || '加载失败');
     btErrors = d.errors || [];
+    // live 行键集重建：加入/删除案例后重渲染信号表，同步已加入行浅黄底
+    btCaseKeys = new Set(btErrors.filter(e => e.source_type === 'live').map(e => e.source_key));
+    renderTable();
     renderBtErrors();
   } catch (e) {
     el('bt-errors-status').textContent = '加载失败：' + e.message;
@@ -2106,7 +2212,9 @@ async function init() {
   const status = await (await fetch('/api/status')).json();
   sigRows = (await (await fetch('/api/signals')).json()).rows || [];
   applyStatus(status);
+  await refreshEvalFlags();
   renderTable();
+  refreshBtErrors();   // 典型案例 live 键集：载入即标已加入行浅黄底（后续增删案例时同步重渲染）
   connectSSE();
   reportModes();
   setInterval(reportModes,1000);

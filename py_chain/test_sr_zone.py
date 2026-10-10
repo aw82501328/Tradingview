@@ -23,7 +23,8 @@ import unittest
 
 from py_chain import sr_zone
 from py_chain.sr_flip import compute_srflip
-from py_chain.mark_entry import near_zone, nearSr, stop_ref_of
+from py_chain.mark_entry import (near_zone, nearSr, stop_ref_of,
+                                 sr_of_detect, sr_drop_fib_for_class1)
 
 
 def bar(t, h, l, c, o=None):
@@ -316,6 +317,70 @@ class TestNearZoneGate(unittest.TestCase):
         # 多单止损 = 支撑区间下沿 − 滑点（区间外侧）
         self.assertEqual(ref, 99.85 - 3.0)
         self.assertEqual(src["src"], "near_sr")
+
+
+class TestClass1FibExempt(unittest.TestCase):
+    """1类策略（wait1Buy/wait1Sell）豁免黄金分割支阻（2026-10-10）：
+    fib 位由非一类买卖点锚定派生，对 1类点不参与「支阻位附近」闸门与止损重选
+    ——与 fxma fibNearOn「仅2/3类点判定，1类点豁免」同语义。点位候选本身仍只查
+    |价差| ≤ near、不分上下方（旧口径不变）。"""
+
+    # 复刻实测场景（bt_chan XAUUSD 10-5：wait1Buy 多头被上方 fib 0.5 回撤位放行、
+    # 止损侧无位可依走最大止损兜底，-34.24）
+    FIB_ABOVE = {"price": 4141.34, "level": "60", "fib": True, "ratio": 0.5,
+                 "type": "RES", "srcType": "fib"}
+    FIB_BELOW = {"price": 4118.0, "level": "60", "fib": True, "ratio": 0.382,
+                 "type": "SUP", "srcType": "fib"}
+    ZONE_SUP = {"kind": "support", "price": 4120.0, "lower": 4120.0, "upper": 4126.0,
+                "level": "60", "srcType": "zone"}
+    MANUAL_BELOW = {"price": 4115.0, "level": "60", "manual": True, "srcType": "manual"}
+
+    def test_drop_fib_only_for_class1_keys(self):
+        pool = [self.FIB_ABOVE, self.FIB_BELOW, self.ZONE_SUP, self.MANUAL_BELOW]
+        # 1类键剔 fib（密集区/人工位保留）；其余键/空池原样返回（同一列表对象，零拷贝）
+        for key in ("wait1Buy", "wait1Sell"):
+            kept = sr_drop_fib_for_class1(pool, key)
+            self.assertEqual(kept, [self.ZONE_SUP, self.MANUAL_BELOW])
+        for key in ("wait2Buy", "waitBuy", "wait3Sell", "wait2BuyBear", None):
+            self.assertIs(sr_drop_fib_for_class1(pool, key), pool)
+        empty = []
+        self.assertIs(sr_drop_fib_for_class1(empty, "wait1Buy"), empty)
+
+    def test_wait1buy_gate_ignores_fib_levels(self):
+        # 场景复刻：只选黄金分割、fib 位在信号价上方约 18 点、near=30——
+        # 点位候选旧口径（|4141.34-4123.355|=17.99 ≤ 30，不分上下方）会命中；
+        # wait1Buy 剔 fib 后池空 → 「以下级别背驰点均远离支阻位」拒绝
+        sig_price, nearTol = 4123.355, 30.0
+        fib_only = sr_of_detect([self.FIB_ABOVE], "60")
+        self.assertIsNotNone(near_zone(sig_price, fib_only, "long", nearTol))
+        kept = sr_drop_fib_for_class1(fib_only, "wait1Buy")
+        self.assertEqual(kept, [])
+        self.assertIsNone(near_zone(sig_price, kept, "long", nearTol))
+        # 下方 fib（支撑侧、距 5.4）对非1类键多头仍放行（豁免只针对1类键）
+        hit = near_zone(sig_price, [self.FIB_BELOW], "long", 30.0)
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["sr"]["price"], 4118.0)
+
+    def test_wait1buy_stop_repick_ignores_fib(self):
+        # 止损重选同口径：1类键剔 fib 后正确侧无位 → 最大止损兜底（进场价−fallback）
+        entry, slip_fb = 4136.505, 10.0
+        fib_stop = {"price": 4131.0, "level": "60", "fib": True, "ratio": 0.618,
+                    "type": "SUP", "srcType": "fib"}
+        pool = sr_drop_fib_for_class1(
+            sr_of_detect([self.FIB_ABOVE, fib_stop], "60"), "wait1Buy")
+        src = {}
+        ref = stop_ref_of("long", entry, None, pool, slip_stop=3.0,
+                          slip_fallback=slip_fb, source_out=src)
+        self.assertEqual(ref, entry - slip_fb)
+        self.assertEqual(src["src"], "fallback")
+        # 非1类键：正确侧 fib 参与止损重选（4131−滑点3=4128 > 最大止损4126.5 不被夹）
+        pool2 = sr_of_detect([self.FIB_ABOVE, fib_stop], "60")
+        src2 = {}
+        ref2 = stop_ref_of("long", entry, None, pool2, slip_stop=3.0,
+                           slip_fallback=slip_fb, source_out=src2)
+        self.assertEqual(ref2, 4131.0 - 3.0)
+        self.assertEqual(src2["src"], "sr_pick")
+        self.assertEqual(src2["srPrice"], 4131.0)
 
 
 if __name__ == "__main__":

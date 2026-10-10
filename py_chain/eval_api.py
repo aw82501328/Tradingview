@@ -2,13 +2,14 @@
 """EVAL 评估子API（/api/eval/*）：用例/基线/评估任务的前端入口。
 
 GET  bars-info / cases / baselines / run-state / bl-bis?id=（基线冻结笔明细）
-POST create-case / delete-case / create-baseline / refresh-baseline /
+     pnl-flags?strategy=（已加入 EVAL 的方案 id，以及当前回测是否已加入）
+POST create-case / create-pnl-case / delete-case / create-baseline / refresh-baseline /
      rename-baseline / delete-baseline / run
 """
 
 from urllib.parse import urlparse, parse_qs
 
-from .eval_service import BusyError
+from .eval_service import BusyError, DuplicateError
 
 
 def _require_id(body):
@@ -40,6 +41,9 @@ def handle(handler, app, method):
                 if not bid:
                     raise ValueError("id 不能为空")
                 result = mgr.baseline_bis(bid)
+            elif action == "pnl-flags":
+                strategy = (parse_qs(parsed.query).get("strategy") or [""])[0]
+                result = mgr.pnl_flags(app, strategy)
             else:
                 handler._send_json({"ok": False, "error": "未知评估接口"}, 404)
                 return True
@@ -49,6 +53,8 @@ def handle(handler, app, method):
                 raise ValueError("请求体须为对象")
             if action == "create-case":
                 result = mgr.create_case(body, symbol=symbol) or {}
+            elif action == "create-pnl-case":
+                result = mgr.create_pnl_case(body, app) or {}
             elif action == "delete-case":
                 result = mgr.delete_case(_require_id(body)) or {}
             elif action == "create-baseline":
@@ -69,6 +75,8 @@ def handle(handler, app, method):
                 return True
         handler._send_json({"ok": True, **result})
     except BusyError as exc:
+        handler._send_json({"ok": False, "error": str(exc)}, 409)
+    except DuplicateError as exc:
         handler._send_json({"ok": False, "error": str(exc)}, 409)
     except (ValueError, TypeError, KeyError) as exc:
         handler._send_json({"ok": False, "error": str(exc)}, 400)
