@@ -1,0 +1,148 @@
+{
+ "id": "b_20261011_151910_e2bdb4",
+ "name": "黄金10",
+ "note": "",
+ "caseIds": [
+  "c_20261011_151853_b90aa1",
+  "c_20261011_151633_da7e34"
+ ],
+ "expected": {
+  "c_20261011_151853_b90aa1": {
+   "total": 146.01,
+   "positions": [
+    {
+     "id": 51,
+     "mode": "backtest",
+     "strategy": "chan_v1",
+     "symbol": "OANDA:XAUUSD",
+     "time": 1791475200,
+     "direction": "long",
+     "periodX": "60",
+     "strategyKey": "wait2BuyBear",
+     "markRes": "15",
+     "price": 4105.5,
+     "nearSr": 4123.33691,
+     "trendDirection": null,
+     "trendReason": null,
+     "planDirection": "空头多",
+     "fallback": false,
+     "nearEqual": false,
+     "expectBi": false,
+     "status": "持仓中",
+     "entryTime": 1791476820,
+     "entryPrice": 4120.47,
+     "lots": 4,
+     "mult": 1.0,
+     "stopRef": 4110.47,
+     "state": "open",
+     "exitTime": null,
+     "exitPrice": null,
+     "exitType": null,
+     "exits": [
+      {
+       "type": "close",
+       "time": 1791479880,
+       "price": 4143.625,
+       "why": "过高低点止盈触发（逆势·预期口径，计划方向 空头多）：检测周期 60 有利方向（上涨）当根收盘K极值 4144.12（10-9 01:15）破前一同向笔端点 4143.43（10-8 10:00），不等确认笔，平 25%（1 手）挂起；下一开盘 10-9 01:18 @ 4143.62 成交",
+       "lots": 1
+      },
+      {
+       "type": "breakeven",
+       "time": 1791490500,
+       "price": 4136.475,
+       "why": "TP1 保本：背驰周期 15 首笔有利方向（上涨）笔 10-9 04:15 @ 4136.48 完成（信号 10-9 00:00 之后），止损位上移至保本位 beStop 4120.47（当拍生效，仅状态迁移不成交）"
+      },
+      {
+       "type": "half",
+       "time": 1791504000,
+       "price": 4144.81,
+       "why": "够笔止盈触发（逆势·预期口径，计划方向 空头多）：检测周期 60 自进场 10-9 00:27 所在合并块起向有利方向（上涨）已走 5 块合并K（不等确认笔），平 50%（2 手）挂起；剩余止损移至保本位 beStop 4120.47；下一开盘 10-9 08:00 @ 4144.81 成交",
+       "lots": 2
+      }
+     ],
+     "pnl": 146.01000000000022,
+     "fillMode": "confirm"
+    }
+   ],
+   "frozenAt": 1791703150.0216856
+  },
+  "c_20261011_151633_da7e34": {
+   "total": 87.19,
+   "positions": [
+    {
+     "id": 6,
+     "mode": "backtest",
+     "strategy": "chan_v1",
+     "symbol": "OANDA:XAUUSD",
+     "time": 1791165420,
+     "direction": "short",
+     "periodX": "60",
+     "strategyKey": "wait2SellBear",
+     "markRes": "3",
+     "price": 4161.815,
+     "nearSr": 4147.85672,
+     "trendDirection": null,
+     "trendReason": null,
+     "planDirection": "多头空",
+     "fallback": false,
+     "nearEqual": false,
+     "expectBi": true,
+     "status": "已平仓",
+     "entryTime": 1791165960,
+     "entryPrice": 4160.555,
+     "lots": 4,
+     "mult": 1.0,
+     "stopRef": 4170.555,
+     "state": "closed",
+     "exitTime": 1791186480,
+     "exitPrice": 4159.91,
+     "exitType": "stopBe",
+     "exits": [
+      {
+       "type": "breakeven",
+       "time": 1791169020,
+       "price": 4139.875,
+       "why": "TP1 保本：背驰周期 3 首笔有利方向（下跌）笔 10-5 10:57 @ 4139.88 完成（信号 10-5 09:57 之后），止损位上移至保本位 beStop 4160.56（当拍生效，仅状态迁移不成交）"
+      },
+      {
+       "type": "half",
+       "time": 1791176400,
+       "price": 4131.46,
+       "why": "够笔止盈触发（逆势，计划方向 多头空）：检测周期 60 有利方向（下跌）笔 10-5 12:00 @ 4124.75 在进场 10-5 10:06 之后完成（末笔方向满足 lastBiOk），平 50%（2 手）挂起；剩余止损移至保本位 beStop 4160.56；下一开盘 10-5 13:00 @ 4131.46 成交",
+       "lots": 2
+      },
+      {
+       "type": "close",
+       "time": 1791176580,
+       "price": 4132.2,
+       "why": "过高低点止盈触发（逆势，计划方向 多头空）：检测周期 60 有利方向（下跌）笔 10-5 12:00 @ 4124.75 破前一同向笔端点 4133.72（10-2 09:00），平 25%（1 手）挂起；下一开盘 10-5 13:03 @ 4132.20 成交",
+       "lots": 1
+      },
+      {
+       "type": "stopBe",
+       "time": 1791186480,
+       "price": 4159.91,
+       "why": "stopBe 触发：10-5 15:45 当根最高 4166.35 冲上保本位 beStop 4160.56，平 100%（1 手）挂起；下一开盘 10-5 15:48 @ 4159.91 成交",
+       "lots": 1
+      }
+     ],
+     "pnl": 87.19000000000142,
+     "fillMode": "confirm"
+    }
+   ],
+   "frozenAt": 1791703150.0216856
+  }
+ },
+ "createdAt": 1791703150.0216856,
+ "updatedAt": 1791703150.0216856,
+ "lastRun": {
+  "at": 1791707315.4762974,
+  "pass": 2,
+  "total": 2,
+  "cases": {
+   "c_20261011_151853_b90aa1": true,
+   "c_20261011_151633_da7e34": true
+  }
+ },
+ "kind": "pnl"
+}
