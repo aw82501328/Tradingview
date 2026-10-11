@@ -13,12 +13,14 @@ _os.environ.setdefault("PY_CHAIN_BT_JOURNAL", "0")  # 引擎测试不落交易�
     末笔延伸提交滞后把末笔自身的块计入=入场拍假就绪）；末笔已确认有利方向→False
   - advance_exit_decision：TP1→beStop→stopBe / TP2 检测周期够笔（统一口径：预期
     enough_fav_bars 或确认 lastBiOk，无需 TP1，不限顺势）→ half 后止损=beStop /
-    TP3a 顺势 breakPrev / TP3b 逆势 seg5 快速离场（锚点无进场块下限，half 先触发
-    后 close 跟上，先到先 latch）/ stopSr / 同拍顺序 half 优先 /
+    TP3 过高低点（2026-10-10 起不分顺势逆势：确认 breakPrev / 预期收盘K极值越
+    前一同向笔端点；旧逆势 seg5 快速离场口径废除——锚点无进场块下限、入场拍假
+    就绪，trade#109 实证）/ stopSr / 同拍顺序 half 优先 /
     预期口径（2026-10-09 严进宽出，默认开）：检测够笔=末笔不利+形成段够块、
     过高低点=收盘K极值越前一同向笔端点，exitExpectOn=False 回退确认笔旧口径
-  - 跟踪止盈双参照（2026-10-09 exitTrailSrc）：detect=检测周期 3/类3/4/类4 结构点流
-    （默认：保本后出3买提损至3买位置，跌破记 trailStop）；mark=背驰周期信号流
+  - 跟踪止盈双参照（2026-10-09 exitTrailSrc；2026-10-11 detect 改结构点）：
+    detect=检测周期已破前低/前高的有利方向笔起点（够笔未破前低/前高不算；
+    破坏该起点记 trailStop）；mark=背驰周期信号流
     同向3类点（wait3Buy/waitBuy/…，旧口径）；门控保本（2026-10-09）——beDone 前
     不接管止损/不提损，参照点自保本当拍起算不追溯
   - 最大止损硬上限兜底（2026-10-09）：止损类部分平仓 latch 后剩余手数由 maxLoss
@@ -158,9 +160,34 @@ class TestFormingBreakRef(unittest.TestCase):
         self.assertEqual(ref["time"], 50)
 
     def test_last_bi_favorable_returns_none(self):
-        # 末笔已是有利方向 → 无形成段，走确认笔口径
-        bis = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 300, 4440, 4450)]
+        # 末笔已是有利方向且已破前一同向端点（up 4450 < 前高 4460 不成立→未破；
+        # 本例改为已破形态）→ 破位事件属确认笔口径，返回 None
+        # （down 4440→up 4470 已破前高 4460）
+        bis = [bi("up", 0, 50, 4400, 4460), bi("down", 50, 150, 4460, 4450),
+               bi("up", 150, 300, 4450, 4470)]
         self.assertIsNone(forming_break_ref(bis, is_short=False))
+
+    def test_last_bi_favorable_not_broken_falls_back_prev(self):
+        # 2026-10-10 补分路（trade#109 二段案例）：末笔已是利好方向但端点未破前
+        # 一同向端点（空单：更高低点 4257.69 > 前低 4254.58）→ 参照退一级取前一同向
+        # 端点，价格越过即触发——防 gapLocked/延伸滞后冻结确认口径端点致破位后
+        # 迟迟不触发（9-28 08:00 破 4254.58、12:00 才 4196.81 平仓）
+        bis = [bi("up", 0, 50, 4400, 4460), bi("down", 50, 150, 4460, 4454.58),
+               bi("up", 150, 200, 4454.58, 4497.31),
+               bi("down", 200, 300, 4497.31, 4457.69)]  # 末笔 down 未破 4454.58
+        ref = forming_break_ref(bis, is_short=True)
+        self.assertEqual(ref["price"], 4454.58)
+        self.assertEqual(ref["time"], 150)
+        # 多单对称：末笔 up 更低高点未破前高 → 参照 = 前一同向 up 端点
+        bis_l = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 150, 4440, 4460),
+                 bi("down", 150, 200, 4460, 4445), bi("up", 200, 300, 4445, 4455)]
+        ref_l = forming_break_ref(bis_l, is_short=False)
+        self.assertEqual(ref_l["price"], 4460.0)
+        self.assertEqual(ref_l["time"], 150)
+
+    def test_last_bi_favorable_no_prev_fav_returns_none(self):
+        # 末笔有利但前面再无同向笔 → 无参照可退
+        self.assertIsNone(forming_break_ref([bi("down", 0, 300, 4460, 4440)], is_short=True))
 
     def test_no_same_direction_bi(self):
         # 无同向笔 / 空列表 → None（不触发预期分路）
@@ -325,9 +352,10 @@ class TestAdvanceExit(unittest.TestCase):
         self.assertEqual(r, "half")
 
     def test_tp2_counter_trend_half_then_close_on_seg5(self):
-        # 2026-10-10 统一口径：逆势（多头空）seg5 状态（末笔 up=不利方向、其后
-        # 下跌形成段 T8 够块）→ 预期口径 half 先触发（同拍顺序 half 在 close 前），
-        # 下一拍 close（快速离场）跟上——先到先 latch、互不阻塞
+        # 2026-10-10 统一口径：逆势（多头空）预期口径 half 先触发（末笔 up=不利方向、
+        # 其后下跌形成段 T8 够块，同拍顺序 half 在 close 前）；下一拍 close 经
+        # exp_break 触发（bar low 4436 破前一同向 down 笔端点 4440——过高低点
+        # 2026-10-10 起不分顺势逆势；旧 seg5 快速离场口径废除）——先到先 latch
         pos = make_pos(planDirection="多头空")
         pos["exitCfg"] = dict(EXIT_MODE_DEFAULTS, exitClosePct=25)
         mark_bis = [bi("up", 0, 500, 4440, 4455)]
@@ -340,7 +368,7 @@ class TestAdvanceExit(unittest.TestCase):
         self.assertEqual(pos["pendingLots"], 2)   # 50% × 4
         self.assertIsNone(execute_pending_exit(pos, bar(800, 4440, 4445, 4435, 4442)))
         self.assertTrue(pos["beDone"])            # half 补 beDone
-        # 下一拍：seg5 仍就绪 → close（快速离场）25% × 4 = 1 手
+        # 下一拍：low 4436 破前低 4440 → close 25% × 4 = 1 手（预期口径 exp_break）
         r = advance_exit_decision(pos, 810, bar(810, 4440, 4445, 4436, 4442),
                                   mark_bis, px_bis, T8)
         self.assertEqual(r, "close")
@@ -350,6 +378,27 @@ class TestAdvanceExit(unittest.TestCase):
         # 两个 latch 都已消费：后续拍（未破 beStop=4455 的 bar）不再重复挂起
         self.assertIsNone(advance_exit_decision(pos, 900, bar(900, 4440, 4448, 4436, 4444),
                                                 mark_bis, px_bis, T8))
+
+    def test_tp3_countertrend_break_price_with_fav_last_bi(self):
+        # 2026-10-10 补分路（trade#109 二段案例）：逆势空单、末笔已是利好方向（down）
+        # 且端点未破前一同向端点（更高低点 4445 > 前低 4440）→ 预期口径参照退一级取
+        # 前低，当根收盘K low 破位即触发 close，不等确认口径 tp3a——gapLocked（跨
+        # 周末跳空）/延伸滞后会冻结确认端点，价格实际破位后迟迟不触发（9-28 08:00
+        # 破 4254.58、12:00 才 4196.81 平仓）
+        pos = make_pos(planDirection="多头空")
+        pos["exitCfg"] = dict(EXIT_MODE_DEFAULTS, exitClosePct=25)
+        pos["halfDone"] = True   # half 已消费，隔离 close 路径
+        mark_bis = [bi("up", 0, 500, 4440, 4455)]  # 无 signalTime 后 down 笔 → 无 TP1
+        px_bis = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 150, 4440, 4450),
+                  bi("down", 150, 300, 4450, 4445)]  # tp3a：4445 未破 4440 → None
+        r = advance_exit_decision(pos, 700, bar(700, 4448, 4452, 4448, 4450),
+                                  mark_bis, px_bis, T8)
+        self.assertIsNone(r)                     # low 4448 未破 4440 → 不触发
+        r = advance_exit_decision(pos, 710, bar(710, 4444, 4448, 4436, 4440),
+                                  mark_bis, px_bis, T8)
+        self.assertEqual(r, "close")             # low 4436 破 4440 → 触发
+        self.assertIn("预期口径", pos["pendingWhy"])
+        self.assertIn("4440", pos["pendingWhy"])
 
     def test_tp2_counter_trend_half_on_confirmed_fav_bi(self):
         # 确认口径兜底：逆势（空头多）检测周期末笔翻为确认的有利方向（up）笔 →
@@ -377,6 +426,20 @@ class TestAdvanceExit(unittest.TestCase):
         self.assertEqual(tr["exitType"], "stopBe")
         # half@4458×2 + 终局@4446×2：pnl = (8×2) + (-4×2) = 8
         self.assertEqual(tr["pnl"], 8.0)
+
+    def test_half_ignores_fav_bi_ended_before_entry(self):
+        # 2026-09-01 #1：空单进场时，检测周期末笔已是更早确认的下跌笔。
+        # lastBiOk 只看方向会在进场当拍假就绪。endTime 不晚于进场 → 不触发。
+        pos = make_pos(signalTime=1000, stopRef=4465.27, beStop=4455.27,
+                       planDirection="多头空")
+        pos["entryTime"] = 1200
+        mark_bis = [bi("up", 0, 500, 4440, 4455)]
+        px_bis = [bi("up", 0, 100, 4400, 4460), bi("down", 100, 800, 4460, 4415.75)]
+        r = advance_exit_decision(pos, 1300, bar(1300, 4455, 4459.79, 4453, 4454),
+                                  mark_bis, px_bis, T8)
+        self.assertIsNone(r)
+        self.assertFalse(pos.get("halfDone"))
+        self.assertFalse(pos.get("beDone"))
 
     def test_tp3a_trend_fav_break_prev(self):
         # 过高低点默认已是 25% 部分平仓；本场景钉全平，断言终局成交
@@ -706,7 +769,7 @@ class TestExitModes(unittest.TestCase):
         self.assertFalse(pos["halfDone"])
 
     def test_close_off(self):
-        # 过高低点止盈关闭：逆势 seg5 不挂起；统一口径下检测周期够笔（预期）照常触发
+        # 过高低点止盈关闭：逆势破前低不挂起；统一口径下检测周期够笔（预期）照常触发
         pos = self.make(planDirection="多头空", exitCfg=ecfg(exitCloseOn=False))
         mark_bis = [bi("up", 0, 500, 4440, 4455)]
         px_bis = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 300, 4440, 4450)]
@@ -791,8 +854,8 @@ class TestExitModes(unittest.TestCase):
         self.assertEqual(len([e for e in pos["exits"] if e["type"] == "close"]), 1)
 
     def test_close_partial_latch_countertrend(self):
-        # 逆势 seg5 分支同 latch：统一口径下 half 先消费（预期口径），close 随后
-        # 部分平仓后形成段持续就绪不再重复挂起
+        # 逆势（多头空）close 同 latch：统一口径下 half 先消费（预期口径），close 经
+        # exp_break（破前低 4440）随后部分平仓，破前低条件持续成立不再重复挂起
         pos = self.make(planDirection="多头空", exitCfg=ecfg(exitClosePct=25))
         mark_bis = [bi("up", 0, 500, 4440, 4455)]
         px_bis = [bi("down", 0, 50, 4460, 4440), bi("up", 50, 300, 4440, 4450)]
@@ -809,7 +872,7 @@ class TestExitModes(unittest.TestCase):
         self.assertEqual(pos["lotsLeft"], 1.0)
         r = advance_exit_decision(pos, 900, bar(900, 4440, 4448, 4436, 4444),
                                   mark_bis, px_bis, T8)
-        self.assertIsNone(r)                  # seg5 仍就绪但两个 latch 均不重触发
+        self.assertIsNone(r)                  # 破前低仍成立但两个 latch 均不重触发
 
     def test_exit_lots_tiny_remaining_takes_all(self):
         # 剩余手数本身不足 1（旧数据残留小数）→ 封顶即全平剩余，防 0 手空事件与
@@ -876,43 +939,49 @@ class TestExitModes(unittest.TestCase):
         self.assertTrue(pos["beDone"])
 
     def test_trail_raise_only_tighter_and_trail_stop(self):
-        # 跟踪止盈（detect 默认，2026-10-09）：门控保本——TP1（t=300）前参照点不
-        # 提损；门控开启后检测周期点流同向 3/类3/4/类4 点 → 止损只上移；异向/1-2类
-        # 点忽略；穿越后记 trailStop
-        pos = self.make(exitCfg=ecfg(exitTrailOn=True, exitTrailSlip=1.0))
+        # 跟踪止盈（detect 默认）：门控保本——TP1 前的下跌笔不提损。此后只有
+        # 破前低的下跌笔起点才是结构高点；未破前低的笔、以及破了但更松的高点
+        # 都不收紧。冲上结构高点记 trailStop
+        pos = self.make(exitCfg=ecfg(exitTrailOn=True, exitTrailSlip=1.0,
+                                     exitHalfOn=False, exitCloseOn=False,
+                                     exitHalfMrOn=False))
         mark_bis = [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)]
-        px_bis = [bi("up", 50, 300, 4440, 4450)]
-        pre_pts = [
-            {"time": 120, "price": 4442.0, "type": "3卖"},    # 门控前：不追溯
-            {"time": 150, "price": 4444.0, "type": "2卖"},    # 1/2类点不参与跟踪
+        # t=300：TP1 保本，水位重置到 300。下跌笔起点 120 早于水位，不追溯
+        pre = [
+            bi("down", 120, 180, 4460.0, 4448.0),
+            bi("up", 180, 300, 4448.0, 4450),
         ]
-        # t=300：TP1 保本迁移（beDone），门控开启、水位重置到 300；此前的点全部忽略
         r = advance_exit_decision(pos, 300, bar(300, 4440, 4445, 4435, 4441),
-                                  mark_bis, px_bis, T7, trail_pts=pre_pts)
+                                  mark_bis, pre, T7)
         self.assertIsNone(r)
         self.assertTrue(pos["beDone"])
-        self.assertEqual(pos["trailMark"], 300)   # 水位一次性推进到保本当拍
-        self.assertEqual(pos["stopRef"], 4463.0)  # 未提损
+        self.assertEqual(pos["trailMark"], 300)
+        self.assertEqual(pos["stopRef"], 4463.0)
         self.assertFalse(pos["trailRaised"])
-        pts = [
-            {"time": 320, "price": 4442.0, "type": "3卖"},    # 4443 < 4463 上移
-            {"time": 350, "price": 4445.0, "type": "3卖"},    # 4446 > 4443 不上移（水位前进）
-            {"time": 380, "price": 4438.0, "type": "类4卖"},  # 3/4类 4439 < 4443 上移
+        px_bis = pre + [
+            bi("down", 320, 340, 4442.0, 4430),   # 4430<4448 破前低，止损 4443
+            bi("up", 340, 348, 4430, 4448),
+            bi("down", 350, 360, 4445.0, 4425),   # 破前低但 4446 更松，不上移
+            bi("down", 365, 375, 4440.0, 4438),   # 4438>4425 未破前低，忽略
+            bi("up", 375, 378, 4438, 4450),
+            bi("down", 380, 390, 4438.0, 4420),   # 4420<4438 破前低，止损 4439
+            bi("up", 390, 500, 4420, 4450),
         ]
         r = advance_exit_decision(pos, 400, bar(400, 4450, 4451, 4448, 4450),
-                                  mark_bis, px_bis, T7, trail_pts=pts)
-        self.assertIsNone(r)                  # 当拍仅迁移
+                                  mark_bis, px_bis, T7)
+        self.assertIsNone(r)
         self.assertEqual(pos["stopRef"], 4439.0)
         self.assertTrue(pos["trailRaised"])
         raises = [e for e in pos["exits"] if e["type"] == "trailRaise"]
-        self.assertEqual(len(raises), 1)      # 同拍多次上移汇总为一条事件
+        self.assertEqual(len(raises), 1)
         self.assertEqual(raises[0]["moves"], 2)
         self.assertEqual(len(pos["trailMoves"]), 2)
-        self.assertEqual(pos["trailMark"], 380)  # 水位只进不退
-        self.assertIn("检测周期点流", raises[0]["why"])
-        # 下一拍穿越上移位 4439 → trailStop（全平默认 100%）
+        self.assertEqual(pos["trailMark"], 380)
+        self.assertIn("检测周期结构点", raises[0]["why"])
+        self.assertIn("下跌结构", raises[0]["why"])
+        # 下一拍冲上 4439 → trailStop
         r = advance_exit_decision(pos, 500, bar(500, 4440, 4441, 4435, 4438),
-                                  mark_bis, px_bis, T7, trail_pts=pts)
+                                  mark_bis, px_bis, T7)
         self.assertEqual(r, "trailStop")
         self.assertEqual(pos["pendingLots"], 4.0)
         tr = execute_pending_exit(pos, bar(600, 4438, 4442, 4430, 4435))
@@ -923,7 +992,8 @@ class TestExitModes(unittest.TestCase):
         # mark 模式（旧口径）：背驰周期信号流 wait3Buy/waitBuy/… 同向3类点驱动；
         # 同拍的检测周期点流不消费；门控保本——TP1 前的信号点不追溯
         pos = self.make(exitCfg=ecfg(exitTrailOn=True, exitTrailSlip=1.0,
-                                     exitTrailSrc="mark"))
+                                     exitTrailSrc="mark", exitHalfOn=False,
+                                     exitCloseOn=False, exitHalfMrOn=False))
         mark_bis = [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)]
         px_bis = [bi("up", 50, 300, 4440, 4450)]
         pre_sigs = [{"time": 200, "price": 4442.0, "direction": "short",
@@ -936,48 +1006,55 @@ class TestExitModes(unittest.TestCase):
             {"time": 320, "price": 4442.0, "direction": "short", "strategyKey": "wait3Sell"},  # 4443 < 4463 上移
             {"time": 350, "price": 4438.0, "direction": "short", "strategyKey": "wait2Sell"},  # 非3类忽略
         ]
-        pts = [{"time": 340, "price": 4435.0, "type": "类3卖"}]  # mark 模式不消费
+        # 同拍检测周期有破前低的下跌结构，止损会收到 4436，mark 模式不消费
+        px_bis = [bi("down", 50, 200, 4460, 4450),
+                  bi("up", 200, 300, 4450, 4455),
+                  bi("down", 340, 360, 4435.0, 4430)]
         r = advance_exit_decision(pos, 400, bar(400, 4450, 4451, 4448, 4450),
-                                  mark_bis, px_bis, T7, trail_sigs=sigs, trail_pts=pts)
+                                  mark_bis, px_bis, T7, trail_sigs=sigs)
         self.assertIsNone(r)
         self.assertEqual(pos["stopRef"], 4443.0)   # 只上移到信号流点 4442+1
         raises = [e for e in pos["exits"] if e["type"] == "trailRaise"]
         self.assertEqual(len(raises), 1)
         self.assertIn("背驰周期信号流", raises[0]["why"])
 
-    def test_trail_detect_long_3buy_story(self):
-        # 2买多单 → 保本迁移后检测周期 3买点出现 → 提损至 3买价−滑点；跌破 → trailStop
+    def test_trail_detect_long_structure_low(self):
+        # 多单：保本后检测周期上涨笔起点（结构低点）→ 提损至该低点−滑点；跌破 → trailStop
         pos = self.make(direction="long", planDirection="多头多", entryPrice=4450.0,
                         stopRef=4437.0, beStop=4445.0,
-                        exitCfg=ecfg(exitTrailOn=True, exitTrailSlip=1.0))
+                        exitCfg=ecfg(exitTrailOn=True, exitTrailSlip=1.0,
+                                     exitHalfOn=False, exitCloseOn=False,
+                                     exitHalfMrOn=False))
         mark_bis = [bi("down", 0, 100, 4460, 4440), bi("up", 100, 200, 4440, 4455),
                     bi("down", 200, 500, 4455, 4440)]  # up 笔(100→200) → TP1
-        px_bis = [bi("up", 0, 50, 4400, 4470), bi("down", 50, 300, 4470, 4450)]
-        pre_pts = [{"time": 200, "price": 4458.0, "type": "3买"}]  # 门控前：不追溯
+        pre = [bi("up", 80, 160, 4440.0, 4465.0),
+               bi("up", 200, 280, 4458.0, 4470),   # 4470>4465 但起点早于水位
+               bi("down", 280, 300, 4470, 4450)]
         r = advance_exit_decision(pos, 300, bar(300, 4462, 4465, 4455, 4460),
-                                  mark_bis, px_bis, T7, trail_pts=pre_pts)
+                                  mark_bis, pre, T7)
         self.assertIsNone(r)
         self.assertTrue(pos["beDone"])
         self.assertFalse(pos["trailRaised"])
-        pts = [{"time": 320, "price": 4458.0, "type": "3买"}]  # 3买回踩低点 4458
+        px_bis = pre + [bi("up", 320, 400, 4458.0, 4480),  # 4480>4470 破前高，低点 4458
+                        bi("down", 400, 500, 4480, 4460)]
         r = advance_exit_decision(pos, 400, bar(400, 4462, 4465, 4455, 4460),
-                                  mark_bis, px_bis, T7, trail_pts=pts)
+                                  mark_bis, px_bis, T7)
         self.assertIsNone(r)
-        self.assertEqual(pos["stopRef"], 4457.0)   # 3买位 4458 − 滑点 1
+        self.assertEqual(pos["stopRef"], 4457.0)   # 结构低点 4458 − 滑点 1
         self.assertTrue(pos["trailRaised"])
-        # 跌破 3买位 → trailStop
         r = advance_exit_decision(pos, 500, bar(500, 4455, 4456, 4450, 4452),
-                                  mark_bis, px_bis, T7, trail_pts=pts)
+                                  mark_bis, px_bis, T7)
         self.assertEqual(r, "trailStop")
 
     def test_trail_off_by_default(self):
-        # 显式关闭跟踪止盈：同向3类点不引起上移（全局默认已是开）
+        # 显式关闭跟踪止盈：下跌结构点不引起上移（全局默认已是开）
         pos = self.make(exitCfg=ecfg(exitTrailOn=False))
         mark_bis = [bi("up", 0, 500, 4440, 4455)]
-        px_bis = [bi("up", 50, 300, 4440, 4450)]
-        pts = [{"time": 200, "price": 4442.0, "type": "3卖"}]
+        px_bis = [bi("down", 100, 180, 4460, 4450),
+                  bi("down", 200, 300, 4442.0, 4430),  # 破前低，关闭时仍不提损
+                  bi("up", 300, 400, 4430, 4450)]
         advance_exit_decision(pos, 400, bar(400, 4450, 4451, 4448, 4450),
-                              mark_bis, px_bis, T7, trail_pts=pts)
+                              mark_bis, px_bis, T7)
         self.assertEqual(pos["stopRef"], 4463.0)
         self.assertFalse(pos["trailRaised"])
 
@@ -985,12 +1062,15 @@ class TestExitModes(unittest.TestCase):
         # 门控保本（2026-10-09）：保本迁移（TP1）之前同向参照点不提损、不接管——
         # 穿越初始止损位记 stopSr 而非 trailStop（2026-08-19 XAUUSD 案例回归）。
         # beDone 由 TP1/half/halfMr 置位；此处 markRes 无 signalTime 后的有利方向笔
-        pos = self.make(exitCfg=ecfg(exitTrailOn=True, exitTrailSlip=1.0))
+        pos = self.make(exitCfg=ecfg(exitTrailOn=True, exitTrailSlip=1.0,
+                                     exitHalfOn=False, exitCloseOn=False,
+                                     exitHalfMrOn=False))
         mark_bis = [bi("up", 0, 500, 4440, 4455)]  # 无 TP1 → beDone 恒 False
-        px_bis = [bi("up", 50, 300, 4440, 4450)]
-        pts = [{"time": 150, "price": 4442.0, "type": "3卖"}]  # 入场时段参照点
+        px_bis = [bi("down", 50, 100, 4460, 4450),
+                  bi("down", 150, 300, 4442.0, 4430),  # 已破前低，但未保本不接管
+                  bi("up", 300, 400, 4430, 4450)]
         r = advance_exit_decision(pos, 400, bar(400, 4450, 4464, 4448, 4452),
-                                  mark_bis, px_bis, T7, trail_pts=pts)
+                                  mark_bis, px_bis, T7)
         self.assertEqual(r, "stopSr")            # 穿越初始止损 4463，非跟踪止盈
         self.assertFalse(pos["trailRaised"])
         self.assertEqual(pos["stopRef"], 4463.0)
@@ -1002,16 +1082,19 @@ class TestExitModes(unittest.TestCase):
         # （修复前：剩余 3 手无保护扛 121 点，-242/-107）
         pos = self.make(entryPrice=4450.0, stopRef=4460.0, beStop=4455.0,
                         exitCfg=ecfg(exitTrailOn=True, exitTrailSlip=1.0,
-                                     exitTrailPct=25))
+                                     exitTrailPct=25, exitHalfOn=False,
+                                     exitCloseOn=False, exitHalfMrOn=False))
         pos["maxLoss"] = 4460.0
         mark_bis = [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)]
-        px_bis = [bi("up", 50, 300, 4440, 4450)]
-        # t=300 TP1 保本；t=400 参照点 4444 → stopRef 4445（收紧）
+        # t=300 TP1 保本；t=400 下跌结构高点 4444 → stopRef 4445（收紧）
         advance_exit_decision(pos, 300, bar(300, 4440, 4445, 4435, 4441),
-                              mark_bis, px_bis, T7)
-        pts = [{"time": 350, "price": 4444.0, "type": "3卖"}]
+                              mark_bis, [bi("up", 50, 300, 4440, 4450)], T7)
+        px_bis = [bi("down", 200, 280, 4460, 4450),
+                  bi("up", 280, 340, 4450, 4460),
+                  bi("down", 350, 380, 4444.0, 4430),  # 4430<4450 破前低，止损 4445
+                  bi("up", 380, 500, 4430, 4450)]
         advance_exit_decision(pos, 400, bar(400, 4450, 4451, 4448, 4450),
-                              mark_bis, px_bis, T7, trail_pts=pts)
+                              mark_bis, px_bis, T7)
         self.assertEqual(pos["stopRef"], 4445.0)
         self.assertTrue(pos["trailRaised"])
         # t=500 冲上 4445 → trailStop 25%（1 手），trailFired latch 关闭穿越判定

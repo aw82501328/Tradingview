@@ -475,12 +475,16 @@ class FxMaEngine(BacktestEngine):
         bis = structure.get(P) or []
         upper = structure.get(UPPER_OF[P]) or []
         macd = self._macd[P].to_list()
+        upperRes = UPPER_OF.get(P)
+        upperMacd = self._macd[upperRes].to_list() if upperRes in getattr(self, "_macd", {}) else None
         cache = self._fx_pt_cache[P]
         mp = self.marks_params or {}
         buys = findBuyPoints(bis, upper, macd, intervalSecOf(P),
-                             mp.get("class2ZsTol", 0.0), mp.get("thirdZsTol", 0.0), cache=cache)
+                             mp.get("class2ZsTol", 0.0), mp.get("thirdZsTol", 0.0), cache=cache,
+                             upperMacd=upperMacd)
         sells = findSellPoints(bis, upper, macd, intervalSecOf(P),
-                               mp.get("class2ZsTol", 0.0), mp.get("thirdZsTol", 0.0), cache=cache)
+                               mp.get("class2ZsTol", 0.0), mp.get("thirdZsTol", 0.0), cache=cache,
+                               upperMacd=upperMacd)
         return buys, sells
 
     def _fx_latest_points(self, P):

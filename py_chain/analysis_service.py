@@ -413,8 +413,7 @@ class AnalysisManager:
             command.append("--zs-periods=" + (",".join(zs_periods) if zs_periods else ""))
             command.append("--zs-keep=" + ",".join(f"{r}:{n}" for r, n in zs_keep.items()))
         if stage == "plan":
-            # 震荡判定参考周期（对齐引擎 compute_plan 闸门；"" = 关闭 → JS 每周期自判，
-            # 2026-10-08 起 Python/JS 同口径强一致）
+            # 震荡判定参考周期（对齐引擎 compute_plan 闸门；"" = 关闭 → 小周期不自判震荡）
             command.append("--range-res=" + str(pm["plan"].get("rangeRes", "240")))
             command.append("--range-bar-n=" + str(pm["plan"]["rangeBarN"]))
             command.append("--range-bi-n=" + str(pm["plan"]["rangeBiN"]))

@@ -291,7 +291,7 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
     assert.equal(sim.closed, true);
   });
 
-  test("逆势（多头空）：无 half，形成段≥5块直接全平", () => {
+  test("逆势（多头空）：无 half，close 同走破前低（2026-10-10 与 py 引擎统一）", () => {
     const mrBars = [
       bar(100, 4450, 4452, 4448, 4451), bar(200, 4450, 4451, 4440, 4445),
       bar(300, 4445, 4449, 4438, 4442), bar(400, 4445, 4449, 4436, 4440),
@@ -299,10 +299,14 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
       bar(700, 4446, 4451, 4440, 4448), bar(800, 4448, 4452, 4442, 4450),
     ];
     const mr = { bis: [bi("up", 0, 700, 4440, 4455)], bars: mrBars };
+    // down(150→700) 终点 4430 破前一同向 down(0→50) 终点 4440 → tp3a=700
+    // （旧口径「形成段≥5块直接全平」废除；favSeg5Time 不再是逆势 close 事件源）
     const px = { bars: altBars([0, 100, 200, 300, 400, 500, 600, 700, 800]),
-                 bis: [bi("up", 50, 300, 4440, 4450), bi("down", 300, 700, 4450, 4430)] };
-    const sim = simulatePosition(SIG({ planDirection: "多头空" }), 4463, mr, px);
-    assert.deepEqual(sim.events.map(e => e.type), ["close"]); // t5=700 → 下一开盘 800 全平
+                 bis: [bi("down", 0, 50, 4460, 4440), bi("up", 50, 150, 4440, 4450),
+                       bi("down", 150, 700, 4450, 4430)] };
+    const sim = simulatePosition(SIG({ planDirection: "多头空" }), 4463, mr, px,
+                                 { exitCfg: { closePct: 100 } });
+    assert.deepEqual(sim.events.map(e => e.type), ["close"]); // tp3a=700 → 下一开盘 800 全平
     assert.equal(sim.events[0].time, 800);
     assert.equal(sim.events[0].price, 4448);
   });
@@ -316,7 +320,8 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
     const px = { bars: altBars([0, 100, 200, 300]),
                  bis: [bi("down", 0, 50, 4460, 4440), bi("up", 50, 150, 4440, 4450),
                        bi("down", 150, 250, 4450, 4435), bi("up", 250, 300, 4435, 4445)] };
-    const sim = simulatePosition(SIG(), 4463, mr, px);
+    // 过高低点默认已改 25% 部分平仓（2026-10-10 统一口径）；本用例钉全平（与 py 同口径）
+    const sim = simulatePosition(SIG(), 4463, mr, px, { exitCfg: { closePct: 100 } });
     assert.deepEqual(sim.events.map(e => e.type), ["close"]);
     assert.equal(sim.events[0].time, 300); // tp3a=250 → 下一开盘 300
     assert.equal(sim.events[0].price, 4445);
@@ -428,7 +433,8 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
                                  { exitCfg: { trailOn: true, trailSlip: 1 },
                                    trailSigs: sigs });
     const types = sim.events.map((e) => e.type);
-    assert.deepEqual(types, ["breakeven", "trailRaise", "trailStop"]);
+    // trailPct 默认 25% 部分平仓 → 终态仍持仓（stillOpen）
+    assert.deepEqual(types, ["breakeven", "trailRaise", "trailStop", "stillOpen"]);
     assert.equal(sim.events[1].stopTo, 4443);   // 4442+1；@150 未消费（否则 4441）
     assert.equal(sim.events[2].price, 4446);    // max(4443, 开盘 4446)
   });
@@ -472,7 +478,8 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
                        bi("down", 300, 500, 4448, 4435)] };
     const sim = simulatePosition(SIG(), 4463, mr, px);
     const types = sim.events.map(e => e.type);
-    assert.deepEqual(types, ["half", "close"]); // bar500 同拍挂 half，close 顺延下一拍
+    // half/close 默认均部分平仓 → 终态仍持仓（stillOpen）
+    assert.deepEqual(types, ["half", "close", "stillOpen"]); // bar500 同拍挂 half，close 顺延下一拍
     assert.equal(sim.events[0].time, 600);       // t5=500 → 下一开盘 600
     assert.equal(sim.events[1].time, 700);       // close 成交不早于 half（lastFill 单调）
   });
@@ -553,11 +560,11 @@ describe("trendDirection 顺势方向状态机", () => {
     assert.equal(planCore.strongFractalAfter(mWeak, findFractalsOf(mWeak), 1, "bottom"), false);
   });
 
-  test("trendStateOf：关闭 null / 无笔 dir=null / 默认参考周期 240", () => {
+  test("trendStateOf：关闭 null / 无笔 dir=null / 默认参考周期空（2026-10-10 起关闭）", () => {
     assert.equal(planCore.trendStateOf({}, {}, ""), null);
     assert.deepEqual(planCore.trendStateOf({ "240": [] }, { "240": [] }, "240"),
                      { dir: null, reason: "", res: "240" });
-    assert.equal(planCore.TREND_RES, "240");
+    assert.equal(planCore.TREND_RES, "");
   });
 });
 

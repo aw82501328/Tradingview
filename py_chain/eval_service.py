@@ -47,6 +47,67 @@ def _marks_params(cfg):
     return {k: v for k, v in (cfg or {}).items() if k in MARKS_KWARGS}
 
 
+def _param_label(path):
+    """参数路径换成参数中心里的中文名。对不上时保留路径。"""
+    key = str(path or "").rsplit(".", 1)[-1]
+    if path.startswith("chanCfg.") or path.startswith("chan_cfg."):
+        prefer = ["chan", "points", "entry"]
+    elif path.startswith("pointsCfg.") or ".marks." in path:
+        prefer = ["points"]
+    elif ".plan." in path:
+        prefer = ["plan"]
+    elif ".sr_kwargs." in path:
+        prefer = []
+    else:
+        prefer = ["entry", "chan", "points", "plan", "fxma"]
+    modules = param_center.PARAM_MODULES
+    for mid in prefer + [m for m in modules if m not in prefer]:
+        spec = modules.get(mid) or {}
+        params = spec.get("params") or {}
+        if key in params:
+            return f"{spec.get('title') or mid} · {params[key][0]}"
+    if ".sr_kwargs." in path:
+        return f"支阻位 · {key}"
+    return path or key
+
+
+def _param_diffs(frozen, current, prefix):
+    """逐项对比两份参数。字典下钻到叶子；列表和标量整段比较。
+
+    一侧没有该键时 frozenMissing / currentMissing 为真。不用 null 表示缺失，
+    因为参数值本身可以是 null。
+    """
+    if isinstance(frozen, dict) and isinstance(current, dict):
+        diffs = []
+        for k in dict.fromkeys(list(frozen) + list(current)):
+            path = f"{prefix}.{k}" if prefix else str(k)
+            in_f, in_c = k in frozen, k in current
+            fv = frozen.get(k) if in_f else None
+            cv = current.get(k) if in_c else None
+            if in_f and in_c and isinstance(fv, dict) and isinstance(cv, dict):
+                diffs.extend(_param_diffs(fv, cv, path))
+                continue
+            if (not in_f and isinstance(cv, dict)) or (not in_c and isinstance(fv, dict)):
+                nested = _param_diffs(fv if in_f else {}, cv if in_c else {}, path)
+                if nested:
+                    diffs.extend(nested)
+                    continue
+            if (not in_f) or (not in_c) or fv != cv:
+                diffs.append({
+                    "path": path, "label": _param_label(path),
+                    "frozen": fv, "current": cv,
+                    "frozenMissing": not in_f, "currentMissing": not in_c,
+                })
+        return diffs
+    if frozen != current:
+        return [{
+            "path": prefix, "label": _param_label(prefix),
+            "frozen": frozen, "current": current,
+            "frozenMissing": False, "currentMissing": False,
+        }]
+    return []
+
+
 def align_marks(a_list, b_list):
     """双侧买卖点对齐（仅展示用）：按 (rawTime, label) 排序后配对；单侧独有标注。"""
     a = sorted(a_list, key=lambda m: (m.get("rawTime") or 0, m.get("label") or ""))
@@ -178,36 +239,135 @@ def compare_bis(expected, actual):
 
 
 # 盈利用例对照进出场时展示的字段（合计由整行 compute_summary，不只看这些）
+# 后半段留给详情定位：品种、背驰周期、分批出场都要留在行快照里
 _POS_VIEW = ("time", "direction", "periodX", "strategyKey", "status",
-             "entryTime", "entryPrice", "exitTime", "exitPrice", "exitType", "pnl")
+             "entryTime", "entryPrice", "exitTime", "exitPrice", "exitType", "pnl",
+             "symbol", "markRes", "mode", "id", "lots", "price", "nearSr", "exits")
+# 信号表浅蓝底与「同一条不重复加入」共用的行身份
+_ROW_KEY_FIELDS = ("symbol", "time", "direction", "periodX", "strategyKey", "entryTime")
 
 
-def _pos_key(row):
-    return (row.get("time"), row.get("direction"), row.get("periodX"), row.get("strategyKey"))
+def _pos_key(row, with_entry=False):
+    """信号身份：信号时间、方向、检测周期、策略名。
+
+    单行对照 with_entry=True 再带进场时间。同一信号止损后再进场时，
+    两笔信号时间相同，必须靠进场时间对上选中的那一笔。
+    """
+    key = (row.get("time"), row.get("direction"), row.get("periodX"), row.get("strategyKey"))
+    if with_entry:
+        return key + (row.get("entryTime"),)
+    return key
+
+
+def _eval_row_key(row):
+    """一条信号在 EVAL 里的身份。与前端 evalRowKey 同口径。"""
+    return "|".join("" if row.get(k) is None else str(row.get(k)) for k in _ROW_KEY_FIELDS)
 
 
 def _pos_view(row):
     return {k: row.get(k) for k in _POS_VIEW}
 
 
-def align_positions(expected, actual):
-    """按信号时间、方向、检测周期、策略对齐两侧进出场。未配上的单侧保留。"""
+def _subset_rows(expected, actual):
+    """从重跑结果里按单行身份（含进场时间）取出被选中的行，顺序跟期望侧一致。对不上的不补。"""
     used = set()
     buckets = {}
     for i, row in enumerate(actual or []):
-        buckets.setdefault(_pos_key(row), []).append(i)
+        buckets.setdefault(_pos_key(row, with_entry=True), []).append(i)
+    out = []
+    for exp in expected or []:
+        for i in buckets.get(_pos_key(exp, with_entry=True), []):
+            if i not in used:
+                used.add(i)
+                out.append(actual[i])
+                break
+    return out
+
+
+_PERIOD_SEC = {"D": 86400, "240": 14400, "120": 7200, "60": 3600, "30": 1800,
+               "15": 900, "5": 300, "3": 180, "1": 60, "30S": 30}
+
+
+def _sig_brief(s):
+    """同向过滤回调里只留身份字段。信号对象随后还会被改，这里先拷出来。"""
+    return {k: s.get(k) for k in ("time", "direction", "periodX", "strategyKey", "entryTime")}
+
+
+def _scoped_miss_note(base, matched, rows, suppressed):
+    """选中行在重算里对不上时的说明。全部对上返回空串。
+
+    对不上不能把合计写成 0：空列表的合计也是 0，和保本平仓分不清。
+    """
+    got = {_pos_key(r, True) for r in matched or []}
+    notes = []
+    for exp in base or []:
+        if _pos_key(exp, True) in got:
+            continue
+        key = _pos_key(exp, False)
+        filtered = any(_pos_key(s, False) == key for s in suppressed or [])
+        sec = _PERIOD_SEC.get(str(exp.get("periodX")), 0)
+        blocker = None
+        for r in rows or []:
+            if r.get("time") != exp.get("time") or r.get("direction") != exp.get("direction"):
+                continue
+            if _PERIOD_SEC.get(str(r.get("periodX")), 0) <= sec:
+                continue
+            blocker = r
+            break
+        if filtered:
+            text = "这行在重算里被同向过滤，没有成交"
+            if blocker is not None:
+                pnl = blocker.get("pnl")
+                pnl_txt = (f"{pnl:+.2f}" if isinstance(pnl, (int, float))
+                           and not isinstance(pnl, bool) else "—")
+                text += (f"，同时刻 {blocker.get('periodX')} {blocker.get('strategyKey')}"
+                         f" 已成交（{pnl_txt}）")
+            text += "。合计仍保留原来的冻结值，没有写成 0。"
+        else:
+            text = "重算结果里没有这行。合计仍保留原来的冻结值，没有写成 0。"
+        notes.append(text)
+    return "".join(notes)
+
+
+def _row_case_name(symbol, row):
+    """单行用例名：品种、信号时间、方向、检测周期、策略、该笔盈亏。"""
+    sym = str(symbol or "").split(":")[-1] or (symbol or "")
+    side = {"long": "多", "short": "空"}.get(row.get("direction"), "")
+    when = ""
+    ts = row.get("time")
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+        when = chan_core.fmtT(ts)
+    pnl = row.get("pnl")
+    pnl_txt = (f"{pnl:+.2f}" if isinstance(pnl, (int, float)) and not isinstance(pnl, bool)
+               else "—")
+    return " ".join(x for x in (
+        sym, when, side, str(row.get("periodX") or ""), str(row.get("strategyKey") or ""), pnl_txt,
+    ) if x)
+
+
+def align_positions(expected, actual, extras=True, with_entry=False):
+    """按信号时间、方向、检测周期、策略对齐两侧进出场。未配上的单侧保留。
+
+    extras=False 时不把重跑里多出来的其他行塞进对照（单行用例只看选中的那几条）。
+    with_entry=True 时进场时间也入键，单行对照不会配上同一信号上更早的另一笔。
+    """
+    used = set()
+    buckets = {}
+    for i, row in enumerate(actual or []):
+        buckets.setdefault(_pos_key(row, with_entry=with_entry), []).append(i)
     out = []
     for exp in expected or []:
         hit = None
-        for i in buckets.get(_pos_key(exp), []):
+        for i in buckets.get(_pos_key(exp, with_entry=with_entry), []):
             if i not in used:
                 hit = i
                 used.add(i)
                 break
         out.append({"a": _pos_view(exp), "b": _pos_view(actual[hit]) if hit is not None else None})
-    for i, row in enumerate(actual or []):
-        if i not in used:
-            out.append({"a": None, "b": _pos_view(row)})
+    if extras:
+        for i, row in enumerate(actual or []):
+            if i not in used:
+                out.append({"a": None, "b": _pos_view(row)})
     return out
 
 
@@ -337,14 +497,15 @@ class EvalManager:
         return out
 
     def _pnl_case_public(self, c):
-        """列表不带进出场明细和引擎参数，只留合计与窗口。"""
+        """列表带进出场（详情里展开），不带引擎参数。"""
         rp = c.get("replay") or {}
         return {
             "id": c.get("id"), "name": c.get("name"), "kind": "pnl",
             "symbol": c.get("symbol"), "strategy": c.get("strategy"),
             "source": c.get("source"), "runId": c.get("runId"),
-            "sourceKey": c.get("sourceKey"),
+            "sourceKey": c.get("sourceKey"), "scope": c.get("scope") or "run",
             "expectedTotal": c.get("expectedTotal"),
+            "positions": c.get("positions") or [],
             "from": rp.get("from"), "toTs": rp.get("to_ts"),
             "dataFromTs": rp.get("data_from_ts"),
             "createdAt": c.get("createdAt"),
@@ -367,9 +528,15 @@ class EvalManager:
     # ---------------- 盈利用例（回测合计） ----------------
 
     def create_pnl_case(self, payload, app):
-        """从一次回测收成盈利用例。K 线不另存，参数和进出场在此刻冻住。"""
+        """从一次回测收成盈利用例。K 线不另存，参数和进出场在此刻冻住。
+
+        仅 runId：历史方案整包（scope=run）。
+        runId 且带 signalId：历史方案明细里的那一行（scope=rows）。
+        source=live：当前信号表里的那一行（scope=rows）。
+        """
         run_id = payload.get("runId")
         source = payload.get("source")
+        row_only = False
         if run_id:
             run = app.bt_runs.detail(run_id)
             if not run:
@@ -377,8 +544,27 @@ class EvalManager:
             cfg = dict(run.get("cfg") or {})
             rows = list(run.get("signals") or [])
             source = "run"
-            source_key = f"run|{run_id}"
-            default_name = run.get("name") or run_id
+            if "signalId" in payload:
+                row_only = True
+                signal_id = payload.get("signalId")
+                if type(signal_id) is not int or signal_id <= 0:
+                    raise ValueError("请在方案明细右击要加入的那一行")
+                picked = [r for r in rows if r.get("id") == signal_id]
+                if not picked:
+                    raise ValueError("找不到这条信号记录")
+                row = dict(picked[0])
+                if row.get("symbol"):
+                    cfg["symbol"] = row["symbol"]
+                elif cfg.get("symbol"):
+                    row["symbol"] = cfg["symbol"]
+                # 明细只收这一行：按该行品种重放，不再按批量整包拒绝
+                cfg.pop("symbols", None)
+                rows = [row]
+                source_key = self._cfg_row_source_key(cfg, row)
+                default_name = None
+            else:
+                source_key = f"run|{run_id}"
+                default_name = run.get("name") or run_id
         elif source == "live":
             worker = self._live_worker(app, payload.get("strategy"))
             if worker.state in ("running", "paused"):
@@ -389,7 +575,13 @@ class EvalManager:
             rows = app.signals.snapshot("backtest", worker._row_base, strategy=worker.strategy)
             if not rows:
                 raise ValueError("当前没有这次回测的信号记录（表格已清空或未产生信号）")
-            source_key = self._live_source_key(worker, rows)
+            signal_id = payload.get("signalId")
+            if type(signal_id) is not int or signal_id <= 0:
+                raise ValueError("请在信号表右击要加入的那一行")
+            rows = [r for r in rows if r.get("id") == signal_id]
+            if not rows:
+                raise ValueError("找不到这条信号记录")
+            source_key = self._row_source_key(worker, rows[0])
             default_name = None
         else:
             raise ValueError("须指定 runId，或 source=live")
@@ -403,20 +595,24 @@ class EvalManager:
         strategy = module_registry.normalize_strategy(cfg.get("strategy"))
         cfg["strategy"] = strategy
         cfg["symbol"] = symbol
+        scope = "rows" if source == "live" or row_only else "run"
         if any(c.get("sourceKey") == source_key for c in self._read_cases()):
-            raise DuplicateError("该回测已在 EVAL 案例")
+            raise DuplicateError("该记录已在 EVAL 案例" if scope == "rows" else "该回测已在 EVAL 案例")
         replay = self._freeze_replay(cfg)
         total = compute_summary(rows)["total"]
         name = (payload.get("name") or "").strip()
         if not name:
-            if default_name:
+            if scope == "rows":
+                name = _row_case_name(symbol, rows[0])
+            elif default_name:
                 name = default_name
             else:
                 name = f"{symbol} {cfg.get('from') or ''} 合计{total:+.2f}".strip()
         case = {
             "id": _new_id("c"), "name": name, "kind": "pnl",
             "source": source, "runId": run_id if source == "run" else None,
-            "sourceKey": source_key, "symbol": symbol, "strategy": strategy,
+            "sourceKey": source_key, "scope": scope,
+            "symbol": symbol, "strategy": strategy,
             "btCfg": _json_roundtrip(cfg), "replay": replay,
             "positions": rows, "expectedTotal": total,
             "createdAt": time.time(),
@@ -425,19 +621,31 @@ class EvalManager:
         return {"case": self._pnl_case_public(case)}
 
     def pnl_flags(self, app, strategy):
-        """已加入的方案 id，以及当前策略这次回测是否已经收成用例。"""
+        """已加入的历史方案 id，以及信号表里按行加入的身份键。
+
+        整包方案（scope=run）只染历史方案那一行，不把信号表整表染蓝。
+        明细里按行加入的用例带 runId，但不把方案列表整行染蓝。
+        """
         cases = self._read_cases()
-        run_ids = [c["runId"] for c in cases if c.get("kind") == "pnl" and c.get("runId")]
-        live, min_id = False, 0
-        workers = getattr(app, "bt_workers", None) or {}
-        worker = workers.get(strategy) if strategy else None
-        if worker is not None and worker.state in ("done", "stopped") and worker.cfg:
-            rows = app.signals.snapshot("backtest", worker._row_base, strategy=worker.strategy)
-            if rows:
-                key = self._live_source_key(worker, rows)
-                live = any(c.get("sourceKey") == key for c in cases)
-                min_id = worker._row_base
-        return {"runIds": run_ids, "live": live, "minId": min_id}
+        run_ids = [c["runId"] for c in cases
+                   if c.get("kind") == "pnl" and c.get("runId")
+                   and (c.get("scope") or "run") != "rows"]
+        sid = None
+        if strategy:
+            from . import module_registry
+            try:
+                sid = module_registry.normalize_strategy(strategy)
+            except ValueError:
+                sid = strategy
+        keys = []
+        for c in cases:
+            if c.get("kind") != "pnl" or c.get("scope") != "rows":
+                continue
+            if sid and c.get("strategy") != sid:
+                continue
+            for row in c.get("positions") or []:
+                keys.append(_eval_row_key(row))
+        return {"runIds": run_ids, "rowKeys": keys}
 
     def _read_cases(self):
         out = []
@@ -463,6 +671,29 @@ class EvalManager:
             str(cfg.get("from_ts") or ""), str(cfg.get("to_ts") or ""),
             _pos_fingerprint(rows),
         ])
+
+    def _cfg_row_source_key(self, cfg, row, strategy=None):
+        """同一回测窗口里的同一条信号只建一次。
+
+        当前信号表与历史方案明细共用此键：同一窗口、同一行不会各建一条。
+        strategy 缺省时按 cfg 规范化；当前信号表传入 Worker 上的策略 id。
+        """
+        if strategy is None:
+            from . import module_registry
+            try:
+                strategy = module_registry.normalize_strategy(cfg.get("strategy"))
+            except ValueError:
+                strategy = str(cfg.get("strategy") or "")
+        return "|".join([
+            "row", str(strategy or ""), str(cfg.get("symbol") or ""),
+            str(cfg.get("from_ts") or ""), str(cfg.get("to_ts") or ""),
+            _eval_row_key(row),
+        ])
+
+    def _row_source_key(self, worker, row):
+        """同一回测窗口里的同一条信号只建一次。"""
+        cfg = worker.cfg or {}
+        return self._cfg_row_source_key(cfg, row, strategy=str(worker.strategy or ""))
 
     def _reject_batch(self, cfg):
         syms = [s for s in (cfg.get("symbols") or []) if s]
@@ -528,29 +759,89 @@ class EvalManager:
             engine = engine_cls(bars, **kw)
             log = SignalLog()
             mode, strategy, symbol = "eval", replay.get("strategy"), replay["symbol"]
+            suppressed = []
+
+            def _on_suppressed(s):
+                log.fill_suppressed(mode, s, symbol=symbol, strategy=strategy)
+                suppressed.append(_sig_brief(s))
+
             result = engine.run(
                 start_ts=replay.get("start_ts"),
                 log=lambda *a, **k: None,
                 on_signal=lambda s: log.append_signal(mode, s, symbol=symbol, strategy=strategy),
                 on_trade=lambda tr: log.fill_trade(mode, tr, symbol=symbol, strategy=strategy),
                 on_exit=lambda tr: log.fill_exit(mode, tr, symbol=symbol, strategy=strategy),
-                on_suppressed=lambda s: log.fill_suppressed(mode, s, symbol=symbol, strategy=strategy),
+                on_suppressed=_on_suppressed,
                 journal=False,
             )
             for tr in result.get("trades") or []:
                 if tr.get("state") == "closed":
                     continue
                 log.fill_trade(mode, tr, symbol=symbol, strategy=strategy)
-            return log.list(mode=mode, strategy=strategy)
+            return log.list(mode=mode, strategy=strategy), suppressed
         finally:
             chan_core.apply_cfg(saved)
 
-    def _pnl_drift(self, case):
-        """当前参数中心与冻住的引擎参数不一致则标漂移。重算仍用冻住的那份。"""
+    def _bound_replay(self, case, baseline):
+        """这条基线实际使用的引擎参数。
+
+        强制更新后参数写在基线期望里；没写过则仍用加入用例时冻在用例上的 replay。
+        """
+        if baseline:
+            exp = (baseline.get("expected") or {}).get(case.get("id")) or {}
+            if exp.get("replay"):
+                return exp["replay"]
+        return case.get("replay") or {}
+
+    def _pnl_param_diffs(self, case, baseline=None):
+        """当前参数中心与这条基线冻住的引擎参数逐项对比。同时返回两侧快照。"""
+        bound = self._bound_replay(case, baseline)
         current = self._freeze_replay(case.get("btCfg") or {})
-        frozen = case.get("replay") or {}
-        return (current.get("chan_cfg") != frozen.get("chan_cfg")
-                or current.get("engine_kwargs") != frozen.get("engine_kwargs"))
+        diffs = _param_diffs(bound.get("chan_cfg") or {}, current.get("chan_cfg") or {}, "chan_cfg")
+        diffs += _param_diffs(bound.get("engine_kwargs") or {}, current.get("engine_kwargs") or {},
+                              "engine_kwargs")
+        return diffs, current, bound
+
+    def _bi_bound_params(self, case, baseline):
+        """成笔用例这条基线实际使用的画笔 / 买卖点参数。"""
+        exp = {}
+        if baseline:
+            exp = (baseline.get("expected") or {}).get(case.get("id")) or {}
+        chan = exp["chanCfg"] if isinstance(exp.get("chanCfg"), dict) else (case.get("chanCfg") or {})
+        pts = exp["pointsCfg"] if exp.get("pointsCfg") is not None else case.get("pointsCfg")
+        return chan, pts
+
+    def _bi_param_diffs(self, case, baseline=None):
+        """当前画笔 / 买卖点参数与这条基线冻住的逐项对比。"""
+        symbol = case.get("symbol")
+        bound_chan, bound_pts = self._bi_bound_params(case, baseline)
+        current_chan = param_center.chan_cfg_effective(symbol)
+        current_pts = param_center.effective("points", symbol) or {}
+        diffs = _param_diffs(bound_chan, current_chan, "chanCfg")
+        if bound_pts is not None:
+            diffs += _param_diffs(_marks_params(bound_pts), _marks_params(current_pts), "pointsCfg")
+        return diffs, current_chan, current_pts, bound_chan, bound_pts
+
+    def param_drift(self, baseline_id):
+        """更新期望前的参数差异。不重跑引擎。"""
+        bl = self._baseline(baseline_id)
+        out = []
+        for cid in bl.get("caseIds") or []:
+            case = self._case(cid)
+            if case.get("kind") == "pnl":
+                diffs, _, _ = self._pnl_param_diffs(case, bl)
+            else:
+                diffs, _, _, _, _ = self._bi_param_diffs(case, bl)
+            if diffs:
+                out.append({"caseId": cid, "caseName": case.get("name"),
+                            "kind": "pnl" if case.get("kind") == "pnl" else "bi",
+                            "diffs": diffs})
+        return {"cases": out}
+
+    def _pnl_drift(self, case, baseline=None):
+        """当前参数中心与这条基线冻住的引擎参数不一致则标漂移。"""
+        diffs, _, _ = self._pnl_param_diffs(case, baseline)
+        return bool(diffs)
 
     def _load_snapshot(self, digest):
         path = self.snap_dir / f"{digest}.json.gz"
@@ -693,15 +984,20 @@ class EvalManager:
                           "caseId": cid, "caseName": c["name"], "res": c.get("res"),
                           "kind": "pnl" if c.get("kind") == "pnl" else "bi",
                           "state": "pending", "ok": None, "drift": False,
-                          "error": None, "details": None})
+                          "driftDiffs": [], "error": None, "details": None})
+        adopt = bool(payload.get("adoptParams"))
+        if adopt and not baseline_id:
+            raise ValueError("只有更新已有基线时可以按当前参数强制更新")
         return self._spawn("freeze", items, freeze_name=name, freeze_note=note,
-                           baseline_id=baseline_id)
+                           baseline_id=baseline_id, adopt_params=adopt)
 
-    def _spawn(self, mode, items, freeze_name=None, freeze_note=None, baseline_id=None):
+    def _spawn(self, mode, items, freeze_name=None, freeze_note=None, baseline_id=None,
+               adopt_params=False):
         job = {"id": _new_id("j"), "state": "running", "mode": mode,
                "items": items, "startedAt": time.time(),
                "finishedAt": None, "error": None,
-               "freezeName": freeze_name, "baselineId": baseline_id}
+               "freezeName": freeze_name, "baselineId": baseline_id,
+               "adoptParams": bool(adopt_params)}
         with self._job_lock:
             with self._state_lock:
                 if self._job and self._job.get("state") == "running":
@@ -718,26 +1014,34 @@ class EvalManager:
         try:
             saved_cfg = dict(chan_core.CHAN_CFG)  # 任务结束恢复进程内画笔参数
             computed = {}
+            # 同一套冻结参数的盈利用例共用一次引擎重跑
+            replay_cache = {}
             for idx, item in enumerate(list(job["items"])):
                 self._set_item(job, idx, state="running")
                 try:
                     case = self._case(item["caseId"])
                     if case.get("kind") == "pnl":
-                        self._handle_pnl(job, idx, case, computed)
+                        self._handle_pnl(job, idx, case, computed, replay_cache)
                         continue
                     self._set_item(job, idx, res=case["res"],
                                    caseName=case["name"])
                     bars = self._load_snapshot(case["snapshot"])
-                    symbol = case.get("symbol")
-                    drift = case.get("chanCfg") != param_center.chan_cfg_effective(symbol)
-                    # 旧用例无 pointsCfg → 用当前有效参数（不标漂移）；有则比对是否漂移
-                    pts_cfg = case.get("pointsCfg")
-                    if pts_cfg is None:
-                        pts_cfg = param_center.effective("points", symbol) or {}
+                    bid = job.get("baselineId") or item.get("baselineId")
+                    baseline = self._baseline(bid) if bid and bid != "(新建)" else None
+                    diffs, current_chan, current_pts, bound_chan, bound_pts = (
+                        self._bi_param_diffs(case, baseline))
+                    # 强制更新：按当前参数重算，并把这套参数冻进这条基线
+                    adopt = (bool(job.get("adoptParams")) and job["mode"] == "freeze"
+                             and baseline is not None)
+                    if adopt:
+                        chan_core.apply_cfg(current_chan)
+                        pts_cfg = current_pts
+                        drift, drift_diffs = False, []
                     else:
-                        drift = drift or _marks_params(pts_cfg) != _marks_params(
-                            param_center.effective("points", symbol))
-                    chan_core.apply_cfg(case.get("chanCfg") or {})  # 用例参数口径
+                        # 旧用例无 pointsCfg → 用当前有效参数（不标漂移）；有则按冻住的那份
+                        pts_cfg = current_pts if bound_pts is None else bound_pts
+                        chan_core.apply_cfg(bound_chan)
+                        drift, drift_diffs = bool(diffs), diffs
                     bis_all = build_bis(bars)
                     marks_all = compute_all_marks(bis_all, bars, PERIODS,
                                                   fromTs=None, **_marks_params(pts_cfg))
@@ -761,8 +1065,12 @@ class EvalManager:
                                          "nMarks": len(marks_all.get(res) or [])}
                                    for res in res_list}
                         ok = True
-                    self._set_item(job, idx, state="done", ok=ok, drift=drift, details=details)
+                    self._set_item(job, idx, state="done", ok=ok, drift=drift,
+                                   driftDiffs=drift_diffs, details=details)
                     computed[case["id"]] = {"case": case, "bis": bis_all, "marks": marks_all}
+                    if adopt:
+                        computed[case["id"]]["adoptChan"] = current_chan
+                        computed[case["id"]]["adoptPoints"] = current_pts
                 except Exception as exc:  # 单用例失败不影响其余用例
                     self._set_item(job, idx, state="error", ok=False, error=str(exc))
             if job["mode"] == "freeze" and all(i["state"] == "done" for i in job["items"]):
@@ -779,37 +1087,104 @@ class EvalManager:
                 job["finishedAt"] = time.time()
                 job["durationMs"] = round((job["finishedAt"] - job["startedAt"]) * 1000)
 
-    def _handle_pnl(self, job, idx, case, computed):
-        """盈利用例：建立基线只拷贝已冻住的进出场；更新期望和跑基线才重跑引擎。"""
+    def _replay_group_key(self, replay):
+        """同一套冻结参数共用一次重跑。展示用的 from 不参与分组。"""
+        fields = ("strategy", "symbol", "chan_cfg", "engine_kwargs",
+                  "periods", "data_from_ts", "to_ts", "start_ts")
+        payload = {k: (replay or {}).get(k) for k in fields}
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+    def _cached_replay(self, replay, replay_cache):
+        """按冻结参数取重跑结果。同组后续用例直接用已有进出场行。"""
+        key = self._replay_group_key(replay)
+        if key not in replay_cache:
+            replay_cache[key] = self._replay_positions(replay)
+        return replay_cache[key]
+
+    def _handle_pnl(self, job, idx, case, computed, replay_cache):
+        """盈利用例：建立基线只拷贝已冻住的进出场；更新期望和跑基线才重跑引擎。
+
+        默认用加入用例时的 replay。这条基线若已强制更新过，用基线里另冻的那份。
+        更新期望且用户确认强制更新时，改用当前参数，并把这份参数写进基线。
+        """
         self._set_item(job, idx, res="盈利", caseName=case["name"], kind="pnl")
         if not case.get("replay"):
             raise ValueError("盈利用例缺少冻结参数")
-        drift = self._pnl_drift(case)
+        bid = job.get("baselineId") or job["items"][idx].get("baselineId")
+        baseline = self._baseline(bid) if bid and bid != "(新建)" else None
+        diffs, current, bound = self._pnl_param_diffs(case, baseline)
+        adopt = (bool(job.get("adoptParams")) and job["mode"] == "freeze"
+                 and baseline is not None)
+        replay = current if adopt else bound
+        drift = False if adopt else bool(diffs)
+        drift_diffs = [] if adopt else diffs
         if job["mode"] == "freeze" and not job.get("baselineId"):
             positions = case.get("positions") or []
             total = case.get("expectedTotal")
-            self._set_item(job, idx, state="done", ok=True, drift=drift, details={
+            self._set_item(job, idx, state="done", ok=True, drift=drift,
+                           driftDiffs=drift_diffs, details={
                 "kind": "pnl", "expectedTotal": total, "actualTotal": total, "delta": 0})
             computed[case["id"]] = {"case": case, "kind": "pnl",
                                     "positions": positions, "total": total}
             return
-        rows = self._replay_positions(case["replay"])
-        total = compute_summary(rows)["total"]
+        rows, suppressed = self._cached_replay(replay, replay_cache)
+        # 按行加入的用例只比选中行；整包方案仍比这次回测的合计
+        scoped = case.get("scope") == "rows"
         if job["mode"] == "run":
             bl = self._baseline(job["items"][idx]["baselineId"])
             exp = (bl.get("expected") or {}).get(case["id"]) or {}
+            exp_positions = exp.get("positions") or []
+            if scoped and not exp_positions:
+                exp_positions = case.get("positions") or []
+            if scoped:
+                matched = _subset_rows(exp_positions, rows)
+                miss = _scoped_miss_note(exp_positions, matched, rows, suppressed)
+                total = None if miss else compute_summary(matched)["total"]
+            else:
+                miss = ""
+                total = compute_summary(rows)["total"]
             exp_total = exp.get("total")
-            ok = exp_total == total
-            delta = None if exp_total is None else round(total - exp_total, 2)
+            if scoped and not exp.get("positions"):
+                exp_total = case.get("expectedTotal")
+            ok = (not miss) and exp_total == total
+            delta = None if miss or exp_total is None or total is None else round(total - exp_total, 2)
             details = {"kind": "pnl", "expectedTotal": exp_total,
                        "actualTotal": total, "delta": delta}
-            if not ok:
-                details["positions"] = align_positions(exp.get("positions") or [], rows)
-            self._set_item(job, idx, state="done", ok=ok, drift=drift, details=details)
+            if miss:
+                details["unmatched"] = miss
+            elif not ok:
+                details["positions"] = align_positions(
+                    exp_positions, rows, extras=not scoped, with_entry=scoped)
+            self._set_item(job, idx, state="done", ok=ok, drift=drift,
+                           driftDiffs=drift_diffs, details=details)
+            positions_out = rows
         else:
-            self._set_item(job, idx, state="done", ok=True, drift=drift, details={
-                "kind": "pnl", "expectedTotal": total, "actualTotal": total, "delta": 0})
-        computed[case["id"]] = {"case": case, "kind": "pnl", "positions": rows, "total": total}
+            if scoped:
+                bl = self._baseline(job["items"][idx]["baselineId"])
+                exp = (bl.get("expected") or {}).get(case["id"]) or {}
+                base = exp.get("positions") or case.get("positions") or []
+                kept_total = exp.get("total") if exp.get("positions") else case.get("expectedTotal")
+                positions_out = _subset_rows(base, rows)
+                miss = _scoped_miss_note(base, positions_out, rows, suppressed)
+            else:
+                positions_out = rows
+                miss = ""
+                kept_total = None
+            if miss:
+                positions_out = base
+                total = kept_total
+                self._set_item(job, idx, state="done", ok=False, drift=drift,
+                               driftDiffs=drift_diffs, details={
+                    "kind": "pnl", "expectedTotal": kept_total, "actualTotal": None,
+                    "delta": None, "unmatched": miss})
+            else:
+                total = compute_summary(positions_out)["total"]
+                self._set_item(job, idx, state="done", ok=True, drift=drift,
+                               driftDiffs=drift_diffs, details={
+                    "kind": "pnl", "expectedTotal": total, "actualTotal": total, "delta": 0})
+        computed[case["id"]] = {"case": case, "kind": "pnl",
+                                "positions": positions_out, "total": total,
+                                "adoptReplay": replay if adopt else None}
 
     def _write_freeze(self, job, computed):
         """冻结期望并落盘基线（新建或覆盖更新）：笔 + 买卖点标记。
@@ -819,20 +1194,39 @@ class EvalManager:
         now = time.time()
         expected = {}
         pnl = False
+        old_expected = {}
+        if job.get("baselineId"):
+            old_expected = (self._baseline(job["baselineId"]).get("expected") or {})
         for item in job["items"]:
             c = computed[item["caseId"]]
+            prev = old_expected.get(item["caseId"]) or {}
             if c.get("kind") == "pnl":
                 pnl = True
-                expected[item["caseId"]] = {
+                entry = {
                     "total": c["total"], "positions": c["positions"], "frozenAt": now,
                 }
+                # 强制更新把当前参数冻进这条基线；普通更新保留已经冻过的那份
+                if c.get("adoptReplay"):
+                    entry["replay"] = c["adoptReplay"]
+                elif prev.get("replay"):
+                    entry["replay"] = prev["replay"]
+                expected[item["caseId"]] = entry
                 continue
             res_list = PERIODS if c["case"]["res"] == "ALL" else [c["case"]["res"]]
-            expected[item["caseId"]] = {
+            entry = {
                 "bis": {res: c["bis"].get(res) or [] for res in res_list},
                 "marks": {res: c["marks"].get(res) or [] for res in res_list},
                 "frozenAt": now,
             }
+            if c.get("adoptChan") is not None:
+                entry["chanCfg"] = c["adoptChan"]
+                entry["pointsCfg"] = c.get("adoptPoints") or {}
+            else:
+                if isinstance(prev.get("chanCfg"), dict):
+                    entry["chanCfg"] = prev["chanCfg"]
+                if prev.get("pointsCfg") is not None:
+                    entry["pointsCfg"] = prev["pointsCfg"]
+            expected[item["caseId"]] = entry
         if job["baselineId"]:
             bl = self._baseline(job["baselineId"])
             bl["expected"] = expected
@@ -876,15 +1270,11 @@ class EvalManager:
             for cid in bl["caseIds"]:
                 case = self._case(cid)
                 bars = self._load_snapshot(case["snapshot"])
-                symbol = case.get("symbol")
-                drift = case.get("chanCfg") != param_center.chan_cfg_effective(symbol)
-                pts_cfg = case.get("pointsCfg")
-                if pts_cfg is None:
-                    pts_cfg = param_center.effective("points", symbol) or {}
-                else:
-                    drift = drift or _marks_params(pts_cfg) != _marks_params(
-                        param_center.effective("points", symbol))
-                chan_core.apply_cfg(case.get("chanCfg") or {})
+                diffs, current_chan, current_pts, bound_chan, bound_pts = (
+                    self._bi_param_diffs(case, bl))
+                drift = bool(diffs)
+                pts_cfg = current_pts if bound_pts is None else bound_pts
+                chan_core.apply_cfg(bound_chan)
                 bis_all = build_bis(bars)
                 marks_all = compute_all_marks(bis_all, bars, PERIODS,
                                               fromTs=None, **_marks_params(pts_cfg))

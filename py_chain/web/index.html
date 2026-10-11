@@ -207,7 +207,7 @@
   #sig-body tr.selected td { background: color-mix(in srgb, var(--accent) 18%, var(--card)); }
   /* 悬停已加入行：黄加深一档，避免悬停瞬间退回普通底色 */
   #sig-body tr.in-case:hover td { background: color-mix(in srgb, var(--warn) 38%, var(--card)); }
-  /* 已加入 EVAL 的当次回测行：浅蓝底，和典型案例的浅黄分开 */
+  /* 已按行加入 EVAL 的信号：浅蓝底，和典型案例的浅黄分开 */
   #sig-body tr.in-eval td { background: color-mix(in srgb, var(--accent) 16%, var(--card)); }
   #sig-body tr.in-eval:hover td { background: color-mix(in srgb, var(--accent) 28%, var(--card)); }
   #bt-runs-body tr.in-eval td { background: color-mix(in srgb, var(--accent) 16%, var(--card)); }
@@ -796,7 +796,7 @@ function summaryStats(rows) {
   // 已平仓平均盈利 / 平均亏损绝对值；保本单和持仓浮盈不参与。
   const avgWin = win.length ? win.reduce((s, r) => s + r.pnl, 0) / win.length : 0;
   const avgLoss = lose.length ? -lose.reduce((s, r) => s + r.pnl, 0) / lose.length : 0;
-  const ex = { stopBe: 0, stopSr: 0, close: 0, half: 0, halfMr: 0, stop: 0, takeProfit: 0, activeTp: 0, trailStop: 0 };
+  const ex = { stopBe: 0, stopSr: 0, close: 0, half: 0, halfMr: 0, stop: 0, takeProfit: 0, activeTp: 0, trailStop: 0, profitLock: 0 };
   for (const r of rows) {
     if (r.exitType && r.exitType in ex) ex[r.exitType]++;
     ex.half += (r.exits || []).filter(e => e.type === 'half').length;
@@ -829,17 +829,19 @@ function summaryHtml(s, opts = {}) {
     const maxAvg = Math.max(avgWin, avgLoss);
     // 出场分布：缠论V1 四类 + fxma 两类（同一方案只会命中其中一组，0 值类不进环形图）
     const exitN = num(ex.stopBe) + num(ex.stopSr) + num(ex.close) + num(ex.stop)
-      + num(ex.takeProfit) + num(ex.trailStop) + num(ex.activeTp);
+      + num(ex.takeProfit) + num(ex.trailStop) + num(ex.activeTp) + num(ex.profitLock);
     const exitCats = [
       { n: num(ex.stopBe), color: '#5a8de6', label: '保损' },
       { n: num(ex.stopSr), color: '#c8742a', label: '止损' },
       { n: num(ex.close), color: '#8f6ce8', label: '过高低' },
+      { n: num(ex.profitLock), color: '#3aa981', label: '锁盈' },
       { n: num(ex.trailStop), color: '#d29922', label: '跟盈' },
       { n: num(ex.takeProfit), color: '#3aa981', label: '止盈' },
       { n: num(ex.activeTp), color: '#2f7d5d', label: '主盈' },
       { n: num(ex.stop), color: '#9a6b2f', label: '固定止损' },
     ];
     const exitLegend = `保损 ${num(ex.stopBe)} · 止损 ${num(ex.stopSr)} · 过高低 ${num(ex.close)}`
+      + (ex.profitLock ? ` · 锁盈 ${num(ex.profitLock)}` : '')
       + (ex.trailStop ? ` · 跟盈 ${num(ex.trailStop)}` : '')
       + (ex.takeProfit ? ` · 止盈 ${num(ex.takeProfit)}` : '')
       + (ex.activeTp ? ` · 主盈 ${num(ex.activeTp)}` : '')
@@ -880,6 +882,7 @@ function summaryHtml(s, opts = {}) {
     `浮盈 <b class="${cls(s.floating)}">${fmtV(s.floating)}</b>`,
     `合计 <b class="${cls(total)}">${fmtV(total)}</b>`,
     `出场：保损 ${s.exits.stopBe} · 止损 ${s.exits.stopSr} · 过高低 ${s.exits.close}`
+      + (s.exits.profitLock ? ` · 锁盈 ${s.exits.profitLock}` : '')
       + (s.exits.trailStop ? ` · 跟盈 ${s.exits.trailStop}` : '')
       + (s.exits.takeProfit ? ` · 止盈 ${s.exits.takeProfit}` : '')
       + (s.exits.stop ? ` · 固定止损 ${s.exits.stop}` : '')
@@ -941,7 +944,7 @@ function renderTable() {
     noOf: displayNo,
     showSym,
     isCase: r => btCaseKeys.has(btCaseKeyOf(r)),   // 已加入典型案例 → 浅黄底
-    inEval: r => selectedMode === 'backtest' && btEvalLive && r.id > btEvalMinId,
+    inEval: r => selectedMode === 'backtest' && btEvalRowKeys.has(evalRowKey(r)),
   });
   const modeCount=sigRows.filter(r=>r.mode===selectedMode
     &&(selectedMode!=='backtest'||btRowStrategy(r)===curBtTab)).length;
@@ -965,6 +968,7 @@ function biChainTxt(bi) {
   if (!parts.length) return '';
   let t = `并画次级别笔 ${parts.join('+')}`;
   if (bi.failed) t += `（${bi.failed}根超范围跳过）`;
+  if (bi.already) t += `（${bi.already}）`;
   return `（${t}）`;
 }
 
@@ -1046,7 +1050,7 @@ async function locateRow(id) {
   }
   const pending = {mode,id};
   locatePending = pending;
-  locateMessages[mode] = `${locateLabel(mode, id)} 定位并标记中…（实时历史不够时会用K线回放跳转，最多等待360秒）`;
+  locateMessages[mode] = `${locateLabel(mode, id)} 定位并标记中…（近期与历史都用K线回放跳到进场并保留后续K线，最多等待360秒）`;
   renderTable();
   updateMarkButtons();
   try {
@@ -1080,7 +1084,7 @@ function bindSignalRows() {
   };
   el('sig-body').onclick = activate;
   el('sig-body').onkeydown = activate;
-  // 右击菜单（共享组件 bt_common.js）：复制 / 加入典型案例；回测结束或中途停止后多一项「加入 EVAL 案例」。
+  // 右击菜单（共享组件 bt_common.js）：复制 / 加入典型案例；回测结束或中途停止后多一项「加入 EVAL 案例」（只收右击的那一行）。
   // 三模式右击均可加入典型案例（条目持久化到 bars.db），典型案例 TAB 仅全量回测显示。
   attachSignalContextMenu(el('sig-body'), tr => {
     const row = sigRows.find(r => r.id === Number(tr.dataset.signalId) && r.mode === selectedMode);
@@ -1088,7 +1092,7 @@ function bindSignalRows() {
     const btState = state.bt[curBtTab]?.state;
     return { row, no: displayNo(row), sourceType: 'live', onAdded: refreshBtErrors,
       addEval: selectedMode === 'backtest' && (btState === 'done' || btState === 'stopped'),
-      onEval: addLiveEvalCase };
+      onEval: () => addLiveEvalCase(row) };
   });
 }
 
@@ -1481,8 +1485,12 @@ function connectSSE() {
 // ---------- 历史回测方案（仅全量回测：保存/列表/明细/对比/载参数） ----------
 let btRuns = [];                 // 列表缓存（/api/bt/runs，不含信号行）
 let btEvalRunIds = new Set();    // 已加入 EVAL 的历史方案 id
-let btEvalLive = false;          // 当前策略这次回测是否已加入 EVAL
-let btEvalMinId = 0;             // 本次运行开始前的信号 id，大于它的行才算这次回测
+let btEvalRowKeys = new Set();   // 按行加入 EVAL 的信号身份（只染这几行）
+// 与 eval_service._eval_row_key 同口径
+function evalRowKey(r) {
+  return ['symbol', 'time', 'direction', 'periodX', 'strategyKey', 'entryTime']
+    .map(k => (r[k] == null ? '' : String(r[k]))).join('|');
+}
 const btCompareSel = new Set();  // 对比勾选的方案 id
 let btRunsPnlSort = 'none';      // 方案列表合计盈亏：none / descending / ascending
 
@@ -1561,23 +1569,23 @@ async function refreshEvalFlags() {
     const d = await (await fetch('/api/eval/pnl-flags?strategy=' + encodeURIComponent(curBtTab))).json();
     if (!d.ok) return;
     btEvalRunIds = new Set(d.runIds || []);
-    btEvalLive = !!d.live;
-    btEvalMinId = Number(d.minId) || 0;
+    btEvalRowKeys = new Set(d.rowKeys || []);
   } catch { /* 拉不到标志就不标底色 */ }
 }
-async function addLiveEvalCase() {
+async function addLiveEvalCase(row) {
   const st = state.bt[curBtTab]?.state;
   if (st === 'running' || st === 'paused') {
     alert('回测尚未结束，不能加入 EVAL');
     return;
   }
+  if (!row || !row.id) { alert('请右击要加入的那一行'); return; }
   try {
     const r = await fetch('/api/eval/create-pnl-case', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ source: 'live', strategy: curBtTab }),
+      body: JSON.stringify({ source: 'live', strategy: curBtTab, signalId: row.id }),
     });
     const d = await r.json().catch(() => ({}));
-    if (r.status === 409) { showCopyTip('该回测已在 EVAL 案例'); return; }
+    if (r.status === 409) { showCopyTip(d.error || '该记录已在 EVAL 案例'); return; }
     if (!r.ok || !d.ok) throw Error(d.error || '请求失败');
     const total = Number(d.case?.expectedTotal);
     showCopyTip('已加入 EVAL 案例' + (Number.isFinite(total) ? '（合计 ' + total.toFixed(2) + '）' : ''));
@@ -1753,6 +1761,7 @@ const BT_METRICS = [
   ['合计', s => `<b class="${pnlClass(s.total)}">${fmtPnlText(s.total)}</b>`],
   ['运行时长', s => fmtDuration(s.duration_sec)],
   ['出场分布', s => `保损 ${s.exits?.stopBe ?? 0} · 止损 ${s.exits?.stopSr ?? 0} · 过高低 ${s.exits?.close ?? 0}`
+    + (s.exits?.profitLock ? ` · 锁盈 ${s.exits.profitLock}` : '')
     + (s.exits?.trailStop ? ` · 跟盈 ${s.exits.trailStop}` : '')
     + (s.exits?.takeProfit ? ` · 止盈 ${s.exits.takeProfit}` : '')
     + (s.exits?.stop ? ` · 固定止损 ${s.exits.stop}` : '')
@@ -2047,7 +2056,7 @@ async function locateErrorRow(entry) {
   const mode = ['backtest', 'replay', 'live'].includes(row.mode) ? row.mode : 'backtest';
   const pending = { mode, id: row.id, src: 'errors', errId: entry.id };
   locatePending = pending;
-  setBtErrorsLocate(`#${entry.id} 定位并标记中…（实时历史不够时会用K线回放跳转，最多等待360秒）`);
+  setBtErrorsLocate(`#${entry.id} 定位并标记中…（近期与历史都用K线回放跳到进场并保留后续K线，最多等待360秒）`);
   updateMarkButtons();
   try {
     const response = await fetch('/api/signals/locate', {

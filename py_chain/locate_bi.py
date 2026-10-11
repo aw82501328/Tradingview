@@ -19,8 +19,26 @@ import time
 # 折线 title 前缀 / localStorage 键（marks.py 按相同值引用，改动须两处同步）
 BI_PREFIX = "ML·BI"
 BI_IDS_KEY = "mark_locate_bi_ids"
-# 每级一色：60 橙 / 15 蓝 / 3 青（CHAN_BI 工作台层不动，这是定位临时叠层）
-BI_COLORS = {"60": "#FF9800", "15": "#2962FF", "3": "#00B8D4"}
+# 颜色与可见周期与 chan_bi.js resolutionColor / intervalVisibility 一致：
+# 3 青蓝，只在 30秒+3分；15 紫，只在 3分+15分；60 黄，只在 15分+1小时；240 蓝，只在 1小时+4小时
+BI_COLORS = {"3": "#00BCD4", "15": "#8A2BE2", "60": "#FFD700", "240": "#2962FF"}
+_IV_OFF = {
+    "ticks": False,
+    "seconds": False, "secondsFrom": 1, "secondsTo": 59,
+    "minutes": False, "minutesFrom": 1, "minutesTo": 59,
+    "hours": False, "hoursFrom": 1, "hoursTo": 24,
+    "days": False, "daysFrom": 1, "daysTo": 366,
+    "weeks": False, "weeksFrom": 1, "weeksTo": 52,
+    "months": False, "monthsFrom": 1, "monthsTo": 12,
+}
+BI_VISIBILITY = {
+    "3": {**_IV_OFF, "seconds": True, "secondsFrom": 30, "secondsTo": 30,
+          "minutes": True, "minutesFrom": 3, "minutesTo": 3},
+    "15": {**_IV_OFF, "minutes": True, "minutesFrom": 3, "minutesTo": 15},
+    "60": {**_IV_OFF, "minutes": True, "minutesFrom": 15, "minutesTo": 15,
+           "hours": True, "hoursFrom": 1, "hoursTo": 1},
+    "240": {**_IV_OFF, "hours": True, "hoursFrom": 1, "hoursTo": 4},
+}
 
 CHAIN_OF = {"240": ["60", "15", "3"], "60": ["15", "3"]}
 BUFFER_BARS = 60   # 每级分型缓冲：上一级范围起点前再留的本级K线根数
@@ -155,7 +173,8 @@ _WAIT_RES_JS = """(()=>{
   const c=TradingViewApi.activeChart(),m=c.chartModel(),s=m.mainSeries();
   const items=s.data().m_bars._items;
   return {res:String(c.resolution()),loading:!!s.isLoading(),len:items?items.length:0,
-          first:items&&items.length?items[0].value[0]:null};
+          first:items&&items.length?items[0].value[0]:null,
+          last:items&&items.length?items[items.length-1].value[0]:null};
 })()"""
 
 
@@ -182,6 +201,74 @@ def wait_resolution(c, res, need_from=None, timeout=40.0):
     return st if isinstance(st, dict) else None
 
 
+def _range_covers(st, need_from, need_to, sec=0):
+    """已加载K线是否盖住 [need_from, need_to]（时间均为 unix 秒）。
+
+    右缘按本级 K 线长度判断：末根开盘虽早于 need_to，但这根 K 线的区间已经
+    含住 need_to 时视为已覆盖。
+    """
+    if not isinstance(st, dict):
+        return False
+    first, last = st.get("first"), st.get("last")
+    if first is None or last is None:
+        return False
+    if need_from is not None and first > int(need_from):
+        return False
+    if need_to is not None and last < int(need_to) and last + max(int(sec), 0) <= int(need_to):
+        return False
+    return True
+
+
+def ensure_level_bars(c, res, need_from, need_to, timeout=35.0):
+    """当前图应已切到 res：保证主图K线盖住 [need_from, need_to]。
+
+    实时图小周期只有约两个月，回放定位默认只带光标前约 300 根。盖不住时把
+    回放光标放到 need_to（含该根K线），再 scrollToFirstBar 往前补。补不到
+    返回现状，超范围的笔由 draw_level 读回校验跳过。
+    """
+    from .chan_core import intervalSecOf
+    res = str(res)
+    sec = intervalSecOf(res) or 60
+    deadline = time.monotonic() + timeout
+    st = wait_resolution(c, res, need_from=need_from,
+                         timeout=min(8.0, max(1.0, deadline - time.monotonic())))
+    if _range_covers(st, need_from, need_to, sec):
+        return st
+    from .data_loader import _scroll_to_first_bar
+    from .monitor import replay_enter
+    anchor = int(need_to if need_to is not None else need_from)
+    cursor = anchor + max(1, sec - 1)
+    now = int(time.time())
+    if cursor > now:
+        cursor = now
+    try:
+        replay_enter(c, cursor, fallback=False,
+                     timeout=min(10.0, max(2.0, deadline - time.monotonic())))
+    except Exception:
+        return st if isinstance(st, dict) else None
+    prev, stalls = None, 0
+    while time.monotonic() < deadline:
+        st = wait_resolution(c, res, need_from=need_from,
+                             timeout=min(8.0, max(1.0, deadline - time.monotonic())))
+        if _range_covers(st, need_from, need_to, sec):
+            return st
+        first = st.get("first") if isinstance(st, dict) else None
+        if first is not None and first == prev:
+            stalls += 1
+            if stalls >= 2:
+                return st
+        else:
+            stalls = 0
+        prev = first
+        if time.monotonic() >= deadline:
+            break
+        try:
+            _scroll_to_first_bar(c)
+        except Exception:
+            return st
+    return st if isinstance(st, dict) else None
+
+
 _DRAW_LEVEL_JS = """(async()=>{
   const chart=TradingViewApi.activeChart();
   if(!chart)return {drawn:0,failed:0,cleared:0,error:'no_chart'};
@@ -202,6 +289,7 @@ _DRAW_LEVEL_JS = """(async()=>{
         try{chart.removeEntity(s.id);cleared++}catch(e){}}}}catch(e){}
   }
   const okIds=[];let failed=0;
+  const made=[];
   // 读回校验容差：秒级 ±2s；图表时间为毫秒形态时按毫秒比（防御，勿扩大）
   const tOk=(got,want)=>got!=null&&want!=null&&
     (Math.abs(got-want)<=2||Math.abs(got-want*1000)<=2000);
@@ -214,29 +302,41 @@ _DRAW_LEVEL_JS = """(async()=>{
          overrides:{linecolor:p.color,linewidth:1,title:p.title}});
     }catch(e){id=null;}
     if(!id){failed++;continue;}
-    // 全开周期可见性（与单行标记同模板：六类全 true 且 From/To 铺满——只写
-    // 布尔位时 TV 沿用工具模板残留的 From/To 会把部分周期挡在外面）
+    // 可见周期与画笔相同：只在本级和低一级（iv 由 chan_bi.js intervalVisibility 同口径传入）
     try{
       const iv=chart.getShapeById(id)._source._properties.intervalsVisibilities;
-      iv.ticks.setValue(false);
-      iv.seconds.setValue(true);iv.secondsFrom.setValue(1);iv.secondsTo.setValue(59);
-      iv.minutes.setValue(true);iv.minutesFrom.setValue(1);iv.minutesTo.setValue(59);
-      iv.hours.setValue(true);iv.hoursFrom.setValue(1);iv.hoursTo.setValue(24);
-      iv.days.setValue(true);iv.daysFrom.setValue(1);iv.daysTo.setValue(366);
-      iv.weeks.setValue(true);iv.weeksFrom.setValue(1);iv.weeksTo.setValue(52);
-      iv.months.setValue(true);iv.monthsFrom.setValue(1);iv.monthsTo.setValue(12);
+      const c=p.iv;
+      iv.ticks.setValue(c.ticks);
+      iv.seconds.setValue(c.seconds);iv.secondsFrom.setValue(c.secondsFrom);iv.secondsTo.setValue(c.secondsTo);
+      iv.minutes.setValue(c.minutes);iv.minutesFrom.setValue(c.minutesFrom);iv.minutesTo.setValue(c.minutesTo);
+      iv.hours.setValue(c.hours);iv.hoursFrom.setValue(c.hoursFrom);iv.hoursTo.setValue(c.hoursTo);
+      iv.days.setValue(c.days);iv.daysFrom.setValue(c.daysFrom);iv.daysTo.setValue(c.daysTo);
+      iv.weeks.setValue(c.weeks);iv.weeksFrom.setValue(c.weeksFrom);iv.weeksTo.setValue(c.weeksTo);
+      iv.months.setValue(c.months);iv.monthsFrom.setValue(c.monthsFrom);iv.monthsTo.setValue(c.monthsTo);
       iv.ranges.setValue(false);
     }catch(e){}
+    made.push({id, start:b.startTime, end:b.endTime});
+  }
+  // 回放定位后折线端点要等吸附：刚创建时 _points 只有 index、没有 time，
+  // 约 2 秒后 time 才写成墙钟（逻辑开盘 +8 小时）。拿 time 和请求时间比会把
+  // 锚对的笔全部判失败删掉。等沉降后用 index 回查主图 K 线开盘时间。
+  if(made.length) await new Promise(r=>setTimeout(r,2500));
+  const byIndex=new Map();
+  const items=cm.mainSeries().data().m_bars._items||[];
+  for(const bar of items) byIndex.set(bar.index, bar.value[0]);
+  for(const it of made){
     // 读回校验：创建成功≠端点正确（TV 会把超出数据范围的时间静默吸附到数据
     // 边缘），端点不符的笔删除跳过并计数
     let good=false;
     try{
-      const pts=chart.getShapeById(id)._source._points;
-      if(pts&&pts.length>=2&&tOk(pts[0].time,b.startTime+p.tz)&&
-         tOk(pts[1].time,b.endTime+p.tz))good=true;
+      const pts=chart.getShapeById(it.id)._source._points;
+      if(pts&&pts.length>=2){
+        const g0=byIndex.get(pts[0].index), g1=byIndex.get(pts[1].index);
+        if(tOk(g0, it.start+p.tz)&&tOk(g1, it.end+p.tz))good=true;
+      }
     }catch(e){}
-    if(good)okIds.push(id);
-    else{try{chart.removeEntity(id)}catch(e){};failed++;}
+    if(good)okIds.push(it.id);
+    else{try{chart.removeEntity(it.id)}catch(e){};failed++;}
   }
   try{
     const old=p.clearFirst?[]:JSON.parse(localStorage.getItem(p.idsKey)||'[]');
@@ -246,12 +346,97 @@ _DRAW_LEVEL_JS = """(async()=>{
 })()"""
 
 
+_COVER_JS = """(()=>{
+  const chart=TradingViewApi.activeChart();
+  if(!chart)return {n:0};
+  const title='CHAN_BI_'+RES;
+  const norm=(t)=>t==null?null:(t>1e12?t/1000:t);
+  let n=0, minS=null, maxE=null;
+  try{
+    for(const s of chart.getAllShapes()){
+      if(s.name!=='polyline')continue;
+      let ttl='', pts=null;
+      try{
+        const src=chart.getShapeById(s.id)._source;
+        ttl=src._properties&&src._properties.title?String(src._properties.title._value):'';
+        pts=src._points;
+      }catch(e){continue;}
+      if(ttl!==title||!pts||pts.length<2)continue;
+      const a=norm(pts[0].time), b=norm(pts[1].time);
+      if(a==null||b==null)continue;
+      n++;
+      const lo=Math.min(a,b), hi=Math.max(a,b);
+      if(minS===null||lo<minS)minS=lo;
+      if(maxE===null||hi>maxE)maxE=hi;
+    }
+  }catch(e){return {n:0,error:String(e)};}
+  return {n, minS, maxE};
+})()"""
+
+
+def chart_bi_covers(c, res, t):
+    """图上画笔 CHAN_BI_<res> 的端点跨度是否已含时间 t。
+
+    更新全部已经画过这段 15 分钟/3 分钟时，定位不再补同一段。回放里端点
+    time 有的是逻辑开盘、有的是逻辑开盘加 8 小时，两种都认。读不到返回 False。
+    """
+    expr = _COVER_JS.replace("RES", json.dumps(str(res)))
+    try:
+        st = c.evaluate(expr)
+    except Exception:
+        return False
+    if not isinstance(st, dict) or not st.get("n"):
+        return False
+    min_s, max_e = st.get("minS"), st.get("maxE")
+    if min_s is None or max_e is None:
+        return False
+    t = int(t)
+    for off in (0, 8 * 3600, -8 * 3600):
+        x = t + off
+        if min_s <= x <= max_e:
+            return True
+    return False
+
+
+_CLEAR_BI_JS = """(()=>{
+  const chart=TradingViewApi.activeChart();
+  if(!chart)return {cleared:0};
+  const cm=chart.chartModel();
+  const prefix=PREFIX, idsKey=IDS;
+  let cleared=0;
+  let ids=[];try{ids=JSON.parse(localStorage.getItem(idsKey)||'[]')}catch(e){}
+  for(const id of ids){try{const ds=cm.dataSourceForId(id);if(ds){cm.removeSource(ds);cleared++}}catch(e){}}
+  try{localStorage.setItem(idsKey,'[]')}catch(e){}
+  const readTitle=(id)=>{try{const sh=chart.getShapeById(id);
+    const pr=sh&&sh._source&&sh._source._properties;
+    return pr&&pr.title?String(pr.title._value):''}catch(e){return ''}};
+  try{for(const s of chart.getAllShapes()){
+    if(s.name!=='polyline')continue;
+    if(readTitle(s.id).indexOf(prefix)===0){
+      try{chart.removeEntity(s.id);cleared++}catch(e){}}}}catch(e){}
+  return {cleared};
+})()"""
+
+
+def clear_locate_bis(c):
+    """清掉定位补上的 ML·BI 折线（画笔 CHAN_BI 不动）。"""
+    expr = (_CLEAR_BI_JS
+            .replace("PREFIX", json.dumps(BI_PREFIX))
+            .replace("IDS", json.dumps(BI_IDS_KEY)))
+    try:
+        r = c.evaluate(expr)
+    except Exception as exc:
+        return {"cleared": 0, "error": str(exc)}
+    return r if isinstance(r, dict) else {"cleared": 0}
+
+
 def draw_level(c, res, bis, tz_off=0, clear_first=False):
     """把一级笔画成折线（图表须已在本级周期上：折线只能锚定当前周期K线边界）。
 
     clear_first=True（首级）先清上一次的 ML·BI 折线（替换语义），后续级追加
-    id。tz_off 为回放态图表时间轴整体平移量（正常图为 0）。失败不抛异常，
-    计入返回值 {drawn, failed, cleared}。
+    id。tz_off 为回放态图表时间轴整体平移量（正常图为 0）。端点校验等吸附
+    沉降后按 index 回查 K 线开盘时间（回放里 _points.time 是墙钟，不能直接比）。
+    失败不抛异常，计入返回值 {drawn, failed, cleared}。
     """
     if not bis:
         return {"drawn": 0, "failed": 0, "cleared": 0}
@@ -259,7 +444,8 @@ def draw_level(c, res, bis, tz_off=0, clear_first=False):
         "bis": [{"startTime": int(b["startTime"]), "startPrice": float(b["startPrice"]),
                  "endTime": int(b["endTime"]), "endPrice": float(b["endPrice"])}
                 for b in bis],
-        "color": BI_COLORS.get(str(res), "#2962FF"),
+        "color": BI_COLORS[str(res)],
+        "iv": BI_VISIBILITY[str(res)],
         "title": f"{BI_PREFIX}·{res}",
         "titlePrefix": BI_PREFIX,
         "idsKey": BI_IDS_KEY,
@@ -268,7 +454,9 @@ def draw_level(c, res, bis, tz_off=0, clear_first=False):
     }
     expr = _DRAW_LEVEL_JS.replace("PAYLOAD", json.dumps(payload, ensure_ascii=False))
     try:
-        r = c.evaluate(expr, timeout=60000, read_timeout=90.0)
+        # 套接字读超时上限是 EVALUATE_READ_TIMEOUT（45s）；这里显式顶满，
+        # 含创建后等 2.5s 吸附沉降
+        r = c.evaluate(expr, timeout=45000, read_timeout=45.0)
     except Exception as exc:
         return {"drawn": 0, "failed": len(bis), "cleared": 0, "error": str(exc)}
     return r if isinstance(r, dict) else {"drawn": 0, "failed": len(bis), "cleared": 0,

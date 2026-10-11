@@ -74,6 +74,21 @@ h1 .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:10px}
 .prow.exit-group .exit-row .zs-keep.dim{opacity:.45}
 .prow.exit-group .exit-row .zs-keep.dim input{pointer-events:none}
 .prow.exit-group .exit-row.lmod .ename{color:var(--warn)}
+/* 锁定盈利：占满一行。左标题+一行说明，右两个数值收成一组，避免半列竖排和整行留白 */
+.prow.lock-exit{grid-column:1/-1;align-items:center}
+.prow.lock-exit .pname{display:flex;flex-direction:column;gap:1px;min-width:0}
+.prow.lock-exit .plabel{display:flex;align-items:center}
+.prow.lock-exit .lock-pri{margin-left:8px;font-size:10px;line-height:1.5;font-weight:400;
+  color:#8fb3e8;border:1px solid #2f5e9e;border-radius:8px;padding:0 6px}
+.prow.lock-exit .pdef{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.45}
+.prow.lock-exit .lock-fields{display:flex;align-items:center;flex-shrink:0;margin-left:16px;
+  background:var(--input);border:1px solid var(--border);border-radius:6px;padding:3px 2px}
+.prow.lock-exit .lock-field{display:flex;align-items:center;gap:6px;color:var(--muted);
+  font-size:12px;white-space:nowrap;padding:0 10px}
+.prow.lock-exit .lock-field + .lock-field{border-left:1px solid var(--border)}
+.prow.lock-exit .lock-field input{width:68px}
+.prow.lock-exit .lock-fields.dim{opacity:.45}
+.prow.lock-exit .lock-fields.dim input{pointer-events:none}
 /* 滑点行内嵌 ATR 系数小输入框（无独立参数行） */
 .prow .slip-k{display:flex;align-items:center;gap:4px;color:var(--muted);font-size:11.5px;white-space:nowrap;flex-shrink:0}
 .prow .slip-k input{width:64px;text-align:right}
@@ -293,7 +308,7 @@ const LOGIC_BODY = `
 <p class="lnote">② 强档：after 终点 &gt; 前高（卖点：&lt; 前低），且和前一波同向比 MACD 没变弱（柱子总面积、DIF 峰、最高柱任一变弱＝背驰）。</p>
 <p class="lnote">③ 中间档（仅 2买/2卖）：after 终点距前高/前低 ≤「前高/前低附近容差」参数（默认5点，含刚越过一点但背驰）；或未过前高/前低且之后最近一笔回调/反弹的终点回到 2买/2卖点价 ≤「回踩2买/2卖点容差」参数（默认5点）。</p>
 <p class="lnote">结论：② → 强档；③ → 中间档；都不满足 → 弱档（非一类行）。类2买/类2卖不走中间档；3类点强档受开关③控制（关＝一律弱档）。</p>
-<p class="lnote llast">观望的周期不出信号；定了策略的周期还要由进出场模块检查进场条件（笔够不够、低级别有没有背驰、离支阻位近不近、策略自己的条件）才发信号——那是「进出场」的事。以上口径回测/实盘/监控引擎与工作台分析页（JS）<b>一致</b>（2026-10-08 对齐：JS 已实现同款参考周期闸门，此前「JS 各周期自判」的分歧消除；rangeRes 选「关闭」时两侧同为每周期自判）。</p>`;
+<p class="lnote llast">观望的周期不出信号；定了策略的周期还要由进出场模块检查进场条件（笔够不够、低级别有没有背驰、离支阻位近不近、策略自己的条件）才发信号——那是「进出场」的事。以上口径回测/实盘/监控引擎与工作台分析页（JS）<b>一致</b>（2026-10-08 对齐：JS 已实现同款参考周期闸门，此前「JS 各周期自判」的分歧消除；rangeRes 选「关闭」时，低于4小时的周期不自判震荡，4小时与日线仍自判）。</p>`;
 
 const DIA_MAIN = `flowchart LR
     REF["参考周期（{RANGE_REF}）<br/>定方向"]
@@ -531,6 +546,7 @@ const ENTRY_GROUPS = [
 // 出场方式：每张卡 = 启用开关 + 平仓比例（比例占总仓位=初始手数%；整数手：⌊总手数×比例%⌋ 不足1手平1手；关闭时比例置灰仍随表单保存）。
 // 够笔止盈拆两源（2026-10-08）：背驰周期/检测周期共一张卡（exit-group 两行各自开关+比例）
 const EXIT_MODE_CARDS = [
+  [['exitLockOn', 'exitLockPct']],
   [['exitStopSrOn', 'exitStopSrPct']],
   [['exitStopBeOn', 'exitStopBePct']],
   [['exitHalfMrOn', 'exitHalfMrPct'], ['exitHalfOn', 'exitHalfPct']],
@@ -580,7 +596,19 @@ function exitModeRowsHtml(m) {
       const on = m.effective[onKey], pct = m.effective[pctKey];
       const isMod = m.overrides[onKey] !== undefined || m.overrides[pctKey] !== undefined
         || (onKey === 'exitTrailOn' && m.overrides.exitTrailSrc !== undefined)
-        || (onKey === 'exitStopBeOn' && m.overrides.exitStopBeMode !== undefined);
+        || (onKey === 'exitStopBeOn' && m.overrides.exitStopBeMode !== undefined)
+        || (onKey === 'exitLockOn' && m.overrides.exitLockPts !== undefined);
+      if (onKey === 'exitLockOn') {
+        const ptsSpec = m.schema.exitLockPts;
+        return `<div class="prow lock-exit${isMod ? ' mod' : ''}" title="${oSpec.desc}">
+        <input type="checkbox" data-k="${onKey}" ${on ? 'checked' : ''} aria-label="${oSpec.label}">
+        <span class="pname"><span class="plabel">${oSpec.label}<span class="lock-pri">最高优先级</span><span class="badge">已修改</span></span>
+        <span class="pdef">${onSpecDef(oSpec)} · 最大盈利超过门槛后，回撤到锁定比例即全平剩余</span></span>
+        <span class="zs-keep lock-fields" data-keep-for="${onKey}">
+          <span class="lock-field">超过<input type="number" step="any" min="${ptsSpec.min}" max="${ptsSpec.max}" data-k="exitLockPts" value="${m.effective.exitLockPts}" aria-label="${ptsSpec.label}">点</span>
+          <span class="lock-field">至少锁定<input type="number" step="1" min="${pSpec.min}" max="${pSpec.max}" data-k="${pctKey}" value="${pct}" aria-label="${pSpec.label}">%</span>
+        </span></div>`;
+      }
       const defText = `${onSpecDef(oSpec)} · 比例默认 ${pSpec.default}%`;
       const inlineSel = onKey === 'exitTrailOn' ? trailSrcHtml(m)
         : (onKey === 'exitStopBeOn' ? beModeHtml(m) : '');
@@ -695,9 +723,10 @@ function entryRowsHtml(m) {
   EXIT_MODE_KEYS.forEach(k => grouped.add(k));   // 出场方式键由专用卡片渲染
   grouped.add('exitTrailSrc');                   // 跟踪止盈参照：并入跟踪止盈卡，不单独成行
   grouped.add('exitStopBeMode');                 // 保本位模式：并入保本止损卡，不单独成行
+  grouped.add('exitLockPts');                    // 锁定盈利门槛：并入锁定盈利卡，不单独成行
   return ENTRY_GROUPS.map(([title, keys]) => {
     if (title === '__EXIT_MODES__') {
-      return `<div class="pgroup">出场方式（至少启用一种；比例 = 平总仓位[初始手数]%，整数手）</div>`
+      return `<div class="pgroup">出场方式（至少启用一种；锁定盈利优先级最高。其余比例 = 平总仓位[初始手数]%，整数手）</div>`
         + exitModeRowsHtml(m);
     }
     return `<div class="pgroup">${title}</div>`
@@ -1037,8 +1066,8 @@ function renderModule(name) {
     chan: '画笔参数按当前品种独立；保存后该品种成笔阈值即时生效（画笔/回测/监控）。有任务运行中时会拒绝保存。',
     points: '标记买卖点按当前品种：邻近合并/保留数/中枢容差在工作台与回测读取；背驰时长可比上限写入该品种 CHAN_CFG。有任务运行中时会拒绝保存。',
     zs: '画中枢按当前品种：各周期是否绘制、以及每周期只保留最近几个中枢。',
-    entry: '标记进出场按当前品种：近支阻、手数、滑点、出场判定、出场方式（开关+平仓比例，至少启用一种；够笔止盈拆背驰周期/检测周期两源，同一张卡）、进场扩展与闸门。进场扩展写入该品种 CHAN_CFG。「当下制够笔K线数」仅回测/监控引擎。有效滑点 = 固定值 + ATR系数×ATR(14)。手数口径：1手=0.01标准手，开/平仓手数恒整数。比例 = 触发时平总仓位（初始手数）百分比（⌊总手数×比例%⌋、不足1手平1手；每种方式一次性触发，部分平仓后剩余由其它方式了结）；跟踪止盈同强分型均线V1（同向3类/类3类买卖点→止损上移，只上移；保本迁移后才接管、保本前参照点不追溯，部分平仓后剩余由最大止损硬上限兜底）。有任务运行中时会拒绝保存。',
-    plan: '交易计划按当前品种分 3 类：震荡（参考周期闸门 rangeRes——可关闭=每周期自判，与图表口径一致；A 横盘/B 中枢内阈值）/ 顺势（参考周期 trendRes + 方向相位判定）/ 其他（点位分类容差）。工作台/回测/实盘/监控同源读取；详见下方图解。有任务运行中时会拒绝保存。',
+    entry: '标记进出场按当前品种：近支阻、手数、滑点、出场判定、出场方式（开关+平仓比例，至少启用一种；锁定盈利优先级最高，门槛点数和锁定盈利比例都可配；够笔止盈拆背驰周期/检测周期两源，同一张卡）、进场扩展与闸门。进场扩展写入该品种 CHAN_CFG。「当下制够笔K线数」仅回测/监控引擎。有效滑点 = 固定值 + ATR系数×ATR(14)。手数口径：1手=0.01标准手，开/平仓手数恒整数。比例 = 触发时平总仓位（初始手数）百分比（⌊总手数×比例%⌋、不足1手平1手；每种方式一次性触发，部分平仓后剩余由其它方式了结）。锁定盈利的比例不是手数：最大盈利超过门槛后，回撤到只剩该比例的盈利就全平剩余。跟踪止盈同强分型均线V1（同向3类/类3类买卖点→止损上移，只上移；保本迁移后才接管、保本前参照点不追溯，部分平仓后剩余由最大止损硬上限兜底）。有任务运行中时会拒绝保存。',
+    plan: '交易计划按当前品种分 3 类：震荡（参考周期闸门 rangeRes——关闭后低于4小时的周期不自判震荡、直接走买卖点，4小时与日线仍自判；A 横盘/B 中枢内阈值）/ 顺势（参考周期 trendRes + 方向相位判定）/ 其他（点位分类容差）。工作台/回测/实盘/监控同源读取；详见下方图解。有任务运行中时会拒绝保存。',
     fxmaBase: '强分型均线V1·基本参数（按当前品种）：进出场周期/买卖点类别/点有效期/止损止盈/同根双触/同向互斥/默认手数/上级周期同向/预判2买卖/黄金分割附近。止盈方式三卡单选：固定点数（满仓一笔触价全平）/ 结构组合（每笔半仓、同向容量最多两笔且同一粗类 1/2/3 持仓期间不叠加、该类平仓后可再开——1/2类一半到前一点位主动止盈+另一半走3/4类点提损跟踪，3类只主动止盈）。点有效期=根数+价距双约束（同卡配置）。上级周期同向与黄金分割附近均为独立硬门槛（开启即必须通过才触发，不参与条件组合计票；黄金分割仅2/3类点判定、1类豁免，未通过该点不触发）。预判2买卖=只修点可见性（确认下跌/上涨笔破前低/前高后反弹/回调够笔即预判2卖/2买提前入列，闸门链全部照旧；锚随反弹延伸漂移、收复前低/前高判死、真点同锚接管）——开启后预判点比真点多，信号集变化大。',
     fxmaEntry: '强分型均线V1·进场条件（按当前品种）：次级别背驰与条件组合互斥——启用背驰=背驰为唯一触发条件（通过即触发，不过则等待，强分型/均线分离/收盘站线与条件满足数完全不参与，相关行变灰；黄金分割/上级同向在「基本参数」页签，若开启仍作为硬门槛拦一道）；关闭背驰=条件组合（三选N）：均线分离/收盘站线/强分型各设「启用+必选/可选」，各类买卖点设条件满足数，必选不通过该类点不触发、启用条件中通过数≥生效N 才触发（必选通过也计票；生效N=min(N,启用条件数)；三条件全停=点出现即触发）。次级别背驰=缠论V1同源区间套下沉链（次级别/次次级别由结构自动归属，点锚定·粘性窗口；3分钟周期须30秒级别已加载）。开关关闭时子参数变灰（数值仍随表单保存，只是不参与判定）。',
   }[name] || '';

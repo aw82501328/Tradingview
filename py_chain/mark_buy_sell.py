@@ -71,9 +71,19 @@ def mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPrice):
     return out
 
 
+def _family_label(p):
+    """二买族强弱标签（2026-10-11 统一二买定义）：点 type 仍为 2买/类2买/2卖/类2卖
+    （下游类型表/过滤免改），图表标签显示 强二买/弱二买/强类2买…；strong=None
+    （首笔上涨未走完）按弱先行显示。无 strong 字段的点（旧数据/1、3类）原样返回。"""
+    if "strong" not in p:
+        return p["type"]
+    tag = "强" if p.get("strong") else "弱"
+    return tag + {"2买": "二买", "类2买": "类2买", "2卖": "二卖", "类2卖": "类2卖"}.get(p["type"], p["type"])
+
+
 def compute_period_marks(res, bis, upperBis, rawBars, atr, macdArr, pi, periodMarks, periods,
                          nearAtrRatio=NEAR_ATR_RATIO, keep=KEEP,
-                         class2ZsTol=CLASS2_ZS_TOL, thirdZsTol=THIRD_ZS_TOL):
+                         class2ZsTol=CLASS2_ZS_TOL, thirdZsTol=THIRD_ZS_TOL, upperMacdArr=None):
     """计算单个周期的买卖点标记列表。
 
     @param res          周期名（如 "60"）
@@ -85,12 +95,15 @@ def compute_period_marks(res, bis, upperBis, rawBars, atr, macdArr, pi, periodMa
     @param pi           本周期在 periods 列表中的下标（0 为最大周期，一买锚定跳过）
     @param periodMarks  已计算出的上级周期标记 { 周期: [marks] }（跨周期共振用）
     @param periods      周期列表（从大到小）
+    @param upperMacdArr 可选：上一级别 MACD（二买族大周期背驰闸；缺省区间套兜底）
     @returns marks 列表，每项 { label, time, price, rawTime, rawPrice, color }
     """
     barSec = intervalSecOf(res)
 
-    buyPts = findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol)
-    sellPts = findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol)
+    buyPts = findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol,
+                           upperMacd=upperMacdArr)
+    sellPts = findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol,
+                             upperMacd=upperMacdArr)
 
     # 一买锚定：除最大周期外，每个一买都锚定到上一级某笔的底部端点
     anchoredBuyPts = buyPts
@@ -127,13 +140,13 @@ def compute_period_marks(res, bis, upperBis, rawBars, atr, macdArr, pi, periodMa
         t = snapToOwnBar(p["price"], p["time"], rawBars)
         # 真1买 与 2买 同点位，文字偏移双倍（更靠下）避免重叠
         mul = 2 if p["type"] == "真1买" else 1
-        marks.append({"label": p["type"], "time": t, "price": p["price"] - offset * mul,
+        marks.append({"label": _family_label(p), "time": t, "price": p["price"] - offset * mul,
                       "rawTime": p["time"], "rawPrice": p["price"]})
     for p in sellPts:
         t = snapToOwnBar(p["price"], p["time"], rawBars)
         # 真1卖 与 2卖 同点位，文字偏移双倍（更靠上）避免重叠
         mul = 2 if p["type"] == "真1卖" else 1
-        marks.append({"label": p["type"], "time": t, "price": p["price"] + offset * mul,
+        marks.append({"label": _family_label(p), "time": t, "price": p["price"] + offset * mul,
                       "rawTime": p["time"], "rawPrice": p["price"]})
 
     # 跨周期共振：本级别 1买/1卖 与紧邻上级 1/2/3 类买卖点落在同一点位 → 标记绿色
@@ -182,6 +195,10 @@ def compute_all_marks(bisByPeriod, barsByPeriod, periods, fromTs=None,
         if not rawBars:
             continue
         upperBis = bisByPeriod.get(periods[pi - 1], []) if pi > 0 else None
+        upperBars = barsByPeriod.get(periods[pi - 1], []) if pi > 0 else []
+        upperMacdArr = (periodMacd.get(periods[pi - 1]) if pi > 0 else None)
+        if upperMacdArr is None and pi > 0 and upperBars:
+            upperMacdArr = calcMACD(upperBars)
         atr = periodAtr.get(res)
         if atr is None:
             atr = calcATR(rawBars, 14)
@@ -190,7 +207,7 @@ def compute_all_marks(bisByPeriod, barsByPeriod, periods, fromTs=None,
             macdArr = calcMACD(rawBars)
         marks = compute_period_marks(res, curBis, upperBis, rawBars, atr, macdArr,
                                      pi, periodMarks, periods, nearAtrRatio, keep,
-                                     class2ZsTol, thirdZsTol)
+                                     class2ZsTol, thirdZsTol, upperMacdArr=upperMacdArr)
         if marks:
             periodMarks[res] = marks
     return periodMarks

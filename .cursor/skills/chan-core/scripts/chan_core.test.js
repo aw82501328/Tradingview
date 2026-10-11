@@ -868,8 +868,12 @@ describe("同笔 1买/1卖（上级笔已结束 → 纯结构标记）", () => {
   ];
 
   test("同笔 + 上级笔已结束 → 纯结构标记 1买（免背驰/创新低）", () => {
+    // 2026-10-11 统一二买定义：1买@4000 后首个抬低 @6000 4450.74 合法标 2买（strong=true）
     const pts = core.findBuyPoints(BI_BUY, UPPER_ENDED, MACD_NO_DIVERGE, 900);
-    assert.deepEqual(pts, [{ type: "1买", time: 4000, price: 4324.68 }]);
+    assert.deepEqual(pts, [
+      { type: "1买", time: 4000, price: 4324.68 },
+      { type: "2买", time: 6000, price: 4450.74, strong: true },
+    ]);
   });
 
   test("同笔 + 命中笔是上级末笔（延伸中）→ 跳过不标", () => {
@@ -913,8 +917,12 @@ describe("同笔 1买/1卖（上级笔已结束 → 纯结构标记）", () => {
   ];
 
   test("同笔 + 上级笔已结束 → 纯结构标记 1卖（锚定无漂移）", () => {
+    // 2026-10-11 统一二卖定义：1卖@4000 后首个压低 @6000 4400.0 合法标 2卖（strong=false）
     const pts = core.findSellPoints(BI_SELL, UPPER_SELL_ENDED, MACD_NO_DIVERGE_SELL, 900);
-    assert.deepEqual(pts, [{ type: "1卖", time: 4000, price: 4436.23 }]);
+    assert.deepEqual(pts, [
+      { type: "1卖", time: 4000, price: 4436.23 },
+      { type: "2卖", time: 6000, price: 4400.0, strong: false },
+    ]);
   });
 
   test("同笔 + 命中笔是上级末笔（延伸中）→ 跳过不标", () => {
@@ -1183,13 +1191,103 @@ describe("buildZS 穿越式离开与零重叠回踩（2026-10-07）", () => {
     const macd = [];
     for (let t = 950; t <= 2000; t += 50) macd.push({ time: t, dif: 0, dea: 0, macd: 0 });
     const pts = core.findBuyPoints(bis(), upper, macd, 900, 0, 0);
-    // 2026-10-10 firstNoDiverge：4056.45 对参照 4071.64 创新低即 1买（与离枢回踩序列并存）
+    // 2026-10-10 firstNoDiverge：4056.45 对参照 4071.64 创新低即 1买（与离枢回踩序列并存）。
+    // 2026-10-11 统一二买定义：2买族 = 1买后抬低序列——1买滚动到 1400@4056.45 后，
+    // 旧窗口 2买@1200（先于锚，不再标记）；首个抬低 1600@4093.86 与窗口 3买 同刻让位。
     assert.deepEqual(pts.map(p => [p.type, p.time, p.price]), [
-      ["2买", 1200, 4071.64],
       ["1买", 1400, 4056.45],
       ["3买", 1600, 4093.86],
       ["类3买", 1800, 4118.91],
       ["4买", 2000, 4121.06],
+    ]);
+  });
+});
+
+// ============ 2026-10-11 统一二买定义：二买族序列 + 背驰闸 + 强弱（与 py 同步） ============
+describe("统一二买定义 secondPointSeries（2026-10-11）", () => {
+  const b = (t0, t1, typ, p0, p1) => ({ type: typ, startTime: t0, endTime: t1, startPrice: p0, endPrice: p1, span: Math.abs(p1 - p0) });
+  const bisBuy = () => [
+    b(100, 200, "down", 460.0, 440.0),
+    b(200, 300, "up",   440.0, 455.0),
+    b(300, 400, "down", 455.0, 435.0),   // 创新低 → 1买@400
+    b(400, 500, "up",   435.0, 445.0),   // 首笔上涨 445 < 前段末笔起点 455 → 弱
+    b(500, 600, "down", 445.0, 441.0),   // 抬低 → 2买
+    b(600, 700, "up",   441.0, 458.0),   // 458 > 445 → 强
+    b(700, 800, "down", 458.0, 443.0),   // 更高抬低 → 类2买（强）
+    b(800, 900, "up",   443.0, 460.0),
+    b(900, 1000, "down", 460.0, 448.0),  // 更高抬低 → 类2买（强）
+  ];
+  const upper = () => [
+    b(-300, -100, "up",   500.0, 560.0),
+    b(-100, 0,   "down", 560.0, 470.0),
+    b(0, 50,     "up",   470.0, 480.0),
+    b(50, 1000,  "down", 480.0, 380.0),
+  ];
+  const upperMacd = (diverge) => {
+    const out = [-100, -50, 0].map(t => ({ time: t, dif: -8.0, dea: 0.0, macd: -10.0 }));
+    for (let t = 50; t <= 1000; t += 50) {
+      out.push({ time: t, dif: diverge ? -2.0 : -15.0, dea: 0.0, macd: diverge ? -2.0 : -20.0 });
+    }
+    return out;
+  };
+  const macdLow = [];
+  for (let t = 100; t <= 1000; t += 50) macdLow.push({ time: t, dif: 0, dea: 0, macd: 0 });
+
+  test("ON+背驰成立：序列 2买/类2买 带强弱", () => {
+    const pts = core.findBuyPoints(bisBuy(), upper(), macdLow, 900, 0, 0, upperMacd(true));
+    assert.deepEqual(pts.map(p => [p.type, p.time, p.price, p.strong ?? null]), [
+      ["1买", 400, 435.0, null],
+      ["2买", 600, 441.0, false],
+      ["类2买", 800, 443.0, true],
+      ["类2买", 1000, 448.0, true],
+    ]);
+  });
+
+  test("ON+背驰不成立：二买族不标", () => {
+    const pts = core.findBuyPoints(bisBuy(), upper(), macdLow, 900, 0, 0, upperMacd(false));
+    assert.deepEqual(pts.map(p => [p.type, p.time]), [["1买", 400]]);
+  });
+
+  test("OFF：忽略背驰闸", () => {
+    const saved = core.CHAN_CFG.secondDivergeGate;
+    core.CHAN_CFG.secondDivergeGate = false;
+    try {
+      const pts = core.findBuyPoints(bisBuy(), upper(), macdLow, 900, 0, 0, upperMacd(false));
+      assert.ok(pts.some(p => p.type === "2买" && p.time === 600));
+    } finally {
+      core.CHAN_CFG.secondDivergeGate = saved;
+    }
+  });
+
+  test("低点破锚：序列作废、1买滚动", () => {
+    const bis = bisBuy().concat([b(1000, 1100, "down", 448.0, 430.0)]);
+    const pts = core.findBuyPoints(bis, upper(), macdLow, 900, 0, 0, upperMacd(true));
+    assert.deepEqual(pts.map(p => [p.type, p.time]), [["1买", 400], ["1买", 1100]]);
+  });
+
+  test("2卖镜像：压低序列带强弱", () => {
+    const bis = [
+      b(100, 200, "up",   440.0, 460.0),
+      b(200, 300, "down", 460.0, 445.0),
+      b(300, 400, "up",   445.0, 465.0),   // 创新高 → 1卖@400
+      b(400, 500, "down", 465.0, 455.0),   // 455 未低于 445 → 弱
+      b(500, 600, "up",   455.0, 459.0),   // 压低 → 2卖
+      b(600, 700, "down", 459.0, 442.0),   // 442 < 455 → 强
+      b(700, 800, "up",   442.0, 457.0),   // 更低压低 → 类2卖（强）
+    ];
+    const up = [
+      b(-300, -100, "down", 380.0, 320.0),
+      b(-100, 0,   "up",   320.0, 410.0),
+      b(0, 50,     "down", 410.0, 400.0),
+      b(50, 1000,  "up",   400.0, 520.0),
+    ];
+    const umacd = [-100, -50, 0].map(t => ({ time: t, dif: 8.0, dea: 0.0, macd: 10.0 }));
+    for (let t = 50; t <= 1000; t += 50) umacd.push({ time: t, dif: 2.0, dea: 0.0, macd: 2.0 });
+    const pts = core.findSellPoints(bis, up, macdLow, 900, 0, 0, umacd);
+    assert.deepEqual(pts.filter(p => p.type === "2卖" || p.type === "类2卖")
+      .map(p => [p.type, p.time, p.price, p.strong ?? null]), [
+      ["2卖", 600, 459.0, false],
+      ["类2卖", 800, 457.0, true],
     ]);
   });
 });

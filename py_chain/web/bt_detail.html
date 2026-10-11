@@ -71,6 +71,21 @@
   .bt-panel h3 { font-size: 14px; margin: 0 0 14px; }
   .bt-chart-panel { padding: 6px; }
   .bt-insights { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
+  /* 策略盈亏柱：零线居中，盈利向上红柱，亏损向下绿柱 */
+  .strat-bars { display: flex; align-items: stretch; gap: 8px; overflow-x: auto; min-height: 220px; }
+  .strat-col { flex: 1 0 96px; min-width: 96px; display: flex; flex-direction: column; align-items: center; }
+  .strat-plot { flex: 1; width: 100%; min-height: 176px; display: flex; padding: 22px 0; }
+  .strat-axis { position: relative; flex: 1; width: 100%; }
+  .strat-axis::before { content: ''; position: absolute; left: 8%; right: 8%; top: 50%;
+    height: 1px; background: var(--border); }
+  .strat-bar { position: absolute; left: 50%; width: 26px; margin-left: -13px; min-height: 2px; }
+  .strat-bar.pos { bottom: 50%; border-radius: 3px 3px 0 0; background: var(--buy); }
+  .strat-bar.neg { top: 50%; border-radius: 0 0 3px 3px; background: var(--sell); }
+  .strat-tip { position: absolute; left: 50%; font-size: 11px; white-space: nowrap;
+    font-variant-numeric: tabular-nums; line-height: 1; }
+  .strat-tip.pos, .strat-tip.neg { transform: translateX(-50%); }
+  .strat-name { margin-top: 8px; font-size: 11px; text-align: center; line-height: 1.35; white-space: nowrap; }
+  .strat-n { font-size: 10px; color: var(--muted); margin-top: 2px; }
   .bt-distribution { display: flex; align-items: center; gap: 20px; }
   .bt-distribution > svg { flex: none; width: 96px; height: 96px; }
   .bt-exit-legend { flex: 1; min-width: 0; display: grid; gap: 9px; }
@@ -156,11 +171,13 @@
     background: #2a2340; color: #b39ddb; border: 1px solid #4a3b6b; cursor: help; }
   #bt-detail-sig-body tr[data-signal-id] { cursor: pointer; }
   #bt-detail-sig-body tr[data-signal-id]:hover td { background: var(--card-2); }
-  /* 已加入典型案例的行：浅黄底标识（悬停/选中态由下方规则优先覆盖） */
+  /* 已加入典型案例的行：浅黄底；已加入 EVAL 的行：浅蓝底（选中态由下方规则优先覆盖） */
   #bt-detail-sig-body tr.in-case td { background: color-mix(in srgb, var(--warn) 26%, var(--card)); }
+  #bt-detail-sig-body tr.in-eval td { background: color-mix(in srgb, var(--accent) 16%, var(--card)); }
   #bt-detail-sig-body tr.selected td { background: color-mix(in srgb, var(--accent) 18%, var(--card)); }
-  /* 悬停已加入行：黄加深一档，避免悬停瞬间退回普通底色 */
+  /* 悬停已加入行：加深一档，避免悬停瞬间退回普通底色 */
   #bt-detail-sig-body tr.in-case:hover td { background: color-mix(in srgb, var(--warn) 38%, var(--card)); }
+  #bt-detail-sig-body tr.in-eval:hover td { background: color-mix(in srgb, var(--accent) 28%, var(--card)); }
   #bt-detail-sig-body tr.selected:not(.exit-continuation) td:first-child { box-shadow: inset 3px 0 var(--accent); }
   #bt-detail-sig-body td[rowspan] { vertical-align: middle; }
   #bt-detail-sig-body tr.exit-continuation td { border-top-style: dashed; }
@@ -170,6 +187,7 @@
   table th:first-child { z-index: 3; }
   /* 首列 sticky 底色 var(--card) 会盖住浅黄：同特异性后置覆盖（选中态在下一行仍最优先） */
   #bt-detail-sig-body tr.in-case:not(.exit-continuation) td:first-child { background: color-mix(in srgb, var(--warn) 26%, var(--card)); }
+  #bt-detail-sig-body tr.in-eval:not(.exit-continuation) td:first-child { background: color-mix(in srgb, var(--accent) 16%, var(--card)); }
   #bt-detail-sig-body tr.selected:not(.exit-continuation) td:first-child { background: color-mix(in srgb,var(--accent) 18%,var(--card)); }
   td.bt-number, th.bt-number { text-align: right; }
   /* 空态 / 错误 / 复制反馈 */
@@ -242,6 +260,8 @@ let btDetailRunId = null;
 let btDetailSummary = null;
 let btDetailName = '';
 let btDetailCaseIds = new Set();   // 已加入典型案例的本方案行 id（source_key 前缀 run|<方案id>|）
+let btDetailEvalKeys = new Set();  // 已按行加入 EVAL 的信号身份（与信号表浅蓝底同口径）
+let btDetailStrategy = '';
 let btAnalyzeBusy = false;
 let btDetailPnlSort = 'none';    // 交易记录盈亏：none / descending / ascending
 let btDetailTab = 'overview';
@@ -305,6 +325,58 @@ function btDetailMetricsHtml(s) {
     tile('胜率', s.win_rate != null ? esc(s.win_rate) + '%' : '—', `盈利 ${s.win || 0} / 亏损 ${s.lose || 0}`) +
     tile('盈亏比', payoff, `均盈 ${Number(s.avg_win || 0).toFixed(2)} / 均亏 ${Number(s.avg_loss || 0).toFixed(2)}`) +
     tile('已平仓笔数', s.closed || 0, `保本 ${Math.max(0, (s.closed || 0) - (s.win || 0) - (s.lose || 0))} 笔`);
+}
+
+// 柱的顺序与交易记录「策略」列、信号表筛选项一致；未列入的键排在后面按名字
+const STRAT_PNL_ORDER = [
+  'waitBuy', 'wait2Buy', 'wait3Buy', 'waitLike2Buy', 'wait1Buy', 'wait2BuyBear',
+  'waitSell', 'wait2Sell', 'wait3Sell', 'waitLike2Sell', 'wait1Sell', 'wait2SellBear',
+  'fx1Buy', 'fx2Buy', 'fx2xBuy', 'fx3Buy', 'fx3xBuy',
+  'fx1Sell', 'fx2Sell', 'fx2xSell', 'fx3Sell', 'fx3xSell',
+];
+
+function strategyPnlHtml(rows) {
+  const groups = new Map();
+  for (const r of rows) {
+    const pnl = r.pnl == null ? NaN : Number(r.pnl);
+    if (!Number.isFinite(pnl)) continue;
+    const key = r.strategyKey || '—';
+    let g = groups.get(key);
+    if (!g) { g = { key, pnl: 0, n: 0 }; groups.set(key, g); }
+    g.pnl += pnl;
+    g.n += 1;
+  }
+  const items = [...groups.values()].sort((a, b) => {
+    const ia = STRAT_PNL_ORDER.indexOf(a.key), ib = STRAT_PNL_ORDER.indexOf(b.key);
+    if (ia < 0 && ib < 0) return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+    if (ia < 0) return 1;
+    if (ib < 0) return -1;
+    return ia - ib;
+  });
+  if (!items.length) {
+    return '<p class="bt-note" style="margin:0">暂无带盈亏的交易，无法按策略汇总。</p>';
+  }
+  const maxAbs = Math.max(...items.map(it => Math.abs(it.pnl)));
+  const sum = items.reduce((s, it) => s + it.pnl, 0);
+  const cols = items.map(it => {
+    const label = it.key;
+    const pct = maxAbs ? (Math.abs(it.pnl) / maxAbs * 50) : 0;
+    const up = it.pnl > 0;
+    const down = it.pnl < 0;
+    const cls = up ? 'pos' : down ? 'neg' : '';
+    const txt = (it.pnl > 0 ? '+' : '') + it.pnl.toFixed(2);
+    const tipStyle = up ? `bottom:calc(50% + ${pct}% + 4px)` : `top:calc(50% + ${pct}% + 4px)`;
+    const bar = cls
+      ? `<i class="strat-bar ${cls}" style="height:${pct}%"></i><span class="strat-tip ${cls} ${pnlClass(it.pnl)}" style="${tipStyle}">${txt}</span>`
+      : `<span class="strat-tip" style="top:50%;transform:translate(-50%,-50%)">0.00</span>`;
+    return `<div class="strat-col" title="${esc(it.key)} · ${it.n} 笔 · ${txt}">
+      <div class="strat-plot"><div class="strat-axis">${bar}</div></div>
+      <div class="strat-name">${esc(label)}</div>
+      <div class="strat-n">${it.n} 笔</div>
+    </div>`;
+  }).join('');
+  return `<div class="strat-bars" role="img" aria-label="各策略盈亏，合计 ${sum.toFixed(2)}">${cols}</div>
+    <p class="bt-note">红柱向上为盈利，绿柱向下为亏损。按整笔交易盈亏汇总（含持仓浮盈），合计 ${fmtPnlText(sum)}。无盈亏的信号不计入。</p>`;
 }
 
 function btDetailExitsHtml(s) {
@@ -376,6 +448,7 @@ function fillBtDetail(run, preserve = false) {
   } : null;
   const cfg = run.cfg || {};
   btDetailRunId = run.id;
+  btDetailStrategy = btRunStrategyId(run);
   btDetailName = run.name || '';
   btDetailSummary = run.summary || {};
   // 快照行缺 symbol 时用方案 cfg 补全，定位需要品种
@@ -406,6 +479,7 @@ function fillBtDetail(run, preserve = false) {
       <p class="bt-note">手数口径（2026-09-23）：1 手 = 0.01 标准手（MT4/MT5 经纪商口径）；盈亏 = 价差 × 方向 × 手数 × 合约乘数（黄金 ×1.0、原油 ×10、白银 ×50、BTC/纳指 ×0.01、其他品种 ×1.0）。</p>
       <section class="bt-panel bt-chart-panel"><div class="equity-chart" id="bt-detail-equity"></div>
         <div id="bt-detail-equity-empty" class="bt-empty" hidden>暂无已实现盈亏记录，产生出场记录后可展示资金曲线。</div></section>
+      <section class="bt-panel"><h3>策略盈亏</h3>${strategyPnlHtml(btDetailSignals)}</section>
       <div class="bt-insights">
         <section class="bt-panel"><h3>出场分布</h3>${btDetailExitsHtml(btDetailSummary)}</section>
         <section class="bt-panel"><h3>亏损归因</h3>${lossAnalysisHtml(la)}
@@ -418,7 +492,7 @@ function fillBtDetail(run, preserve = false) {
       <details id="bt-detail-params" class="bt-params-wrap"><summary>回测参数 · ${paramKeys.length} 项</summary><div class="bt-params">${paramsHtml || '暂无参数快照'}</div></details>
     </section>
     <section id="bt-detail-records" role="tabpanel" aria-labelledby="bt-detail-tab-records" hidden>
-      <div class="bt-record-head"><strong>交易记录 · ${btDetailSignals.length} 条信号</strong><span>分批出场分行展示 · 点击定位 · 右键复制/加入典型案例（已加入行浅黄底）</span></div>
+      <div class="bt-record-head"><strong>交易记录 · ${btDetailSignals.length} 条信号</strong><span>分批出场分行展示 · 点击定位 · 右键复制/加入典型案例（浅黄底）或加入 EVAL（浅蓝底）</span></div>
       <div id="bt-detail-locate" class="bt-detail-locate" role="status">${esc(btDetailLocateMsg)}</div>
       <div class="scroll" id="bt-detail-table-scroll" tabindex="0" aria-label="交易记录表，可横向滚动"><table>
         <thead><tr>${SIG_TABLE_HEADERS}</tr></thead>
@@ -450,13 +524,59 @@ async function loadBtDetailCases() {
   const runId = btDetailRunId, token = loadToken;
   try {
     const d = await (await fetch('/api/bt/errors')).json();
-    if (!d.ok || token !== loadToken || runId !== btDetailRunId) return;
-    const prefix = `run|${runId}|`;
-    btDetailCaseIds = new Set((d.errors || [])
-      .filter(e => e.source_type === 'run' && String(e.source_key || '').startsWith(prefix))
-      .map(e => Number(e.source_key.slice(prefix.length))));
-    renderBtDetailRows();
+    if (token !== loadToken || runId !== btDetailRunId) return;
+    if (d.ok) {
+      const prefix = `run|${runId}|`;
+      btDetailCaseIds = new Set((d.errors || [])
+        .filter(e => e.source_type === 'run' && String(e.source_key || '').startsWith(prefix))
+        .map(e => Number(e.source_key.slice(prefix.length))));
+      renderBtDetailRows();
+    }
   } catch { /* 拉取失败=暂不高亮，右击加入/下次加载时重试 */ }
+  if (token === loadToken && runId === btDetailRunId) loadBtDetailEvalFlags();
+}
+
+// 与 eval_service._eval_row_key、控制台 evalRowKey 同口径
+function evalRowKey(r) {
+  return ['symbol', 'time', 'direction', 'periodX', 'strategyKey', 'entryTime']
+    .map(k => (r[k] == null ? '' : String(r[k]))).join('|');
+}
+
+async function loadBtDetailEvalFlags() {
+  const runId = btDetailRunId, token = loadToken;
+  if (!runId) return;
+  try {
+    const d = await (await fetch('/api/eval/pnl-flags?strategy=' + encodeURIComponent(btDetailStrategy || ''))).json();
+    if (!d.ok || token !== loadToken || runId !== btDetailRunId) return;
+    btDetailEvalKeys = new Set(d.rowKeys || []);
+    renderBtDetailRows();
+  } catch { /* 拉不到标志就不标底色 */ }
+}
+
+async function addDetailEvalCase(row) {
+  const signalId = row && row.id;
+  if (typeof signalId !== 'number' || !Number.isInteger(signalId) || signalId <= 0) {
+    alert('请右击要加入的那一行');
+    return;
+  }
+  try {
+    const r = await fetch('/api/eval/create-pnl-case', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ runId: btDetailRunId, signalId }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.status === 409) {
+      showCopyTip(d.error || '该记录已在 EVAL 案例');
+      await loadBtDetailEvalFlags();
+      return;
+    }
+    if (!r.ok || !d.ok) throw Error(d.error || '请求失败');
+    const total = Number(d.case && d.case.expectedTotal);
+    showCopyTip('已加入 EVAL 案例' + (Number.isFinite(total) ? '（合计 ' + total.toFixed(2) + '）' : ''));
+    await loadBtDetailEvalFlags();
+  } catch (e) {
+    alert('加入 EVAL 案例失败：' + e.message);
+  }
 }
 
 async function loadDetail(id) {
@@ -464,6 +584,7 @@ async function loadDetail(id) {
   btAnalyzeBusy = false;
   btDetailRunId = null;
   btDetailSignals = [];
+  btDetailEvalKeys = new Set();
   btDetailSelectedId = null;
   btDetailSummary = null;
   btDetailPnlSort = 'none';
@@ -489,7 +610,7 @@ async function loadDetail(id) {
   fillBtDetail(run);
   // 未做过亏损归因的方案自动分析一次；失败在卡片内提示，已分析的直接展示快照。
   if (!(run.summary?.loss_analysis?.lookahead != null)) await analyzeBtDetail();
-  loadBtDetailCases();   // 典型案例行底色：后台拉键集补亮（不阻塞页面加载）
+  loadBtDetailCases();   // 典型案例浅黄、EVAL 浅蓝：后台拉键集补亮（不阻塞页面加载）
 }
 
 // ---------- 亏损归因 ----------
@@ -601,6 +722,7 @@ function btDetailRowsHtml() {
     showLossReason: true,
     pnlBars: pnlScaleMax(rows),
     isCase: r => btDetailCaseIds.has(r.id),   // 已加入典型案例 → 浅黄底
+    inEval: r => btDetailEvalKeys.has(evalRowKey(r)),   // 已加入 EVAL → 浅蓝底
   });
 }
 
@@ -629,7 +751,7 @@ async function locateDetailRow(id) {
   const mode = row.mode === 'replay' || row.mode === 'live' ? row.mode : 'backtest';
   const pending = { mode, id, runId: btDetailRunId };
   locatePending = pending;
-  setBtDetailLocateMsg(`#${btDetailLabelOf(id)} 定位并标记中…（实时历史不够时会用K线回放跳转，最多等待360秒）`);
+  setBtDetailLocateMsg(`#${btDetailLabelOf(id)} 定位并标记中…（近期与历史都用K线回放跳到进场并保留后续K线，最多等待360秒）`);
   renderBtDetailRows();
   try {
     const response = await fetch('/api/signals/locate', {
@@ -662,6 +784,7 @@ function biChainTxt(bi) {
   if (!parts.length) return '';
   let t = `并画次级别笔 ${parts.join('+')}`;
   if (bi.failed) t += `（${bi.failed}根超范围跳过）`;
+  if (bi.already) t += `（${bi.already}）`;
   return `（${t}）`;
 }
 
@@ -717,8 +840,9 @@ function onBtDetailSigActivate(event) {
   locateDetailRow(Number(tr.dataset.signalId));
 }
 
-// 右击菜单（共享组件 bt_common.js）：仅复制 / 复制并加入典型案例；
-// # 用方案内序号，行取自快照数组；来源标记 run（去重键 run_id + 行内 id）
+// 右击菜单（共享组件 bt_common.js）：复制 / 复制并加入典型案例 / 加入 EVAL 案例。
+// # 用方案内序号，行取自快照数组；典型案例来源标记 run（去重键 run_id + 行内 id）。
+// EVAL 只收右击的这一行，不收整包方案。
 
 // ---------- 资金曲线重画（窗口尺寸变化 / 页签切回概览） ----------
 function redrawBtDetailEquity() {
@@ -756,7 +880,8 @@ function bindDetailPage() {
     const row = btDetailSignals.find(r => r.id === Number(tr.dataset.signalId));
     if (!row) return null;
     return { row, no: btDetailLabelOf(row.id), sourceType: 'run', runId: btDetailRunId,
-      onAdded: () => loadBtDetailCases() };   // 加入成功后重拉键集，该行转浅黄底
+      onAdded: () => loadBtDetailCases(),   // 加入成功后重拉键集，该行转浅黄底
+      addEval: true, onEval: () => addDetailEvalCase(row) };
   });
   if (typeof ResizeObserver !== 'undefined') {
     let width = 0;

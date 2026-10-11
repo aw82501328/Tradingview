@@ -479,6 +479,7 @@ class TestExitModesParams(unittest.TestCase):
     def test_update_rejects_all_off(self):
         with self.assertRaises(ValueError):
             param_center.update("entry", {
+                "exitLockOn": False,
                 "exitStopSrOn": False, "exitStopBeOn": False, "exitHalfOn": False,
                 "exitCloseOn": False, "exitTrailOn": False})
         # 与存量覆盖合并后全关同样拒绝：先显式关三种只留 stopSr + trail
@@ -487,7 +488,8 @@ class TestExitModesParams(unittest.TestCase):
         # exitTrailOn=False 等于默认被剔除 → stopSrOn 回落默认开，合并后仍非全关，放行
         param_center.update("entry", {"exitTrailOn": False})
         with self.assertRaises(ValueError):
-            param_center.update("entry", {"exitStopSrOn": False, "exitStopBeOn": False,
+            param_center.update("entry", {"exitLockOn": False,
+                                          "exitStopSrOn": False, "exitStopBeOn": False,
                                           "exitHalfOn": False, "exitCloseOn": False,
                                           "exitTrailOn": False})  # 合并后全关
 

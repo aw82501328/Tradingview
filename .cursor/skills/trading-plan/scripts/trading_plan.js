@@ -67,7 +67,7 @@ const RANGE_CFG = {
 // 震荡判定参考周期（对齐 py_chain/trading_plan.py RANGE_RES；WEB 参数中心 plan 模块
 // rangeRes，analysis_service 透传 --range-res）。开启（"240"/"D"）= 参考周期闸门：
 // 更低周期不自判 A/B、只听参考周期 regime，参考周期及以上只作锚不交易；
-// ""（off，默认）= 关闭 → 每周期自判震荡（与 Python RANGE_RES 关闭口径一致）
+// ""（off，默认）= 关闭 → 小周期（低于4小时）不自判震荡，4小时与日线仍自判 A/B
 const RANGE_RES_ARG = getStrArg("range-res", "");
 const RANGE_RES = (RANGE_RES_ARG === "off" || RANGE_RES_ARG === "") ? "" : RANGE_RES_ARG;
 
@@ -204,6 +204,11 @@ function strategyOf(res, type, reason, label, cls, cfg) {
   if (type === "1卖") return { ...base, direction: "空头空", strategy: "等待反弹后做2卖" };
   if (type === "1买") return { ...base, direction: "多头多", strategy: "等待回调后做2买" };
   if (type === "2买" || type === "类2买") {
+    // 2026-10-11 统一二买定义：强弱二分路由——强二买（首笔上涨过前段末笔起点，与
+    // wait2Buy 进场闸 brokePrevHigh 同口径）→ 等2买；弱/未定型 → 等2买Bear（抬低回调）。
+    // 旧三档不再用于二买族（无 strong 字段的旧点防御路径仍走下方分支）。
+    if (cls === "强二买" || cls === "强类2买") return { ...base, direction: "多头多", strategy: "等待回调后做2买" };
+    if (cls === "弱二买" || cls === "弱类2买") return { ...base, direction: "空头多", strategy: "等待低点附近的2买" };
     if (cls === "过左高不背驰") return { ...base, direction: "多头多", strategy: "等待回调后的3买点" };
     // 未定型（点后首段还没走够）：弱档先行（2026-10-10 提前入列）——先武装弱2买，
     // 定型后滚动翻档，不再回退前锚。
@@ -215,6 +220,9 @@ function strategyOf(res, type, reason, label, cls, cfg) {
     return { ...base, direction: "多头空", strategy: "等待高点附近的一卖" };
   }
   if (type === "2卖" || type === "类2卖") {
+    // 2026-10-11 统一二卖定义：强弱二分路由（镜像）——强二卖 → 等2卖；弱 → 等2卖Bear。
+    if (cls === "强二卖" || cls === "强类2卖") return { ...base, direction: "空头空", strategy: "等待反弹后做2卖" };
+    if (cls === "弱二卖" || cls === "弱类2卖") return { ...base, direction: "多头空", strategy: "等待高点附近的2卖" };
     if (cls === "过左低不背驰") return { ...base, direction: "空头空", strategy: "等待反弹后的3卖点" };
     // 未定型：弱档先行（对称）。
     if (cls === "未定型") return { ...base, direction: "多头空", strategy: "等待高点附近的2卖" };
@@ -390,8 +398,8 @@ function classifySecond(bis, macdArr, p, cfg) {
  *      rangeGate 给定时用参考周期 regime（替换语义：regime 震荡 → 观望（strategy
  *      注明来源周期）；regime 非震荡 → 跳过本周期 A/B 支直接走趋势分支；regime 带
  *      insufficient（参考周期笔 <2）→ 观望·笔数据不足）；
- *      rangeGate 为空时按本周期自身判定：isRangeBound（A 震荡）或 buildZS 最后一个
- *      中枢未离开且当前价在中枢内（B 震荡）→ 方向「观望」，策略「震荡整理，观望等待方向选择」；
+ *      rangeGate 为空时，仅 4 小时与日线自判 A/B（横盘 / 未离开中枢且现价在箱内
+ *      → 观望）。严格低于 4 小时的周期不自判震荡，直接走趋势与买卖点（2026-10-11）；
  *   2. 趋势：获取最近笔端点上的买卖点（findBuyPoints/findSellPoints）：
  *      - 先匹配最后一笔终点上的买卖点 → 按类型映射策略；
  *      - 若最后一笔终点无买卖点（空）→ 再向前获取一笔（逐笔向前扫描最近笔端点），
@@ -407,12 +415,12 @@ function classifySecond(bis, macdArr, p, cfg) {
  *   lastPrice  当前最新价（判断是否在中枢区间内）
  *   bars       本周期实时K线（供震荡判定，可为空）
  *   rangeGate  参考周期震荡 regime（planGateRow 结果；对齐 py_chain range_gate
- *              替换语义；缺省 = 本周期自判 A/B 旧行为）
+ *              替换语义；缺省时仅 4 小时与日线自判 A/B，小周期不自判）
  * @returns {object} { res, direction, strategy, reason, label, pointDesc }
  *   pointDesc  找到的最近买卖点描述（如 "1卖@8-17 18:00(30262.95)"，供图上标注；震荡/无匹配时为空）
  */
 function predictPlan(opts) {
-  const { res, bis, upperBis, macdArr, lastPrice, bars, rangeGate } = opts;
+  const { res, bis, upperBis, macdArr, lastPrice, bars, rangeGate, upperMacd } = opts;
   const atr = opts.atr || 0;
   const barSec = opts.barSec || intervalSecOf(res) || 60;
   const empty = { res, direction: "观望", strategy: "数据不足", reason: "笔数量不足，无法判断", label: "数据不足" };
@@ -431,7 +439,8 @@ function predictPlan(opts) {
                reason: rangeGate.reason || "", label: "震荡观望" };
     }
     // regime 非震荡 → 跳过本周期 A/B 支，直接走趋势分支
-  } else {
+  } else if ((intervalSecOf(res) || 0) >= (intervalSecOf("240") || 14400)) {
+  // 4小时与日线：rangeRes 关闭时仍自判 A/B。小周期（严格低于 4 小时）不进这里，直接走趋势。
   // 1. 震荡优先（A：isRangeBound 横盘判定，RANGE_CFG 来自参数中心/CLI；rangeBoundOn 关闭则跳过）
   if (RANGE_CFG.rangeBoundOn !== false) {
     const rb = isRangeBound(bis, bars, atr, RANGE_CFG);
@@ -468,14 +477,14 @@ function predictPlan(opts) {
       return { res, direction: "观望", strategy: "震荡整理（中枢内），观望等待方向选择", reason, label: "震荡观望" };
     }
   }
-  } // else（自判 A/B）结束
+  } // 4小时/日线自判 A/B 结束；小周期不自判，落到下方趋势分支
 
   // 2. 趋势 → 获取本周期买卖点
   let buyPts = [], sellPts = [];
   try {
     if (bis.length >= 3) {
-      buyPts = findBuyPoints(bis, upperBis || [], macdArr || [], barSec);
-      sellPts = findSellPoints(bis, upperBis || [], macdArr || [], barSec);
+      buyPts = findBuyPoints(bis, upperBis || [], macdArr || [], barSec, undefined, undefined, upperMacd);
+      sellPts = findSellPoints(bis, upperBis || [], macdArr || [], barSec, undefined, undefined, upperMacd);
     }
   } catch (e) {
     if (DEBUG) console.log(`[计划] ${res} findBuy/SellPoints 失败: ${e.message}`);
@@ -501,12 +510,21 @@ function predictPlan(opts) {
   // 3. 先取最后一笔终点的买卖点；4. 无 → 逐笔向前扫描。
   //    2026-10-10 提前入列（原 anchorUndecidedSkip「未定型回退前锚」淘汰）：未定型点
   //    直接接管，strategyOf 弱档先行路由、定型后滚动翻档（与 py_chain 对齐）。
-  const clsOf = (p) => (/^(2买|类2买|3买|类3买|4买|类4买|2卖|类2卖|3卖|类3卖|4卖|类4卖)$/.test(p.type)
-    ? classifySecond(bis, macdArr, p, RANGE_CFG) : "其他");
+  // 2026-10-11 统一二买定义：二买族（2买/类2买/2卖/类2卖）按 strong 二分
+  // （null=首笔上涨/下跌未走完 → 弱先行，过前高后滚动翻强）；无 strong 字段的点
+  // （旧数据/异常路径）回退 classifySecond 三档（与 py_chain cls_of 对齐）。
+  const FAMILY_CLS = { "2买": "二买", "类2买": "类2买", "2卖": "二卖", "类2卖": "类2卖" };
+  const clsOf = (p) => {
+    if ("strong" in p && FAMILY_CLS[p.type]) return (p.strong ? "强" : "弱") + FAMILY_CLS[p.type];
+    return (/^(2买|类2买|3买|类3买|4买|类4买|2卖|类2卖|3卖|类3卖|4卖|类4卖)$/.test(p.type)
+      ? classifySecond(bis, macdArr, p, RANGE_CFG) : "其他");
+  };
   const outOf = (m, origin) => {
     const p = m.point;
-    let reason = `找到最近买卖点 ${p.type} @ ${fmtT(p.time)} ${p.price.toFixed(2)}（${origin}）`;
-    let out = strategyOf(res, p.type, reason, `趋势|${p.type}`, clsOf(p), RANGE_CFG);
+    const cls = clsOf(p);
+    const shown = ("strong" in p && FAMILY_CLS[p.type]) ? cls : p.type;
+    let reason = `找到最近买卖点 ${shown} @ ${fmtT(p.time)} ${p.price.toFixed(2)}（${origin}）`;
+    let out = strategyOf(res, p.type, reason, `趋势|${p.type}`, cls, RANGE_CFG);
     // 形成中 1买/1卖（末笔仍在新低/新高中）→ 直接买卖档（wait1Buy/wait1Sell）：
     // 其入场闸门当下正可判；确认收笔后才切回调档（wait2Buy/wait2Sell）。
     const bi = m.bi;
@@ -708,7 +726,8 @@ function phaseDirection(name, p, bis, bars, upperBis, barSec, rb, tCut = null) {
   return [null, `${name}${t}后方向不明`];
 }
 
-function trendDirection(res, bis, bars, upperBis, macdArr, tCut = null, rebound = null, lowerStroke = null) {
+function trendDirection(res, bis, bars, upperBis, macdArr, tCut = null, rebound = null, lowerStroke = null,
+                        upperMacd = null) {
   const name = trendResName(res);
   if (bis && bis.length && !bis[bis.length-1]._contextReady) {
     bis = core.buildStructureContext(bis, bars, intervalSecOf(res), tCut, null, null, null, lowerStroke).bis;
@@ -719,8 +738,8 @@ function trendDirection(res, bis, bars, upperBis, macdArr, tCut = null, rebound 
   const barSec = intervalSecOf(res);
   let pts = [];
   try {
-    pts = findBuyPoints(win, upperBis, macdArr, barSec)
-      .concat(findSellPoints(win, upperBis, macdArr, barSec));
+    pts = findBuyPoints(win, upperBis, macdArr, barSec, undefined, undefined, upperMacd)
+      .concat(findSellPoints(win, upperBis, macdArr, barSec, undefined, undefined, upperMacd));
   } catch (e) {
     pts = [];
   }
@@ -778,8 +797,13 @@ function trendStateOf(periodBis, barsByPeriod, trendRes, periodMacd = null, cfg 
   if (best !== null) upper = periodBis[best];
   let macdArr = (periodMacd || {})[tr];
   if (macdArr == null) macdArr = calcMACD(bars);
+  let upperMacd = best !== null ? (periodMacd || {})[best] : null;
+  if (upperMacd == null && best !== null) {
+    const ub = (barsByPeriod || {})[best] || [];
+    if (ub.length) upperMacd = calcMACD(ub);
+  }
   const rebound = cfg && cfg.trendRebound === false ? null : {enabled:true, near_pts:cfg?.reboundNearPts ?? 5, angle_ref:cfg?.reboundAngleRef ?? 5, min_bars:core.CHAN_CFG.expectBiMinBars || 5};
-  const [dir, reason] = trendDirection(tr, bis, bars, upper, macdArr, tCut, rebound, core.lowerStrokePack(tr, periodBis, barsByPeriod));
+  const [dir, reason] = trendDirection(tr, bis, bars, upper, macdArr, tCut, rebound, core.lowerStrokePack(tr, periodBis, barsByPeriod), upperMacd);
   return { dir, reason, res: tr };
 }
 
@@ -1075,7 +1099,7 @@ async function main() {
     }
 
     // 逐周期：从大到小计算交易计划并收集报告行（表格形式统一输出）
-    // 震荡判定参考周期闸门（对齐 py_chain compute_plan；--range-res="" 关闭 → 每周期自判旧行为）
+    // 震荡判定参考周期闸门（对齐 py_chain compute_plan；--range-res="" 关闭 → 小周期不自判）
     const gateOn = !!RANGE_RES;
     const refSec = gateOn ? (intervalSecOf(RANGE_RES) || 0) : 0;
     const refName = gateOn ? trendResName(RANGE_RES) : "";
@@ -1086,9 +1110,10 @@ async function main() {
                     reason: `${refName}笔数据不足（少于2笔），无法判定震荡/趋势，观望` };
     }
     if (gateOn) console.log(`[震荡闸门] 参考周期 ${refName}：开启（更低周期不自判 A/B 只听门，${refName}及以上只作锚）`);
-    else console.log("[震荡闸门] rangeRes 已关闭：每个周期用 A横盘/B中枢内 各自判震荡（与引擎关闭口径一致）");
+    else console.log("[震荡闸门] rangeRes 已关闭：低于4小时的周期不自判震荡，直接走买卖点；4小时与日线仍自判 A横盘/B中枢内");
     let currentRes = prepRes;
     let upperBis = null;
+    let upperMacdArr = null; // 与 upperBis 同步级联：上一（更大）周期 MACD（二买族背驰闸）
     const reportRows = []; // [{symbol, res, direction, strategy}]
     const planRows = {}; // {res: {direction, strategy, reason, pointDesc}}，落盘供 mark-entry 读取
     for (let pi = 0; pi < PERIODS.length; pi++) {
@@ -1126,6 +1151,7 @@ async function main() {
         p = predictPlan({
           res, bis: curBis, upperBis, macdArr, atr, lastPrice, bars: rawBars,
           rangeGate: gateOn ? rangeGate : undefined,
+          upperMacd: upperMacdArr,
         });
       }
       if (gateOn && res === RANGE_RES) {
@@ -1152,6 +1178,7 @@ async function main() {
 
       // 记录本周期笔，供下一级周期做上级判断
       upperBis = curBis;
+      upperMacdArr = macdArr;
     }
 
     // 表格形式输出全部周期交易计划

@@ -867,8 +867,10 @@ function favSeg5Time(pd, isShort, entryT) {
  *   beStop：进场K线（sig.time 对应 markRes bar，取不到时兜底 进场价±保本滑点）极值 ± slipBe
  *   TP1 保本：markRes 首个进场后完成的有利方向笔 → 止损位上移至 beStop（仅状态迁移，不成交）
  *   TP2 平一半（仅顺势）：periodX 首个有利方向形成段合并后≥5根K（favSeg5Time）→ 平一半，
- *           剩余半仓止损移至 beStop；不要求 TP1 先触发
- *   TP3 全平：顺势 = periodX 有利方向笔破前高/前低（breakPrev）；逆势 = favSeg5Time
+ *           剩余半仓止损移至 beStop；不要求 TP1 先触发（已知漂移：py 引擎 2026-10-10
+ *           起够笔不限顺势，本 hindsight 视图未同步）
+ *   TP3 全平（2026-10-10 起不分顺势逆势，与 py 引擎统一）：periodX 有利方向笔破
+ *           前一同向笔端点（breakPrev）；旧逆势 favSeg5Time 快速离场口径废除
  *   half/close 成交 = 触发后第一根 markRes bar 开盘价（跳空自然体现；无下一根 → 未成交，
  *           与 py 引擎「触发 bar 无下一根 → 未成交」语义一致）
  *   止损：markRes K线逐根盘中检查（short high>止损位 / long low<止损位），跳空按开盘价成交
@@ -916,7 +918,9 @@ function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
     }
   }
   const tp1 = findBiEvent(markResData && markResData.bis, entryT, fav);
-  const tp3a = trend ? findBiEvent(periodXData && periodXData.bis, entryT, fav, false, true) : null;
+  // 过高低点止盈参照（2026-10-10 起不分顺势逆势，与 py 引擎统一口径）：有利方向笔
+  // 破前一同向笔端点（breakPrev）；旧逆势 favSeg5Time 快速离场口径废除
+  const tp3a = findBiEvent(periodXData && periodXData.bis, entryT, fav, false, true);
   const t5 = favSeg5Time(periodXData, isShort, entryT);
   // 最大止损价（硬上限，兜底通道用；引擎 _fill_pending maxLoss 同口径：
   // 进场价 ± 有效兜底滑点 = slipFallback + kFallback×markRes ATR）
@@ -991,9 +995,10 @@ function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
         return "half";
       }
     }
-    // tp3a/t5 是「首个匹配」事件，一旦存在每拍都满足——部分平仓（closePct<100）
-    // 须 closeDone latch 一次性消费，防逐拍重复挂起（引擎 closeDone 同口径）
-    const closeT = trend ? (tp3a ? tp3a.time : null) : t5;
+    // tp3a 是「首个匹配」事件，一旦存在每拍都满足——部分平仓（closePct<100）
+    // 须 closeDone latch 一次性消费，防逐拍重复挂起（引擎 closeDone 同口径）；
+    // 2026-10-10 起不分顺势逆势（旧逆势走 t5 快速离场，已废除）
+    const closeT = tp3a ? tp3a.time : null;
     if (ec.closeOn && !closeDone && closeT != null && closeT <= upto) {
       const nb = nextOpen(closeT);
       if (nb) {

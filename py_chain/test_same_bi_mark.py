@@ -82,9 +82,14 @@ MACD_NO_DIVERGE_SELL = [
 class TestSameBiFirstBuy(unittest.TestCase):
 
     def test_same_bi_upper_ended_marks_first_buy(self):
-        """同笔 + 上级笔已结束 → 纯结构标记 1买，且无 2买/3买 混入（分支隔离）。"""
+        """同笔 + 上级笔已结束 → 纯结构标记 1买，且无 3买 混入（分支隔离）。
+        2026-10-11 统一二买定义：1买@4000 后首个抬低 @6000 4450.74 合法标 2买
+        （strong=True：其前上涨笔终点 4450.74 的反弹过前一根上涨笔终点）。"""
         pts = cc.findBuyPoints(BI_BUY, UPPER_ENDED, MACD_NO_DIVERGE, 900)
-        self.assertEqual(pts, [{"type": "1买", "time": 4000, "price": 4324.68}])
+        self.assertEqual(pts, [
+            {"type": "1买", "time": 4000, "price": 4324.68},
+            {"type": "2买", "time": 6000, "price": 4450.74, "strong": True},
+        ])
 
     def test_same_bi_upper_last_still_skipped(self):
         """同笔 + 命中笔是上级末笔（延伸中）→ 跳过不标（时序护栏）。"""
@@ -114,9 +119,14 @@ class TestSameBiFirstBuy(unittest.TestCase):
 class TestSameBiFirstSell(unittest.TestCase):
 
     def test_same_bi_upper_ended_marks_first_sell(self):
-        """同笔 + 上级笔已结束 → 纯结构标记 1卖；函数内锚定锚回同一端点（无漂移）。"""
+        """同笔 + 上级笔已结束 → 纯结构标记 1卖；函数内锚定锚回同一端点（无漂移）。
+        2026-10-11 统一二卖定义：1卖@4000 后首个压低 @6000 4400.0 合法标 2卖
+        （strong=False：其前下跌笔未创更低于前一根下跌笔终点）。"""
         pts = cc.findSellPoints(BI_SELL, UPPER_SELL_ENDED, MACD_NO_DIVERGE_SELL, 900)
-        self.assertEqual(pts, [{"type": "1卖", "time": 4000, "price": 4436.23}])
+        self.assertEqual(pts, [
+            {"type": "1卖", "time": 4000, "price": 4436.23},
+            {"type": "2卖", "time": 6000, "price": 4400.0, "strong": False},
+        ])
 
     def test_same_bi_upper_last_sell_skipped(self):
         """同笔 + 命中笔是上级末笔（延伸中）→ 跳过不标。"""

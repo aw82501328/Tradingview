@@ -13,7 +13,7 @@ _os.environ.setdefault("PY_CHAIN_BT_JOURNAL", "0")  # 引擎测试不落交易�
   - compute_plan(range_res=...)：参考周期 regime 震荡 → 更低周期观望；非震荡 →
     更低周期直接走趋势分支；参考周期及以上（240/D）固定观望只作锚；参考周期
     笔 <2（含无数据）→ 更低周期观望·笔数据不足；
-    "" 关闭（2026-10-08）→ 每周期自判 A/B（240 震荡不再封锁低周期、
+    "" 关闭 → 小周期不自判震荡（240/日线仍自判 A/B；240 震荡不再封锁低周期、
     240/D 恢复正常计划行、无 regime 传递）；
     work_cache 二次调用复用一致
 
@@ -127,9 +127,15 @@ class TestPredictPlanRangeGate(unittest.TestCase):
                            atr=self.atr, barSec=self.sec, **kw)
 
     def test_own_judgment_range(self):
+        # 小周期不自判：15m 自身虽满足 A 支，也不再震荡观望
         row = self._plan()
-        self.assertEqual(row["direction"], "观望")
-        self.assertIn("震荡整理", row["strategy"])
+        self.assertNotIn("震荡整理", row["strategy"])
+        # 4小时仍自判 A/B
+        big = predictPlan("240", alt_bis(0, 14400, 6, 4100.0, 4110.0), None, [],
+                          4105.0, flat_bars(0, 14400, 40, 4099.0, 4111.0),
+                          atr=100.0, barSec=14400)
+        self.assertEqual(big["direction"], "观望")
+        self.assertIn("震荡整理", big["strategy"])
 
     def test_gate_range_blocks_with_source_name(self):
         row = self._plan(range_gate={"range": True, "resName": "4小时", "reason": "4小时：xxx"})
@@ -206,12 +212,10 @@ class TestComputePlanRangeRes(unittest.TestCase):
         rows = compute_plan(periodBis, barsByPeriod, self.PERIODS, periodAtr=periodAtr,
                             range_res="240")
         self.assertNotIn("震荡整理", rows["15"]["strategy"])
-        # 对照："" 关闭（2026-10-08）→ 每周期自判：15m 自身数据判 A 支震荡
-        # → 震荡观望（自判文案，无「4小时」前缀；旧「未配置→全部观望」防御已移除）
+        # 对照："" 关闭 → 小周期不自判。15m 自身数据虽满足 A 支，也不再震荡观望
         rows_off = compute_plan(periodBis, barsByPeriod, self.PERIODS, periodAtr=periodAtr,
                                 range_res="")
-        self.assertEqual(rows_off["15"]["direction"], "观望")
-        self.assertIn("震荡整理", rows_off["15"]["strategy"])
+        self.assertNotIn("震荡整理", rows_off["15"]["strategy"])
         self.assertNotIn("4小时", rows_off["15"]["strategy"])
         # 更低周期一致解锁
         self.assertNotIn("震荡整理", rows["3"]["strategy"])
@@ -253,7 +257,7 @@ class TestComputePlanRangeRes(unittest.TestCase):
             self.assertIn("参考周期", rows[res]["strategy"], res)
 
     def test_off_mode_self_judgment(self):
-        # "" 关闭（2026-10-08）：每周期自判 A/B——240 自身震荡不再封锁更低周期、
+        # "" 关闭：小周期不自判；240 自身震荡不再封锁更低周期、
         # 240/D 恢复正常计划行（不再「只作锚」）、无 regime 传递
         periodBis, barsByPeriod, periodAtr = self._build(
             bis240=alt_bis(0, 14400, 6, 4100.0, 4110.0),    # 240 自判 → A 支震荡

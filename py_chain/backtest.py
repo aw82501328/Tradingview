@@ -13,7 +13,8 @@
   - 旧锚点保护：anchor 下锚点距收集时刻 > 检测周期 1 根 bar → 回落 confirm（fillMode=confirm-stale-anchor）。
 
 出场规则（三模式统一口径，模块级 advance_exit_decision / execute_pending_exit
-为唯一实现源；mark_entry.stop_ref_of/find_bi_event/lastBiOk/forming_seg_ready/trend_following_of）：
+为唯一实现源；mark_entry.stop_ref_of/find_bi_event/lastBiOk/enough_fav_bars/
+forming_break_ref/trend_following_of）：
   - 触发判定在「已收盘 bar」进行（bar 完整 high/low 判止损穿越；三档止盈用
     endTime ≤ 收盘时刻的已确认笔 / 检测周期形成段合并K线计数）；
   - 成交统一「下一根K线开盘」：止损/保本止损/平一半/全平的事件时间 = 触发 bar 的
@@ -27,12 +28,16 @@
     （2026-10-08 够笔止盈拆分新增：背驰周期首笔有利方向笔完成，同 TP1 事件源，
     不限顺势；默认关）/ 检测周期够笔 half（原止盈2 平一半，比例默认 50%）/
     过高低点止盈 close（原止盈3 全平）/ 跟踪止盈
-    trailStop（同 fxma 结构点驱动：参照点出现 → 止损一次性上移到点价∓跟踪止盈滑点，
-    只上移；trailRaise 事件仅状态迁移；2026-10-09 起双参照 exitTrailSrc——detect=
-    检测周期结构点流 3/类3/4/类4〔默认：保本后检测周期出3买即提损至3买位置〕，
-    mark=背驰周期信号流同向3类点〔旧口径 wait3Buy/waitBuy/…〕；门控保本——beDone
-    之前不接管止损、参照点自保本当拍起算不追溯，防入场时段参照点抢在「够笔→保本」
-    之前提损）。比例 = 平剩余仓位百分比，
+    trailStop（参照点出现 → 止损一次性上移到点价∓跟踪止盈滑点，只上移；trailRaise
+    事件仅状态迁移；2026-10-09 起双参照 exitTrailSrc——detect=检测周期有利方向笔
+    的起点〔默认：空头=下跌笔起点高点，多头=上涨笔起点低点；价格破坏该结构点才出场。
+    2026-10-11 修正：不再用 3/类3/4/类4 买卖点——9-28 trade#109 的 15m 3卖
+    4157.98 把止损抬到 4158.98，18:42 即被扫掉。够笔还不够，须破前低/前高
+    才算结构确认：trade#109 只有 9-28 20:15 高点 4171.42 的下跌破了前低，
+    其后 4146/4140 未破前低不算；该高点到 9-29 22:15 才被破坏〕，
+    mark=背驰周期信号流同向3类点〔旧口径
+    wait3Buy/waitBuy/…〕；门控保本——beDone 之前不接管止损、参照点自保本当拍
+    起算不追溯，防入场时段参照点抢在「够笔→保本」之前提损）。比例 = 平剩余仓位百分比，
     每种方式一次性触发（部分平仓按方式 latch 防逐拍重触发）；
   - 最大止损硬上限兜底（2026-10-09）：止损类方式部分平仓 latch 关闭穿越判定后，
     剩余手数由 maxLoss（进场价±最大止损）兜底——盘中破坏即全平剩余（记 stopSr），
@@ -51,13 +56,21 @@
     向有利方向走出 min_merged 块合并K（预期口径 enough_fav_bars——锚点取末笔延伸
     终点块与进场块较晚者：末笔延伸收盘才提交，纯末笔锚点在入场初段会把末笔自身的
     块计入=假就绪；进场块下限防进场前已走出的块计入）或末笔翻为有利方向确认笔
-    （lastBiOk，含 M4 形成中够块），先到先触发 → 下一开盘平指定比例（默认一半），
-    剩余止损移至 beStop（不要求保本先触发）；逆势单与快速离场（seg5）构成先后两级
-    部分止盈；exitExpectOn=False 恢复「末笔须已确认反向」旧口径；
-  - 过高低点止盈：顺势 = 检测周期有利方向笔破前高/前低（breakPrev）；预期口径下
-    另认「形成段运行极值越过前一同向笔端点」（当根收盘K极值判定，不等收笔确认）；
-    逆势（多头空/空头多）= 检测周期首个有利方向形成段（合并后 ≥5 根K成笔预期）
-    → 下一开盘平指定比例；
+    （lastBiOk，含 M4 形成中够块；该笔 endTime 必须晚于进场——进场前已走完的
+    有利笔不是「翻为」，否则入场当拍假就绪。2026-09-01 #1：60m 下跌笔 8-31
+    21:00 已确认，08:15 进场、08:18 即半平，剩余止损收到保本位，08:21 保本止损），
+    先到先触发 → 下一开盘平指定比例（默认一半），
+    剩余止损移至 beStop（不要求保本先触发）；exitExpectOn=False 恢复「末笔须已确认
+    反向」旧口径；
+  - 过高低点止盈（2026-10-10 起不分顺势逆势，统一破前高/前低参照）：确认口径 =
+    检测周期有利方向笔破前一同向笔端点（breakPrev）；预期口径（exitExpectOn）另认
+    「当根收盘K极值越过前一同向笔端点」（不等收笔确认；末笔有利但未破前一同向端点
+    时参照退一级取前一同向端点——gapLocked/延伸滞后会冻结确认口径端点，9-28
+    trade#109：08:00 破 4254.58、12:00 才 4196.81 平仓）
+    → 下一开盘平指定比例；旧逆势分支「形成段≥5根K成笔预期快速离场」废除——锚点
+    无进场块下限、进场前反弹块被计入 → 入场拍假就绪（2026-09-26 trade#109 实证：
+    02:57 进场 03:00 即 4294.98 亏 0.29 平 1 手，正确参照前低 4254.58 应 9-28
+    08:03 @ 4255.39 出场）；
   - stopSr/stopBe/trailStop：盘中破坏止损位 / 保本位 beStop / 跟踪止盈上移后的止损位；
   - 同向持仓互斥：同方向持仓未终局时新信号不成交（on_suppressed 回调）；多空互不影响；
   - 已平仓盈亏 = exits 中带 lots 的部分平仓事件（half/close/stop 类按比例触发）逐笔按
@@ -81,7 +94,7 @@ import time
 
 from .chan_core import (
     buildBi, fixBiExtremes, calcATR, calcMACD, intervalSecOf, fmtT,
-    nearDoubleOn, CHAN_CFG, lockedPivotsOf, findBuyPoints, findSellPoints,
+    nearDoubleOn, CHAN_CFG, lockedPivotsOf,
     MacdAccumulator, AtrAccumulator, extendLastBi, extendLastBiFrom,
 )
 from .mark_buy_sell import compute_all_marks
@@ -93,12 +106,12 @@ from .trading_plan import (compute_plan, trend_state_of,
 from .mark_entry import (
     compute_entries, stop_ref_of, sr_of_detect, sr_drop_fib_for_class1,
     find_bi_event, filterDetectPeriods,
-    trend_following_of, forming_seg_ready, forming_break_ref, lastBiOk,
+    trend_following_of, forming_break_ref, lastBiOk,
     enough_fav_bars,
     DEFAULT_LOTS, DEFAULT_SLIP_STOP, DEFAULT_SLIP_FALLBACK, DEFAULT_SLIP_BE,
     DEFAULT_SLIP_STOP_ATR_K, DEFAULT_SLIP_FALLBACK_ATR_K, DEFAULT_SLIP_BE_ATR_K,
     NEAR as DEFAULT_NEAR, EXIT_MIN_MERGED, REALTIME_MIN_BARS, ZS_EXIT_WEAK_RATIO,
-    EXIT_MODE_DEFAULTS, EXIT_TRAIL_REF_KEYS, EXIT_TRAIL_POINT_TYPES,
+    EXIT_MODE_DEFAULTS, EXIT_TRAIL_REF_KEYS,
 )
 from .bt_journal import BtJournal, FILL_MODE_LABELS, DIR_LABELS
 
@@ -134,8 +147,11 @@ def _exit_lots(lots_total, lots_left, pct):
 
 
 def exit_cfg_desc(ec):
-    """出场方式配置摘要（entryWhy 叙事用），如「支阻止损100%·保本止损100%·够笔止盈50%…」。"""
+    """出场方式配置摘要（entryWhy 叙事用），如「锁定盈利(超100点锁50%)·支阻止损100%…」。"""
     parts = []
+    if ec.get("exitLockOn"):
+        parts.append(f"锁定盈利(超{float(ec.get('exitLockPts', 100)):.0f}点"
+                     f"锁{float(ec.get('exitLockPct', 50)):.0f}%)")
     if ec.get("exitStopSrOn"):
         parts.append(f"支阻止损{float(ec.get('exitStopSrPct', 100)):.0f}%")
     if ec.get("exitStopBeOn"):
@@ -156,9 +172,43 @@ def exit_cfg_desc(ec):
     return "·".join(parts) if parts else "无（至少启用一种）"
 
 
+def trail_structure_refs(px_bis, direction):
+    """检测周期跟踪止盈参照：破前低/前高之后的有利方向笔起点才是结构点。
+
+    够笔不够。空头要下跌笔终点低于前一根下跌笔终点（破前低），结构高点是
+    这根下跌笔的起点；多头对称，上涨笔终点高于前一根上涨笔终点（破前高），
+    结构低点是这根上涨笔的起点。没破前低/前高的笔不收紧止损。
+    9-28 trade#109：20:15 下跌 4171.42→4110.87 破了前低 4140.77，结构高点
+    停在 4171.42；其后 4146.77、4140.39 都没破前低，不能再往下收。该高点
+    到 9-29 22:15 才被打掉。
+    @returns [{time, price, key}]，按笔起点时间升序。
+    """
+    is_short = direction == "short"
+    fav = "down" if is_short else "up"
+    key = "下跌结构" if is_short else "上涨结构"
+    refs = []
+    prev_end = None
+    for b in px_bis or []:
+        if b.get("type") != fav:
+            continue
+        end = b.get("endPrice")
+        broke = (prev_end is not None and end is not None
+                 and (end < prev_end if is_short else end > prev_end))
+        if end is not None:
+            prev_end = end
+        if not broke:
+            continue
+        st, px = b.get("startTime"), b.get("startPrice")
+        if st is None or px is None:
+            continue
+        refs.append({"time": st, "price": px, "key": key})
+    return refs
+
+
 def trail_raise(pos, refs, t):
-    """跟踪止盈上移（纯函数，2026-10-09 双模式）：refs = 调用方按 exitTrailSrc 归一化
-    好的参照点流 [{time, price, key}]（detect=检测周期 3/类3/4/类4 结构点；
+    """跟踪止盈上移（纯函数，2026-10-09 双模式；2026-10-11 detect 改结构点）：
+    refs = 调用方按 exitTrailSrc 归一化好的参照点流 [{time, price, key}]
+    （detect=检测周期已破前低/前高的有利方向笔起点，空头下跌结构高点 / 多头上涨结构低点；
     mark=背驰周期信号流同向 3类点，含被同向互斥抑制的）中每出现一个时间晚于水位
     trailMark 的参照，止损一次性上移到 点价∓跟踪止盈滑点（只上移：空头只下移/
     多头只上移）；水位只进不退（点消失不回滚）。门控保本（2026-10-09）：调用方
@@ -193,10 +243,52 @@ def trail_raise(pos, refs, t):
         pos["exits"].append({
             "type": "trailRaise", "time": t, "price": last["pointPrice"],
             "stopTo": last["stopTo"], "moves": len(pos["trailMoves"]),
-            "why": (f"跟踪止盈上移（参照={'背驰周期信号流' if (ec.get('exitTrailSrc') or 'detect') == 'mark' else '检测周期点流'}）："
-                    f"同向3类点 {last['pointKey']} "
+            "why": (f"跟踪止盈上移（参照={'背驰周期信号流' if (ec.get('exitTrailSrc') or 'detect') == 'mark' else '检测周期结构点'}）："
+                    f"{'同向3类点' if (ec.get('exitTrailSrc') or 'detect') == 'mark' else '结构点'} {last['pointKey']} "
                     f"{fmtT(last['pointTime'])} @ {last['pointPrice']:.2f} → 止损位上移至 "
                     f"{last['stopTo']:.2f}（累计 {len(pos['trailMoves'])} 次，只上移）")})
+
+
+def _apply_profit_lock(pos, bar, ec, lots_left):
+    """锁定盈利（2026-10-11，出场优先级最高；仅缠论V1，本函数只被 advance_exit_decision 调用）。
+
+    最大盈利 = 进场后有利方向极值相对进场价的点数。超过 exitLockPts 后武装，
+    锁定价 = 进场价 ± 最大盈利 × exitLockPct%（多头加、空头减）。盘中价格
+    回到锁定价不利一侧 → 全平剩余手数（记 profitLock）。
+    本拍只用上一拍已记下的最大盈利做回撤判定，本拍极值记完下一拍才生效
+    （一根大阳的下影不算回撤）。关闭时不判定、不记账。
+    @returns True 已挂起成交
+    """
+    if not ec.get("exitLockOn"):
+        return False
+    is_short = pos["direction"] == "short"
+    entry = pos.get("entryPrice")
+    peak = pos.get("maxFavPx")
+    hit = False
+    if entry is not None and peak is not None and lots_left:
+        peak_pts = (entry - peak) if is_short else (peak - entry)
+        need = float(ec.get("exitLockPts", 100.0))
+        pct = float(ec.get("exitLockPct", 50.0))
+        if peak_pts > need:
+            keep = peak_pts * pct / 100.0
+            lock_px = (entry - keep) if is_short else (entry + keep)
+            # 与止损穿越同一口径：空头 high 冲上锁定价 / 多头 low 跌破锁定价
+            crossed = bar["high"] > lock_px if is_short else bar["low"] < lock_px
+            if crossed:
+                pos["pendingExit"] = "profitLock"
+                pos["pendingLots"] = lots_left
+                ext = bar["high"] if is_short else bar["low"]
+                pos["pendingWhy"] = (
+                    f"锁定盈利触发：最大盈利 {peak_pts:.2f} 点已超过 {need:.2f} 点，"
+                    f"至少锁定 {pct:.0f}% = {keep:.2f} 点（锁定价 {lock_px:.2f}）；"
+                    f"{fmtT(bar['time'])} 当根{'最高' if is_short else '最低'} {ext:.2f} "
+                    f"{'冲上' if is_short else '跌破'}锁定价，全平剩余 {lots_left} 手挂起")
+                hit = True
+    fav = bar["low"] if is_short else bar["high"]
+    prev = pos.get("maxFavPx")
+    if prev is None or (fav < prev if is_short else fav > prev):
+        pos["maxFavPx"] = fav
+    return hit
 
 
 def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
@@ -207,6 +299,9 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
     统一语义（出场阶梯重构 2026-09-09；2026-10-08 出场方式可配置化；2026-10-09
     出场预期口径「严进宽出」——检测周期够笔/顺势过高低点改形成段预期触发，
     不等确认笔，exitExpectOn=False 回退旧口径）：
+      - 锁定盈利 profitLock（2026-10-11，同拍最先判定）：最大盈利超过 exitLockPts
+        后，回撤到只剩 exitLockPct% 的盈利即全平剩余（两个参数可配；比例锁的是
+        盈利点数不是手数）。本拍极值下一拍才参与回撤判定；
       - 出场方式开关/比例快照在 pos["exitCfg"]（缺省 EXIT_MODE_DEFAULTS=现网行为）：
         支阻止损 stopSr / 保本止损 stopBe（TP1 迁移随其开关）/ 够笔止盈 half /
         过高低点止盈 close / 跟踪止盈 trailStop；比例 = 平剩余仓位（lotsLeft）百分比，
@@ -214,22 +309,23 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
         latch；止损类部分
         平仓用 stopSrFired/stopBeFired/trailFired latch 防逐拍重触发）；
       - 用 bar 完整 high/low 判止损/保本止损穿越（保本位 = beStop，非进场价）；
-        TP1 用 markRes 已确认笔（endTime <= t）；过高低点止盈顺势分支用 periodX 已确认笔
-        （breakPrev）；检测/背驰周期够笔（2026-10-10 统一口径，不分顺势逆势）：
-        确认口径 lastBiOk / TP1 首笔有利方向确认笔 + 预期口径 enough_fav_bars
-        （向有利方向走出 min_merged 块合并K，不等确认笔）先到先触发；逆势快速离场仍用
-        检测周期形成段「合并后≥5根K成笔预期」（forming_seg_ready，
-        px_merged_times 缺省 None 时跳过形成段判定）；
-        预期口径（exitExpectOn，默认开）另认顺势过高低点
-        「当根收盘K极值越过前一同向笔端点」（forming_break_ref + bar high/low，
-        无前视）；
+        TP1 用 markRes 已确认笔（endTime <= t）；检测/背驰周期够笔（2026-10-10
+        统一口径，不分顺势逆势）：确认口径 lastBiOk（末笔有利且 endTime 晚于
+        进场；进场前已走完的有利笔不算） / TP1 首笔有利方向确认笔 +
+        预期口径 enough_fav_bars（向有利方向走出 min_merged 块合并K，不等确认笔）
+        先到先触发（px_merged_times 缺省 None 时跳过预期口径）；
+        过高低点止盈（2026-10-10 起不分顺势逆势）：确认口径 periodX 已确认笔
+        breakPrev / 预期口径「当根收盘K极值越过前一同向笔端点」（forming_break_ref
+        + bar high/low，无前视；末笔有利但未破前一同向端点时参照退一级——防
+        gapLocked/延伸滞后冻结端点致破位后迟迟不触发）；旧逆势「形成段≥5根K
+        成笔预期快速离场」废除；
       - 跟踪止盈上移在穿越判定之后执行（本拍上移、下一拍生效，同 fxma 口径）；
         门控保本（2026-10-09）：beDone 之前不上移、穿越不记 trailStop（只认 stopSr），
         门控开启当拍水位一次性推进到当拍（保本前的参照点不追溯）；
       - 最大止损硬上限兜底（2026-10-09）：止损类通道 latch 关闭或有效止损位宽于
         maxLoss 时，盘中破坏 maxLoss → 全平剩余手数（记 stopSr，永不 latch）；
       - breakeven/trailRaise：仅状态迁移（当拍生效、事件仅落盘）；
-      - half/close/stopSr/stopBe/trailStop：成交型事件——只把 pos['pendingExit'] 挂起
+      - profitLock/half/close/stopSr/stopBe/trailStop：成交型事件——只把 pos['pendingExit'] 挂起
         （pendingLots=本次平仓手数），由 execute_pending_exit 在「下一根K线开盘」执行
         成交（同一拍只挂一个，逐拍执行后继续判定）。
     @param t      决策时刻 = bar 收盘时刻（下一根开盘时刻）
@@ -239,9 +335,9 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
     @param mark_merged_times  背驰周期合并K线块截止时间数组（升序；None 跳过背驰够笔
                              预期口径，仅剩 TP1 确认笔事件源）
     @param trail_sigs         持仓 markRes 的信号流快照（跟踪止盈 mark 模式参照；None 跳过）
-    @param trail_pts          持仓检测周期的结构点流快照 [{type,time,price}]（detect 模式
-                             参照，_rebuild_chain 计算；None 跳过）
-    @returns 挂起类型（"halfMr"/"half"/"close"/"stopSr"/"stopBe"/"trailStop"）或 None（含仅迁移）
+    @param trail_pts          保留参数，detect 模式不再读取（结构点直接取 px_bis
+                              有利方向笔起点）。旧调用方传入无影响。
+    @returns 挂起类型（"profitLock"/"halfMr"/"half"/"close"/"stopSr"/"stopBe"/"trailStop"）或 None（含仅迁移）
     """
     if pos.get("pendingExit"):
         return None  # 已挂起等下一开盘，不再重复判定
@@ -251,16 +347,18 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
     lots_left = pos.get("lotsLeft", pos.get("lots", 0))
     lots_total = pos.get("lots", lots_left)  # 百分比基数=初始开仓手数（总仓位）
     trend = trend_following_of(pos.get("planDirection"), pos.get("strategyKey"))
+    phase = "顺势" if trend else "逆势"
     tp1 = find_bi_event(mark_bis, pos["signalTime"], fav)
-    tp3a = find_bi_event(px_bis, pos["signalTime"], fav, break_prev=True) if trend else None
-    seg5 = forming_seg_ready(px_bis, px_merged_times, is_short, min_merged) \
-        if px_merged_times else False
+    tp3a = find_bi_event(px_bis, pos["signalTime"], fav, break_prev=True)
     fav_cn = "下跌" if is_short else "上涨"
     # 预期口径（严进宽出，2026-10-09；2026-10-10 够笔统一口径）：检测/背驰周期
     # 「向有利方向走出 min_merged 块合并K」即够笔（enough_fav_bars：末笔锚点 +
     # 进场块下限，不分顺势逆势、不等确认笔——纯末笔锚点在入场初段会把末笔自身的
     # 块计入=假就绪，2026-10-01 XAUUSD 案例：08:27 进场锚点滞留 02:00，03:00-07:00
-    # 下跌块被计入）；当根收盘K极值越过前一同向笔端点（exp_break）= 顺势过高低点。
+    # 下跌块被计入）；当根收盘K极值越过前一同向笔端点（exp_break）= 过高低点
+    # （2026-10-10 起不分顺势逆势；forming_break_ref 末笔有利但未破前一同向端点时
+    # 参照退一级——gapLocked/延伸滞后会冻结确认口径端点，价格实际破位后迟迟不触发，
+    # 9-28 trade#109：08:00 破 4254.58、12:00 才 4196.81 平仓）。
     # exitExpectOn=False 回退确认笔旧口径（lastBiOk / find_bi_event 确认笔）。
     expect_on = bool(ec.get("exitExpectOn"))
     entry_ref = pos.get("entryTime") or pos.get("signalTime") or 0
@@ -269,7 +367,7 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
     exp_mr = bool(expect_on and mark_merged_times and enough_fav_bars(
         mark_bis, mark_merged_times, entry_ref, is_short, min_merged))
     exp_break = None
-    if expect_on and trend:
+    if expect_on:
         ref = forming_break_ref(px_bis, is_short)
         if ref is not None and (bar["low"] < ref["price"] if is_short
                                 else bar["high"] > ref["price"]):
@@ -280,8 +378,10 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
     # 时段 15m 卖类点提损位扫掉 1 手并 latch 死止损通道，剩余 3 手裸扛 121 点）。
     trail_on = (bool(ec.get("exitTrailOn")) and bool(pos.get("trailRaised"))
                 and bool(pos.get("beDone")))
-    # 同一拍顺序：保本 → 背驰周期够笔 → 检测周期够笔 → 过高低点止盈 →
-    # 止损/跟踪止盈穿越（+最大止损兜底） → 跟踪止盈上移
+    # 同一拍顺序：锁定盈利（最高） → 保本 → 背驰周期够笔 → 检测周期够笔 →
+    # 过高低点止盈 → 止损/跟踪止盈穿越（+最大止损兜底） → 跟踪止盈上移
+    if _apply_profit_lock(pos, bar, ec, lots_left):
+        return "profitLock"
     if (ec.get("exitStopBeOn") and tp1 and tp1["time"] <= t
             and not pos.get("beDone")):
         pos["beDone"] = True
@@ -314,22 +414,29 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
                 f"合并K（不等确认笔），平 {pct:.0f}%（{pos['pendingLots']} 手）挂起；"
                 f"剩余止损移至保本位 beStop {pos.get('beStop'):.2f}")
         return "halfMr"
-    half_conf = lastBiOk(px_bis, fav)
+    # 确认口径：末笔须在进场之后结束。进场前已走完的有利笔不是「翻为」，
+    # 入场当拍 lastBiOk 会恒真，下一开盘就够笔止盈并把剩余止损收到保本位
+    # （2026-09-01 #1：60m 下跌笔 8-31 21:00 @ 4415.75 已确认，08:15 进场，
+    #  08:18 半平 @ 4453.77，08:18 高点 4459.79 破保本位，08:21 保本止损）。
+    half_conf = lastBiOk(px_bis, fav) and bool(px_bis) and \
+        px_bis[-1].get("endTime", 0) > entry_ref
     # 够笔止盈（原 TP2 半平；2026-10-10 统一口径不限顺势）：确认口径 lastBiOk
-    # （末笔翻为有利方向，含 M4 形成中够块）与预期口径 exp_seg（向有利方向走出
-    # min_merged 块合并K，不等确认笔）先到先触发；逆势单与快速离场（seg5）构成
-    # 先后两级部分止盈。halfDone latch 一次性消费（首个匹配事件，条件持续成立）。
+    # （末笔翻为有利方向且 endTime 晚于进场，含 M4 形成中够块）与预期口径
+    # exp_seg（向有利方向走出 min_merged 块合并K，不等确认笔）先到先触发。
+    # halfDone latch 一次性消费（首个匹配事件，条件持续成立）。
     if (ec.get("exitHalfOn") and (half_conf or exp_seg)
             and not pos.get("halfDone")):
         pos["halfDone"] = True
         pos["pendingExit"] = "half"
         pct = float(ec.get("exitHalfPct", 50.0))
         pos["pendingLots"] = _exit_lots(lots_total, lots_left, pct)
-        phase = "顺势" if trend else "逆势"
         if half_conf:
+            last = px_bis[-1]
             pos["pendingWhy"] = (
                 f"够笔止盈触发（{phase}，计划方向 {pos.get('planDirection')}）：检测周期 "
-                f"{pos.get('periodX')} 有利方向（{fav_cn}）已够笔（末笔方向满足 lastBiOk），"
+                f"{pos.get('periodX')} 有利方向（{fav_cn}）笔 {fmtT(last.get('endTime'))} @ "
+                f"{float(last.get('endPrice') or 0):.2f} 在进场 {fmtT(entry_ref)} 之后完成"
+                f"（末笔方向满足 lastBiOk），"
                 f"平 {pct:.0f}%（{pos['pendingLots']} 手）挂起；"
                 f"剩余止损移至保本位 beStop {pos.get('beStop'):.2f}")
         else:
@@ -341,13 +448,16 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
                 f"剩余止损移至保本位 beStop {pos.get('beStop'):.2f}")
         return "half"
     tp3a_hit = tp3a if (tp3a and tp3a["time"] <= t) else None
-    if (ec.get("exitCloseOn") and trend and (tp3a_hit or exp_break)
+    if (ec.get("exitCloseOn") and (tp3a_hit or exp_break)
             and not pos.get("closeDone")):
-        # 过高低点止盈（原 TP3 全平）：顺势 = 有利方向笔破前一同向笔端点。确认口径
-        # 用 find_bi_event（笔须完成）；预期口径（2026-10-09）另看形成段运行极值越过
-        # 前一同向笔端点（当根收盘K极值判定，无前视）。tp3a/exp_break 是「首个匹配」
-        # 事件，破前高的条件一旦成立每拍都找得到——部分平仓（exitClosePct<100）
-        # 须 closeDone latch 一次性消费，防逐拍重复挂起
+        # 过高低点止盈（原 TP3）：有利方向笔破前一同向笔端点，2026-10-10 起不分
+        # 顺势逆势统一此口径。旧逆势分支=「形成段≥5根K成笔预期快速离场」（锚点无
+        # 进场块下限、进场前反弹块计入 → 入场拍假就绪，trade#109：02:57 进场
+        # 03:00 即亏 0.29 平仓）废除。确认口径用 find_bi_event（笔须完成）；预期
+        # 口径（2026-10-09）另看形成段运行极值越过前一同向笔端点（当根收盘K极值
+        # 判定，无前视）。tp3a/exp_break 是「首个匹配」事件，破前高的条件一旦成立
+        # 每拍都找得到——部分平仓（exitClosePct<100）须 closeDone latch 一次性
+        # 消费，防逐拍重复挂起
         pct = float(ec.get("exitClosePct", 100.0))
         pos["pendingExit"] = "close"
         pos["pendingLots"] = _exit_lots(lots_total, lots_left, pct)
@@ -358,31 +468,17 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
             ref_txt = (f"破前一同向笔端点 {ref:.2f}（{fmtT(tp3a_hit['refTime'])}）"
                        if ref is not None else "破前一同向笔端点")
             pos["pendingWhy"] = (
-                f"过高低点止盈触发（顺势，计划方向 {pos.get('planDirection')}）：检测周期 "
+                f"过高低点止盈触发（{phase}，计划方向 {pos.get('planDirection')}）：检测周期 "
                 f"{pos.get('periodX')} 有利方向（{fav_cn}）笔 {fmtT(tp3a_hit['time'])} @ "
                 f"{tp3a_hit['price']:.2f} {ref_txt}，平 {pct:.0f}%（{pos['pendingLots']} 手）挂起")
         else:
             ext = bar["low"] if is_short else bar["high"]
             pos["pendingWhy"] = (
-                f"过高低点止盈触发（顺势·预期口径，计划方向 {pos.get('planDirection')}）："
-                f"检测周期 {pos.get('periodX')} 有利方向（{fav_cn}）形成段运行极值 "
-                f"{ext:.2f}（{fmtT(bar['time'])} 收盘K）破前一同向笔端点 "
+                f"过高低点止盈触发（{phase}·预期口径，计划方向 {pos.get('planDirection')}）："
+                f"检测周期 {pos.get('periodX')} 有利方向（{fav_cn}）当根收盘K极值 "
+                f"{ext:.2f}（{fmtT(bar['time'])}）破前一同向笔端点 "
                 f"{exp_break['price']:.2f}（{fmtT(exp_break['time'])}），不等确认笔，"
                 f"平 {pct:.0f}%（{pos['pendingLots']} 手）挂起")
-        return "close"
-    if (ec.get("exitCloseOn") and (not trend) and seg5
-            and not pos.get("closeDone")):
-        # 过高低点止盈：逆势（多头空/空头多）= 首个有利方向形成段成笔预期，快速离场。
-        # seg5 一旦就绪持续为真，与顺势分支同用 closeDone latch 一次性消费
-        pct = float(ec.get("exitClosePct", 100.0))
-        pos["pendingExit"] = "close"
-        pos["pendingLots"] = _exit_lots(lots_total, lots_left, pct)
-        if pos["pendingLots"] < lots_left:
-            pos["closeDone"] = True
-        pos["pendingWhy"] = (
-            f"过高低点止盈触发（逆势，计划方向 {pos.get('planDirection')}）：检测周期 "
-            f"{pos.get('periodX')} 有利方向（{fav_cn}）形成段合并后≥{min_merged}根K"
-            f"（成笔预期），快速离场，平 {pct:.0f}%（{pos['pendingLots']} 手）挂起")
         return "close"
     # 进场K线止损下限（stopEntryBarFloor）：进场背驰周期K线仍在走（bar 落在其窗口内）
     # 且未保本 → 用当根极值更新运行极值并把止损外推到 运行极值±有效止损滑点（只放松，
@@ -466,11 +562,12 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
             f"{ext:.2f} {'冲上' if is_short else '跌破'}最大止损硬上限 {ml:.2f}"
             f"（止损类方式已部分平仓或有效止损位更宽），全平剩余 {lots_left} 手挂起")
         return "stopSr"
-    # 跟踪止盈上移（最后执行：本拍上移、下一拍生效——同 fxma「出场判定之后提损」口径）。
-    # 参照双模式（2026-10-09，exitTrailSrc）：detect=检测周期结构点流（3/类3/4/类4，
-    # 默认——保本后检测周期出3买即提损至3买位置）；mark=背驰周期信号流同向3类点
-    # （wait3Buy/waitBuy/…，含被同向互斥抑制的，旧口径）。两路都归一化为
-    # [{time, price, key}] 后交给 trail_raise（只上移、水位只进不退）。
+    # 跟踪止盈上移（最后执行：本拍上移、下一拍生效）。
+    # 参照双模式（2026-10-09，exitTrailSrc；2026-10-11 detect 改结构点）：
+    # detect=检测周期已破前低/前高的有利方向笔起点（空头下跌笔高点 / 多头上涨笔
+    # 低点，默认——够笔未破前低/前高不算结构；保本后价格破坏该结构点才出场）；
+    # mark=背驰周期信号流同向3类点（wait3Buy/waitBuy/…，含被同向互斥抑制的，旧口径）。
+    # 两路都归一化为 [{time, price, key}] 后交给 trail_raise（只上移、水位只进不退）。
     # 门控保本（2026-10-09）：仅 beDone（TP1/half/halfMr 迁移）后执行；门控开启当拍
     # 把水位一次性推进到当拍——保本之前（含入场时段）的参照点不追溯，防刚进场就被
     # 入场时段参照点把止损提到入场价附近。
@@ -486,14 +583,9 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
                         if q.get("strategyKey") in EXIT_TRAIL_REF_KEYS
                         and q.get("direction") == pos.get("direction")]
                 trail_raise(pos, refs, t)
-        elif trail_pts:
-            want_buy = pos.get("direction") == "long"  # 多单看买点 / 空单看卖点
-            refs = [{"time": q.get("time"), "price": q.get("price"),
-                     "key": q.get("type")}
-                    for q in trail_pts
-                    if q.get("type") in EXIT_TRAIL_POINT_TYPES
-                    and q["type"].endswith("买" if want_buy else "卖")]
-            trail_raise(pos, refs, t)
+        else:
+            # 结构点取本拍检测周期笔（px_bis），与够笔/过高低点同一份快照
+            trail_raise(pos, trail_structure_refs(px_bis, pos.get("direction")), t)
     return None
 
 
@@ -725,7 +817,7 @@ class BacktestEngine:
         mp = module_params or {}
         # plan 模块的 trendRes（顺势参考周期）/ rangeRes（震荡判定参考周期）单独取出：
         # 不混入震荡阈值 plan_cfg；trendRes "" = 关闭顺势过滤；rangeRes "" = 关闭
-        # 震荡闸门（每周期自判震荡，无「只作锚」固定观望，2026-10-08 可配置化）
+        # 震荡闸门（关闭后小周期不自判震荡，4小时与日线仍自判，无「只作锚」固定观望）
         plan_mp = dict(mp.get("plan") or {})
         tr = plan_mp.pop("trendRes", mp.get("trendRes"))
         self.trend_res = DEFAULT_TREND_RES if tr is None else tr
@@ -752,8 +844,9 @@ class BacktestEngine:
         self._cut = {res: 0 for res in self.periods}
         self._merged = {res: [] for res in self.periods}
         # 合并块截止时间数组（与 _merged 平行：块 .time = 覆盖的最后一根原始K线时间，
-        # 严格递增）——出场 TP2/逆势TP3b 的形成段「合并后≥5根K」计数锚定用
-        # （forming_seg_ready 按末笔 endTime 二分定位，不能用 endIdx——延伸不更新它）
+        # 严格递增）——出场够笔（half/halfMr 预期口径 enough_fav_bars）的形成段
+        # 「合并后≥5根K」计数锚定用（按末笔 endTime 二分定位，不能用 endIdx——
+        # 延伸不更新它）
         self._merged_times = {res: [] for res in self.periods}
         self._merge_dir = {res: 0 for res in self.periods}
         self._fractals = {res: [] for res in self.periods}
@@ -772,11 +865,6 @@ class BacktestEngine:
         self._bars_prefix_cut = {res: 0 for res in self.periods}
         # 链路按周期工作缓存（sr cluster/fib、plan）：未变周期跨重算复用
         self._chain_work_cache = {}
-        # 跟踪止盈 detect 模式参照（2026-10-09）：检测周期结构点流（3/类3/4/类4），
-        # _rebuild_chain 里 findBuyPoints/findSellPoints 计算（仅 exitTrailOn 且
-        # detect 时），点缓存 S1/S3 记忆化跨重算复用、重同步时清空
-        self._trail_pts = {}
-        self._trail_pt_cache = {}
         self._macd = {res: MacdAccumulator() for res in self.periods}
         self._macd_times = {res: [] for res in self.periods}  # 与 macd.entries 一一对应（切片二分用）
         self._atr = {res: AtrAccumulator(14) for res in self.periods}
@@ -1065,10 +1153,6 @@ class BacktestEngine:
         # （len+末笔端点）不变，sr/plan 按周期复用会拿到漂移期旧结果，破坏
         # 「重同步点输出严格等于 batch(前缀)」的既有保证
         self._chain_work_cache.clear()
-        # 跟踪止盈点缓存同步失效（同 fxma _fx_pt_cache：bis/macd 全量重建对象身份
-        # 变化，主动清空防 id 复用误命中）
-        if res in self._trail_pt_cache:
-            self._trail_pt_cache[res] = {}
         inc = self._bi_inc.get(res)
         if inc is not None:
             inc.invalidate()  # 增量笔构建器状态已过期：下次 update 走全量重建
@@ -1292,8 +1376,7 @@ class BacktestEngine:
                                           self._merged_times.get(pos.get("periodX")) or [],
                                           self._merged_times.get(pos.get("markRes")) or [],
                                           min_merged=self.exit_min_merged,
-                                          trail_sigs=st["allSignals"].get(pos.get("markRes")),
-                                          trail_pts=self._trail_pts.get(pos.get("periodX")))
+                                          trail_sigs=st["allSignals"].get(pos.get("markRes")))
             # ② 收集进场信号（与 run 同序同口径）
             if self.signal_mode == "realtime":
                 if changed:
@@ -1561,7 +1644,7 @@ class BacktestEngine:
             # 出场判定（统一口径：已收盘 bar 判定，成交挂起到下一根开盘执行）：
             # 用刚收盘的 fine bar（第 i 根）完整 high/low 查止损 + 当前笔快照查三档止盈；
             # 跟踪止盈参照：mark 模式= allSignals 里该持仓 markRes 的信号流（含被同向
-            # 互斥抑制的）；detect 模式= _trail_pts 里该持仓检测周期的结构点流
+            # 互斥抑制的）；detect 模式= 该持仓检测周期笔的有利方向起点
             for d in ("long", "short"):
                 pos = open_pos[d]
                 if pos is None:
@@ -1572,8 +1655,7 @@ class BacktestEngine:
                                       self._merged_times.get(pos.get("periodX")) or [],
                                       self._merged_times.get(pos.get("markRes")) or [],
                                       min_merged=self.exit_min_merged,
-                                      trail_sigs=allSignals.get(pos.get("markRes")),
-                                      trail_pts=self._trail_pts.get(pos.get("periodX")))
+                                      trail_sigs=allSignals.get(pos.get("markRes")))
                 _jr_exits(pos)  # breakeven 当拍落事件；half/close/stop 挂起待下一拍成交
             if self.signal_mode == "realtime":
                 # 当下背驰：笔结构变化时重算链路（刷新①③所需的计划/支阻位缓存），
@@ -1800,32 +1882,8 @@ class BacktestEngine:
                                          timesByPeriod=timesByPeriod,
                                          mergedTimesByPeriod=mergedTimesByPeriod)
             self._structure_bis = periodBis
-            # 跟踪止盈 detect 模式参照点流（2026-10-09 级别修正：检测周期结构点，
-            # 同 fxma 点流驱动）：结构视图（笔过滤/校准）与买卖点标记同口径；
-            # findBuyPoints/findSellPoints 带 S1/S3 记忆化缓存，仅 exitTrailOn 开启
-            # 且参照=detect 时计算（默认关，零开销）；1/2类点不进参照
-            if self.exit_cfg.get("exitTrailOn") and \
-                    (self.exit_cfg.get("exitTrailSrc") or "detect") == "detect":
-                mp = self.marks_params or {}
-                for res in filterDetectPeriods(self.periods):
-                    bisP = periodBis.get(res) or []
-                    if not bisP:
-                        self._trail_pts[res] = []
-                        continue
-                    upperP = periodBis.get(self._upper_res_of(res)) or []
-                    sec = intervalSecOf(res) or 0
-                    cache = self._trail_pt_cache.setdefault(res, {})
-                    buys = findBuyPoints(bisP, upperP, periodMacd.get(res) or [],
-                                         sec, mp.get("class2ZsTol", 0.0),
-                                         mp.get("thirdZsTol", 0.0), cache=cache)
-                    sells = findSellPoints(bisP, upperP, periodMacd.get(res) or [],
-                                           sec, mp.get("class2ZsTol", 0.0),
-                                           mp.get("thirdZsTol", 0.0), cache=cache)
-                    pts = [{"type": p["type"], "time": p["time"], "price": p["price"]}
-                           for p in buys + sells
-                           if p.get("type") in EXIT_TRAIL_POINT_TYPES]
-                    pts.sort(key=lambda p: p["time"])
-                    self._trail_pts[res] = pts
+            # 跟踪止盈 detect 参照不再在这里算买卖点：advance_exit_decision 直接
+            # 读检测周期笔（self._bis）的有利方向起点。
             # 1. 买卖点（全链路完整性；默认关闭以提速，可由 --with-marks 开启）
             if self.with_marks:
                 try:
@@ -2212,6 +2270,7 @@ class BacktestEngine:
                 "entryWhy": entryWhy,
                 "state": "open",
                 "beDone": False,
+                "maxFavPx": None,  # 锁定盈利水位：有利方向极值（本拍记账、下一拍判定回撤）
                 "halfDone": False,
                 "halfMrDone": False,
                 "closeDone": False,
@@ -2373,6 +2432,7 @@ def summarize(result):
         if et:
             name = {"stopSr": "支阻止损", "stopBe": "保本止损", "halfMr": "背驰够笔止盈",
                     "half": "检测够笔止盈", "close": "过高低点止盈",
+                    "profitLock": "锁定盈利",
                     "trailStop": "跟踪止盈"}.get(et, et)
             exitTypes[name] = exitTypes.get(name, 0) + 1
         halfCnt += sum(1 for e in t.get("exits", [])

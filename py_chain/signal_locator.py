@@ -7,12 +7,15 @@
 
 标记之后追画次级别笔链（2026-10-09，见 locate_bi 与 _draw_bi_after_locate）：
 开仓时间被工作台缓存的 60/240 大周期笔覆盖时，从 bars.db 现算其下各级笔
-（60→15m+3m、240→60m+15m+3m，逐级区间套锁定），逐级切周期画折线后回到
+（60→15m+3m、240→60m+15m+3m，逐级区间套锁定）。检测周期是 15/3、或定位
+落在 3/15 分钟时，改挂覆盖开仓时间的 60 分钟笔，同样补 15 分钟和 3 分钟。
+逐级切周期时若图上没有这段 K 线，用回放把该级 K 线补上再画折线，画完回到
 定位周期；未覆盖/失败只记 result['bis']，不影响定位与标记。
 
-实时图历史不够时（尤其 30S 约一周、更早只能回放拿到）：用 Bar Replay
-跳到最后出场之后（无出场则进场后再留一段K线），这样进场之后的走势和离场
-标记都在窗口内。跳转成功后图表停在回放态。
+近期行情与历史行情都用 Bar Replay 跳到最后出场之后（无出场则进场后再留
+一段K线），右缘停在保留根数处再居中，进场点直接进窗口。实时图历史不够时
+（尤其 30S 约一周、更早只能回放拿到）同样走这条跳转。已加载末根早于目标
+右缘时，光标钳到末根，不把 selectDate 指到未来。跳转成功后图表停在回放态。
 """
 import json
 import math
@@ -81,10 +84,12 @@ def _view_until(row, stamp, res, after_bars=DEFAULT_AFTER_BARS):
 
 
 def _replay_to_signal(c, stamp, deadline, res=None, until=None):
-    """实时图未覆盖目标K线时，用 Bar Replay 跳到【出场之后】加载窗口。
+    """用 Bar Replay 跳到【出场之后】加载窗口。
 
-    光标必须晚于最后出场（或进场后再留一段），否则进场之后的K线不存在、离场画不上。
-    进场根本身用 stamp 在窗口内查找。
+    近期行情（目标K线已在实时图，右缘却钉在最新一根）与历史不够时都走这里，
+    右缘停在保留根数处，进场点才能直接进窗口。光标必须晚于最后出场（或进场
+    后再留一段），否则进场之后的K线不存在、离场画不上。进场根本身用 stamp
+    在窗口内查找。until 由调用方在超出已加载末根时钳到末根，避免指向未来。
     """
     from .chan_core import intervalSecOf
     from .monitor import replay_check, replay_enter
@@ -300,12 +305,18 @@ def _center_view(c, symbol, res, t_target, t_until):
 
 
 def _upper_res_of(row, landed):
-    """画次级别笔所依的大周期：优先检测周期 periodX（60/240），缺省回退落地
-    周期的上一级（15→60、60→240）；两者都不在 60/240 内返回 ''。"""
+    """画次级别笔所依的大周期。
+
+    检测周期 periodX 是 60/240 时直接用它。检测周期是 15/3，或图落在 3/15
+    （背驰画在 3 分钟时落地就是 3，旧逻辑会直接跳过）时，改挂其上一级 60，
+    这样才能补 15 分钟和 3 分钟。落到 60 且检测周期不是 60/240 时改挂 240。
+    """
     upper = str(row.get('periodX') or '')
     if upper in ('60', '240'):
         return upper
-    return {'15': '60', '60': '240'}.get(landed, '')
+    if upper in ('15', '3') or landed in ('3', '15'):
+        return '60'
+    return {'60': '240'}.get(landed, '')
 
 
 def _draw_bi_after_locate(c, row, result, view_until):
@@ -331,6 +342,14 @@ def _draw_bi_after_locate(c, row, result, view_until):
         first = next(iter((out.get('errors') or {}).values()), None)
         return {'drawn': 0, 'failed': 0,
                 'skipped': first or '次级别笔计算失败（bars.db 无数据？）'}
+    # 图上画笔已经盖住开仓时间的级别不再补（否则和 CHAN_BI 叠成双线）
+    names = {'3': '3分钟', '15': '15分钟', '60': '1小时', '240': '4小时'}
+    already = [res for res in levels if locate_bi.chart_bi_covers(c, res, t_entry)]
+    levels = {res: bis for res, bis in levels.items() if res not in already}
+    already_txt = '、'.join(names.get(r, r) for r in already) + '已有画笔' if already else ''
+    if not levels:
+        locate_bi.clear_locate_bis(c)
+        return {'drawn': 0, 'failed': 0, 'skipped': already_txt}
     # 回放态图表时间轴整体平移：图侧信号K线时间 − 开仓逻辑时间（限幅 ±15h，
     # 正常图为 0；非整小时平移视为噪声归零）
     tz = int(result['time']) - t_entry
@@ -342,8 +361,12 @@ def _draw_bi_after_locate(c, row, result, view_until):
         for res, bis in levels.items():
             if cur != res:
                 _set_resolution(c, res)
-                locate_bi.wait_resolution(c, res, need_from=bis[0]['startTime'])
                 cur = res
+            # 切到本级后图上往往还没有这段历史K线（实时深度不够，或回放只带了
+            # 光标前约 300 根）。先补齐再画，否则折线锚不到K线边界会被删掉。
+            need_from = int(bis[0]['startTime'])
+            need_to = max(int(view_until), max(int(b['endTime']) for b in bis))
+            locate_bi.ensure_level_bars(c, res, need_from, need_to)
             r = locate_bi.draw_level(c, res, bis, tz_off=tz, clear_first=first_level)
             first_level = False
             counts[res] = int(r.get('drawn') or 0)
@@ -361,6 +384,8 @@ def _draw_bi_after_locate(c, row, result, view_until):
         recenter_err = str(exc)
     out = {'upper': upper, 'levels': counts, 'drawn': drawn_total,
            'failed': failed_total, 'errors': out.get('errors') or {}}
+    if already_txt:
+        out['already'] = already_txt
     if recenter_err:
         out['error'] = f'回切居中失败：{recenter_err}'
     return out
@@ -412,9 +437,30 @@ def locate_signal(row, cfg=None, timeout=360, colors=None, after_bars=DEFAULT_AF
                     # not match stale bars. 晚于最后一根则回放跳转（含信号开盘根），
                     # 不能在已跳到历史时刻后因 stamp>=barEnd 放弃画标记。
                     if stamp < data['barEnd']:
+                        # 近期行情：目标K线已在实时图里，但右缘钉在最新一根，
+                        # setTimeViewport 会被拉回实时边缘，进场点落在屏外要手拖。
+                        # 与历史行情同一条路：回放光标停在 view_until（出场/进场
+                        # + 保留根数）再居中。末根早于 view_until（保留根数超出
+                        # 已有K线）时钳到末根开盘，不把 selectDate 指到未来。
+                        # 跳完置 jumped/extended，避免末根开盘早于 until 再重跳。
+                        if not jumped and not extended and not replay_started(c):
+                            until = view_until
+                            if data['last'] is not None and data['last'] < view_until:
+                                until = data['last']
+                            try:
+                                _replay_to_signal(c, stamp, deadline, res, until=until)
+                            except CDPError:
+                                raise
+                            except Exception as exc:
+                                raise CDPError(f'近期行情回放定位失败：{exc}') from exc
+                            extended = True
+                            jumped = True
+                            jump_at = time.monotonic()
+                            last_scroll = -float('inf')
+                            continue
                         # 回放态下上次定位的光标封死了已加载窗口：保留根数调大时
                         # 目标K线虽已覆盖，仍须按本次 until 重跳扩窗，否则视口右缘不动
-                        # （实时图 until 在未来时不进回放，维持钳到最新一根的预期行为）。
+                        # （只扩一次——last 总比 until 早开盘若干秒，不设防会反复重跳）。
                         if (not extended and data['last'] is not None
                                 and data['last'] < view_until
                                 and replay_started(c)):

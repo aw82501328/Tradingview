@@ -516,6 +516,7 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
     // 主循环：从大到小逐周期计算并标记
     let currentRes = prepRes;
     let upperBis = null; // 上一级周期的笔（用于一买锚定）
+    let upperMacdArr = null; // 上一级周期 MACD（二买族大周期背驰闸，与 upperBis 同步级联）
     const periodMarks = {}; // 各周期已生成的标记（用于跨周期共振判定：上级买卖点 ↔ 本级别1类）
     for (let pi = 0; pi < PERIODS.length; pi++) {
       const res = PERIODS[pi];
@@ -542,10 +543,10 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
       const atr = calcATR(rawBars, 14);
       const macdArr = calcMACD(rawBars);
 
-      // 计算买卖点（区间套：2买/类2买 只在上级上涨笔段内，2卖/类2卖 只在上级下跌笔段内）
-      // 1买/1卖 必须满足 MACD 背驰（柱状体面积变小 或 黄白线动能减弱）才标记
-      let buyPts = findBuyPoints(curBis, upperBis, macdArr, intervalSecOf(res), CLASS2_ZS_TOL, THIRD_ZS_TOL);
-      let sellPts = findSellPoints(curBis, upperBis, macdArr, intervalSecOf(res), CLASS2_ZS_TOL, THIRD_ZS_TOL);
+      // 计算买卖点（2026-10-11 统一二买定义：二买族=1买/1卖后抬低/压低序列+大周期背驰闸+强弱二分；
+      // 区间套窗口仅作 3买/3卖 中枢锚）1买/1卖 创新低/新高即标记（firstNoDiverge）
+      let buyPts = findBuyPoints(curBis, upperBis, macdArr, intervalSecOf(res), CLASS2_ZS_TOL, THIRD_ZS_TOL, upperMacdArr);
+      let sellPts = findSellPoints(curBis, upperBis, macdArr, intervalSecOf(res), CLASS2_ZS_TOL, THIRD_ZS_TOL, upperMacdArr);
 
       // 保留区间套下识别出的全部买卖点，再做邻近合并，最后每周期不分类只保留最近 N 个（默认 10，减少图上标记数量）
 
@@ -588,19 +589,24 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
 
       // 汇总标记：把时间吸附到本周期bar边界
       // rawTime/rawPrice 保存未吸附的原始点位，用于跨周期共振判定
+      // 二买族标签（2026-10-11 统一二买定义）：type 不变，图表显示 强二买/弱二买/强类2买…
+      // （strong=null 未定型 → 弱先行）；与 py_chain/mark_buy_sell.py _family_label 同步。
+      const FAMILY_LABEL = { "2买": "二买", "类2买": "类2买", "2卖": "二卖", "类2卖": "类2卖" };
+      const familyLabel = p => ("strong" in p && FAMILY_LABEL[p.type])
+        ? (p.strong ? "强" : "弱") + FAMILY_LABEL[p.type] : p.type;
       const marks = [];
       const offset = Math.max(atr * 0.5, 0.05);
       for (const p of anchoredBuyPts) {
         const t = snapToOwnBar(p.price, p.time, rawBars);
         // 真1买 与 2买 同点位，文字偏移双倍（更靠下）避免重叠
         const mul = p.type === "真1买" ? 2 : 1;
-        marks.push({ label: p.type, time: t, price: p.price - offset * mul, rawTime: p.time, rawPrice: p.price });
+        marks.push({ label: familyLabel(p), time: t, price: p.price - offset * mul, rawTime: p.time, rawPrice: p.price });
       }
       for (const p of sellPts) {
         const t = snapToOwnBar(p.price, p.time, rawBars);
         // 真1卖 与 2卖 同点位，文字偏移双倍（更靠上）避免重叠
         const mul = p.type === "真1卖" ? 2 : 1;
-        marks.push({ label: p.type, time: t, price: p.price + offset * mul, rawTime: p.time, rawPrice: p.price });
+        marks.push({ label: familyLabel(p), time: t, price: p.price + offset * mul, rawTime: p.time, rawPrice: p.price });
       }
 
       // 跨周期共振：本级别的 1买/1卖 若与紧邻上一级别的 1/2/3 类买卖点落在同一点位
@@ -639,6 +645,7 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
 
       // 记录本周期笔，供下一级周期锚定一买使用
       upperBis = curBis;
+      upperMacdArr = macdArr;
 
       if (DRY) continue;
 

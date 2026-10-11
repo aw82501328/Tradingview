@@ -2,7 +2,8 @@
 """EVAL 评估子API（/api/eval/*）：用例/基线/评估任务的前端入口。
 
 GET  bars-info / cases / baselines / run-state / bl-bis?id=（基线冻结笔明细）
-     pnl-flags?strategy=（已加入 EVAL 的方案 id，以及当前回测是否已加入）
+     pnl-flags?strategy=（已加入 EVAL 的方案 id，以及按行加入的信号身份键）
+     param-drift?id=（基线冻住的参数与当前参数的逐项差异，不重跑）
 POST create-case / create-pnl-case / delete-case / create-baseline / refresh-baseline /
      rename-baseline / delete-baseline / run
 """
@@ -44,6 +45,11 @@ def handle(handler, app, method):
             elif action == "pnl-flags":
                 strategy = (parse_qs(parsed.query).get("strategy") or [""])[0]
                 result = mgr.pnl_flags(app, strategy)
+            elif action == "param-drift":
+                bid = (parse_qs(parsed.query).get("id") or [""])[0]
+                if not bid:
+                    raise ValueError("id 不能为空")
+                result = mgr.param_drift(bid)
             else:
                 handler._send_json({"ok": False, "error": "未知评估接口"}, 404)
                 return True
@@ -60,7 +66,10 @@ def handle(handler, app, method):
             elif action == "create-baseline":
                 result = mgr.start_freeze(body) or {}
             elif action == "refresh-baseline":
-                result = mgr.start_freeze({"id": _require_id(body)}) or {}
+                result = mgr.start_freeze({
+                    "id": _require_id(body),
+                    "adoptParams": bool(body.get("adoptParams")),
+                }) or {}
             elif action == "rename-baseline":
                 result = mgr.rename_baseline(body) or {}
             elif action == "delete-baseline":

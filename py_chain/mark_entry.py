@@ -12,7 +12,8 @@
 backtest.BacktestEngine 增量推进；本模块提供出场构件（与 mark_entry.js 对齐）：
   - stop_ref_of        方向感知止损参考位（支阻位 ± 滑点，最大止损硬上限 进场价±滑点，永不为 None）
   - trend_following_of 顺势/逆势判定（计划 direction ∈ {多头多,空头空} 为顺势）
-  - forming_seg_ready  检测周期形成段「合并后≥5根K成笔预期」判定（TP2 / 逆势 TP3b 事件源）
+  - forming_seg_ready  检测周期形成段「合并后≥5根K成笔预期」判定（历史 TP2/逆势 TP3b
+                       事件源；2026-10-10 逆势 TP3 改破前低参照后仅工具/测试用）
   - find_bi_event      笔事件查找（TP1/TP3a 事件源，返回含 startTime）
 
 不连接 CDP、不绘图；回测链路通过 compute_entries 直接调用。
@@ -112,9 +113,9 @@ EXIT_HALF_MR_PCT = 50.0
 EXIT_HALF_ON = True        # 检测周期够笔（原 TP2 半平/够笔止盈）：检测周期有利方向够笔
                            # （确认口径不限顺势 2026-10-10；预期口径仅顺势）
 EXIT_HALF_PCT = 50.0
-EXIT_CLOSE_ON = True       # 过高低点止盈（原 TP3 全平）：顺势破前高/低、逆势成笔预期
+EXIT_CLOSE_ON = True       # 过高低点止盈（原 TP3 全平）：破前高/前低（不分顺势逆势）
 EXIT_CLOSE_PCT = 25.0
-EXIT_TRAIL_ON = True       # 跟踪止盈（同 fxma 结构点驱动）：同向3类点→止损上移
+EXIT_TRAIL_ON = True       # 跟踪止盈：检测周期有利方向笔起点（结构点）被破坏→出场
 EXIT_TRAIL_PCT = 25.0
 EXIT_TRAIL_SLIP = 1.0      # 跟踪止盈滑点（点）：止损上移到参照点价∓该值（同 fxma tpTrailSlipPts）
 # 跟踪止盈参照（2026-10-09 双模式 exitTrailSrc，默认 detect）；门控保本（同日）：
@@ -122,22 +123,31 @@ EXIT_TRAIL_SLIP = 1.0      # 跟踪止盈滑点（点）：止损上移到参照
 # 不追溯——防入场时段参照点抢在「够笔→保本」之前把止损提到进场价附近
 # （2026-08-19 XAUUSD 案例）。止损类部分平仓 latch 后剩余手数由 maxLoss 兜底
 # （advance_exit_decision，记 stopSr 永不 latch）。
-# - detect=检测周期结构点流（findBuyPoints/findSellPoints 的 3/类3/4/类4 类点）：
-#   保本后检测周期出现3买 → 提损至3买位置，跌破即 trailStop（同 fxma 点流口径）。
-#   1/2类点不参与：2买即入场点自身，1类是趋势起点，提损到它们没有跟踪意义。
+# - detect=检测周期已破前低/前高的有利方向笔起点（2026-10-11）：够笔不够，
+#   空头下跌笔须破前低、多头上涨笔须破前高，结构点才是该笔起点。保本后止损
+#   收到该点∓滑点，价格破坏结构点记 trailStop。不用 3/类3/4/类4 买卖点。
+#   trade#109：15m 3卖 18:00 @ 4157.98 不是结构；其后只有 20:15 高点 4171.42
+#   的下跌破了前低，4146/4140 未破前低不算；4171.42 到 9-29 22:15 才被破坏。
 # - mark=背驰周期信号流（旧口径）：markRes 信号流中同向 3类买卖点
 #   （wait3Buy/waitBuy/wait3Sell/waitSell，含被同向互斥抑制的）。
 EXIT_TRAIL_SRC = "detect"
-EXIT_TRAIL_POINT_TYPES = ("3买", "类3买", "4买", "类4买",
-                          "3卖", "类3卖", "4卖", "类4卖")
 EXIT_TRAIL_REF_KEYS = {"wait3Buy", "waitBuy", "wait3Sell", "waitSell"}
 EXIT_EXPECT_ON = True      # 出场预期口径（严进宽出，2026-10-09）：检测周期够笔/顺势过
                            # 高低点用形成段预期触发（合并K够块即够笔、当根收盘K极值越过
                            # 前一同向笔端点即过前高），不等确认笔；False=确认笔旧口径。
                            # 进场侧结构判定不变（严进），仅出场放宽（宽出）。
+# 锁定盈利（2026-10-11，出场优先级最高；仅缠论V1标记进出场）。
+# 参数在参数中心 entry 模块，强分型均线V1（FxMaEngine）不读、不生效。
+# 最大盈利超过门槛后，回撤到只剩指定比例的盈利即全平剩余。
+# 两个数都可配；比例是盈利点数的比例，不是手数比例。
+EXIT_LOCK_ON = True
+EXIT_LOCK_PTS = 100.0      # 最大盈利门槛（点，绝对价格）
+EXIT_LOCK_PCT = 50.0       # 至少锁定最大盈利的百分比
 # 出场方式默认快照（BacktestEngine.exit_cfg 消费；_fill_pending 固化进 pos.exitCfg，
 # advance_exit_decision 纯函数读 pos——三模式（回测/实时/实盘）同一份判定）
 EXIT_MODE_DEFAULTS = {
+    "exitLockOn": EXIT_LOCK_ON, "exitLockPts": EXIT_LOCK_PTS,
+    "exitLockPct": EXIT_LOCK_PCT,
     "exitStopSrOn": EXIT_STOP_SR_ON, "exitStopSrPct": EXIT_STOP_SR_PCT,
     "exitStopBeOn": EXIT_STOP_BE_ON, "exitStopBePct": EXIT_STOP_BE_PCT,
     "exitStopBeMode": EXIT_STOP_BE_MODE,
@@ -149,8 +159,8 @@ EXIT_MODE_DEFAULTS = {
     "exitTrailSrc": EXIT_TRAIL_SRC,
     "exitExpectOn": EXIT_EXPECT_ON,
 }
-# 出场方式开关键（「至少启用一种」校验用；exitTrailSlip 非开关不列入）
-EXIT_MODE_ON_KEYS = ("exitStopSrOn", "exitStopBeOn", "exitHalfMrOn",
+# 出场方式开关键（「至少启用一种」校验用；exitTrailSlip / 锁定盈利的两个数值非开关不列入）
+EXIT_MODE_ON_KEYS = ("exitLockOn", "exitStopSrOn", "exitStopBeOn", "exitHalfMrOn",
                      "exitHalfOn", "exitCloseOn", "exitTrailOn")
 
 
@@ -1624,7 +1634,9 @@ def trend_following_of(plan_direction, strategy_key=None):
 
 
 def forming_seg_ready(px_bis, px_merged_times, is_short, min_merged=EXIT_MIN_MERGED):
-    """检测周期形成段「成笔预期」判定（TP2 / 逆势 TP3b 事件源，当下状态无前视）：
+    """检测周期形成段「成笔预期」判定（历史 TP2/逆势 TP3b 事件源；2026-10-10 逆势
+    TP3 统一改破前低参照后引擎不再调用，保留为计数口径文档与单测工具。锚点无
+    进场块下限——进场前已走出的块会计入，事件源用途已由 enough_fav_bars 取代）：
     末笔为不利方向（short→up / long→down）且其后正在走的有利方向形成段，
     自末笔延伸终点所在合并块起，其后合并K线块数 ≥ min_merged−1（与 isValid
     「两分型间隔 gap>=4」同口径，含锚点块共 min_merged 块）。
@@ -1680,18 +1692,30 @@ def enough_fav_bars(bis, merged_times, entry_time, is_short, min_merged=EXIT_MIN
 
 
 def forming_break_ref(bis, is_short):
-    """预期过前高/破前底参照（严进宽出 2026-10-09）：末笔为不利方向（其后正在走的
-    有利方向形成段尚未确认成笔）时，返回最近一根已确认**同向（有利方向）**笔的
-    端点——形成段运行极值越过该端点即视为「过高低点」，不等形成段收笔确认。
+    """预期过前高/破前底参照（严进宽出 2026-10-09；2026-10-10 补末笔有利方向分路）：
+    末笔为不利方向（其后正在走的有利方向形成段尚未确认成笔）时，返回最近一根已
+    确认**同向（有利方向）**笔的端点——形成段运行极值越过该端点即视为「过高低点」，
+    不等形成段收笔确认。
 
-    与 forming_seg_ready 同一门禁（末笔不利方向才存在有利形成段）；末笔已是
-    有利方向时无形成段，返回 None（走 find_bi_event 确认笔口径）。
+    末笔已是利好方向时分两路：该笔端点**尚未破**前一同向笔端点（更高低点/更低
+    高点）→ 仍返回前一同向笔端点（价格越过即触发——有利笔确认后确认口径 tp3a 须等
+    端点越过参照，而端点可能被 gapLocked 冻结〔跨周末跳空〕或延伸滞后，价格实际
+    破位后迟迟不触发：2026-09-28 trade#109 实证 08:00 破 4254.58、12:00 才
+    4196.81 平仓）；该笔端点**已破**前一同向端点 → 返回 None（破位事件发生在确认
+    笔内，tp3a 当拍自会触发，不重复给参照）。
     @returns None | {price, time}（参照笔端点价/完成时间）
     """
     if not bis:
         return None
     fav = "down" if is_short else "up"
     if bis[-1]["type"] == fav:
+        for j in range(len(bis) - 2, -1, -1):
+            if bis[j]["type"] == fav:
+                broke = (bis[-1]["endPrice"] < bis[j]["endPrice"]) if is_short \
+                    else (bis[-1]["endPrice"] > bis[j]["endPrice"])
+                if broke:
+                    return None
+                return {"price": bis[j]["endPrice"], "time": bis[j]["endTime"]}
         return None
     for j in range(len(bis) - 1, -1, -1):
         if bis[j]["type"] == fav:

@@ -34,7 +34,8 @@ FLUSH_EVERY = 500
 # ---- 中文标签单一来源（写侧组句 / 读侧渲染共用） ----
 DIR_LABELS = {"long": "做多", "short": "做空"}
 EXIT_LABELS = {
-    "breakeven": "TP1 保本", "halfMr": "背驰够笔止盈", "half": "检测够笔止盈",
+    "breakeven": "TP1 保本", "profitLock": "锁定盈利",
+    "halfMr": "背驰够笔止盈", "half": "检测够笔止盈",
     "close": "过高低点止盈",
     "stopSr": "支阻位止损", "stopBe": "保本止损",
     "stop": "固定止损", "takeProfit": "固定止盈",

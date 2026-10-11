@@ -47,6 +47,9 @@ data/journal/
 
 # 调试残留：probe/shot/截屏/中间 dump（一次性脚本与产物，不入库）
 .probe/
+# 根目录一次性 A/B 对拍与诊断脚本/产物（_ 前缀；已跟踪的 _export_baseline.js 不受影响）
+/_*
+data/_tmp*
 _probe*.py
 _shot*.py
 _shot*.png

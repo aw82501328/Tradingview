@@ -1007,8 +1007,11 @@ def compute_srflip(periodBis, barsByPeriod, periods,
         # 锚点限窗（fib 只当下）：锚点须形成于最近 N 根内；bis 传全量供参照笔定位
         if "fib" in srTypes and bis and len(bis) >= 3:
             macd = periodMacdIn.get(res) or calcMACD(bars)
-            buyPts = findBuyPoints(bis, upperBis, macd, intervalSecOf(res), cache=work_cache)
-            sellPts = findSellPoints(bis, upperBis, macd, intervalSecOf(res), cache=work_cache)
+            upperMacd = periodMacdIn.get(upperRes) if upperRes else None
+            buyPts = findBuyPoints(bis, upperBis, macd, intervalSecOf(res), cache=work_cache,
+                                   upperMacd=upperMacd)
+            sellPts = findSellPoints(bis, upperBis, macd, intervalSecOf(res), cache=work_cache,
+                                     upperMacd=upperMacd)
             fN = int(fibLookbackBars or 0)
             minPt = bars[-fN:][0]["time"] if fN > 0 and len(bars) > fN else None
             fibs = buildFibCandidates(bis, buyPts, sellPts, fibLevels, bars, clusterAtr * atr,

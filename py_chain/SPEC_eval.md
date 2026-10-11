@@ -39,8 +39,12 @@
   `app.analysis.cfg.symbol`；`chanCfg` 快照 = 创建时 `param_center.chan_cfg_effective(symbol)`。
 - **建立基线 / 更新期望**：对选用例用**当时**的逻辑重算并冻结 expected（后台任务，
   同一时刻仅一个任务，忙时 409）。「更新期望」仅在逻辑有意变更后使用。
-- **跑基线**：逐用例解压快照 → 按用例 chanCfg 应用（若与当前有效参数不同则标记
-  `参数漂移`，UI 黄色徽标）→ build_bis → compute_all_marks（pointsCfg 口径，漂移同语义）
+  盈利用例默认仍用加入时冻住的引擎参数重算。若与当前参数不一致，更新前列出逐项差异
+  （`GET param-drift`）；用户确认后 `adoptParams` 按当前参数重算，并把这份参数另冻进
+  **这条基线**的 expected（不改用例上的原始快照）。之后跑这条基线用基线里这份参数。
+- **跑基线**：逐用例解压快照 → 按这条基线冻住的参数应用（基线里若有强制更新冻上的
+  chanCfg / replay 用那份，否则用用例快照；与当前有效参数不同则标记
+  `参数不一致`，并带逐项差异，UI 黄色徽标）→ build_bis → compute_all_marks（pointsCfg 口径，漂移同语义）
   → 与冻结期望比对（笔 11 字段 + 买卖点 6 字段：label/time/price/rawTime/rawPrice/color）；
   任务结束后恢复任务前的进程内画笔参数（`chan_core.apply_cfg`，try/finally）。
   笔与买卖点全过才算通过；旧基线无 marks 时只比笔。

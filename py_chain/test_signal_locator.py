@@ -158,51 +158,83 @@ class SignalLocatorTests(unittest.TestCase):
         self.assertEqual(draw.call_args.kwargs.get('last_time'), 270)
 
     def test_timestamp_inside_latest_candle_and_unavailable_gap(self):
-        for stamp, valid in ((110, True), (300, False)):
-            client = Mock()
-            client.evaluate.side_effect = [None, None,
-                {'bar': {'time': 100, 'index': 9}, 'last': 100, 'barEnd': 280},
-                {'time': 100, 'index': 9}]
-            with patch.object(locator, 'CDPClient') as cls:
-                cls.return_value.__enter__.return_value = client
+        # 目标落在缺口（晚于末根且没有下一根）：仍走历史不够的回放，失败则不画标记
+        client = Mock()
+        client.evaluate.side_effect = [None, None,
+            {'bar': {'time': 100, 'index': 9}, 'last': 100, 'barEnd': 280},
+            {'time': 100, 'index': 9}]
+        with patch.object(locator, 'CDPClient') as cls:
+            cls.return_value.__enter__.return_value = client
+            with patch.object(locator, '_draw_after_locate', return_value={'drawn': 2, 'cleared': 1}) as draw:
+                with self.assertRaises(locator.CDPError):
+                    locator.locate_signal({**self.row, 'time': 300})
+                draw.assert_not_called()
+        # 近期：末根早于保留窗口，回放光标钳到末根，不指向未来的 view_until
+        client = Mock()
+        bar = {'bar': {'time': 100, 'index': 9}, 'last': 100, 'barEnd': 280}
+        client.evaluate.side_effect = [None, None, bar, bar, {'time': 100, 'index': 9}]
+        with patch.object(locator, 'CDPClient') as cls:
+            cls.return_value.__enter__.return_value = client
+            with patch.object(locator, '_replay_to_signal') as jump:
                 with patch.object(locator, '_draw_after_locate', return_value={'drawn': 2, 'cleared': 1}) as draw:
-                    if valid:
-                        result = locator.locate_signal({**self.row, 'time': stamp})
-                        self.assertEqual(result['time'], 100)
-                        self.assertEqual(result['mark']['drawn'], 2)
-                        draw.assert_called_once()
-                    else:
-                        with self.assertRaises(locator.CDPError):
-                            locator.locate_signal({**self.row, 'time': stamp})
-                        draw.assert_not_called()
+                    result = locator.locate_signal({**self.row, 'time': 110})
+        self.assertEqual(result['time'], 100)
+        self.assertEqual(result['mark']['drawn'], 2)
+        self.assertTrue(result['replay'])
+        draw.assert_called_once()
+        jump.assert_called_once()
+        self.assertEqual(jump.call_args.kwargs['until'], 100)
+        self.assertLess(100, locator._view_until({**self.row, 'time': 110}, 110, '3'))
 
     def test_locate_marks_row_after_centering_and_tolerates_draw_failure(self):
         def make_client():
             client = Mock()
-            client.evaluate.side_effect = [None, None,
-                {'bar': {'time': 100, 'index': 9}, 'last': 100, 'barEnd': 280},
+            bar = {'bar': {'time': 100, 'index': 9}, 'last': 100, 'barEnd': 280}
+            client.evaluate.side_effect = [None, None, bar, bar,
                 {'time': 100, 'index': 9, 'symbol': 'OANDA:XAUUSD', 'markRes': '3'}]
             return client
         colors = {'buy': '#123456'}
         with patch.object(locator, 'CDPClient') as cls:
             client = make_client()
             cls.return_value.__enter__.return_value = client
-            with patch.object(locator, '_draw_after_locate') as draw:
-                draw.return_value = {'drawn': 3, 'cleared': 0}
-                result = locator.locate_signal(self.row, colors=colors)
-                draw.assert_called_once()
-                args, kwargs = draw.call_args
-                self.assertIs(args[0], client)
-                self.assertEqual(args[2], 100)
-                self.assertEqual(kwargs.get('colors'), colors)
-                self.assertEqual(kwargs.get('last_time'), 100)
-                self.assertEqual(result['mark'], {'drawn': 3, 'cleared': 0})
-                # 标记失败不否定定位本身：错误进 result['mark']['error']
-                cls.return_value.__enter__.return_value = make_client()
-                draw.side_effect = RuntimeError('cdp down')
-                result = locator.locate_signal(self.row, colors=None)
-                self.assertEqual(result['mark']['drawn'], 0)
-                self.assertIn('cdp down', result['mark']['error'])
+            with patch.object(locator, '_replay_to_signal'):
+                with patch.object(locator, '_draw_after_locate') as draw:
+                    draw.return_value = {'drawn': 3, 'cleared': 0}
+                    result = locator.locate_signal(self.row, colors=colors)
+                    draw.assert_called_once()
+                    args, kwargs = draw.call_args
+                    self.assertIs(args[0], client)
+                    self.assertEqual(args[2], 100)
+                    self.assertEqual(kwargs.get('colors'), colors)
+                    self.assertEqual(kwargs.get('last_time'), 100)
+                    self.assertEqual(result['mark'], {'drawn': 3, 'cleared': 0})
+                    self.assertTrue(result['replay'])
+                    # 标记失败不否定定位本身：错误进 result['mark']['error']
+                    cls.return_value.__enter__.return_value = make_client()
+                    draw.side_effect = RuntimeError('cdp down')
+                    result = locator.locate_signal(self.row, colors=None)
+                    self.assertEqual(result['mark']['drawn'], 0)
+                    self.assertIn('cdp down', result['mark']['error'])
+
+    def test_recent_bars_past_keep_window_replay_to_view_until(self):
+        """近期行情末根晚于保留窗口：回放光标用 view_until，截掉后面直到现在的K线。"""
+        client = Mock()
+        bar = {'bar': {'time': 100, 'index': 9}, 'last': 50000, 'barEnd': 280}
+        client.evaluate.side_effect = [
+            None, None, bar, bar,
+            {'time': 100, 'index': 9, 'symbol': 'OANDA:XAUUSD', 'markRes': '3'},
+        ]
+        view_until = locator._view_until(self.row, 100, '3')
+        with patch.object(locator, 'CDPClient') as cls:
+            cls.return_value.__enter__.return_value = client
+            with patch.object(locator, '_replay_to_signal') as jump:
+                with patch.object(locator, '_draw_after_locate', return_value={'drawn': 1, 'cleared': 0}):
+                    result = locator.locate_signal(self.row)
+        jump.assert_called_once()
+        self.assertEqual(jump.call_args.kwargs['until'], view_until)
+        self.assertGreater(50000, view_until)
+        self.assertTrue(result['replay'])
+        self.assertTrue(any('setTimeViewport' in str(call) for call in client.evaluate.call_args_list))
 
     def test_view_until_covers_exit_and_looks_ahead_without_exit(self):
         row = {**self.row, 'exits': [{'type': 'close', 'time': 500, 'price': 1}],

@@ -502,14 +502,137 @@ class TestBuildZsPassThroughLeave(unittest.TestCase):
         pts = cc.findBuyPoints(bis, upper, macd, 900, 0.0, 0.0)
         got = [(p["type"], p["time"], p["price"]) for p in pts]
         # 离枢回踩序列：3买 → 类3买 → 4买；不再误标类2买。
-        # 2026-10-10 firstNoDiverge：4056.45 对参照 4071.64 创新低即 1买（与回踩序列并存）
+        # 2026-10-10 firstNoDiverge：4056.45 对参照 4071.64 创新低即 1买（与回踩序列并存）。
+        # 2026-10-11 统一二买定义：2买 族 = 1买后抬低序列——1买 滚动到 1400@4056.45 后，
+        # 旧窗口 2买@1200（先于锚，不再标记）；首个抬低 1600@4093.86 与窗口 3买 同刻，
+        # 按「1买→二买族→3买」顺序让位保留离枢身份 3买。
         self.assertEqual(got, [
-            ("2买", 1200, 4071.64),
             ("1买", 1400, 4056.45),
             ("3买", 1600, 4093.86),
             ("类3买", 1800, 4118.91),
             ("4买", 2000, 4121.06),
         ])
+
+
+class TestSecondPointSeries(unittest.TestCase):
+    """2026-10-11 统一二买定义：二买族 = 1买/1卖后抬低/压低序列 + secondDivergeGate
+    大周期背驰闸 + strong 强弱二分（强=紧邻前反向笔终点过再前一根反向笔终点）。"""
+
+    def b(self, t0, t1, typ, p0, p1):
+        return {"type": typ, "startTime": t0, "endTime": t1,
+                "startPrice": p0, "endPrice": p1, "span": abs(p1 - p0)}
+
+    def _bis_buy(self):
+        return [
+            self.b(100, 200, "down", 460.0, 440.0),
+            self.b(200, 300, "up",   440.0, 455.0),
+            self.b(300, 400, "down", 455.0, 435.0),   # 创新低 → 1买@400
+            self.b(400, 500, "up",   435.0, 445.0),   # 首笔上涨 445 < 前段末笔起点 455 → 弱
+            self.b(500, 600, "down", 445.0, 441.0),   # 抬低 441>435 → 2买
+            self.b(600, 700, "up",   441.0, 458.0),   # 458 > 前一根 up 终点 445 → 强
+            self.b(700, 800, "down", 458.0, 443.0),   # 更高抬低 → 类2买（强）
+            self.b(800, 900, "up",   443.0, 460.0),
+            self.b(900, 1000, "down", 460.0, 448.0),  # 更高抬低 → 类2买（强）
+        ]
+
+    def _upper(self):
+        # 末根确认下跌笔 50→1000 覆盖 1买@400；参照 = 前一根下跌笔 -100→0
+        return [
+            self.b(-300, -100, "up",   500.0, 560.0),
+            self.b(-100, 0,   "down", 560.0, 470.0),
+            self.b(0, 50,     "up",   470.0, 480.0),
+            self.b(50, 1000,  "down", 480.0, 380.0),
+        ]
+
+    def _upper_macd(self, diverge):
+        # 参照窗 [-100,0] 绿柱大；末笔窗 [50,1000] 绿柱小（diverge=True）/更大（False）
+        out = [{"time": t, "dif": -8.0, "dea": 0.0, "macd": -10.0} for t in (-100, -50, 0)]
+        for t in range(50, 1001, 50):
+            out.append({"time": t, "dif": -2.0 if diverge else -15.0, "dea": 0.0,
+                        "macd": -2.0 if diverge else -20.0})
+        return out
+
+    MACD_LOW = [{"time": t, "dif": 0.0, "dea": 0.0, "macd": 0.0} for t in range(100, 1001, 50)]
+
+    def test_on_diverge_marks_series_with_strong(self):
+        pts = cc.findBuyPoints(self._bis_buy(), self._upper(), self.MACD_LOW, 900,
+                               0.0, 0.0, upperMacd=self._upper_macd(True))
+        got = [(p["type"], p["time"], p["price"], p.get("strong")) for p in pts]
+        self.assertEqual(got, [
+            ("1买", 400, 435.0, None),
+            ("2买", 600, 441.0, False),      # 首笔上涨 445 未过 455 → 弱
+            ("类2买", 800, 443.0, True),     # 458 > 445 → 强
+            ("类2买", 1000, 448.0, True),    # 460 > 458 → 强
+        ])
+
+    def test_on_no_diverge_blocks_series(self):
+        pts = cc.findBuyPoints(self._bis_buy(), self._upper(), self.MACD_LOW, 900,
+                               0.0, 0.0, upperMacd=self._upper_macd(False))
+        self.assertEqual([(p["type"], p["time"]) for p in pts], [("1买", 400)])
+
+    def test_off_ignores_divergence_gate(self):
+        saved = cc.CHAN_CFG.get("secondDivergeGate")
+        cc.CHAN_CFG["secondDivergeGate"] = False
+        try:
+            pts = cc.findBuyPoints(self._bis_buy(), self._upper(), self.MACD_LOW, 900,
+                                   0.0, 0.0, upperMacd=self._upper_macd(False))
+            self.assertTrue([p for p in pts if p["type"] == "2买" and p["time"] == 600])
+        finally:
+            cc.CHAN_CFG["secondDivergeGate"] = saved
+
+    def test_series_void_when_low_breaks_anchor(self):
+        # 1000→1100 跌破 1买@435 → 1买滚动到 1100@430，序列作废重找（其后无 down → 无 2买）
+        bis = self._bis_buy() + [self.b(1000, 1100, "down", 448.0, 430.0)]
+        pts = cc.findBuyPoints(bis, self._upper(), self.MACD_LOW, 900,
+                               0.0, 0.0, upperMacd=self._upper_macd(True))
+        self.assertEqual([(p["type"], p["time"]) for p in pts],
+                         [("1买", 400), ("1买", 1100)])
+
+    def test_sell_mirror_series(self):
+        bis = [
+            self.b(100, 200, "up",   440.0, 460.0),
+            self.b(200, 300, "down", 460.0, 445.0),
+            self.b(300, 400, "up",   445.0, 465.0),   # 创新高 → 1卖@400
+            self.b(400, 500, "down", 465.0, 455.0),   # 455 未低于前一根 down 终点 445 → 弱
+            self.b(500, 600, "up",   455.0, 459.0),   # 压低 459<465 → 2卖
+            self.b(600, 700, "down", 459.0, 442.0),   # 442 < 455 → 强
+            self.b(700, 800, "up",   442.0, 457.0),   # 更低压低 → 类2卖（强）
+        ]
+        upper = [
+            self.b(-300, -100, "down", 380.0, 320.0),
+            self.b(-100, 0,   "up",   320.0, 410.0),
+            self.b(0, 50,     "down", 410.0, 400.0),
+            self.b(50, 1000,  "up",   400.0, 520.0),
+        ]
+        umacd = [{"time": t, "dif": 8.0, "dea": 0.0, "macd": 10.0} for t in (-100, -50, 0)]
+        for t in range(50, 1001, 50):
+            umacd.append({"time": t, "dif": 2.0, "dea": 0.0, "macd": 2.0})
+        pts = cc.findSellPoints(bis, upper, self.MACD_LOW, 900, 0.0, 0.0, upperMacd=umacd)
+        got = [(p["type"], p["time"], p["price"], p.get("strong")) for p in pts
+               if p["type"] in ("2卖", "类2卖")]
+        self.assertEqual(got, [
+            ("2卖", 600, 459.0, False),
+            ("类2卖", 800, 457.0, True),
+        ])
+
+
+class TestSecondFamilyRouting(unittest.TestCase):
+    """strategyOf 二买族强弱二分路由（2026-10-11）：强→等2买、弱→等2买Bear。"""
+
+    def test_routing(self):
+        from py_chain.trading_plan import strategyOf
+        strong_buy = strategyOf("15", "2买", "r", "l", "强二买")
+        self.assertEqual((strong_buy["direction"], strong_buy["strategy"]),
+                         ("多头多", "等待回调后做2买"))
+        weak_buy = strategyOf("15", "类2买", "r", "l", "弱类2买")
+        self.assertEqual((weak_buy["direction"], weak_buy["strategy"]),
+                         ("空头多", "等待低点附近的2买"))
+        strong_sell = strategyOf("15", "2卖", "r", "l", "强二卖")
+        self.assertEqual((strong_sell["direction"], strong_sell["strategy"]),
+                         ("空头空", "等待反弹后做2卖"))
+        weak_sell = strategyOf("15", "类2卖", "r", "l", "弱类2卖")
+        self.assertEqual((weak_sell["direction"], weak_sell["strategy"]),
+                         ("多头空", "等待高点附近的2卖"))
 
 
 if __name__ == "__main__":

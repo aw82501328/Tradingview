@@ -41,8 +41,8 @@ function candidateBadges(r) {
 }
 
 // 出场类型：stopSr=支阻位止损（支阻位±止损滑点，再按最大止损夹紧）
-//          | stopBe=保本止损（beStop=进场K线极值±保本滑点）| close=过高低点止盈（顺势=
-//          有利方向破前高/低；逆势=形成段≥5合并K）；exits 含 half=够笔止盈（顺势
+//          | stopBe=保本止损（beStop=进场K线极值±保本滑点）| close=过高低点止盈（不分
+//          顺势逆势=有利方向破前高/低）；exits 含 half=够笔止盈（统一口径不限顺势
 //          检测周期够笔，平剩余比例）/breakeven=保本/trailRaise=跟踪止盈上移（仅迁移）
 //          强分型均线V1（fxma）：stop=固定点数止损 | takeProfit=固定点数止盈（盘中触价即
 //          按触发价成交，与实盘 MT5 SL/TP 同口径）；structure 模式：activeTp=主动止盈 |
@@ -58,12 +58,13 @@ function exitTypeName(t) {
   if (t === 'activeTp') return '主动止盈';
   if (t === 'trailStop') return '跟踪止盈';
   if (t === 'trailRaise') return '跟踪止盈上移';
+  if (t === 'profitLock') return '锁定盈利';
   return t || '-';
 }
 function exitEventsDesc(r) {
   const names = { breakeven: '保本', half: '检够笔', halfMr: '背够笔', close: '过高低', stopSr: '损', stopBe: '保损',
                   stop: '固损', takeProfit: '固盈', activeTp: '主盈', trailStop: '跟盈',
-                  trailRaise: '提' };
+                  trailRaise: '提', profitLock: '锁盈' };
   return (r.exits || []).map(e => names[e.type] || e.type).join('·') || '';
 }
 // 分批出场只拆分展示，仍按整笔交易计数、汇总和排序。
@@ -430,6 +431,7 @@ function signalRowsHtml(rows, opts = {}) {
       const totalTxt = r.pnl == null ? '-' : Number(r.pnl).toFixed(2);
       const selected = interactive && selectedId === r.id;
       const classes = [selected ? 'selected' : '', i ? 'exit-continuation' : '',
+        (opts.isCase && opts.isCase(r)) ? 'in-case' : '',
         (opts.inEval && opts.inEval(r)) ? 'in-eval' : ''].filter(Boolean).join(' ');
       const attrs = interactive
         ? ` data-signal-id="${r.id}" tabindex="0" aria-selected="${selected}" title="点击定位信号K线并标记该行进出场"`

@@ -5,7 +5,7 @@
  * 覆盖：
  *   - predictPlan(rangeGate=…)：regime 震荡 → 观望（strategy 注明来源周期）；
  *     非震荡 → 跳过自身 A/B 直接走趋势分支（替换语义）；insufficient → 观望·笔数据不足；
- *     无 rangeGate → 本周期自判 A/B（旧行为，rangeRes 关闭时的口径）
+ *     无 rangeGate → 小周期不自判；4小时与日线仍自判 A/B
  *   - planGateRow：笔 <2 → insufficient；自身判震荡（A 支）→ range:true；强趋势 → range:false
  *   - TREND_RES / RANGE_RES 默认口径与 py_chain/trading_plan.py 常量一致
  *
@@ -87,11 +87,15 @@ describe("predictPlan rangeGate（参考周期闸门替换语义）", () => {
     assert.equal(row.label, "数据不足");
   });
 
-  test("无 rangeGate → 本周期自判 A/B（旧行为；rangeRes 关闭时的口径）", () => {
-    const row = predictPlan({ res: "15", bis: SELF_RANGE.bis, bars: SELF_RANGE.bars,
+  test("无 rangeGate → 小周期不自判；4小时仍自判 A/B", () => {
+    const small = predictPlan({ res: "15", bis: SELF_RANGE.bis, bars: SELF_RANGE.bars,
       atr: SELF_RANGE.atr, lastPrice: 4205 });
-    assert.equal(row.label, "震荡观望");
-    assert.match(row.strategy, /震荡整理，观望等待方向选择/);
+    assert.notEqual(small.label, "震荡观望");
+    assert.ok(!small.strategy.includes("震荡整理"));
+    const big = predictPlan({ res: "240", bis: altBis(0, 14400, 6, 4100, 4110),
+      bars: flatBars(0, 14400, 40, 4099, 4111), atr: 100, lastPrice: 4105 });
+    assert.equal(big.label, "震荡观望");
+    assert.match(big.strategy, /震荡整理/);
   });
 });
 
@@ -120,9 +124,9 @@ describe("planGateRow（参考周期 regime）", () => {
 });
 
 describe("默认口径（与 py_chain/trading_plan.py 常量一致）", () => {
-  test("TREND_RES / RANGE_RES 默认 240（闸门开启，强一致默认）", () => {
-    assert.equal(TREND_RES, "240");
-    assert.equal(RANGE_RES, "240");
+  test("TREND_RES / RANGE_RES 默认关闭（与 py_chain 常量一致）", () => {
+    assert.equal(TREND_RES, "");
+    assert.equal(RANGE_RES, "");
   });
 });
 
@@ -200,5 +204,25 @@ describe("strategyOf 弱档分流档位（2026-10-09）", () => {
   test("过了原始点（其他）→ 旧弱档不变", () => {
     assert.equal(strategyOf("60", "2买", "", "", "其他").strategy, "等待高点附近的一卖");
     assert.equal(strategyOf("60", "2卖", "", "", "其他").strategy, "等待低点附近的一买");
+  });
+});
+
+
+// 2026-10-11 统一二买定义：二买族强弱二分路由（与 py_chain/trading_plan.py 同步）
+describe("strategyOf 二买族强弱二分（2026-10-11）", () => {
+  test("强二买/强类2买 → 等2买；弱 → 等2买Bear", () => {
+    assert.deepEqual(
+      ["强二买", "强类2买"].map(c => { const o = strategyOf("15", "2买", "", "", c); return [o.direction, o.strategy]; }),
+      [["多头多", "等待回调后做2买"], ["多头多", "等待回调后做2买"]]);
+    assert.deepEqual(
+      ["弱二买", "弱类2买"].map(c => { const o = strategyOf("15", "类2买", "", "", c); return [o.direction, o.strategy]; }),
+      [["空头多", "等待低点附近的2买"], ["空头多", "等待低点附近的2买"]]);
+  });
+
+  test("2卖镜像：强二卖 → 等2卖；弱 → 等2卖Bear", () => {
+    const s = strategyOf("15", "2卖", "", "", "强二卖");
+    assert.deepEqual([s.direction, s.strategy], ["空头空", "等待反弹后做2卖"]);
+    const w = strategyOf("15", "类2卖", "", "", "弱类2卖");
+    assert.deepEqual([w.direction, w.strategy], ["多头空", "等待高点附近的2卖"]);
   });
 });

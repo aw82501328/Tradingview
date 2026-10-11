@@ -80,6 +80,14 @@ CHAN_CFG = {
     # 画笔链路零影响。关=回退旧口径（创新低/新高 + 背驰 AND）。
     # 与 .cursor/skills/chan-core/scripts/chan_core.js CHAN_CFG.firstNoDiverge 同步。
     "firstNoDiverge": True,
+    # 二买族大周期背驰闸（2026-10-11 用户规则，统一二买定义，默认开）：2买/类2买/2卖/类2卖
+    # = 本级最新 1买/1卖 后的抬低/压低序列（首个=2买族，此后每个严格更高抬低/更低压低=类2买族，
+    # 无中枢/上级窗口约束；端点破锚价→序列作废重找）。开=序列需大周期背驰：上级末两根确认
+    # 同向笔 isBiDiverge（上级自身 MACD；不可判定→不标，无上级（日线）→豁免）；关=仅抬低/压低
+    # 序列，无其他条件。每点带 strong：紧邻前一根反向笔终点 vs 再前一根反向笔终点（=该点所在
+    # 笔起点，即「同周期前一个下跌/上涨段最后一笔的起点」）——过=强、已完成未过=弱、未完成=None
+    # （弱先行，滚动翻强）。与 .cursor/skills/chan-core/scripts/chan_core.js 同步。
+    "secondDivergeGate": True,
     "nearDoubleFixed": 2.0,  # 近等双顶/双底固定容差（品种报价单位的绝对价差，如黄金 2.0=2 美元）；
                              # thr = 该值（2026-10-02 起取消 ATR 项/价格比例项/15m双动能确认）。
                              # 比较顺序：先影线（更极端直接替换后移），影线不满足再比实体——
@@ -2868,15 +2876,19 @@ _LEAVE_SELL = ("3卖", "类3卖", "4卖", "类4卖")
 
 
 def _append_third_points(points, third_list, family_types, class2_type):
-    """写入 3/类3/4/类4；与类2同点时删类2保留离枢点。
+    """写入 3/类3/4/类4；与二买族同点时删二买族保留离枢点。
 
-    去重/定位用增量索引（离枢点时间集合 + 类2同刻首现下标表；删除后下标表整体
+    2026-10-11 起同刻让位范围从 类2 扩到 2买：统一二买定义（1买后抬低序列）后，
+    序列 2买 可与窗口 3买族落在同一端点——按「1买→二买族→3买」的顺序语义，
+    同刻优先保留更具体的离枢身份（3买族），二买族让位。
+    去重/定位用增量索引（离枢点时间集合 + 二买族同刻首现下标表；删除后下标表整体
     重建——删除罕见，摊销 O(1)），与 any/_findIndex 全量扫描语义逐位一致。"""
     mc_types = tuple(family_types)
+    fam2 = ("2买", "类2买") if class2_type.endswith("买") else ("2卖", "类2卖")
     mc_times = {p["time"] for p in points if p["type"] in mc_types}
     c2_first = {}
     for i, p in enumerate(points):
-        if p["type"] == class2_type and p["time"] not in c2_first:
+        if p["type"] in fam2 and p["time"] not in c2_first:
             c2_first[p["time"]] = i
     for t in third_list:
         if t["time"] in mc_times:
@@ -2886,7 +2898,7 @@ def _append_third_points(points, third_list, family_types, class2_type):
             del points[dup]
             c2_first = {}
             for i, p in enumerate(points):
-                if p["type"] == class2_type and p["time"] not in c2_first:
+                if p["type"] in fam2 and p["time"] not in c2_first:
                     c2_first[p["time"]] = i
         points.append({"type": t["type"], "time": t["time"], "price": t["price"]})
         if t["type"] in mc_types:
@@ -3022,10 +3034,89 @@ def _find2WinSlot(cache, macdArr, kind):
     return slot[1]
 
 
-def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.0, cache=None):
+def _upper_diverge_at(upperBis, upperMacd, macdArr, tRef, is_sell):
+    """大周期背驰闸（2026-10-11 用户规则，secondDivergeGate 开时二买族的硬门槛）：
+    上级末两根确认同向笔（买侧=下跌笔、卖侧=上涨笔）isBiDiverge——优先上级自身 MACD
+    （upperMacd）；缺省时区间套兜底：本级 macd 在上级两笔时间窗内取指标对比。
+    参照 = 覆盖/先于 tRef（锚点时刻）的最近一根同向笔 vs 其前一根同向笔。
+    @returns True/False；不可判定（上级缺失或同向确认笔不足两根）→ None。"""
+    conf = confirmedStructureBis(upperBis)
+    if not conf:
+        return None
+    want = "up" if is_sell else "down"
+    li = None
+    for i in range(len(conf) - 1, -1, -1):
+        if conf[i]["type"] == want and conf[i]["startTime"] <= tRef:
+            li = i
+            break
+    if li is None:
+        return None
+    prev = next((conf[j] for j in range(li - 1, -1, -1) if conf[j]["type"] == want), None)
+    if prev is None:
+        return None
+    return bool(isBiDiverge(conf[li], prev, upperMacd or macdArr))
+
+
+def _second_point_series(bis, firstPts, upperBis, upperMacd, macdArr, is_sell):
+    """2买/2卖族序列发射（2026-10-11 用户规则：统一二买定义，替代上级窗口/中枢口径）：
+      锚 = 本级最新 1买/1卖；其后首个抬低（down 端点 > 锚价）/压低（up 端点 < 锚价）为
+    2买/2卖，此后每个严格更高抬低/更低压低为 类2买/类2卖；端点破锚价 → 锚将滚动、
+    整条序列作废（返回空）；介于前一点与锚价之间 → 不标、序列等待（prev_px 单调口径）。
+      背驰闸（secondDivergeGate 开）：上级末两根确认同向笔 isBiDiverge（大周期背驰 →
+    上涨/下跌预期），作用于整条序列；不可判定 → 不标；无上级（日线）→ 豁免。
+      强弱（strong 字段，type 字符串不变）：每点取紧邻前一根反向笔终点 vs 再前一根
+    反向笔终点（=该点所在笔起点，即「同周期前一个下跌/上涨段最后一笔的起点」）——
+    过=强、已完成未过=弱、未走完/不可比=None（弱先行，滚动翻强）。2卖镜像。
+    @returns 点列表（{type, time, price, strong}）。"""
+    want = "up" if is_sell else "down"    # 序列扫描的笔方向（抬低=down 端点 / 压低=up 端点）
+    rev = "down" if is_sell else "up"     # strong 对比的反向笔方向
+    if firstPts:
+        anchor_t = firstPts[-1]["time"]
+        anchor_p = firstPts[-1]["price"]
+    else:
+        # 无 1买/1卖 锚（早期数据/无上级）：结构底/顶兜底（最低 down 端点 / 最高 up 端点），
+        # 保持旧结构底口径——其后首个抬低/压低为 2买/2卖。
+        cands = [b for b in bis if b["type"] == want]
+        if not cands:
+            return []
+        ab = (max(cands, key=lambda b: b["endPrice"]) if is_sell
+              else min(cands, key=lambda b: b["endPrice"]))
+        anchor_t, anchor_p = ab["endTime"], ab["endPrice"]
+    if CHAN_CFG.get("secondDivergeGate", True) and (upperBis or []):
+        # 仅明确的 False 拦截；不可判定（上级同向确认笔不足两根/数据窗口有限）→ 放行，
+        # 与「无上级（日线）豁免」同一降级口径
+        if _upper_diverge_at(upperBis, upperMacd, macdArr, anchor_t, is_sell) is False:
+            return []
+    out = []
+    prev_px = None
+    for i, b in enumerate(bis):
+        if b["type"] != want or (b["endTime"] or 0) <= anchor_t:
+            continue
+        p = b["endPrice"]
+        if not ((p < anchor_p) if is_sell else (p > anchor_p)):
+            return []  # 破锚价：1买/1卖 将滚动到新极值，序列作废重找
+        if prev_px is not None and not ((p < prev_px) if is_sell else (p > prev_px)):
+            continue  # 介于前一点与锚价之间：不标、序列等待
+        strong = None
+        if i >= 1 and bis[i - 1]["type"] == rev and not bis[i - 1].get("_forming"):
+            prev_rev = next((bis[j] for j in range(i - 2, -1, -1) if bis[j]["type"] == rev), None)
+            if prev_rev is not None:
+                strong = bool((bis[i - 1]["endPrice"] < prev_rev["endPrice"]) if is_sell
+                              else (bis[i - 1]["endPrice"] > prev_rev["endPrice"]))
+        out.append({"type": ("2卖" if is_sell else "2买") if prev_px is None
+                    else ("类2卖" if is_sell else "类2买"),
+                    "time": b["endTime"], "price": p, "strong": strong})
+        prev_px = p
+    return out
+
+
+def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.0, cache=None,
+                  upperMacd=None):
     """买点识别（MACD 背驰 + 抬高结构 + 中枢类2/3）。
-    2买：上级上涨笔内首个 price > up.startPrice（无上级：结构底抬高），不读 zd/zg。
-    类2买：2买后更高抬高且落在中枢 [zd-class2ZsTol, zg]；无中枢不标。
+    2买/类2买（2026-10-11 统一二买定义，_second_point_series）：本级最新 1买 后抬低序列
+    （首个=2买、此后每个严格更高抬低=类2买）+ 可选大周期背驰闸（secondDivergeGate，
+    上级末两根确认下跌笔 isBiDiverge，upperMacd 优先/缺省区间套兜底）+ 每点 strong 强弱。
+    上级上涨笔窗口仍产 twoBuyMeta（zg/seg 边界）供 3买/类3买锚定，不再发射二买族。
     3买/类3买/4买/类4买：离 zg 后回踩 > zg-thirdZsTol；同段按顺序全部标出；无中枢不标。
     1买逻辑不变。
     返回按 time 升序（稳定排序；同刻保持识别序 2/类2→1买→3/4类，尾点=时间最新）。
@@ -3087,34 +3178,23 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
                 continue
             lows = [{"biIdx": i, "time": t, "price": p} for i, t, p in downLows[lo:hi]]
             lows.sort(key=lambda x: x["time"])
-            # 2买：抬高结构，不依赖中枢
+            # firstLow 仅作 twoBuyMeta/3买 锚（2026-10-11 起二买族由 _second_point_series
+            # 统一发射：1买后抬低序列 + 大周期背驰闸 + 强弱二分，不再依赖上级窗口/中枢）
             firstLow = next((l for l in lows if l["price"] > up["startPrice"]), None)
             if firstLow is None:
                 continue
-            win_points = [{"type": "2买", "time": firstLow["time"], "price": firstLow["price"]}]
             zs = _pick_zs_for_two(zss, up["startTime"], up["endTime"], firstLow["time"])
             meta_entry = None
             if zs is not None:
                 zd, zg = zs["zd"], zs["zg"]
                 meta_entry = {"time": firstLow["time"], "price": firstLow["price"],
                               "zg": zg, "segStart": up["startTime"], "segEnd": segEnd}
-                # 与类2卖对称：同一中枢内每一个更高抬低都标类2买（低点可低于收敛后的 zd）
-                prev_px = firstLow["price"]
-                for l in lows:
-                    if l["time"] <= firstLow["time"] or not (l["price"] > prev_px):
-                        continue
-                    b = bis[l["biIdx"]]
-                    bhi = max(b["startPrice"], b["endPrice"])
-                    if l["price"] <= zg and bhi >= (zd - c2tol):
-                        win_points.append({"type": "类2买", "time": l["time"], "price": l["price"]})
-                        prev_px = l["price"]
             if stable:
-                wincache[id(up)] = (up, win_points, meta_entry)
-            points.extend(win_points)
+                wincache[id(up)] = (up, None, meta_entry)
             if meta_entry is not None:
                 twoBuyMeta.append(meta_entry)
     else:
-        # 结构底 → 2买（不依赖中枢）
+        # 结构底 → 2买（仅产 twoBuyMeta 供 3买锚；二买族点由 _second_point_series 发射）
         structBottomIdx = None
         if firstBuy is not None:
             minP = float("inf")
@@ -3140,7 +3220,6 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
                     secondBuy = {"biIdx": i, "time": bis[i]["endTime"], "price": bis[i]["endPrice"]}
                     break
             if secondBuy is not None:
-                points.append({"type": "2买", "time": secondBuy["time"], "price": secondBuy["price"]})
                 zss = buildZS(bis, barSec)
                 zs = _pick_zs_for_two(zss, secondBuy["time"], secondBuy["time"], secondBuy["time"])
                 if zs is not None:
@@ -3149,29 +3228,24 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
                     t1 = zs.get("exitTime") or zs["endTime"]
                     twoBuyMeta.append({"time": secondBuy["time"], "price": secondBuy["price"],
                                        "zg": zg, "segStart": t0, "segEnd": t1})
-                    prev_px = secondBuy["price"]
-                    for i in range(secondBuy["biIdx"] + 1, len(bis)):
-                        if bis[i]["type"] != "down":
-                            continue
-                        p = bis[i]["endPrice"]
-                        bhi = max(bis[i]["startPrice"], bis[i]["endPrice"])
-                        if p > prev_px and p <= zg and bhi >= (zd - c2tol):
-                            points.append({"type": "类2买", "time": bis[i]["endTime"], "price": p})
-                            prev_px = p
 
     for fb in firstBuys:
         points.append({"type": "1买", "time": fb["time"], "price": fb["price"]})
 
-    # 3买 / 类3买：仅对有中枢的 2买段；扫到「下一个 2买」（含无中枢的 2买）之前
-    all_two = sorted([p for p in points if p["type"] == "2买"], key=lambda x: x["time"])
+    # 二买族序列（2026-10-11 统一二买定义）：1买 后抬低序列 + 大周期背驰闸 + 强弱二分
+    points.extend(_second_point_series(bis, firstBuys, upperBis, upperMacd, macdArr, False))
+
+    # 3买 / 类3买：仅对有中枢的 2买段；扫到下一个窗口锚（下一个 meta 的 firstLow）之前。
+    # 2026-10-11 前边界=「下一个 2买」点（旧口径下即下一窗口 firstLow，等价）；
+    # 统一二买定义后序列 2买 落在上行段内部，继续当边界会截断 3买扫描，故改用 meta 边界。
     twoBuyMeta.sort(key=lambda x: x["time"])
     third_out = []
-    for tb in twoBuyMeta:
+    for j, tb in enumerate(twoBuyMeta):
         twoIdx = idxByEndTime.get(tb["time"], -1)
         if twoIdx < 0:
             continue
         endScan = len(bis)
-        for nxt in all_two:
+        for nxt in twoBuyMeta[j + 1:]:
             if nxt["time"] > tb["time"]:
                 endScan = idxByEndTime.get(nxt["time"], len(bis))
                 if endScan < 0:
@@ -3200,8 +3274,11 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
     return points
 
 
-def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.0, cache=None):
-    """卖点识别（与买点对称）：2卖不依赖中枢；类2/3/类3/4/类4 依赖中枢。
+def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.0, cache=None,
+                   upperMacd=None):
+    """卖点识别（与买点对称）：二卖族（2卖/类2卖）由 _second_point_series 统一发射
+    （1卖 后压低序列 + secondDivergeGate 大周期背驰闸 + strong 强弱）；上级下跌笔窗口
+    仍产 twoSellMeta（zd/seg 边界）供 3卖/类3卖锚定。3/类3/4/类4 卖依赖中枢。
     返回按 time 升序（稳定排序；同刻保持识别序 2/类2→1卖→3/4类，尾点=时间最新）。
     """
     bis = pointEligibleBis(bis)
@@ -3283,36 +3360,23 @@ def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0
                 continue
             highs = [{"biIdx": i, "time": t, "price": p} for i, t, p in upHighs[lo:hi]]
             highs.sort(key=lambda x: x["time"])
-            # 2卖：次高结构，不依赖中枢
+            # firstHigh 仅作 twoSellMeta/3卖 锚（2026-10-11 起二卖族由 _second_point_series
+            # 统一发射，不再依赖上级窗口/中枢）
             firstHigh = next((h for h in highs if h["price"] < dn["startPrice"]), None)
             if firstHigh is None:
                 continue
-            win_points = [{"type": "2卖", "time": firstHigh["time"], "price": firstHigh["price"]}]
             zs = _pick_zs_for_two(zss, dn["startTime"], dn["endTime"], firstHigh["time"])
             meta_entry = None
             if zs is not None:
                 zd, zg = zs["zd"], zs["zg"]
                 meta_entry = {"time": firstHigh["time"], "price": firstHigh["price"],
                               "zd": zd, "segStart": dn["startTime"], "segEnd": segEnd}
-                # 同一中枢内，2卖之后每一个更低次高都标类2卖。
-                # 收敛后的 zg 取全部笔公共重叠，更早的类2卖高点可以高于这个 zg，
-                # 只要该上涨笔仍与 [zd, zg] 有重叠。
-                prev_px = firstHigh["price"]
-                for h in highs:
-                    if h["time"] <= firstHigh["time"] or not (h["price"] < prev_px):
-                        continue
-                    b = bis[h["biIdx"]]
-                    blo = min(b["startPrice"], b["endPrice"])
-                    if h["price"] >= zd and blo <= (zg + c2tol):
-                        win_points.append({"type": "类2卖", "time": h["time"], "price": h["price"]})
-                        prev_px = h["price"]
             if stable:
-                wincache[id(dn)] = (dn, win_points, meta_entry)
-            points.extend(win_points)
+                wincache[id(dn)] = (dn, None, meta_entry)
             if meta_entry is not None:
                 twoSellMeta.append(meta_entry)
     else:
-        # 结构顶 → 2卖
+        # 结构顶 → 2卖（仅产 twoSellMeta 供 3卖锚；二卖族点由 _second_point_series 发射）
         structTopIdx = None
         if firstSell is not None:
             maxP = float("-inf")
@@ -3338,7 +3402,6 @@ def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0
                     secondSell = {"biIdx": i, "time": bis[i]["endTime"], "price": bis[i]["endPrice"]}
                     break
             if secondSell is not None:
-                points.append({"type": "2卖", "time": secondSell["time"], "price": secondSell["price"]})
                 zss = buildZS(bis, barSec)
                 zs = _pick_zs_for_two(zss, secondSell["time"], secondSell["time"], secondSell["time"])
                 if zs is not None:
@@ -3347,28 +3410,24 @@ def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0
                     t1 = zs.get("exitTime") or zs["endTime"]
                     twoSellMeta.append({"time": secondSell["time"], "price": secondSell["price"],
                                         "zd": zd, "segStart": t0, "segEnd": t1})
-                    prev_px = secondSell["price"]
-                    for i in range(secondSell["biIdx"] + 1, len(bis)):
-                        if bis[i]["type"] != "up":
-                            continue
-                        p = bis[i]["endPrice"]
-                        blo = min(bis[i]["startPrice"], bis[i]["endPrice"])
-                        if p < prev_px and p >= zd and blo <= (zg + c2tol):
-                            points.append({"type": "类2卖", "time": bis[i]["endTime"], "price": p})
-                            prev_px = p
 
     for as_ in anchoredSells:
         points.append({"type": "1卖", "time": as_["time"], "price": as_["price"]})
 
+    # 二卖族序列（2026-10-11 统一二卖定义）：1卖 后压低序列 + 大周期背驰闸 + 强弱二分。
+    # 锚用本级原始 firstSells（anchoredSells 是图表/校准锚定，可能移到上级端点，
+    # 序列语义看本级结构，不随锚定漂移）。
+    points.extend(_second_point_series(bis, firstSells, upperBis, upperMacd,
+                                       macdArr, True))
+
     twoSellMeta.sort(key=lambda x: x["time"])
-    all_two = sorted([p for p in points if p["type"] == "2卖"], key=lambda x: x["time"])
     third_out = []
-    for ts in twoSellMeta:
+    for j, ts in enumerate(twoSellMeta):
         twoIdx = idxByEndTime.get(ts["time"], -1)
         if twoIdx < 0:
             continue
         endScan = len(bis)
-        for nxt in all_two:
+        for nxt in twoSellMeta[j + 1:]:
             if nxt["time"] > ts["time"]:
                 endScan = idxByEndTime.get(nxt["time"], len(bis))
                 if endScan < 0:

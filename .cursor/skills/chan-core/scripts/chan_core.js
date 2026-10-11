@@ -64,6 +64,14 @@ const CHAN_CFG = {
   // 画笔链路零影响。关=回退旧口径（创新低/新高 + 背驰 AND）。
   // 与 py_chain/chan_core.py CHAN_CFG.firstNoDiverge 同步。
   firstNoDiverge: true,
+  // 二买族大周期背驰闸（2026-10-11 用户规则，统一二买定义，默认开）：2买/类2买/2卖/类2卖
+  // = 本级最新 1买/1卖 后的抬低/压低序列（首个=2买族，此后每个严格更高抬低/更低压低=类2买族，
+  // 无中枢/上级窗口约束；端点破锚价→序列作废重找）。开=序列需大周期背驰：上级末两根确认
+  // 同向笔 isBiDiverge（上级自身 MACD，upperMacd 入参；不可判定→不标，无上级（日线）→豁免）；
+  // 关=仅抬低/压低序列，无其他条件。每点带 strong：紧邻前一根反向笔终点 vs 再前一根反向笔
+  // 终点（=该点所在笔起点）——过=强、已完成未过=弱、未完成=null（弱先行，滚动翻强）。
+  // 与 py_chain/chan_core.py CHAN_CFG.secondDivergeGate 同步。
+  secondDivergeGate: true,
   debug: false,   // 调试打印（buildBi / 买卖点识别过程）
   nearDoubleFixed: 2.0, // 近等双顶/双底固定容差（品种报价单位绝对价差，如黄金 2.0=2 美元）；
                         // thr = 该值（2026-10-02 起取消 ATR 项/价格比例项/15m双动能确认）。
@@ -1729,19 +1737,113 @@ const LEAVE_SELL = ["3卖", "类3卖", "4卖", "类4卖"];
 
 function appendThirdPoints(points, thirdList, familyTypes, class2Type) {
   const family = new Set(familyTypes);
+  // 2026-10-11 同刻让位范围从 类2 扩到 2买（与 py_chain/_append_third_points 同步）：
+  // 统一二买定义后序列 2买 可与窗口 3买族同端点，按「1买→二买族→3买」顺序保留离枢身份。
+  const fam2 = class2Type.endsWith("买") ? ["2买", "类2买"] : ["2卖", "类2卖"];
   for (const t of thirdList) {
     if (points.some(p => family.has(p.type) && p.time === t.time)) continue;
-    const dup = points.findIndex(p => p.type === class2Type && p.time === t.time);
+    let dup = -1;
+    for (let i = 0; i < points.length; i++) {
+      if (fam2.includes(points[i].type) && points[i].time === t.time) { dup = i; break; }
+    }
     if (dup >= 0) points.splice(dup, 1);
     points.push(t);
   }
 }
 
 /**
- * 买点识别：2买抬高结构（不依赖中枢）；类2/3/类3 依赖中枢；1买不变。
+ * 买点识别（2026-10-11 统一二买定义）：二买族（2买/类2买）由 secondPointSeries 发射
+ * （1买后抬低序列 + secondDivergeGate 大周期背驰闸 + strong 强弱）；上级上涨笔窗口仍产
+ * twoBuyMeta 供 3买/类3买锚定。3/类3/4/类4 依赖中枢；1买不变。
  * 返回按 time 升序（稳定排序；同刻保持识别序 2/类2→1买→3/4类，尾点=时间最新）。
  */
-function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) {
+/**
+ * 大周期背驰闸（2026-10-11 用户规则，secondDivergeGate 开时二买族的硬门槛；
+ * 与 py_chain/chan_core.py _upper_diverge_at 同步）：上级末两根确认同向笔（买侧=下跌笔、
+ * 卖侧=上涨笔）isBiDiverge——优先上级自身 MACD（upperMacd）；缺省时区间套兜底。
+ * 参照 = 覆盖/先于 tRef（锚点时刻）的最近一根同向笔 vs 其前一根同向笔。
+ * @returns true/false；不可判定（上级缺失或同向确认笔不足两根）→ null。
+ */
+function upperDivergeAt(upperBis, upperMacd, macdArr, tRef, isSell) {
+  const conf = confirmedStructureBis(upperBis);
+  if (!conf.length) return null;
+  const want = isSell ? "up" : "down";
+  let li = -1;
+  for (let i = conf.length - 1; i >= 0; i--) {
+    if (conf[i].type === want && conf[i].startTime <= tRef) { li = i; break; }
+  }
+  if (li < 0) return null;
+  let prev = null;
+  for (let j = li - 1; j >= 0; j--) {
+    if (conf[j].type === want) { prev = conf[j]; break; }
+  }
+  if (!prev) return null;
+  return !!isBiDiverge(conf[li], prev, upperMacd || macdArr);
+}
+
+/**
+ * 2买/2卖族序列发射（2026-10-11 用户规则：统一二买定义，替代上级窗口/中枢口径；
+ * 与 py_chain/chan_core.py _second_point_series 同步）：
+ *   锚 = 本级最新 1买/1卖；其后首个抬低/压低笔端点为 2买/2卖，此后每个严格更高抬低/
+ * 更低压低为 类2买/类2卖；端点破锚价 → 锚滚动、整条序列作废；介于前一点与锚价之间
+ * → 不标、序列等待。背驰闸（secondDivergeGate 开）作用于整条序列；不可判定 → 不标；
+ * 无上级（日线）→ 豁免。强弱 strong：紧邻前一根反向笔终点 vs 再前一根反向笔终点
+ * （=该点所在笔起点）——过=强、已完成未过=弱、未走完/不可比=null（弱先行）。
+ */
+function secondPointSeries(bis, firstPts, upperBis, upperMacd, macdArr, isSell) {
+  const want = isSell ? "up" : "down";   // 序列扫描的笔方向（抬低=down 端点 / 压低=up 端点）
+  const rev = isSell ? "down" : "up";    // strong 对比的反向笔方向
+  let anchorT, anchorP;
+  if (firstPts && firstPts.length) {
+    anchorT = firstPts[firstPts.length - 1].time;
+    anchorP = firstPts[firstPts.length - 1].price;
+  } else {
+    // 无 1买/1卖 锚（早期数据/无上级）：结构底/顶兜底（与 py_chain 同步），
+    // 保持旧结构底口径——其后首个抬低/压低为 2买/2卖。
+    const cands = bis.filter(b => b.type === want);
+    if (!cands.length) return [];
+    let ab = cands[0];
+    for (const c of cands) {
+      if (isSell ? c.endPrice > ab.endPrice : c.endPrice < ab.endPrice) ab = c;
+    }
+    anchorT = ab.endTime; anchorP = ab.endPrice;
+  }
+  if (CHAN_CFG.secondDivergeGate !== false && upperBis && upperBis.length) {
+    // 仅明确的 false 拦截；不可判定（null：上级同向确认笔不足两根）→ 放行，与
+    // 「无上级（日线）豁免」同一降级口径（与 py_chain 同步）
+    if (upperDivergeAt(upperBis, upperMacd, macdArr, anchorT, isSell) === false) {
+      return [];
+    }
+  }
+  const out = [];
+  let prevPx = null;
+  for (let i = 0; i < bis.length; i++) {
+    const b = bis[i];
+    if (b.type !== want || (b.endTime || 0) <= anchorT) continue;
+    const p = b.endPrice;
+    if (!(isSell ? p < anchorP : p > anchorP)) return []; // 破锚价：1买/1卖 滚动、序列作废重找
+    if (prevPx != null && !(isSell ? p < prevPx : p > prevPx)) continue; // 介于：不标、序列等待
+    let strong = null;
+    if (i >= 1 && bis[i - 1].type === rev && !bis[i - 1]._forming) {
+      let prevRev = null;
+      for (let j = i - 2; j >= 0; j--) {
+        if (bis[j].type === rev) { prevRev = bis[j]; break; }
+      }
+      if (prevRev) {
+        strong = !!(isSell ? bis[i - 1].endPrice < prevRev.endPrice
+                           : bis[i - 1].endPrice > prevRev.endPrice);
+      }
+    }
+    out.push({
+      type: prevPx == null ? (isSell ? "2卖" : "2买") : (isSell ? "类2卖" : "类2买"),
+      time: b.endTime, price: p, strong,
+    });
+    prevPx = p;
+  }
+  return out;
+}
+
+function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, upperMacd) {
   bis = pointEligibleBis(bis);
   const knownUpper = confirmedStructureBis(upperBis);
   if (bis.length < 3) return [];
@@ -1818,9 +1920,10 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) 
         .slice()
         .sort((a, b) => a.time - b.time);
       if (!lows.length) continue;
+      // firstLow 仅作 twoBuyMeta/3买 锚（2026-10-11 起二买族由 secondPointSeries 统一发射：
+      // 1买后抬低序列 + 大周期背驰闸 + 强弱二分，不再依赖上级窗口/中枢）
       const firstLow = lows.find(l => l.price > up.startPrice);
       if (!firstLow) continue;
-      points.push({ type: "2买", time: firstLow.time, price: firstLow.price });
       const zs = pickZsForTwo(zss, up.startTime, up.endTime, firstLow.time);
       if (!zs) continue;
       const zd = zs.zd, zg = zs.zg;
@@ -1828,19 +1931,9 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) 
         time: firstLow.time, price: firstLow.price,
         zg, segStart: up.startTime, segEnd: up.coverageEnd ?? up.endTime,
       });
-      // 同一中枢内每一个更高抬低都标类2买（低点可低于收敛后的 zd）
-      let prevPx = firstLow.price;
-      for (const l of lows) {
-        if (l.time <= firstLow.time || !(l.price > prevPx)) continue;
-        const b = bis[l.biIdx];
-        const bhi = Math.max(b.startPrice, b.endPrice);
-        if (l.price <= zg && bhi >= (zd - c2tol)) {
-          points.push({ type: "类2买", time: l.time, price: l.price });
-          prevPx = l.price;
-        }
-      }
     }
   } else {
+    // 结构底（仅产 twoBuyMeta 供 3买锚；二买族点由 secondPointSeries 发射）
     let structBottomIdx = null;
     if (firstBuy) {
       let minP = Infinity;
@@ -1866,7 +1959,6 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) 
         }
       }
       if (secondBuy) {
-        points.push({ type: "2买", time: secondBuy.time, price: secondBuy.price });
         const zss = buildZS(bis, barSec);
         const zs = pickZsForTwo(zss, secondBuy.time, secondBuy.time, secondBuy.time);
         if (zs) {
@@ -1877,16 +1969,6 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) 
             time: secondBuy.time, price: secondBuy.price,
             zg, segStart: t0, segEnd: t1,
           });
-          let prevPx = secondBuy.price;
-          for (let i = secondBuy.biIdx + 1; i < bis.length; i++) {
-            if (bis[i].type !== "down") continue;
-            const p = bis[i].endPrice;
-            const bhi = Math.max(bis[i].startPrice, bis[i].endPrice);
-            if (p > prevPx && p <= zg && bhi >= (zd - c2tol)) {
-              points.push({ type: "类2买", time: bis[i].endTime, price: p });
-              prevPx = p;
-            }
-          }
         }
       }
     }
@@ -1894,15 +1976,24 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) 
 
   for (const fb of firstBuys) points.push({ type: "1买", time: fb.time, price: fb.price });
 
+  // 二买族序列（2026-10-11 统一二买定义）：1买 后抬低序列 + 大周期背驰闸 + 强弱二分
+  for (const p of secondPointSeries(bis, firstBuys, upperBis, upperMacd, macdArr, false)) {
+    points.push(p);
+  }
+
+  // 3买/类3买 扫描边界 = 下一个窗口锚（下一个 meta 的 firstLow；与 py 同步）。
+  // 2026-10-11 前边界=「下一个 2买」点（旧口径下即下一窗口 firstLow，等价）；统一二买
+  // 定义后序列 2买 落在上行段内部，继续当边界会截断 3买扫描，故改用 meta 边界。
   twoBuyMeta.sort((a, b) => a.time - b.time);
-  const allTwoBuy = points.filter(p => p.type === '2买').slice().sort((a, b) => a.time - b.time);
   const thirdOut = [];
-  for (const tb of twoBuyMeta) {
+  for (let ji = 0; ji < twoBuyMeta.length; ji++) {
+    const tb = twoBuyMeta[ji];
     let twoIdx = idxByEndTime[tb.time];
     if (twoIdx == null) twoIdx = -1;
     if (twoIdx < 0) continue;
     let endScan = bis.length;
-    for (const nxt of allTwoBuy) {
+    for (let jn = ji + 1; jn < twoBuyMeta.length; jn++) {
+      const nxt = twoBuyMeta[jn];
       if (nxt.time > tb.time) {
         endScan = idxByEndTime[nxt.time];
         if (endScan == null) endScan = bis.length;
@@ -1938,7 +2029,7 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) 
  * 卖点识别：2卖次高结构（不依赖中枢）；类2/3/类3 依赖中枢；与买点对称。
  * 返回按 time 升序（稳定排序；同刻保持识别序 2/类2→1卖→3/4类，尾点=时间最新）。
  */
-function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) {
+function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, upperMacd) {
   bis = pointEligibleBis(bis);
   const knownUpper = confirmedStructureBis(upperBis);
   if (bis.length < 3) return [];
@@ -2041,9 +2132,9 @@ function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol)
         .slice()
         .sort((a, b) => a.time - b.time);
       if (!highs.length) continue;
+      // firstHigh 仅作 twoSellMeta/3卖 锚（2026-10-11 起二卖族由 secondPointSeries 统一发射）
       const firstHigh = highs.find(h => h.price < dn.startPrice);
       if (!firstHigh) continue;
-      points.push({ type: "2卖", time: firstHigh.time, price: firstHigh.price });
       const zs = pickZsForTwo(zss, dn.startTime, dn.endTime, firstHigh.time);
       if (!zs) continue;
       const zd = zs.zd, zg = zs.zg;
@@ -2051,20 +2142,9 @@ function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol)
         time: firstHigh.time, price: firstHigh.price,
         zd, segStart: dn.startTime, segEnd: dn.coverageEnd ?? dn.endTime,
       });
-      // 同一中枢内，2卖之后每一个更低次高都标类2卖。
-      // 收敛后的 zg 是全部笔公共重叠，更早的类2卖可以高于这个 zg，只要上涨笔仍与中枢重叠。
-      let prevPx = firstHigh.price;
-      for (const h of highs) {
-        if (h.time <= firstHigh.time || !(h.price < prevPx)) continue;
-        const b = bis[h.biIdx];
-        const blo = Math.min(b.startPrice, b.endPrice);
-        if (h.price >= zd && blo <= (zg + c2tol)) {
-          points.push({ type: "类2卖", time: h.time, price: h.price });
-          prevPx = h.price;
-        }
-      }
     }
   } else {
+    // 结构顶（仅产 twoSellMeta 供 3卖锚；二卖族点由 secondPointSeries 发射）
     let structTopIdx = null;
     if (firstSell) {
       let maxP = -Infinity;
@@ -2090,7 +2170,6 @@ function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol)
         }
       }
       if (secondSell) {
-        points.push({ type: "2卖", time: secondSell.time, price: secondSell.price });
         const zss = buildZS(bis, barSec);
         const zs = pickZsForTwo(zss, secondSell.time, secondSell.time, secondSell.time);
         if (zs) {
@@ -2101,16 +2180,6 @@ function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol)
             time: secondSell.time, price: secondSell.price,
             zd, segStart: t0, segEnd: t1,
           });
-          let prevPx = secondSell.price;
-          for (let i = secondSell.biIdx + 1; i < bis.length; i++) {
-            if (bis[i].type !== "up") continue;
-            const p = bis[i].endPrice;
-            const blo = Math.min(bis[i].startPrice, bis[i].endPrice);
-            if (p < prevPx && p >= zd && blo <= (zg + c2tol)) {
-              points.push({ type: "类2卖", time: bis[i].endTime, price: p });
-              prevPx = p;
-            }
-          }
         }
       }
     }
@@ -2118,15 +2187,23 @@ function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol)
 
   for (const as_ of anchoredSells) points.push({ type: "1卖", time: as_.time, price: as_.price });
 
+  // 二卖族序列（2026-10-11 统一二卖定义）：1卖 后压低序列 + 大周期背驰闸 + 强弱二分
+  // 二卖族序列锚用本级原始 firstSells（与 py_chain 同步：anchoredSells 是图表/校准
+  // 锚定，可能移到上级端点，序列语义看本级结构，不随锚定漂移）。
+  for (const p of secondPointSeries(bis, firstSells, upperBis, upperMacd, macdArr, true)) {
+    points.push(p);
+  }
+
   twoSellMeta.sort((a, b) => a.time - b.time);
-  const allTwoSell = points.filter(p => p.type === '2卖').slice().sort((a, b) => a.time - b.time);
   const thirdOut = [];
-  for (const ts of twoSellMeta) {
+  for (let ji = 0; ji < twoSellMeta.length; ji++) {
+    const ts = twoSellMeta[ji];
     let twoIdx = idxByEndTime[ts.time];
     if (twoIdx == null) twoIdx = -1;
     if (twoIdx < 0) continue;
     let endScan = bis.length;
-    for (const nxt of allTwoSell) {
+    for (let jn = ji + 1; jn < twoSellMeta.length; jn++) {
+      const nxt = twoSellMeta[jn];
       if (nxt.time > ts.time) {
         endScan = idxByEndTime[nxt.time];
         if (endScan == null) endScan = bis.length;
