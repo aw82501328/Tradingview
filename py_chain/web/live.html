@@ -59,8 +59,8 @@
 </head>
 <body>
 <h1>实盘监控</h1>
-<div class="sub">数据源 bars.db live_* 表 · 每 5s 刷新 · 策略按 TAB 分离 ·
-「开启/关闭交易」写 live_state（重启 webapp 不影响 live_trader 进程）·
+<div class="sub">数据源 bars.db live_* 表 · 每 5s 刷新 · 记录时间均为北京时间（UTC+8） · 策略按 TAB 分离 ·
+打开页面不会自动启动 · 「开启交易」打开 MT5 并启动实盘进程 · 「关闭交易」只停新开仓 ·
 运行手册见 <a href="/live" onclick="return false">py_chain/LIVE_GUIDE.md</a></div>
 
 <div class="tabbar">
@@ -113,7 +113,7 @@
 
 <script>
 const fmtT = ts => ts ? new Date(ts * 1000).toLocaleString('zh-CN',
-  { timeZone: 'UTC', hour12: false }) + ' UTC' : '—';
+  { timeZone: 'Asia/Shanghai', hour12: false }) + ' UTC+8' : '—';
 const esc = s => String(s ?? '—').replace(/[&<>"]/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const dirCls = d => d === 'long' ? 'long' : 'short';
@@ -148,20 +148,35 @@ function renderTabs() {
 function renderToggle() {
   const s = current();
   if (!s) return;
+  const starting = !s.online && ['terminal', 'login', 'trader'].includes(s.launch_phase);
   const pend = s.online && s.heartbeat && s.heartbeat.trading_enabled != null
     && s.heartbeat.trading_enabled !== s.trading_enabled;
+  const label = !s.online ? (starting ? '启动中…' : '开启交易')
+    : (s.trading_enabled ? '关闭交易' : '开启交易');
+  const cls = (!s.online || !s.trading_enabled) ? 'start' : 'stop';
+  let hint = '';
+  if (!s.online && s.launch_error) hint = s.launch_error;
+  else if (starting) hint = s.launch_phase === 'trader'
+    ? '实盘进程预热中，完成后变为在线' : '正在打开 MT5 终端…';
+  else if (!s.online) hint = '点击开启交易将打开 MT5 并启动实盘进程';
+  else if (pend) hint = '待进程生效…';
   document.getElementById('trade-ctl').innerHTML = `
-    <button class="tgl-btn ${s.trading_enabled ? 'stop' : 'start'}" ${toggling ? 'disabled' : ''}>
-      ${s.trading_enabled ? '关闭交易' : '开启交易'}</button>
-    ${pend ? '<span class="pend">待进程生效…</span>' : ''}
-    ${s.online ? '' : '<span class="pend">进程离线：开关已记录，恢复后生效</span>'}`;
+    <button class="tgl-btn ${cls}" ${(toggling || starting) ? 'disabled' : ''}>
+      ${label}</button>
+    ${hint ? `<span class="pend">${esc(hint)}</span>` : ''}`;
   document.querySelector('.tgl-btn').onclick = toggleTrading;
 }
 
 async function toggleTrading() {
   if (toggling) return;
-  const s = current(), target = !s.trading_enabled;
-  const msg = target
+  const s = current();
+  const startStack = !s.online;
+  const target = startStack ? true : !s.trading_enabled;
+  const modeNote = s.session && s.session.id
+    ? (s.session.shadow ? 'shadow，只记录不下单' : '实单') : '按配置文件';
+  const msg = startStack
+    ? `确认开启「${s.strategy_title}」？将打开 MT5 终端并启动实盘进程（${modeNote}）。`
+    : target
     ? `确认开启「${s.strategy_title}」策略交易？开启后将恢复真实下单（若非 shadow 模式）。`
     : `确认关闭「${s.strategy_title}」策略交易？关闭后停止新开仓，存量持仓照常管理出场，新信号转 shadow 记录。`;
   if (!confirm(msg)) return;
@@ -175,11 +190,9 @@ async function toggleTrading() {
     });
     const d = await r.json();
     if (!r.ok || !d.ok) throw Error(d.error || `请求失败 ${r.status}`);
-    s.trading_enabled = d.enabled;   // 成功才改本地态；失败由下轮轮询同步真实 kv
   } catch (e) { alert(e.message); }
   toggling = false;
-  renderTabs();
-  render(current());
+  await refresh();
 }
 
 function renderLoadError(msg) {

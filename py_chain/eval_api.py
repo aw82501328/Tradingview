@@ -5,7 +5,7 @@ GET  bars-info / cases / baselines / run-state / bl-bis?id=（基线冻结笔明
      pnl-flags?strategy=（已加入 EVAL 的方案 id，以及按行加入的信号身份键）
      param-drift?id=（基线冻住的参数与当前参数的逐项差异，不重跑）
 POST create-case / create-pnl-case / delete-case / create-baseline / refresh-baseline /
-     rename-baseline / delete-baseline / run
+     rename-baseline / delete-baseline / remove-baseline-case / run
 """
 
 from urllib.parse import urlparse, parse_qs
@@ -74,6 +74,11 @@ def handle(handler, app, method):
                 result = mgr.rename_baseline(body) or {}
             elif action == "delete-baseline":
                 result = mgr.delete_baseline(_require_id(body)) or {}
+            elif action == "remove-baseline-case":
+                case_id = body.get("caseId")
+                if not isinstance(case_id, str) or not case_id:
+                    raise ValueError("caseId 不能为空")
+                result = mgr.remove_baseline_case(_require_id(body), case_id) or {}
             elif action == "run":
                 ids = body.get("baselineIds")
                 if ids is not None and not isinstance(ids, list):

@@ -42,10 +42,13 @@ forming_break_ref/trend_following_of）：
   - 最大止损硬上限兜底（2026-10-09）：止损类方式部分平仓 latch 关闭穿越判定后，
     剩余手数由 maxLoss（进场价±最大止损）兜底——盘中破坏即全平剩余（记 stopSr），
     每手最大亏损 ≤ 最大止损 ± 成交滑点；正常穿越判定位不宽于 maxLoss 时兜底不可达；
-  - 保本止损位 beStop（exitStopBeMode 双口径，2026-10-10）：extreme =
+  - 保本止损位 beStop（exitStopBeMode 三口径）：extreme =
     进场成交K线极值 ± slip_be（short: high+ / long: low−；run() 批量路径成交 bar
     当拍未收盘，存在 ≤1 根 fine bar 的微前视，step_to 实时路径无前视——研究口径
-    可接受）；entry（0亏损）= 进场价（保本滑点不参与；下一开盘成交跳空仍可能略有出入）；
+    可接受）；entry（0亏损，默认）= 进场价（保本滑点不参与；下一开盘成交跳空仍可能
+    略有出入）；bi（笔端点±滑点，2026-10-12）= 背驰周期首笔有利方向笔确认那拍
+    beStop = 该笔起点 ± slip_be（开仓时点快照，惰性落位；成笔前无值——half/halfMr
+    预期口径抢先置 beDone 时穿越判定暂回落支阻位，成笔那拍自然切换）；
   - TP1 保本（随保本止损开关）：背驰周期（markRes）够笔（进场后首笔有利方向笔完成）→
     止损位上移至 beStop（状态迁移，当拍生效、事件仅落盘）；
   - 背驰周期够笔（halfMr，默认关；2026-10-10 统一口径）：背驰周期向有利方向走出
@@ -155,9 +158,10 @@ def exit_cfg_desc(ec):
     if ec.get("exitStopSrOn"):
         parts.append(f"支阻止损{float(ec.get('exitStopSrPct', 100)):.0f}%")
     if ec.get("exitStopBeOn"):
+        be_mode = ec.get("exitStopBeMode") or "extreme"
         parts.append(f"保本止损{float(ec.get('exitStopBePct', 100)):.0f}%"
-                     + ("（0亏损）" if (ec.get("exitStopBeMode") or "extreme") == "entry"
-                        else ""))
+                     + ("（0亏损）" if be_mode == "entry"
+                        else ("（笔端点）" if be_mode == "bi" else "")))
     if ec.get("exitHalfMrOn"):
         parts.append(f"背驰够笔{float(ec.get('exitHalfMrPct', 50)):.0f}%")
     if ec.get("exitHalfOn"):
@@ -170,6 +174,12 @@ def exit_cfg_desc(ec):
         parts.append(f"跟踪止盈{float(ec.get('exitTrailPct', 100)):.0f}%"
                      f"（{'背驰' if (ec.get('exitTrailSrc') or 'detect') == 'mark' else '检测'}）")
     return "·".join(parts) if parts else "无（至少启用一种）"
+
+
+def _be_stop_txt(pos):
+    """保本位叙事（bi 口径成笔前 beStop=None → 待定文本，防 None 格式化崩溃）。"""
+    v = pos.get("beStop")
+    return f"{v:.2f}" if v is not None else "待定（背驰周期成笔后落位）"
 
 
 def trail_structure_refs(px_bis, direction):
@@ -382,15 +392,32 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
     # 过高低点止盈 → 止损/跟踪止盈穿越（+最大止损兜底） → 跟踪止盈上移
     if _apply_profit_lock(pos, bar, ec, lots_left):
         return "profitLock"
+    # 保本位 bi 口径惰性落位（2026-10-12）：背驰周期首笔有利方向笔确认那拍
+    # beStop = 该笔起点 ± 开仓时点快照的保本滑点。值定义独立于 exitStopBeOn
+    # （half「剩余止损移至保本位」也可用）；beStop is None 判定天然一次性；
+    # startPrice 缺失（旧数据防御）兜底进场价。markRes ≤ 检测周期（下沉规则，
+    # mark_entry 规则3），细周期成笔天然早于检测周期够笔——half 抢先仅预期口径
+    # 直线行情理论可达，彼时穿越判定暂回落 stopRef（见下文 typ/stop 选择）。
+    be_bi_mode = (ec.get("exitStopBeMode") or "extreme") == "bi"
+    if (be_bi_mode and pos.get("beStop") is None
+            and tp1 and tp1["time"] <= t):
+        sp = tp1.get("startPrice")
+        sp = pos["entryPrice"] if sp is None else float(sp)
+        pos["beStop"] = (sp + pos.get("slipBeEff", 0.0)) if is_short \
+            else (sp - pos.get("slipBeEff", 0.0))
     if (ec.get("exitStopBeOn") and tp1 and tp1["time"] <= t
             and not pos.get("beDone")):
         pos["beDone"] = True
+        be_src = (f"（笔端点 {float(tp1['startPrice']):.2f}"
+                  f"{'+' if is_short else '-'}保本滑点 "
+                  f"{pos.get('slipBeEff', 0):.2f}）"
+                  if (be_bi_mode and tp1.get("startPrice") is not None) else "")
         pos["exits"].append({
             "type": "breakeven", "time": tp1["time"], "price": tp1["price"],
             "why": (f"TP1 保本：背驰周期 {pos.get('markRes')} 首笔有利方向（{fav_cn}）笔 "
                     f"{fmtT(tp1['time'])} @ {tp1['price']:.2f} 完成（信号 "
                     f"{fmtT(pos['signalTime'])} 之后），止损位上移至保本位 beStop "
-                    f"{pos.get('beStop'):.2f}（当拍生效，仅状态迁移不成交）")})
+                    f"{_be_stop_txt(pos)}（当拍生效，仅状态迁移不成交）{be_src}")})
     if (ec.get("exitHalfMrOn") and ((tp1 and tp1["time"] <= t) or exp_mr)
             and not pos.get("halfMrDone")):
         # 背驰周期够笔（2026-10-08 够笔止盈拆分；2026-10-10 统一口径）：确认口径
@@ -406,13 +433,13 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
                 f"背驰周期够笔止盈触发：背驰周期 {pos.get('markRes')} 首笔有利方向"
                 f"（{fav_cn}）笔 {fmtT(tp1['time'])} @ {tp1['price']:.2f} 完成（信号 "
                 f"{fmtT(pos['signalTime'])} 之后），平 {pct:.0f}%（{pos['pendingLots']} 手）"
-                f"挂起；剩余止损移至保本位 beStop {pos.get('beStop'):.2f}")
+                f"挂起；剩余止损移至保本位 beStop {_be_stop_txt(pos)}")
         else:
             pos["pendingWhy"] = (
                 f"背驰周期够笔止盈触发（预期口径）：背驰周期 {pos.get('markRes')} 自进场 "
                 f"{fmtT(entry_ref)} 所在合并块起向有利方向（{fav_cn}）已走 {min_merged} 块"
                 f"合并K（不等确认笔），平 {pct:.0f}%（{pos['pendingLots']} 手）挂起；"
-                f"剩余止损移至保本位 beStop {pos.get('beStop'):.2f}")
+                f"剩余止损移至保本位 beStop {_be_stop_txt(pos)}")
         return "halfMr"
     # 确认口径：末笔须在进场之后结束。进场前已走完的有利笔不是「翻为」，
     # 入场当拍 lastBiOk 会恒真，下一开盘就够笔止盈并把剩余止损收到保本位
@@ -438,14 +465,14 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
                 f"{float(last.get('endPrice') or 0):.2f} 在进场 {fmtT(entry_ref)} 之后完成"
                 f"（末笔方向满足 lastBiOk），"
                 f"平 {pct:.0f}%（{pos['pendingLots']} 手）挂起；"
-                f"剩余止损移至保本位 beStop {pos.get('beStop'):.2f}")
+                f"剩余止损移至保本位 beStop {_be_stop_txt(pos)}")
         else:
             pos["pendingWhy"] = (
                 f"够笔止盈触发（{phase}·预期口径，计划方向 {pos.get('planDirection')}）：检测周期 "
                 f"{pos.get('periodX')} 自进场 {fmtT(entry_ref)} 所在合并块起向有利方向"
                 f"（{fav_cn}）已走 {min_merged} 块合并K（不等确认笔），"
                 f"平 {pct:.0f}%（{pos['pendingLots']} 手）挂起；"
-                f"剩余止损移至保本位 beStop {pos.get('beStop'):.2f}")
+                f"剩余止损移至保本位 beStop {_be_stop_txt(pos)}")
         return "half"
     tp3a_hit = tp3a if (tp3a and tp3a["time"] <= t) else None
     if (ec.get("exitCloseOn") and (tp3a_hit or exp_break)
@@ -510,10 +537,13 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
     # 止损/跟踪止盈穿越（成交型）：类型按当前有效止损位归属判定（跟踪止盈上移过 →
     # trailStop；保本后 → stopBe；否则 stopSr）；被关闭的方式忽略（不挂起）；
     # 部分平仓按方式 latch 一次性消费，防穿越后逐拍重复触发。
-    typ = "trailStop" if trail_on else ("stopBe" if pos.get("beDone") else "stopSr")
+    # bi 口径成笔前 beStop=None（half/halfMr 预期口径抢先置 beDone 的理论场景）：
+    # 「移保本」尚无落位值 → 穿越判定暂回落支阻位 stopRef/stopSr，成笔那拍自然切换
+    be_active = bool(pos.get("beDone")) and pos.get("beStop") is not None
+    typ = "trailStop" if trail_on else ("stopBe" if be_active else "stopSr")
     latch = {"stopSr": "stopSrFired", "stopBe": "stopBeFired",
              "trailStop": "trailFired"}[typ]
-    stop = pos.get("beStop") if pos.get("beDone") else pos.get("stopRef")
+    stop = pos.get("beStop") if be_active else pos.get("stopRef")
     if (pos.get("beDone") and trail_on and stop is not None
             and pos.get("stopRef") is not None):
         # 跟踪止盈接管：有效止损取 beStop 与上移后 stopRef 的更紧者（空头更低/多头更高）
@@ -2021,15 +2051,17 @@ class BacktestEngine:
         detectPeriods = filterDetectPeriods(self.periods)  # 与确认制一致：须有已加载更低级别
         if self._rt_fired_idx is None:
             self._rt_fired_idx = {(f[0], f[1], f[3]) for f in self._rt_fired}
-        # C-1 盘中合成K：当下背驰评估消费合成K尾接视图（macd/ATR/merged/macdTimes），
-        # 使背驰窗口/柱缩闸/够笔计数盘中即见当根 res K 的运行 OHLC
+        # C-1 盘中合成K：当下背驰评估消费合成K尾接视图（macd/ATR/merged/macdTimes/bars），
+        # 使背驰窗口/柱缩闸/够笔计数盘中即见当根 res K 的运行 OHLC。
+        # bars 供 MACD背驰容差取笔端点实体（min/max(open, close)）；已收前缀 + 进行中合成K。
         synth = getattr(self, "_synth_state", None)
         macdViews = {res: self._macd[res].entries for res in self.periods}
         atrViews = {res: self._atr[res].value for res in self.periods}
         mergedViews = dict(self._merged)
         macdTViews = dict(self._macd_times or {})
+        barViews = {res: self._prefix_bars(res) for res in self.periods}
         # 合成K尾接改原地 append + finally 弹出（与 _rebuild_chain 同口径，
-        # 免每拍 O(n) 整表拷贝；entries/macd_times 本就是引擎共享数组）
+        # 免每拍 O(n) 整表拷贝；entries/macd_times/bars 前缀本就是引擎共享数组）
         tail_lists = []
         if synth:
             for res, sv in synth.items():
@@ -2043,6 +2075,10 @@ class BacktestEngine:
                     tail_lists.append(mt)
                 else:
                     macdTViews[res] = [m["time"] for m in macdViews[res]]
+                bars = barViews.get(res)
+                if bars is not None:
+                    bars.append(sv["bar"])
+                    tail_lists.append(bars)
         try:
             jr = getattr(self, "_journal", None)
             on_reject = None
@@ -2057,7 +2093,7 @@ class BacktestEngine:
                 self._plan, srLevels, detectPeriods,
                 near=self.near, tCut=t, fired=self._rt_fired, firedIndex=self._rt_fired_idx,
                 periodTimes=self._times, periodMacdTimes=macdTViews,
-                periodMerged=mergedViews,
+                periodMerged=mergedViews, periodBars=barViews,
                 divergeConfirm=self.diverge_confirm,
                 expectBiEnabled=self.expect_bi,
                 entryMacdShrink=self.entry_macd_shrink,
@@ -2164,7 +2200,7 @@ class BacktestEngine:
                               f"{'+' if d == 'short' else '-'}止损滑点 {slipStopEff:.2f}")
             else:
                 stopSource = f"最大止损兜底 进场价{'+' if d == 'short' else '-'}{slipFbEff:.2f}"
-            # 保本止损位 beStop（exitStopBeMode 双口径，2026-10-10；默认值=
+            # 保本止损位 beStop（exitStopBeMode 三口径；默认值=
             # mark_entry.EXIT_STOP_BE_MODE，当前 entry）：
             #   extreme（原行为）= 进场成交K线极值 ± 有效保本滑点（short: high+ / long: low−）；
             #     成交 bar 按 entryTime 定位于 fine 时间轴，取不到时兜底 进场价 ± 有效保本滑点。
@@ -2172,11 +2208,16 @@ class BacktestEngine:
             #     step_to 实时路径无前视（研究口径可接受，见模块 docstring）。
             #   entry（0亏损）= 进场价（保本滑点不参与；与成交K线极值无关，进行中 bar
             #     也无需收盘校正）；穿越后仍按下一开盘成交，跳空可能略有出入。
+            #   bi（笔端点±滑点，2026-10-12）= 背驰周期首笔有利方向笔确认那拍 beStop=
+            #     该笔起点 ± 有效保本滑点（advance_exit_decision 惰性落位，滑点用此处
+            #     开仓时点快照 pos["slipBeEff"]）；成笔前无值（half 抢先仅预期口径理论
+            #     可达，彼时止损暂留支阻位）；无需收盘校正（笔端点是历史固定价）。
             slip_be_eff = self.slip_be + self.slip_be_atr_k * mrAtr
-            be_entry_mode = (self.exit_cfg.get("exitStopBeMode")
-                             or "extreme") == "entry"
-            if be_entry_mode:
+            be_mode = self.exit_cfg.get("exitStopBeMode") or "extreme"
+            if be_mode == "entry":
                 beStop = entryPrice
+            elif be_mode == "bi":
+                beStop = None  # 待定：背驰周期有利方向成笔后落位（笔起点±保本滑点）
             else:
                 beStop = entryPrice + (slip_be_eff if d == "short" else -slip_be_eff)
                 bi = bisect.bisect_left(fineTimes, entryTime)
@@ -2214,13 +2255,20 @@ class BacktestEngine:
                             stopSource += (f"｜进场K线极值下限 {extSeed:.2f}"
                                            f"{'+' if d == 'short' else '-'}滑点夹紧")
             # 进场叙事（交易日志 entryWhy）：信号→口径→止损/保本/最大止损推导全链
-            be_desc = ("进场价·0亏损模式" if be_entry_mode else
-                       f"成交K线极值{'+' if d == 'short' else '-'}保本滑点 {slip_be_eff:.2f}")
+            if be_mode == "entry":
+                be_desc = "进场价·0亏损模式"
+            elif be_mode == "bi":
+                be_desc = ("笔端点待定·背驰周期有利方向成笔后=该笔起点"
+                           f"{'+' if d == 'short' else '-'}保本滑点 {slip_be_eff:.2f}")
+            else:
+                be_desc = (f"成交K线极值{'+' if d == 'short' else '-'}保本滑点"
+                           f" {slip_be_eff:.2f}")
+            be_txt = f"{beStop:.2f}" if beStop is not None else "待定"
             entryWhy = (
                 f"{DIR_LABELS.get(d, d)}｜{s.get('signalNote') or s.get('strategyLabel') or s.get('strategyKey')}"
                 f"｜{FILL_MODE_LABELS.get(fillMode, fillMode)}：{fmtT(entryTime)} @ {entryPrice:.2f} 进场"
                 f"｜止损位 {stopRef:.2f}（{stopSource}）"
-                f"｜保本位 beStop {beStop:.2f}（{be_desc}）"
+                f"｜保本位 beStop {be_txt}（{be_desc}）"
                 f"｜最大止损 {maxLoss:.2f}｜{self.lots} 手"
                 f"｜出场 {exit_cfg_desc(self.exit_cfg)}")
             trades.append({
@@ -2252,6 +2300,8 @@ class BacktestEngine:
                 "stopRef": stopRef,
                 "stopSource": stopSource,  # 止损位来源叙事（外推/跟踪止盈上移时更新）
                 "beStop": beStop,
+                # bi 口径开仓时点有效保本滑点快照（成笔落位时用；2026-10-12）
+                "slipBeEff": slip_be_eff,
                 "maxLoss": maxLoss,  # 最大止损价；进场K线外推后夹紧用，保本后不再参与
                 # 进场K线止损下限状态（advance_exit_decision 运行极值外推用；
                 # ext=None=窗口内尚无已收 bar，下限暂不生效）

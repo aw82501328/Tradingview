@@ -33,7 +33,7 @@ def mk(t, h, l, **kw):
          "highTime": kw.get("highTime", t), "lowTime": kw.get("lowTime", t),
          "rawHigh": kw.get("rawHigh", h), "rawLow": kw.get("rawLow", l),
          "rawHighTime": kw.get("rawHighTime", t), "rawLowTime": kw.get("rawLowTime", t)}
-    for k in ("_topCand", "_topCandTime", "_origLow", "_origLowTime"):
+    for k in ("_topCand", "_topCandTime", "_origLow", "_origLowTime", "_wickHigh", "_wickHighTime"):
         if kw.get(k) is not None:
             m[k] = kw[k]
     return m
@@ -386,21 +386,33 @@ class TestMacdReplacementExtremes(unittest.TestCase):
                 self.assertEqual((bis[i-1]["endTime"], bis[i-1]["endPrice"]),
                                  (b["startTime"], b["startPrice"]))
 
-    def test_gold_september_9_keeps_intermediate_top(self):
+    def test_gold_september_9_high_stays_at_2130(self):
         import json
+        from datetime import datetime, timedelta, timezone
         from pathlib import Path
         bars = json.loads((Path(__file__).parent / "fixtures/macd_xauusd_20260909.json").read_text())["15"]
         merged = cc.mergeBars(cc.markWickBars(bars))
-        bis = cc.buildBi(cc.findFractals(merged), merged, cc.calcATR(bars, 14), cc.calcMACD(bars))
+        bis = cc.buildBi(cc.findFractals(merged), merged, cc.calcATR(bars, 14), cc.calcMACD(bars), res="15")
         cc.fixBiExtremes(bis, merged)
         self.assert_structure(bis, merged)
-        recent = [b for b in bis if 1788954300 <= b["startTime"] < 1788966900]
-        # 22:15、23:15 的真实低点低于前一根，不再因长下影压平被包含。
-        # 下跌笔从 19:45 延伸到 23:15 的真实低点 4375.155。
-        self.assertEqual([(b["startTime"], b["endTime"]) for b in recent],
-                         [(1788954300, 1788966900)])
-        self.assertTrue(recent[0]["macdCross"])
-        self.assertEqual(recent[0]["endPrice"], 4375.155)
+        # 9-10 14:00 顶只比 21:30 高不到 1 点，但 21:30→23:15 下跌已经够笔，
+        # 高点留在 21:30 的 4434.175，不再退回 19:45。
+        # 23:15→9-10 2:00 上涨也够笔，2:00 顶 4421.65 虽更低，仍是端点。
+        tz = timezone(timedelta(hours=8))
+        t2130 = int(datetime(2026, 9, 9, 21, 30, tzinfo=tz).timestamp())
+        t2315 = int(datetime(2026, 9, 9, 23, 15, tzinfo=tz).timestamp())
+        t0200 = int(datetime(2026, 9, 10, 2, 0, tzinfo=tz).timestamp())
+        up = next(b for b in bis if b["endTime"] == t2130)
+        self.assertEqual(up["type"], "up")
+        self.assertEqual(up["endPrice"], 4434.175)
+        down = next(b for b in bis if b["startTime"] == t2130)
+        self.assertEqual(down["type"], "down")
+        self.assertEqual(down["endTime"], t2315)
+        self.assertEqual(down["endPrice"], 4375.155)
+        up2 = next(b for b in bis if b["startTime"] == t2315)
+        self.assertEqual(up2["type"], "up")
+        self.assertEqual(up2["endTime"], t0200)
+        self.assertEqual(up2["endPrice"], 4421.65)
 
 
 class TestMasterSwitches(unittest.TestCase):
@@ -652,6 +664,91 @@ class TestSecondFamilyRouting(unittest.TestCase):
         weak_sell = strategyOf("15", "类2卖", "r", "l", "弱类2卖")
         self.assertEqual((weak_sell["direction"], weak_sell["strategy"]),
                          ("多头空", "等待高点附近的2卖"))
+
+
+class TestFixBiExtremesLastBiWick(unittest.TestCase):
+    """末笔长影端点恢复 + 上影镜像 + 绝对极值守卫（2026-10-12 用户规则：
+    长影压平后若无更低/更高的**实体**极值成笔（= 影线超过笔区间全部结构极值且低于/
+    高于端点），长影即该笔最低/最高点；realtime 进场评估读末笔，末笔同样恢复）。"""
+
+    def _up_down_bis(self):
+        return [{
+            "type": "up", "startIdx": 0, "endIdx": 2,
+            "startTime": 0, "endTime": 2,
+            "startPrice": 90, "endPrice": 96, "span": 6, "rawCount": 2,
+            "gapLocked": False, "macdCross": False,
+        }, {
+            "type": "down", "startIdx": 2, "endIdx": 5,
+            "startTime": 2, "endTime": 5,
+            "startPrice": 96, "endPrice": 86, "span": 10, "rawCount": 3,
+            "gapLocked": False, "macdCross": False,
+        }]
+
+    def test_last_down_bi_origlow_recovered(self):
+        # 末笔（下跌）内部块 _origLow=78 < 端点 86 且 < 笔区间结构最低 85 → 恢复为端点
+        merged = [
+            mk(0, 90, 80), mk(1, 94, 84), mk(2, 96, 86),
+            mk(3, 92, 87, _origLow=78, _origLowTime=33),
+            mk(4, 90, 85),
+            mk(5, 91, 86),
+        ]
+        out = cc.fixBiExtremes(self._up_down_bis(), merged)
+        self.assertEqual((out[1]["endPrice"], out[1]["endTime"], out[1]["endIdx"]), (78, 33, 3))
+
+    def test_last_down_bi_wick_guarded_by_structural_low(self):
+        # 影线 85.5 低于端点 86 但未超过结构最低 85 → 非该笔绝对极值，不恢复
+        merged = [
+            mk(0, 90, 80), mk(1, 94, 84), mk(2, 96, 86),
+            mk(3, 92, 87, _origLow=85.5, _origLowTime=33),
+            mk(4, 90, 85),
+            mk(5, 91, 86),
+        ]
+        out = cc.fixBiExtremes(self._up_down_bis(), merged)
+        self.assertEqual((out[1]["endPrice"], out[1]["endIdx"]), (86, 5))
+
+    def test_last_up_bi_wickhigh_recovered(self):
+        # 上涨镜像：末笔（上涨）内部块 _wickHigh=112 > 端点 103 且 > 结构最高 104 → 恢复
+        merged = [
+            mk(0, 90, 80), mk(1, 94, 84), mk(2, 96, 85),
+            mk(3, 102, 86, _wickHigh=112, _wickHighTime=33),
+            mk(4, 104, 88),
+            mk(5, 103, 89),
+        ]
+        bis = [{
+            "type": "down", "startIdx": 0, "endIdx": 2,
+            "startTime": 0, "endTime": 2,
+            "startPrice": 96, "endPrice": 90, "span": 6, "rawCount": 2,
+            "gapLocked": False, "macdCross": False,
+        }, {
+            "type": "up", "startIdx": 2, "endIdx": 5,
+            "startTime": 2, "endTime": 5,
+            "startPrice": 90, "endPrice": 103, "span": 13, "rawCount": 3,
+            "gapLocked": False, "macdCross": False,
+        }]
+        out = cc.fixBiExtremes(bis, merged)
+        self.assertEqual((out[1]["endPrice"], out[1]["endTime"], out[1]["endIdx"]), (112, 33, 3))
+
+    def test_last_up_bi_wick_guarded_by_structural_high(self):
+        # 影线 103.5 高于端点 103 但未超过结构最高 104 → 不恢复（近等取后顶不受影线干扰）
+        merged = [
+            mk(0, 90, 80), mk(1, 94, 84), mk(2, 96, 85),
+            mk(3, 102, 86, _wickHigh=103.5, _wickHighTime=33),
+            mk(4, 104, 88),
+            mk(5, 103, 89),
+        ]
+        bis = [{
+            "type": "down", "startIdx": 0, "endIdx": 2,
+            "startTime": 0, "endTime": 2,
+            "startPrice": 96, "endPrice": 90, "span": 6, "rawCount": 2,
+            "gapLocked": False, "macdCross": False,
+        }, {
+            "type": "up", "startIdx": 2, "endIdx": 5,
+            "startTime": 2, "endTime": 5,
+            "startPrice": 90, "endPrice": 103, "span": 13, "rawCount": 3,
+            "gapLocked": False, "macdCross": False,
+        }]
+        out = cc.fixBiExtremes(bis, merged)
+        self.assertEqual((out[1]["endPrice"], out[1]["endIdx"]), (103, 5))
 
 
 if __name__ == "__main__":

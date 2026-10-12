@@ -14,7 +14,9 @@
  * 同向持仓互斥：同方向持仓未终局不再开新仓，多空互不影响）：
  *   - 止损位：正确侧最近支阻位 ± 止损滑点（short 上方+ / long 下方−）；再按最大止损
  *     硬上限夹紧（多 ≥ 进场价−最大止损 / 空 ≤ 进场价+最大止损；无正确侧位即落此价）
- *   - 保本止损位 beStop：进场K线极值 ± 保本滑点（short: high+ / long: low−）
+ *   - 保本止损位 beStop（--exit-stop-be-mode 三口径，2026-10-12 与 py 引擎同步）：
+ *     extreme=进场K线极值±保本滑点（short: high+ / long: low−）；entry=进场价（0亏损）；
+ *     bi=背驰周期首笔有利方向笔起点±保本滑点（成笔前无值，止损暂留支阻位）
  *   - 止盈1 保本：背驰周期够笔（有利方向笔完成）→ 止损位上移至 beStop（仅状态迁移）
  *   - 止盈2 平一半（仅顺势：计划 direction ∈ 多头多/空头空）：检测周期首个有利方向、
  *     合并后 ≥5 根K且有成笔预期的形成段 → 平一半，剩余半仓止损移至 beStop
@@ -34,10 +36,11 @@
  *   --lots=N            每笔进场手数（仅落盘记录，默认 4；盈亏口径 = 价格差×方向×手数）
  *   --slip-stop=K       止损位滑点（绝对价格，默认 3）
  *   --slip-fallback=K   最大止损（买点止损≥进场价−该值，卖点≤进场价+该值，默认 10）
- *   --slip-be=K         保本滑点（beStop = 进场K线极值±该值，默认 3）
+ *   --slip-be=K         保本滑点（extreme/bi 口径 beStop = 进场K线极值/笔起点±该值，默认 3）
  *   --slip-stop-atr-k=K    止损滑点ATR系数（有效滑点=固定值+系数×ATR(14,背驰周期)，默认 0=关闭）
  *   --slip-fallback-atr-k=K 最大止损ATR系数（同上口径，默认 0）
  *   --slip-be-atr-k=K      保本滑点ATR系数（同上口径，默认 0）
+ *   --exit-stop-be-mode=M 保本位模式（extreme|entry|bi；默认 entry=0亏损，py EXIT_STOP_BE_MODE 同名同默认）
  *   --dry               只计算不绘图
  *   --debug             打印调试信息
  *
@@ -77,7 +80,7 @@ const LOTS = Math.max(1, Math.round(getArg("lots", 4) || 4));
 const SLIP_STOP = getArg("slip-stop", 3);
 // 最大止损：止损离进场价最远不超过该值（支阻位更远时收到进场价±该值；键名历史遗留）
 const SLIP_FALLBACK = getArg("slip-fallback", 10);
-// 保本滑点：beStop = 进场K线极值 ± 该值（short: high+ / long: low−）
+// 保本滑点：extreme 口径 beStop=进场K线极值±该值；bi 口径=笔起点±该值（entry 不参与）
 const SLIP_BE = getArg("slip-be", 3);
 // 滑点 ATR 系数（2026-09-19）：有效滑点 = 固定滑点 + 系数 × ATR(14, 背驰周期 markRes)；0=关闭
 // --slip-*-atr-k 来自 WEB 参数中心（analysis_service entry 阶段透传，与 py_chain 同名同默认）
@@ -98,6 +101,9 @@ const boolArg = (name, def) => {
   return !(v === "0" || v.toLowerCase() === "false");
 };
 const EXIT_CFG = {
+  // 保本位模式（extreme|entry|bi；默认 entry=0亏损。2026-10-12 前本脚本恒按 extreme
+  // 计算，与 py 默认 entry 存在漂移——本次三口径同步消除）
+  beMode: getStrArg("exit-stop-be-mode", "entry"),
   stopSrOn: boolArg("exit-stop-sr-on", true),
   stopSrPct: getArg("exit-stop-sr-pct", 100) || 100,
   stopBeOn: boolArg("exit-stop-be-on", true),
@@ -675,6 +681,15 @@ function evaluateEntry(ctx, strategy) {
       if (!macdBelowZero(macdArr)) return { ok: false, reason: "MACD 未下0轴或反弹过0轴" };
       break;
     case "wait2Buy":
+      // 强二买：取消过前高；0轴看 strong2BuyMacdOn，默认关。1买保持过前高 + 0轴。
+      if (ctx.pointCls === "强二买") {
+        if (core.CHAN_CFG.strong2BuyMacdOn) {
+          const tol = Number(core.CHAN_CFG.macdZeroTol ?? 5);
+          const dif = macdArr && macdArr.length ? macdArr[macdArr.length - 1].dif : null;
+          if (!(dif > -tol)) return { ok: false, reason: "MACD 未上0轴或回调破0轴" };
+        }
+        break;
+      }
       if (!brokePrevHigh(bis)) return { ok: false, reason: "上涨段未过前高" };
       if (!macdAboveZero(macdArr)) return { ok: false, reason: "MACD 未上0轴或回调破0轴" };
       break;
@@ -777,7 +792,9 @@ function stopRefOf(sig, srLevels, slipStop = SLIP_STOP, slipFallback = SLIP_FALL
  *   必须是进场后开始的新笔，排除进场前已存在的同向笔——进场背驰点本身常是「创新高/新低」笔）
  * @param {boolean} breakPrev true 时再要求端点破前一同向笔端点
  *   （up 笔 endPrice > 前一 up 笔 endPrice = 过前高；down 笔 = 破前底）
- * @returns {null|{time:number, price:number, startTime:number}} 笔完成时间（endTime）、端点价、起点时间
+ * @returns {null|{time:number, price:number, startTime:number, startPrice:number}}
+ *   笔完成时间（endTime）、端点价、起点时间/起点价（startPrice 供保本位 bi 口径取
+ *   「有利方向笔起点」，2026-10-12 增量键，既有调用者不感知；py find_bi_event 同步）
  */
 function findBiEvent(bis, fromT, type, requirePostStart, breakPrev) {
   if (!bis) return null;
@@ -793,7 +810,7 @@ function findBiEvent(bis, fromT, type, requirePostStart, breakPrev) {
       const broke = type === "up" ? b.endPrice > bis[j].endPrice : b.endPrice < bis[j].endPrice;
       if (!broke) continue;
     }
-    return { time: b.endTime, price: b.endPrice, startTime: b.startTime };
+    return { time: b.endTime, price: b.endPrice, startTime: b.startTime, startPrice: b.startPrice };
   }
   return null;
 }
@@ -864,7 +881,10 @@ function favSeg5Time(pd, isShort, entryT) {
  * （出场阶梯重构 2026-09-09，与 py_chain/backtest.advance_exit_decision 口径对齐）。
  *   止损位：stopRef（支阻位±止损滑点 / 兜底进场价±兜底滑点，永不为 null）；
  *           TP1 / half 后 = beStop（保本位）
- *   beStop：进场K线（sig.time 对应 markRes bar，取不到时兜底 进场价±保本滑点）极值 ± slipBe
+ *   beStop 三口径（exitCfg.beMode，2026-10-12 与 py 引擎 exitStopBeMode 同步）：
+ *           entry=进场价（0亏损）；extreme=进场K线（sig.time 对应 markRes bar，取不到时
+ *           兜底 进场价±保本滑点）极值 ± slipBe；bi=背驰周期首笔有利方向笔起点 ± slipBe
+ *           （成笔 tp1.time 前无值：half 抢先触发时止损暂留原位，成笔那拍落位迁入）
  *   TP1 保本：markRes 首个进场后完成的有利方向笔 → 止损位上移至 beStop（仅状态迁移，不成交）
  *   TP2 平一半（仅顺势）：periodX 首个有利方向形成段合并后≥5根K（favSeg5Time）→ 平一半，
  *           剩余半仓止损移至 beStop；不要求 TP1 先触发（已知漂移：py 引擎 2026-10-10
@@ -883,7 +903,7 @@ function favSeg5Time(pd, isShort, entryT) {
  *   （slipBe/kBe 默认 SLIP_BE / SLIP_BE_ATR_K，有效保本滑点 = slipBe + kBe×markRes ATR；
  *   slipFallback/kFallback 默认 SLIP_FALLBACK / SLIP_FALLBACK_ATR_K（最大止损硬上限）；
  *   exitCfg 默认 EXIT_CFG 旗标；trailSigs = 同 markRes 全量信号流，跟踪止盈参照点）
- * @returns {{events:Array<{type:string,time:number,price:number|null}>, closed:boolean, beStop:number, lotsLeft:number}}
+ * @returns {{events:Array<{type:string,time:number,price:number|null}>, closed:boolean, beStop:number|null, lotsLeft:number}}
  *   type: breakeven | trailRaise（仅迁移）| half（够笔止盈）| close（过高低点止盈）|
  *         stopSr（支阻位止损；含最大止损硬上限兜底全平）| stopBe（保本止损）|
  *         trailStop（跟踪止盈，门控保本：beDone 前不接管）| stillOpen；
@@ -908,16 +928,34 @@ function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
   const slipBeEff = slipBe + kBe * ((markResData && markResData.atr) || 0);
   const fav = isShort ? "down" : "up"; // 有利方向笔（short 持仓盼下跌笔）
   const trend = trendFollowingOf(sig.planDirection, sig.strategyKey);
-  // 保本止损位：进场K线极值 ± 有效保本滑点（sig.time 对应 markRes bar；取不到取 ≤ entryT 最近一根）
-  let beStop = entryP + (isShort ? slipBeEff : -slipBeEff);
   const mbars = (markResData && markResData.bars) || [];
-  for (let i = mbars.length - 1; i >= 0; i--) {
-    if (mbars[i].time <= entryT) {
-      beStop = isShort ? mbars[i].high + slipBeEff : mbars[i].low - slipBeEff;
-      break;
+  const tp1 = findBiEvent(markResData && markResData.bis, entryT, fav);
+  // 保本位三口径（py 引擎 exitStopBeMode 同步，2026-10-12）：entry=进场价（0亏损）；
+  //   extreme=进场K线极值±有效保本滑点（sig.time 对应 markRes bar，取不到取 ≤ entryT
+  //   最近一根，仍取不到兜底进场价±滑点）；bi=背驰周期首笔有利方向笔起点±有效保本
+  //   滑点（起点缺失兜底进场价；成笔 tp1.time 前无值，彼时止损暂留支阻位——half
+  //   抢先触发的理论场景，py be_active 回落同口径）
+  const beMode = ec.beMode || "extreme";
+  let beStop = null;
+  if (beMode === "entry") {
+    beStop = entryP;
+  } else if (beMode === "bi") {
+    if (tp1) {
+      const sp = tp1.startPrice != null ? tp1.startPrice : entryP;
+      beStop = isShort ? sp + slipBeEff : sp - slipBeEff;
+    }
+  } else {
+    beStop = entryP + (isShort ? slipBeEff : -slipBeEff);
+    for (let i = mbars.length - 1; i >= 0; i--) {
+      if (mbars[i].time <= entryT) {
+        beStop = isShort ? mbars[i].high + slipBeEff : mbars[i].low - slipBeEff;
+        break;
+      }
     }
   }
-  const tp1 = findBiEvent(markResData && markResData.bis, entryT, fav);
+  // bi 口径成笔（tp1.time）前 beStop 未落位 → 该时刻保本位无效（half 抢先场景）
+  const beStopAt = (upto) => (beMode === "bi" && !(tp1 && tp1.time <= upto))
+    ? null : beStop;
   // 过高低点止盈参照（2026-10-10 起不分顺势逆势，与 py 引擎统一口径）：有利方向笔
   // 破前一同向笔端点（breakPrev）；旧逆势 favSeg5Time 快速离场口径废除
   const tp3a = findBiEvent(periodXData && periodXData.bis, entryT, fav, false, true);
@@ -955,6 +993,7 @@ function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
   const events = [];
   let stop = stopRef;
   let be = false, half = false, closed = false, closeDone = false, halfMr = false;
+  let biLanded = false; // bi 口径成笔落位（half/halfMr 抢先置 be 后成笔那拍迁止损）
   let trailMark = entryT, trailRaised = false;
   const stopFired = { stopSr: false, stopBe: false, trailStop: false };
   // 跟踪止盈门控保本（py 引擎 2026-10-09 同口径）：be（TP1/half/halfMr 置保本位）
@@ -969,7 +1008,8 @@ function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
   const applyTps = (upto) => {
     if (ec.stopBeOn && tp1 && tp1.time <= upto && !be) {
       be = true;
-      stop = beStop; // 保本：止损位上移至 beStop（进场K线极值±保本滑点）
+      const bv = beStopAt(upto); // 保本：止损位上移至 beStop（三口径；bi=笔起点±滑点）
+      if (bv != null) stop = bv;
       events.push({ type: "breakeven", time: tp1.time, price: tp1.price });
     }
     // 背驰周期够笔（引擎 halfMr 同口径）：事件源同 TP1（不限顺势），halfMr latch 一次性
@@ -977,8 +1017,9 @@ function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
       const nb = nextOpen(tp1.time);
       if (nb) {
         halfMr = true;
-        be = true;  // 剩余仓位止损移至 beStop
-        stop = beStop;
+        be = true;  // 剩余仓位止损移至 beStop（bi 成笔前无值 → 暂留原位）
+        const bv = beStopAt(upto);
+        if (bv != null) stop = bv;
         lastFill = nb.time;
         if (take("halfMr", nb.time, nb.open, ec.halfMrPct)) return "close";
         return "half"; // 部分平仓：挂起拍跳过止损检查（同引擎单事件）
@@ -988,8 +1029,9 @@ function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
       const nb = nextOpen(t5);
       if (nb) { // 触发后无下一根 → 未成交（与引擎口径一致）
         half = true;
-        be = true;  // 剩余仓位止损移至 beStop
-        stop = beStop;
+        be = true;  // 剩余仓位止损移至 beStop（bi 成笔前无值 → 暂留原位）
+        const bv = beStopAt(upto);
+        if (bv != null) stop = bv;
         lastFill = nb.time;
         if (take("half", nb.time, nb.open, ec.halfPct)) return "close";
         return "half";
@@ -1030,9 +1072,20 @@ function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
     if (bar.time <= entryT) continue; // 进场当根不计（进场K线自身的高低点）
     const ev = applyTps(bar.time);
     openTrailGate(bar.time);
+    // bi 口径成笔落位（half/halfMr 抢先置 be 后，成笔那拍把止损迁到笔端点±滑点；
+    // 已跟踪提损则取更紧者——py「跟踪接管取更紧」同口径；TP1 已迁移过则幂等）
+    if (be && beMode === "bi" && !biLanded) {
+      const bv = beStopAt(bar.time);
+      if (bv != null) {
+        stop = trailRaised ? (isShort ? Math.min(stop, bv) : Math.max(stop, bv)) : bv;
+        biLanded = true;
+      }
+    }
     if (ev === "close") { closed = true; break; }
     if (ev === "half") { trailRaise(bar.time); continue; } // 本拍已挂事件，跳过止损检查
-    const typ = trailOn() ? "trailStop" : (be ? "stopBe" : "stopSr");
+    // bi 成笔前 beStop 无值（be 已置但未落位）→ 穿越判定暂按支阻位（py be_active 同口径）
+    const typ = trailOn() ? "trailStop"
+      : ((be && beStopAt(bar.time) != null) ? "stopBe" : "stopSr");
     if (stop != null) {
       const on = typ === "trailStop" ? true : (typ === "stopBe" ? ec.stopBeOn : ec.stopSrOn);
       const pct = typ === "trailStop" ? ec.trailPct : (typ === "stopBe" ? ec.stopBePct : ec.stopSrPct);
@@ -1429,7 +1482,8 @@ async function main() {
       if (plan && plan.strategy && plan.direction !== "观望") candidates.push(plan);
       const altRow = { strategy: plan ? plan.altStrategy : null,
                        direction: plan ? plan.altDirection : null,
-                       reason: plan ? plan.altReason : null };
+                       reason: plan ? plan.altReason : null,
+                       pointCls: plan ? plan.altPointCls : null };
       if (altRow.strategy && altRow.direction !== "观望") candidates.push(altRow);
       if (!candidates.length) {
         console.log(`
@@ -1459,6 +1513,7 @@ async function main() {
 [周期 ${res}] 策略「${strategy.label}」与参考周期方向（${trendReason}）相反，顺势过滤跳过`);
           continue;
         }
+        ctx.pointCls = prow.pointCls;
         const evalRes = evaluateEntry(ctx, strategy);
         if (!evalRes.ok) {
           console.log(`
@@ -1533,7 +1588,7 @@ async function main() {
         (e) => e.final || e.type === "close" || e.type === "stopSr" || e.type === "stopBe");
       openPos[s.direction] = { sig: s, endTime: terminal ? terminal.time : Infinity };
       const evDesc = sim.events.map(e => `${EXIT_NAMES[e.type] || e.type} ${toT(e.time)}${e.price != null ? " @" + e.price.toFixed(2) : ""}${e.lots != null ? ` (${e.lots}手${e.final ? "终局" : ""})` : ""}`).join(" → ");
-      console.log(`[持仓] ${toT(s.time)} ${s.direction === "long" ? "做多" : "做空"}（检测周期 ${s.periodX}，${trendFollowingOf(s.planDirection, s.strategyKey) ? "顺势" : "逆势"}，${LOTS} 手，止损参考 ${s.stopRef.toFixed(2)}，保本位 ${sim.beStop.toFixed(2)}）: ${evDesc || "无出场事件"}`);
+      console.log(`[持仓] ${toT(s.time)} ${s.direction === "long" ? "做多" : "做空"}（检测周期 ${s.periodX}，${trendFollowingOf(s.planDirection, s.strategyKey) ? "顺势" : "逆势"}，${LOTS} 手，止损参考 ${s.stopRef.toFixed(2)}，保本位 ${sim.beStop != null ? sim.beStop.toFixed(2) : "待定(bi成笔前)"}）: ${evDesc || "无出场事件"}`);
     }
     // 重新按背驰级别聚合（flatSigs 为带互斥/出场信息的信号副本，落盘与绘制都用它）
     allEntries = {};

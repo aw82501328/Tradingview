@@ -141,7 +141,13 @@ def fmt_reject(r):
                                          "（方向不符）"),
         "no_new_extreme": lambda c: (f"{c.get('res')} 段极值 {_f2(c.get('extreme'))} 未破参照端点 "
                                      f"{_f2(c.get('refExtreme'))}（近等容差 {c.get('tol')}；"
-                                     f"参照 {fmtT(c.get('refTime')) if c.get('refTime') else '?'}）"),
+                                     f"参照 {fmtT(c.get('refTime')) if c.get('refTime') else '?'}"
+                                     + (("；实体 " + _f2(c.get("bodyExtreme")) + " 对参照实体 "
+                                         + _f2(c.get("bodyRef")))
+                                        if c.get("bodyExtreme") is not None
+                                        and c.get("bodyRef") is not None
+                                        else ("；实体未取到" if "bodyExtreme" in c else ""))
+                                     + "）"),
         "macd_no_diverge": lambda c: f"{c.get('res')} MACD 对比不背驰（动能未衰竭）",
         "macd_shrink_gate": lambda c: (f"最近两根柱 |macd| {c.get('prev')}→{c.get('last')}"
                                        " 未收缩"),

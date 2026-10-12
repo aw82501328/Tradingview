@@ -102,6 +102,18 @@ def fld(obj, name):
         return getattr(obj, name)
 
 
+def position_row(p):
+    """持仓统一成 dict。positions_get 是 namedtuple，不能用 p["ticket"]；
+    改 SL 要读现有 tp，缺这个键会在 fld 回退后抛 AttributeError。"""
+    return {
+        "ticket": fld(p, "ticket"), "type": fld(p, "type"),
+        "volume": fld(p, "volume"), "sl": fld(p, "sl"), "tp": fld(p, "tp"),
+        "price_open": fld(p, "price_open"), "profit": fld(p, "profit"),
+        "comment": fld(p, "comment"), "magic": fld(p, "magic"),
+        "time": fld(p, "time"),
+    }
+
+
 def filling_candidates(bitmask):
     """symbol_info.filling_mode 位掩码 → 请求 type_filling 候选序列（FOK→IOC）。"""
     out = []
@@ -240,8 +252,9 @@ class MT5Broker:
         if magic:
             args["magic"] = magic  # 部分版本支持按 magic 过滤；不支持时下面兜底
         ps = mt5.positions_get(**args) or []
-        # 字段访问走 fld()（np.void 下标式 / namedtuple 属性式，见注释）
-        return [p for p in ps if not magic or fld(p, "magic") == magic]
+        # 先按 magic 过滤，再收成 dict（对账与 kill-close 用 p["ticket"]）
+        return [position_row(p) for p in ps
+                if not magic or fld(p, "magic") == magic]
 
     def market_order(self, direction, volume, sl=None, tp=None, comment=""):
         """市价单（带 SL/可选 TP；filling 旋转；成交以返回结果实际量价回填）。
@@ -302,7 +315,11 @@ class MT5Broker:
 
         tp：_TP_UNCHANGED（默认）=保留持仓现 TP；数值=同时改 TP（fxma 固定止盈对齐用）。"""
         spec = self.spec()
-        pos = self._position_of(position_ticket)
+        try:
+            pos = self._position_of(position_ticket)
+        except RuntimeError as exc:
+            return OrderResult(False, retcode=10036, retcomment=str(exc),
+                               position_ticket=position_ticket)
         direction = "long" if pos["type"] == _BUY else _SELL
         sl = self.normalize_price(sl)
         if clamp:
@@ -335,7 +352,11 @@ class MT5Broker:
     def close_position(self, position_ticket, volume=None, comment=""):
         """平仓（volume=None 全平；否则部分平，向下归一到 volume_step）。"""
         spec = self.spec()
-        pos = self._position_of(position_ticket)
+        try:
+            pos = self._position_of(position_ticket)
+        except RuntimeError as exc:
+            return OrderResult(False, retcode=10036, retcomment=str(exc),
+                               position_ticket=position_ticket)
         vol = normalize_volume(pos["volume"] if volume is None else
                                min(volume, pos["volume"]), spec)
         direction = "short" if pos["type"] == _BUY else "long"   # 反向单
@@ -395,11 +416,7 @@ class MT5Broker:
         ps = mt5.positions_get(ticket=ticket)
         if not ps:
             raise RuntimeError(f"持仓不存在：ticket={ticket}")
-        p = ps[0]
-        return {"ticket": fld(p, "ticket"), "type": fld(p, "type"),
-                "volume": fld(p, "volume"), "sl": fld(p, "sl"),
-                "price_open": fld(p, "price_open"), "magic": fld(p, "magic"),
-                "comment": fld(p, "comment")}
+        return position_row(ps[0])
 
 
 # ---------------------------------------------------------------------------

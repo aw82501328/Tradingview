@@ -432,26 +432,47 @@ def buildFibCandidates(fullBis, buyPts, sellPts, fibLevels, bars, tol, barArrays
             if (spacing > 0 and bars[-1]["time"] - refer["endTime"] > spacing
                     and fullBis[-2]["type"] != refer["type"]):
                 refer = fullBis[-2]
-        side = "sell" if refer["type"] == "down" else "buy"
-        srcPoint = {"type": "最近段", "time": refer["endTime"], "price": refer["endPrice"]}
         out = []
-        for lv in fibLevelsOf(refer, side, fibLevels):
-            out.append({
-                "price": lv["price"],
-                "type": "RES" if side == "sell" else "SUP",
-                "fib": True,
-                "ratio": lv["ratio"],
-                "fromPoint": srcPoint,
-                "referBi": {
-                    "startTime": refer["startTime"], "endTime": refer["endTime"],
-                    "startPrice": refer["startPrice"], "endPrice": refer["endPrice"],
-                },
-                "touchCount": 1,
-                "firstTouch": refer["startTime"],
-                "lastTouch": refer["endTime"],
-                "breakTime": refer["endTime"],  # 末笔终点 = fib 位生效/绘线锚点时间
-                "barsPassed": countBarsPassing(lv["price"], bars, tol, barArrays),
-            })
+
+        def _emit_stroke(ref, label):
+            side = "sell" if ref["type"] == "down" else "buy"
+            src = {"type": label, "time": ref["endTime"], "price": ref["endPrice"]}
+            for lv in fibLevelsOf(ref, side, fibLevels):
+                out.append({
+                    "price": lv["price"],
+                    "type": "RES" if side == "sell" else "SUP",
+                    "fib": True,
+                    "ratio": lv["ratio"],
+                    "fromPoint": src,
+                    "referBi": {
+                        "startTime": ref["startTime"], "endTime": ref["endTime"],
+                        "startPrice": ref["startPrice"], "endPrice": ref["endPrice"],
+                    },
+                    "touchCount": 1,
+                    "firstTouch": ref["startTime"],
+                    "lastTouch": ref["endTime"],
+                    "breakTime": ref["endTime"],  # 末笔终点 = fib 位生效/绘线锚点时间
+                    "barsPassed": countBarsPassing(lv["price"], bars, tol, barArrays),
+                })
+
+        _emit_stroke(refer, "最近段")
+        # 反向侧（2026-10-12 用户规则：做空找压力=最近下跌笔的反弹位、做多找支撑=
+        # 最近上涨笔的回撤位，两侧同出）：末段口径原先只画参照段一侧，评估反向进场时
+        # 另一侧缺位——9-4 23:24 XAUUSD 15m：末笔=上涨笔只出 SUP 4417.13，距 2卖 候选点
+        # 4449 差 31.87 > near 被拒；前一根下跌笔 15:45→21:00 的 0.618 反弹位 4442.92
+        # 仅差 6 点却不在池中（要等趋势侧优先分支在价格掉头后才翻过去）。
+        # 反向参照 = 最近一根反向笔（形成中且不够笔的跳过，取再前一根同向笔）。
+        opp_type = "up" if refer["type"] == "down" else "down"
+        opp = None
+        for b in reversed(fullBis):
+            if b["type"] != opp_type:
+                continue
+            if b.get("_forming") and not b.get("enough") and len(fullBis) >= 3:
+                continue
+            opp = b
+            break
+        if opp is not None:
+            _emit_stroke(opp, "最近反向段")
         return out
     if minPointTime is not None:
         buyPts = [p for p in buyPts if p["time"] >= minPointTime]

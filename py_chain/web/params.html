@@ -508,7 +508,7 @@ const CHOICE_LABELS = { trendRes: { '': '关闭', '240': '4小时', 'D': '日线
                         fibLevels: { '0.236': '回撤23.6%', '0.382': '回撤38.2%', '0.5': '回撤50%', '0.618': '回撤61.8%', '0.786': '回撤78.6%' },
                         sameBarPriority: { 'stop': '止损优先(保守)', 'tp': '止盈优先' },
                         exitTrailSrc: { 'detect': '检测周期', 'mark': '背驰周期' },
-                        exitStopBeMode: { 'extreme': '当前(极值±滑点)', 'entry': '0亏损(进场价)' },
+                        exitStopBeMode: { 'extreme': '极值±滑点', 'entry': '0亏损(进场价)', 'bi': '笔端点±滑点' },
                         mutexScope: { 'global': '全局同向一笔(同缠论V1)', 'perPeriod': '每周期独立互斥' },
                         tpMode: { 'points': '固定点数', 'structure': '结构组合(半仓+主动止盈+跟踪止损)' },
                         maReq: { 'required': '必选', 'optional': '可选' },
@@ -528,18 +528,19 @@ const SLIP_ATR_K = { slip_stop: 'slip_stop_atr_k', slip_fallback: 'slip_fallback
 // 2026-10-08 交易计划页签 3 类分组上线后 trendRes 断行移除），保留空集兜底渲染逻辑
 const BREAK_BEFORE_KEYS = new Set();
 
-// 「标记进出场」分类分组：组标题行 + 组内键序（macdZeroTol 在 schema 里排末尾但语义属进场扩展组；
-// 键集与 param_center entry 模块对应，未列键自动排尾部兜底渲染）
+// 「标记进出场」分类分组：组标题行 + 组内键序（键集与 param_center entry 模块对应，未列键自动排尾部兜底渲染）
 // __EXIT_MODES__ = 出场方式组标记（exitModeRowsHtml 专用：每方式一张 开关+比例 卡）
+// __STRONG2_MACD__ = 强2类买卖点黄白线（开关 strong2BuyMacdOn + 容差 macdZeroTol 同一张卡）
+// __MACD_DIVERGE__ = MACD背驰容差（开关 macdDivergeBodyOn + 容差 macdDivergeTol 同一张卡）
 const ENTRY_GROUPS = [
   ['支阻', ['near']],
   ['手数', ['lots']],
   ['滑点（ATR系数内嵌各行；跟踪止盈滑点随其开关置灰）', ['slip_stop', 'slip_fallback', 'slip_be', 'exitTrailSlip']],
   ['出场判定', ['exit_min_merged', 'realtime_min_bars', 'zs_exit_weak_ratio']],
   ['__EXIT_MODES__', []],
-  ['进场扩展（M1/M2/M4、0轴容差）', ['sinkFallback', 'sinkFallbackRearm', 'nearEqualAtrK', 'nearEqualPct',
-                                     'expectBiEnough', 'expectBiMinBars', 'divergeConfirm', 'macdZeroTol']],
-  ['进场闸门', ['entryMacdShrink', 'stopEntryBarFloor']],
+  ['进场扩展（M1/M4）', ['sinkFallback', 'sinkFallbackRearm',
+                       'expectBiEnough', 'expectBiMinBars', 'divergeConfirm']],
+  ['进场闸门', ['__STRONG2_MACD__', '__MACD_DIVERGE__', 'entryMacdShrink', 'stopEntryBarFloor']],
   ['规则修复（07-07 06:30 案例锚点）', ['divergeReferByZs', 'sinkSkipLevel']],
 ];
 
@@ -566,8 +567,9 @@ function trailSrcHtml(m) {
         + choiceLabel('exitTrailSrc', c) + `</option>`).join('')
     + `</select> 平仓 `;
 }
-// 保本位模式（2026-10-10 双口径）：并入保本止损卡内联下拉（不单独成行；
-// 同跟踪止盈参照模式），extreme=成交K线极值±保本滑点，entry=0亏损（进场价，默认）
+// 保本位模式（三口径）：并入保本止损卡内联下拉（不单独成行；同跟踪止盈参照模式），
+// extreme=成交K线极值±保本滑点，entry=0亏损（进场价，默认），bi=笔端点±滑点
+// （背驰周期首笔有利方向笔起点±保本滑点，成笔前无值）
 function beModeHtml(m) {
   const spec = m.schema.exitStopBeMode;
   if (!spec) return '';
@@ -628,6 +630,36 @@ function exitModeRowsHtml(m) {
   }).join('');
 }
 function onSpecDef(spec) { return spec.default ? '默认开' : '默认关'; }
+
+// 强2类买卖点黄白线：开关 + 容差同一张卡（进场闸门）
+function strong2MacdCardHtml(m) {
+  const onSpec = m.schema.strong2BuyMacdOn, tolSpec = m.schema.macdZeroTol;
+  if (!onSpec || !tolSpec) return '';
+  const on = !!m.effective.strong2BuyMacdOn;
+  const tol = m.effective.macdZeroTol;
+  const isMod = m.overrides.strong2BuyMacdOn !== undefined || m.overrides.macdZeroTol !== undefined;
+  return `<div class="prow ${isMod ? 'mod' : ''}" title="${onSpec.desc}">
+    <input type="checkbox" data-k="strong2BuyMacdOn" ${on ? 'checked' : ''} aria-label="强2类买卖点黄白线">
+    <span class="pname"><span class="plabel">强2类买卖点黄白线<span class="badge">已修改</span></span>
+    <span class="pdef">${onSpecDef(onSpec)} · 开=强二买 DIF 须高于 -容差；关=强二买不看黄白线。容差默认 ${tolSpec.default}，0=严格 0 轴</span></span>
+    <span class="zs-keep">容差<input type="number" step="any" min="${tolSpec.min}" max="${tolSpec.max}"
+      data-k="macdZeroTol" value="${tol}" aria-label="黄白线容差">点</span></div>`;
+}
+
+// MACD背驰容差：开关 + 固定容差同一张卡（进场闸门）。容差不随开关置灰，关着仍用于影线
+function macdDivergeCardHtml(m) {
+  const onSpec = m.schema.macdDivergeBodyOn, tolSpec = m.schema.macdDivergeTol;
+  if (!onSpec || !tolSpec) return '';
+  const on = !!m.effective.macdDivergeBodyOn;
+  const tol = m.effective.macdDivergeTol;
+  const isMod = m.overrides.macdDivergeBodyOn !== undefined || m.overrides.macdDivergeTol !== undefined;
+  return `<div class="prow ${isMod ? 'mod' : ''}" title="${onSpec.desc}">
+    <input type="checkbox" data-k="macdDivergeBodyOn" ${on ? 'checked' : ''} aria-label="MACD背驰容差">
+    <span class="pname"><span class="plabel">MACD背驰容差<span class="badge">已修改</span></span>
+    <span class="pdef">${onSpecDef(onSpec)} · 开=影线不过再比笔端点实体；关=只比影线。容差默认 ${tolSpec.default}，0=只有严格更极端才过</span></span>
+    <span class="zs-keep">容差<input type="number" step="any" min="${tolSpec.min}" max="${tolSpec.max}"
+      data-k="macdDivergeTol" value="${tol}" aria-label="背驰容差">点</span></div>`;
+}
 
 // 出场方式开关关闭时：同卡比例输入置灰；跟踪止盈关闭时滑点组的「跟踪止盈滑点」置灰
 function applyExitModeDim() {
@@ -724,13 +756,19 @@ function entryRowsHtml(m) {
   grouped.add('exitTrailSrc');                   // 跟踪止盈参照：并入跟踪止盈卡，不单独成行
   grouped.add('exitStopBeMode');                 // 保本位模式：并入保本止损卡，不单独成行
   grouped.add('exitLockPts');                    // 锁定盈利门槛：并入锁定盈利卡，不单独成行
+  grouped.add('strong2BuyMacdOn');               // 并入「强2类买卖点黄白线」卡
+  grouped.add('macdZeroTol');
+  grouped.add('macdDivergeBodyOn');              // 并入「MACD背驰容差」卡
+  grouped.add('macdDivergeTol');
   return ENTRY_GROUPS.map(([title, keys]) => {
     if (title === '__EXIT_MODES__') {
       return `<div class="pgroup">出场方式（至少启用一种；锁定盈利优先级最高。其余比例 = 平总仓位[初始手数]%，整数手）</div>`
         + exitModeRowsHtml(m);
     }
     return `<div class="pgroup">${title}</div>`
-      + keys.filter(k => m.schema[k]).map(k => paramRow(m, k)).join('');
+      + keys.map(k => k === '__STRONG2_MACD__' ? strong2MacdCardHtml(m)
+        : k === '__MACD_DIVERGE__' ? macdDivergeCardHtml(m)
+        : (m.schema[k] ? paramRow(m, k) : '')).join('');
   }).join('') + Object.keys(m.schema)
     .filter(k => !grouped.has(k) && !Object.values(SLIP_ATR_K).includes(k))
     .map(k => paramRow(m, k)).join('');  // 未分组键（未来新增）尾部兜底，不丢渲染

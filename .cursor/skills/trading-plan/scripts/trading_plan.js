@@ -536,6 +536,8 @@ function predictPlan(opts) {
     }
     out.strategyLabel = out.strategy;
     out.pointDesc = `${p.type}@${fmtT(p.time)}(${p.price.toFixed(2)})`;
+    // 档位标签供进场闸区分：强二买与 1买同文案，开单条件不同
+    out.pointCls = cls;
     return out;
   };
   // 3/4. 买卖双侧各自扫锚（2026-10-10 用户规则：两侧独立、互不影响，与 py_chain 对齐）：
@@ -570,6 +572,7 @@ function predictPlan(opts) {
     out.altStrategy = alt.strategy;
     out.altReason = alt.reason;
     out.altPointDesc = alt.pointDesc;
+    out.altPointCls = alt.pointCls;
   }
   return out;
 }
@@ -1168,6 +1171,8 @@ async function main() {
         reason: p.reason || "",
         pointDesc: p.pointDesc || "",
       };
+      if (p.pointCls) planRows[res].pointCls = p.pointCls;
+      if (p.altPointCls) planRows[res].altPointCls = p.altPointCls;
 
       // 绘图：蓝色文字标记该周期策略（放可见范围顶部空白，最新bar右侧）
       // 内容：方向 + 策略，若找到最近买卖点则追加一行「最近买卖点:类型@时间(价格)」

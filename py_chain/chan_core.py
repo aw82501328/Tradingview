@@ -118,9 +118,10 @@ CHAN_CFG = {
     # 8-7 08:45 型二底由回退候选捕获（+280.5）；代价为再进场磨损簇（8-14 四连小止损 -68）。
     "sinkFallback": True,        # M1 下沉链回退：停止级无候选时沿链向上一级（仍 < 检测周期）重评
     "sinkFallbackRearm": True,   # M1 配套：同向持仓终局后重置该 (periodX,strategyKey,markRes) 段去重
-    "nearEqualAtrK": 0.0,        # M2 创新低/新高近等容差 ATR 系数（<=0 且比例项 <=0 时禁用；
-                                  # 实测仅 1 笔且为负贡献，默认关）
-    "nearEqualPct": 0.0,         # M2 近等容差价格比例（与 ATR 项取 max；近等带内要求三判据 AND）
+    "macdDivergeBodyOn": True,   # MACD背驰容差开关（2026-10-12）：开=影线未过再比笔端点K实体（默认）；
+                                  # 关=只比影线。容差见 macdDivergeTol
+    "macdDivergeTol": 0.0,       # MACD背驰固定容差（绝对价差，点）。未严格更极端时价差 ∈ [0, 该值]
+                                  # 算近等；0=不放宽。开关关着仍用于影线
     "expectBiEnough": True,      # M4 检测周期预期够笔（固定口径）：末笔方向相反且端点后
                                   # ≥expectBiMinBars 根本级K线即视为回调/反弹中（不等反向分型
                                   # 确认——分型需右邻收盘，固有 1 根本级K线滞后，如 8-6 10:00 顶
@@ -137,6 +138,9 @@ CHAN_CFG = {
     "macdZeroTol": 5.0,          # 2买/2卖 MACD 0 轴容差（2026-09-16）：2买 dif > -tol、
                                   # 2卖 dif < +tol 视为「上/下过 0 轴后回调/反弹未破 0 轴太多」，
                                   # 动能还在（原严格口径 dif>0 / dif<0，tol=0 即回退）
+    "strong2BuyMacdOn": False,   # 强二买开单 0 轴闸（2026-10-12）：开=DIF > -macdZeroTol 才进；
+                                  # 默认关=强二买不看 0 轴。过前高闸对强二买取消（1买的
+                                  # 等待回调后做2买仍保留过前高与 0 轴）
     # ---- 三处规则修复（2026-09-26 用户逐条确认；详见 plan/三处规则修复）----
     # anchorUndecidedSkip/anchorUndecidedMinBars（A 开关）已于 2026-10-10 淘汰：
     # 「未定型不接管」被「提前入列」取代——未定型点接管锚点并按弱档先行路由
@@ -347,6 +351,7 @@ def _mergeStep(merged, direction, bar):
         m["rawLowTime"] = bar["time"]
         if bar.get("_preHigh") is not None:
             m["_wickHigh"] = bar["_preHigh"]
+            m["_wickHighTime"] = bar["time"]
         _absorb_body(m, bar)
         merged.append(m)
         return merged, direction
@@ -422,11 +427,13 @@ def _mergeStep(merged, direction, bar):
             last["_origLowTime"] = bar.get("_origLowTime", bar["time"])
         # 冲高插针真高（_wickHigh）随覆盖范围传播：markWickBars 压平长上影前的真实
         # 高点（_preHigh，块级旁路字段）。fractalSideRealWick 开启时分型邻侧比较用
-        # max(high, _wickHigh)——被压平的邻侧上影不再误杀中间分型。只进邻侧比较通道，
+        # max(high, _wickHigh)——被压平的邻侧上影不再误杀中间分型；fixBiExtremes
+        # 上涨镜像恢复用它作端点候选价（2026-10-12）。只进邻侧比较/端点恢复通道，
         # 不写入 rawHigh/high——合并结构与跳空检测保持压平语义（与 _origLow 同模式）。
         wh = bar.get("_preHigh")
         if wh is not None and wh > last.get("_wickHigh", float("-inf")):
             last["_wickHigh"] = wh
+            last["_wickHighTime"] = bar["time"]
         last["_rawCount"] += 1
         last["time"] = bar["time"]
         _absorb_body(last, bar)
@@ -446,6 +453,7 @@ def _mergeStep(merged, direction, bar):
         m["rawLowTime"] = bar["time"]
         if bar.get("_preHigh") is not None:
             m["_wickHigh"] = bar["_preHigh"]
+            m["_wickHighTime"] = bar["time"]
         _absorb_body(m, bar)
         merged.append(m)
     return merged, direction
@@ -970,24 +978,45 @@ class BiBuildCtx:
         #   实体最高价不得涨回起点顶价之上——影线刺穿不算（2026-10-01 起；顶后崩盘
         #   bar 跌回起点之下 = 中继弱反弹，不成笔；中心 bar 的崩盘低点可能被包含合并
         #   抬高，须依赖三根中的右 bar 提供证据）；上涨笔对称。
-        merged = self.merged
-        i = a["mergedIdx"]
         j = b["mergedIdx"]
-        if a["type"] == "top":
-            range_low = min(merged[i]["low"], merged[i + 1]["low"])
-            range_high = max(merged[i]["high"], merged[i + 1]["high"])
-        else:
-            range_low = min(merged[i - 1]["low"], merged[i]["low"])
-            range_high = max(merged[i - 1]["high"], merged[i]["high"])
         # 终点侧三根。本周期振幅 ≥ 单根长K豁免点数的K线不参与（大振幅K不作为反向贯穿证据）。
+        # 起点侧两根同样跳过长K：大振幅K不抬高「必须脱离」的阈值。两根都被豁免时起点侧不阻挡。
+        # 例：15m 2026-09-09 23:15 底的左邻是 22:45/23:00 合并长K（振幅约 43，高点 4423.535），
+        # 9-10 2:00 顶 4421.65 只低不到 2 点，这段上涨已经够笔，不能被这根长K否决。
+        range_low, range_high = self._startSideRange(a)
         end_low, end_high = self._endSideExtremes(j)
         if a["type"] == "top" and b["type"] == "bottom":
             end_ok = True if end_high is None else end_high < a["high"]
-            return b["low"] < range_low and end_ok
+            start_ok = True if range_low is None else b["low"] < range_low
+            return start_ok and end_ok
         if a["type"] == "bottom" and b["type"] == "top":
             end_ok = True if end_low is None else end_low > a["low"]
-            return b["high"] > range_high and end_ok
+            start_ok = True if range_high is None else b["high"] > range_high
+            return start_ok and end_ok
         return True
+
+    def _startSideRange(self, a):
+        """起点侧与段同侧两根的最低/最高。
+
+        下跌笔顶起点取 [中心, 右]，上涨笔底起点取 [左, 中心]，与原先两根 min/max 相同。
+        振幅 ≥ 单根长K豁免点数的K线跳过；两根都跳过时返回 (None, None)，起点侧不阻挡。
+        两根都不是长K时，结果与跳过长K之前完全一致。
+        """
+        merged = self.merged
+        i = a["mergedIdx"]
+        idxs = (i, i + 1) if a["type"] == "top" else (i - 1, i)
+        thr = wideBarPointsOf(self.res)
+        skip = thr > 0
+        lows, highs = [], []
+        for idx in idxs:
+            m = merged[idx]
+            if skip and (m["high"] - m["low"]) >= thr:
+                continue
+            lows.append(m["low"])
+            highs.append(m["high"])
+        if not lows:
+            return None, None
+        return min(lows), max(highs)
 
     def _endSideExtremes(self, j):
         """终点分形三根的实体极值（bodyBottom/bodyTop）。
@@ -1283,6 +1312,95 @@ def _shiftBreakRestore(ctx, last, k, tail):
     return _stkCons(k, _stkCons(mid, _stkCons(anchor, tail)))
 
 
+def _bar_extreme_low(m):
+    """结构低与长下影真低里的更低者，以及对应时间。"""
+    p = m["low"]
+    t = m.get("lowTime") or m.get("time")
+    ol = m.get("_origLow")
+    if ol is not None and ol < p:
+        return ol, (m.get("_origLowTime") or t)
+    return p, t
+
+
+def _bar_extreme_high(m):
+    """结构高与长上影真高里的更高者，以及对应时间。"""
+    p = m["high"]
+    t = m.get("highTime") or m.get("time")
+    wh = m.get("_wickHigh")
+    if wh is not None and wh > p:
+        return wh, (m.get("_wickHighTime") or t)
+    return p, t
+
+
+def _deeper_opposite_bar(ctx, prev, last, k):
+    """last 与 k 同类型时，找 (last, k) 内比本笔起点 prev 更极端的反向价。
+
+    顶与顶之间的低点若低于起点底，这段已不是同一笔上涨；底对称。
+    比较含长影压平前的真低/真高（_origLow/_wickHigh）：15m 2026-09-09 23:15
+    插针 4375.155 低于 23:00 结构低 4380.39，底应落在 23:15。
+    返回落在该极值合并K上的合成分型，没有则 None。同价取更晚的一根。"""
+    lo = last["mergedIdx"] + 1
+    hi = k["mergedIdx"]
+    if lo >= hi:
+        return None
+    merged = ctx.merged
+    eps = 1e-9
+    if last["type"] == "top":
+        floor = prev["low"]
+        best_i, best_p, best_t = None, None, None
+        for i in range(lo, hi):
+            p, t = _bar_extreme_low(merged[i])
+            if best_p is None or p <= best_p + eps:
+                best_i, best_p, best_t = i, p, t
+        if best_p is None or best_p >= floor - eps:
+            return None
+        m = merged[best_i]
+        return {"mergedIdx": best_i, "type": "bottom", "high": m["high"], "low": best_p,
+                "time": best_t}
+    ceil = prev["high"]
+    best_i, best_p, best_t = None, None, None
+    for i in range(lo, hi):
+        p, t = _bar_extreme_high(merged[i])
+        if best_p is None or p >= best_p - eps:
+            best_i, best_p, best_t = i, p, t
+    if best_p is None or best_p <= ceil + eps:
+        return None
+    m = merged[best_i]
+    return {"mergedIdx": best_i, "type": "top", "high": best_p, "low": m["low"],
+            "time": best_t}
+
+
+def _bridge_same_type_extreme(ctx, head, last, k):
+    """同类型分型之间，反向极值已经和两端都成笔时拆开。
+
+    更极端的 k 不再直接后移端点（例：15m 2026-09-09 顶 21:30 4434.175 与
+    9-10 14:00 顶 4435.045 之间有 23:15 低点 4375.155，低于本笔起点 20:30 底
+    4391；直接替换再被端点极值修正会把下跌起点拖回 19:45）。
+    更低的顶、更高的底同样拆开：前一段下跌/上涨已经够笔，后一段也够笔，
+    k 是新端点，不是来替换前顶（例：21:30→23:15 下跌够笔，23:15→9-10 2:00
+    顶 4421.65 上涨够笔，2:00 虽低于 4434.175 仍是端点）。
+    拆不开则不拦截：更极端的仍按原同类型替换，不够极端的仍丢掉
+    （反向极值还不成笔时，后移端点是既有行为，近等取后等规则依赖它）。
+    返回新栈头表示已拆笔；None 表示不拦截。"""
+    if _stkLen(head) < 2:
+        return None
+    prev = head[1][0]
+    if prev.get("type") == last.get("type"):
+        return None
+    bridge = _deeper_opposite_bar(ctx, prev, last, k)
+    if bridge is None:
+        return None
+    if not (_pair_forms_bi(ctx, last, bridge) and _pair_forms_bi(ctx, bridge, k)):
+        return None
+    if CHAN_CFG["debug"]:
+        kind = "顶" if last["type"] == "top" else "底"
+        mid = "底" if bridge["type"] == "bottom" else "顶"
+        print(f"[阶段二] 同型跨更极值拆笔: {kind}@{last['mergedIdx']} 保留，"
+              f"接入{mid}@{bridge['mergedIdx']}({bridge['low'] if bridge['type']=='bottom' else bridge['high']})，"
+              f"再接入{kind}@{k['mergedIdx']}")
+    return _stkCons(k, _stkCons(bridge, head))
+
+
 def biStep(ctx, head, k):
     """阶段二单步（回溯替换）：把分型 k 并入不可变结果栈 head，返回新 head。
     规则体与原 buildBi 阶段二逐行一致；result[-n] 栈操作映射见 _stkCons 注释。
@@ -1310,9 +1428,15 @@ def biStep(ctx, head, k):
                 restored = _shiftBreakRestore(ctx, last, k, head[1])
                 if restored is not None:
                     return restored
-                k["_shiftAnchor"] = last.get("_shiftAnchor")
-                k["_shiftMid"] = last["_shiftMid"]
+            # 中间反向极值已经和两端都成笔时拆开（见 _bridge_same_type_extreme）。
+            # 更极端的不再直接后移；更低的顶/更高的底也不再丢掉。拆不开维持原行为。
+            bridged = _bridge_same_type_extreme(ctx, head, last, k)
+            if bridged is not None:
+                return bridged
             if more:
+                if last.get("_shiftMid") is not None:
+                    k["_shiftAnchor"] = last.get("_shiftAnchor")
+                    k["_shiftMid"] = last["_shiftMid"]
                 head = _stkCons(k, head[1])           # result[-1] = k
         else:
             # 跳空锁定的端点：仅当后续同类型分型「突破」锁定价格时才解锁替换
@@ -1819,6 +1943,13 @@ def fixBiExtremes(bis, merged, count_raw=None):
     endInnerRecoverOn（2026-10-09，默认开）时扫描范围扩为「笔内部块（startIdx+1）起，
     下一笔终点分型前」——终点分型之前被包含合并吞掉的极值同样恢复（笔端点=笔区间真实
     极值）；顶分支的分型中心（自身 high 即端点价）仍不扫。
+    末笔恢复 + 上影镜像（2026-10-12 用户规则）：长影压平后若无更低/更高的**实体**极值
+    成笔（= 笔端点不曾压过插针价——影线不算，仅实体极值参与结构端点），长影即该笔
+    最低/最高点。落地为两点：① 最后一笔同样做端点恢复（此前跳过、交给 extendLastBi——
+    但延伸只跟踪结构价，永远到不了被压平的影线价；realtime 进场评估恰读末笔）；② 顶
+    分支候选真高在 rawHigh 之外加 _wickHigh（长上影压平前真实高点），与底分支 _origLow
+    镜像。后续实体极值跌破/升过插针价时端点自然推进过去，恢复条件（比端点更极端）失效，
+    无需显式回滚。
     跳空独立成笔（gapLocked）端点固定在缺口处，不参与修正。原地修改并返回 bis。
     count_raw：可选 (a,b)→原始K线数 回调（bi_inc 增量路径传前缀和查询）。"""
     if not bis or len(bis) == 0 or not merged or len(merged) == 0:
@@ -1830,11 +1961,22 @@ def fixBiExtremes(bis, merged, count_raw=None):
         b = bis[i]
         if b.get("gapLocked", False):
             continue  # 跳空成笔端点固定在缺口处
-        if i + 1 >= len(bis):
-            continue  # 最后一笔由 extendLastBi 负责延伸
-        next_ = bis[i + 1]
-        toIdx = next_["endIdx"] - 1  # 不含下一笔终点分型，避免笔退化
+        is_last = i + 1 >= len(bis)
+        next_ = None if is_last else bis[i + 1]
+        # 末笔恢复（2026-10-12 用户规则：长影压平后若无更低/更高的实体极值成笔，长影
+        # 即该笔最低/最高点）：端点恢复同样作用于最后一笔——realtime 进场评估读的恰是
+        # 末笔（逆势够笔闸从 bis[-1].endTime 起数合并K）。9-4 23:21 XAUUSD 15m：插针
+        # 真低 4365.57 未恢复，下跌笔端点停在 22:45@4417.34，2卖信号漏发。
+        # 末笔扫描上界 = 自身终点分型（endIdx）；endIdx 之后的块属形成中的下一笔，不扫。
+        toIdx = b["endIdx"] if is_last else next_["endIdx"] - 1  # 非末笔：不含下一笔终点分型，避免笔退化
         extreme = None
+        # 影线候选守卫（2026-10-12）：长影=「该笔」最低/最高点 ⇒ 影线须超过笔区间全部
+        # **结构**极值才可恢复端点。近等取后顶/后底可能有意把端点放在较低的实体极值上
+        # （test_near_double 9-18 案例：后顶 4397.045，笔内结构高点 4399.67、下跌腿被压平
+        # 上影 4398.2——影线不是该笔绝对极值，不得抬端点）；rawLow/rawHigh（包含掩盖的
+        # 结构极值）不受此守卫，保持 2026-10-09 旧口径。
+        seg_hi = max((merged[k]["high"] for k in range(b["startIdx"], toIdx + 1)), default=None)
+        seg_lo = min((merged[k]["low"] for k in range(b["startIdx"], toIdx + 1)), default=None)
         # 内部块后向扫描（endInnerRecoverOn，2026-10-09）：被包含合并吞掉的更极端真低/真高
         # 也可能藏在终点分型**之前**的笔内部块（例：60m 2026-10-07 19:00 被 20:00 插针K线
         # 包含、升序合并取高低后 4066.53 从结构消失，底分型落在 21:00 4082.42）——笔端点应
@@ -1855,20 +1997,27 @@ def fixBiExtremes(bis, merged, count_raw=None):
                 mk = merged[k]
                 is_center = k == b["endIdx"]
                 cand_low = None
+                is_wick = False
                 if is_center:
                     cand_low = mk.get("_origLow")
+                    is_wick = cand_low is not None
                 elif mk.get("_origLow") is not None:
                     cand_low = mk["_origLow"]
+                    is_wick = True
                 else:
                     cand_low = mk.get("rawLow")
                 if cand_low is None or cand_low >= mk["low"]:
                     continue  # 未被合并/压平掩盖
+                if is_wick and seg_lo is not None and cand_low >= seg_lo - eps:
+                    continue  # 影线未超过笔区间结构最低点 → 非该笔绝对极值，不恢复（守卫）
                 if cand_low < b["endPrice"] - eps and (extreme is None or cand_low < extreme["price"]):
                     t = mk["_origLowTime"] if mk.get("_origLowTime") is not None else mk.get("rawLowTime")
                     extreme = {"price": cand_low, "time": t, "idx": k}
         else:
-            # 终点是顶：保持 endIdx+1 起扫（上影压平不产生 _origHigh，分型中心自身即端点
-            # 价；被包含合并掩盖的更高真实高点走 rawHigh 原值，不会把端点平移回已压平的插针价）
+            # 终点是顶：保持 endIdx+1 起扫、分型中心不扫（中心走 _topCand 端点价通道）。
+            # 候选真高（2026-10-12 镜像规则）= rawHigh（被包含合并掩盖）或 _wickHigh
+            # （长上影压平前真实高点——压平后无更高实体极值成笔时，长影即该笔最高点，
+            # 恢复为端点），两者取更极端。
             k0 = b["endIdx"] + 1
             if k0 > toIdx:
                 if not inner_on:
@@ -1880,10 +2029,14 @@ def fixBiExtremes(bis, merged, count_raw=None):
                 if k == b["endIdx"]:
                     continue  # 分型中心自身 high 即端点价，保持原语义不扫
                 mk = merged[k]
-                if mk.get("rawHigh") is None or mk["rawHigh"] <= mk["high"]:
-                    continue  # 未被掩盖
-                if mk["rawHigh"] > b["endPrice"] + eps and (extreme is None or mk["rawHigh"] > extreme["price"]):
-                    extreme = {"price": mk["rawHigh"], "time": mk["rawHighTime"], "idx": k}
+                for cand_high, cand_t, is_wick in ((mk.get("rawHigh"), mk.get("rawHighTime"), False),
+                                                   (mk.get("_wickHigh"), mk.get("_wickHighTime"), True)):
+                    if cand_high is None or cand_high <= mk["high"]:
+                        continue  # 未被合并/压平掩盖
+                    if is_wick and seg_hi is not None and cand_high <= seg_hi + eps:
+                        continue  # 影线未超过笔区间结构最高点 → 非该笔绝对极值，不恢复（守卫）
+                    if cand_high > b["endPrice"] + eps and (extreme is None or cand_high > extreme["price"]):
+                        extreme = {"price": cand_high, "time": cand_t, "idx": k}
         if extreme is None:
             continue
         if CHAN_CFG["debug"]:
@@ -1894,12 +2047,13 @@ def fixBiExtremes(bis, merged, count_raw=None):
         b["endIdx"] = extreme["idx"]
         b["span"] = b["endPrice"] - b["startPrice"] if b["type"] == "up" else b["startPrice"] - b["endPrice"]
         b["rawCount"] = count_raw(b["startIdx"], b["endIdx"])
-        # 下一笔起点联动（保持两笔端点连续）
-        next_["startPrice"] = extreme["price"]
-        next_["startTime"] = extreme["time"]
-        next_["startIdx"] = extreme["idx"]
-        next_["span"] = next_["endPrice"] - next_["startPrice"] if next_["type"] == "up" else next_["startPrice"] - next_["endPrice"]
-        next_["rawCount"] = count_raw(next_["startIdx"], next_["endIdx"])
+        # 下一笔起点联动（保持两笔端点连续）；末笔无下一笔，恢复终点即形成段起点
+        if next_ is not None:
+            next_["startPrice"] = extreme["price"]
+            next_["startTime"] = extreme["time"]
+            next_["startIdx"] = extreme["idx"]
+            next_["span"] = next_["endPrice"] - next_["startPrice"] if next_["type"] == "up" else next_["startPrice"] - next_["endPrice"]
+            next_["rawCount"] = count_raw(next_["startIdx"], next_["endIdx"])
     return bis
 
 
@@ -3061,12 +3215,14 @@ def _upper_diverge_at(upperBis, upperMacd, macdArr, tRef, is_sell):
 def _second_point_series(bis, firstPts, upperBis, upperMacd, macdArr, is_sell):
     """2买/2卖族序列发射（2026-10-11 用户规则：统一二买定义，替代上级窗口/中枢口径）：
       锚 = 本级最新 1买/1卖；其后首个抬低（down 端点 > 锚价）/压低（up 端点 < 锚价）为
-    2买/2卖，此后每个严格更高抬低/更低压低为 类2买/类2卖；端点破锚价 → 锚将滚动、
-    整条序列作废（返回空）；介于前一点与锚价之间 → 不标、序列等待（prev_px 单调口径）。
+    2买/2卖。端点破锚价 → 锚将滚动、整条序列作废（返回空）。
+      买侧（2026-10-12）：锚后每个仍高于锚价的下跌端点都标，首个为 2买，其后为类2买，
+    不再要求严格高于上一个已标出的二买点。
+      卖侧：此后每个严格更低压低为类2卖；介于前一点与锚价之间 → 不标、序列等待。
       背驰闸（secondDivergeGate 开，2026-10-12 收窄为仅拦弱档）：上级末两根确认同向笔
     isBiDiverge 无背驰时弱/未定点不标（未定型翻强后才出现、回调段成笔才判断），强档
     （strong=True）放行；不可判定/无上级（日线）→ 放行。被闸点仍推进序列结构
-    （后续更高抬低/更低压低仍是类2买，不重编号）。
+    （后续点仍是类2买/类2卖，不重编号）。
       强弱（strong 字段，type 字符串不变）：每点取紧邻前一根反向笔终点 vs 再前一根
     反向笔终点（=该点所在笔起点，即「同周期前一个下跌/上涨段最后一笔的起点」）——
     过=强、已完成未过=弱、未走完/不可比=None（弱先行，滚动翻强）。2卖镜像。
@@ -3099,7 +3255,8 @@ def _second_point_series(bis, firstPts, upperBis, upperMacd, macdArr, is_sell):
         p = b["endPrice"]
         if not ((p < anchor_p) if is_sell else (p > anchor_p)):
             return []  # 破锚价：1买/1卖 将滚动到新极值，序列作废重找
-        if prev_px is not None and not ((p < prev_px) if is_sell else (p > prev_px)):
+        # 卖侧仍要求严格更低压低；买侧不再要求高于上一个已标二买点
+        if is_sell and prev_px is not None and not (p < prev_px):
             continue  # 介于前一点与锚价之间：不标、序列等待
         strong = None
         if i >= 1 and bis[i - 1]["type"] == rev and not bis[i - 1].get("_forming"):
@@ -3108,7 +3265,7 @@ def _second_point_series(bis, firstPts, upperBis, upperMacd, macdArr, is_sell):
                 strong = bool((bis[i - 1]["endPrice"] < prev_rev["endPrice"]) if is_sell
                               else (bis[i - 1]["endPrice"] > prev_rev["endPrice"]))
         if gate_block and (strong is not True or b.get("_forming")):
-            prev_px = p  # 被闸点仍推进序列结构：后续更高抬低/更低压低仍是类2买，不重编号
+            prev_px = p  # 被闸点仍推进序列结构：后续点仍是类2买/类2卖，不重编号
             continue
         out.append({"type": ("2卖" if is_sell else "2买") if prev_px is None
                     else ("类2卖" if is_sell else "类2买"),
@@ -3121,7 +3278,7 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
                   upperMacd=None):
     """买点识别（MACD 背驰 + 抬高结构 + 中枢类2/3）。
     2买/类2买（2026-10-11 统一二买定义，_second_point_series）：本级最新 1买 后抬低序列
-    （首个=2买、此后每个严格更高抬低=类2买）+ 可选大周期背驰闸（secondDivergeGate 仅拦
+    （首个=2买、其后每个仍高于锚价的下跌端点=类2买，不要求高于上一已标点）+ 可选大周期背驰闸（secondDivergeGate 仅拦
     弱档：上级末两根确认下跌笔 isBiDiverge 无背驰时弱/未定不标，强档放行；upperMacd
     优先/缺省区间套兜底）+ 每点 strong 强弱。
     上级上涨笔窗口仍产 twoBuyMeta（zg/seg 边界）供 3买/类3买锚定，不再发射二买族。

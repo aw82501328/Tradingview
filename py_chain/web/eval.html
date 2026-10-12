@@ -332,7 +332,7 @@ function posBlock(p,btn){
 }
 function pnlPositionsHtml(rows){
   if(!rows||!rows.length)return '<p class="muted">没有进出场对照</p>';
-  return `<table class="pair-table"><thead><tr><th>冻结进出场</th><th>本次进出场</th></tr></thead><tbody>${rows.map(r=>{
+  return `<table class="pair-table"><thead><tr><th>冻结进出场</th><th>当前进出场</th></tr></thead><tbody>${rows.map(r=>{
     const diff=!r.a||!r.b||r.a.entryTime!==r.b.entryTime||r.a.exitTime!==r.b.exitTime||r.a.pnl!==r.b.pnl;
     return `<tr${diff?' style="background:#26180f"':''}><td>${posBlock(r.a)}</td><td>${posBlock(r.b)}</td></tr>`;
   }).join('')}</tbody></table>`;
@@ -385,16 +385,17 @@ function pnlGroupHtml(g,isRun){
       html+=`<tr><td>${esc(it.caseName||it.caseId)}</td><td colspan="4" class="err-text">✗ ${esc(it.error||'计算失败')}</td></tr>`;
       return;
     }
-    const fail=isRun&&!it.ok&&!d.unmatched;
     const miss=d.unmatched;
+    const hasPair=Array.isArray(d.positions)&&d.positions.length;
+    const fail=isRun&&!it.ok&&hasPair;
     html+=`<tr class="${fail?'case-row':''}"><td>${esc(it.caseName||it.caseId)}</td>
-      <td>${pnlTxt(d.expectedTotal)}</td><td>${miss?'<span class="badge fail">未找到</span>':pnlTxt(d.actualTotal)}</td>
+      <td>${pnlTxt(d.expectedTotal)}</td><td>${pnlTxt(d.actualTotal)}</td>
       <td>${d.delta?`<span class="chg">${pnlTxt(d.delta)}</span>`:pnlTxt(d.delta)}</td>
-      <td>${miss?'<span class="badge fail">未找到原行</span>':(isRun?(it.ok?'<span class="badge pass">✓ 通过</span>':'<span class="badge fail">✗ 合计变化</span>'):'<span class="badge pass">已冻结</span>')}
+      <td>${miss?'<span class="badge fail">没开单</span>':(isRun?(it.ok?'<span class="badge pass">✓ 通过</span>':'<span class="badge fail">✗ 合计变化</span>'):'<span class="badge pass">已冻结</span>')}
         ${it.drift?' <span class="badge drift" title="当前参数与这条基线冻住的参数不同，运行仍用冻住的参数。具体差异见上方列表">参数不一致</span>':''}
         ${fail?' <span class="caption">▾ 展开进出场</span>':''}</td></tr>`;
-    if(miss)html+=`<tr><td colspan="5" class="err-text">${esc(miss)}</td></tr>`;
-    if(fail)html+=`<tr hidden><td colspan="5" style="padding:0"><div class="case-detail">${pnlPositionsHtml(d.positions)}</div></td></tr>`;
+    if(fail)html+=`<tr hidden><td colspan="5" style="padding:0"><div class="case-detail">${miss?`<p class="err-text">${esc(miss)}</p>`:''}${pnlPositionsHtml(d.positions)}</div></td></tr>`;
+    else if(miss)html+=`<tr><td colspan="5" class="err-text">${esc(miss)}</td></tr>`;
   });
   return html+'</tbody></table></div>';
 }
@@ -518,17 +519,28 @@ function biRow(bi,i){
     <td>${bi.gapLocked?'✓':'·'}</td><td>${bi.macdCross?'✓':'·'}</td></tr>`;
 }
 const BI_TABLE_HEAD='<thead><tr><th>笔#</th><th>向</th><th>起#</th><th>止#</th><th>起价</th><th>止价</th><th>起时间</th><th>止时间</th><th>raw</th><th>span</th><th>GL</th><th>MC</th></tr></thead>';
+function rmCaseBtn(blId,c){
+  return `<button type="button" class="btn mini" style="margin-left:auto;flex-shrink:0" data-rm-bl="${esc(blId)}" data-rm-case="${esc(c.caseId)}" data-rm-name="${esc(c.caseName)}">移出</button>`;
+}
 async function showBaselineDetail(id){
   locateRows=[];
   const d=await api('bl-bis?id='+encodeURIComponent(id));
   if(d.kind==='pnl'){
     $('resultTitle').textContent='④ 基线明细';
-    $('runMeta').textContent=`基线「${d.name}」冻结合计与进出场`;
+    $('runMeta').textContent=`基线「${d.name}」冻结与最近一次运行对照${d.lastRunAt?` · 运行于 ${fmtT(d.lastRunAt)}`:''}`;
     let html='';
     for(const c of d.cases||[]){
-      html+=`<div class="bl-group-title">${esc(c.caseName)} <span class="badge">${esc(c.symbol||'—')}</span> <span class="caption">合计 ${pnlTxt(c.total)} · 冻结于 ${fmtT(c.frozenAt)}</span></div>`;
-      const lines=(c.positions||[]).map(p=>`<div class="pnl-pos">${posBlock(p)}</div>`).join('');
-      html+=`<div class="case-detail">${lines||'<p class="muted">无进出场</p>'}</div>`;
+      const cur=c.current;
+      const cap=cur
+        ?`冻结 ${pnlTxt(cur.expectedTotal)} · 当前 ${pnlTxt(cur.actualTotal)} · 差额 ${cur.delta?`<span class="chg">${pnlTxt(cur.delta)}</span>`:pnlTxt(cur.delta)}${cur.unmatched?' · <span class="badge fail">没开单</span>':''} · 冻结于 ${fmtT(c.frozenAt)}`
+        :`冻结 ${pnlTxt(c.total)} · 当前 <span class="muted">尚未运行</span> · 冻结于 ${fmtT(c.frozenAt)}`;
+      html+=`<div class="bl-group-title">${esc(c.caseName)} <span class="badge">${esc(c.symbol||'—')}</span> <span class="caption">${cap}</span>${rmCaseBtn(id,c)}</div>`;
+      if(!cur){
+        const lines=(c.positions||[]).map(p=>`<div class="pnl-pos">${posBlock(p)}</div>`).join('');
+        html+=`<div class="case-detail">${lines||'<p class="muted">无进出场</p>'}<p class="muted">尚未运行，没有当前值。点「运行」后这里并排显示冻结与重算。</p></div>`;
+      }else{
+        html+=`<div class="case-detail">${cur.unmatched?`<p class="err-text">${esc(cur.unmatched)}</p>`:''}${pnlPositionsHtml(cur.positions)}</div>`;
+      }
     }
     $('runBody').innerHTML=(d.cases||[]).length?html:'<p class="muted">基线内没有可用用例（可能已被删除）。</p>';
     return;
@@ -538,7 +550,7 @@ async function showBaselineDetail(id){
   let html='';
   for(const c of d.cases||[]){
     const range=c.fromTs||c.toTs?`${c.fromTs?fmtT(c.fromTs):'头'} → ${c.toTs?fmtT(c.toTs):'尾'}`:'全量';
-    html+=`<div class="bl-group-title">${esc(c.caseName)} <span class="badge">${esc(c.res)}</span> <span class="caption">${esc(c.symbol||'—')} · ${range} · 冻结于 ${fmtT(c.frozenAt)}</span></div>`;
+    html+=`<div class="bl-group-title">${esc(c.caseName)} <span class="badge">${esc(c.res)}</span> <span class="caption">${esc(c.symbol||'—')} · ${range} · 冻结于 ${fmtT(c.frozenAt)}</span>${rmCaseBtn(id,c)}</div>`;
     const resList=Object.keys(c.bis||{}).sort((a,b)=>PERIOD_ORDER.indexOf(a)-PERIOD_ORDER.indexOf(b));
     for(const res of resList){
       const bis=c.bis[res]||[];
@@ -643,6 +655,13 @@ async function deleteCase(id){
   await loadCases();
   toast('用例已删除');
 }
+async function removeBaselineCase(baselineId,caseId,caseName){
+  if(!confirm(`从这条基线移出用例「${caseName||''}」？\n用例本身仍保留，其他基线不受影响。`))return;
+  await api('remove-baseline-case',{id:baselineId,caseId});
+  await loadBaselines();
+  await showBaselineDetail(baselineId);
+  toast('已从基线移出该用例');
+}
 
 /* ---------- 事件 ---------- */
 document.addEventListener('click',e=>{
@@ -682,6 +701,7 @@ document.addEventListener('click',e=>{
   if(b.dataset.refresh)act(()=>refreshBaseline(b.dataset.refresh));
   if(b.dataset.rename)act(()=>renameBaseline(b.dataset.rename,b.dataset.name));
   if(b.dataset.delBl)act(()=>deleteBaseline(b.dataset.delBl));
+  if(b.dataset.rmBl)act(()=>removeBaselineCase(b.dataset.rmBl,b.dataset.rmCase,b.dataset.rmName));
 });
 document.addEventListener('change',e=>{if(e.target.classList.contains('case-cb'))refreshSel()});
 

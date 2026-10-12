@@ -116,19 +116,15 @@ def in_block_windows(srv_ts, windows):
 
 def provisional_sl(direction, bid, ask, near_sr, slip=DEFAULT_SLIP_STOP,
                    fallback=DEFAULT_SLIP_FALLBACK):
-    """信号拍临时 SL（引擎 stopRef 在成交拍才冻结）：近支阻 ± 滑点；
-    再按最大止损夹紧（多 ≥ bid−fallback / 空 ≤ ask+fallback，与 stop_ref_of 同口径）。"""
+    """信号拍券商止损：直接用最大止损兜底（多 bid−fallback / 空 ask+fallback）。
+
+    近支阻 ± 滑点离现价往往只有几美元，挂在券商单上很容易被扫（2026-10-12
+    黄金多单：近阻力 4201.56−3=4198.56，成交 4200.73，同根最低打到即平）。
+    正式止损在成交拍才冻结，届时再把券商 SL 改成引擎 stopRef。
+    near_sr、slip 保留参数，不再参与定价。"""
     if direction == "long":
-        max_loss = bid - fallback
-        cand = (near_sr - slip) if near_sr is not None else None
-        if cand is None or cand >= bid:
-            cand = max_loss
-        return max(cand, max_loss)
-    max_loss = ask + fallback
-    cand = (near_sr + slip) if near_sr is not None else None
-    if cand is None or cand <= ask:
-        cand = max_loss
-    return min(cand, max_loss)
+        return bid - fallback
+    return ask + fallback
 
 
 def config_hash(pm, cfg):
@@ -384,9 +380,14 @@ class LiveTrader:
                     fill_at_open_bar=True, fine_res=fine))
             return
         periods = [p for p in DEFAULT_PERIODS]
-        bars = data_store.load_store(self.cfg["db_symbol"], periods, from_ts, to_ts)
+        try:
+            bars = data_store.load_store(self.cfg["db_symbol"], periods, from_ts, to_ts)
+        except ValueError:
+            bars = {}   # 品种尚未入库，与窗口内无 3m 一样走下面的深拉
         if not bars.get("3"):
             # 首启：EXNESS:XAUUSD 库为空 → 深拉（MT5Feed 路径；ReplayFeed 数据已在）
+            self.log(f"[live] 本地无 {self.cfg['db_symbol']} 的 3 分钟数据，"
+                     f"从 MT5 深拉 {int(warmup_days)} 天")
             self.feed.history(min_depth_days=int(warmup_days))
             bars = data_store.load_store(self.cfg["db_symbol"], periods, from_ts, to_ts)
             if not bars.get("3"):
@@ -591,16 +592,21 @@ class LiveTrader:
                                         f"{s['strategyKey']}")
             return
         bid, ask = self.broker.quote()
-        # 信号拍临时 SL/TP：fxma 信号自带固定点数价位（provStop/provTp，来自触发拍
-        # 收盘价 ∓/± 点数；structure 无固定止盈 → tp 不挂，主动止盈由引擎触价事件驱动）；
-        # 缠论V1 信号走近支阻 ± 滑点的 provisional_sl（原行为）。
+        # 信号拍券商止损：fxma 用信号自带固定点数（provStop/provTp；structure 无固定
+        # 止盈则不挂 TP，主动止盈由引擎触价事件驱动）。缠论V1 直接用参数中心「最大止损」
+        # 兜底（买 bid−该值 / 卖 ask+该值），不用近支阻——近支阻临时价离现价太近。
+        # 成交拍再把券商 SL 改成引擎 stopRef。
         tp = None
         if s.get("provStop") is not None:
             sl = self.broker.normalize_price(s["provStop"])
             if s.get("provTp") is not None:
                 tp = self.broker.normalize_price(s["provTp"])
         else:
-            sl = provisional_sl(d, bid, ask, s.get("nearSr"))
+            ep = (self._pm or {}).get("entry") or {}
+            fb = ep.get("slip_fallback")
+            if fb is None:
+                fb = DEFAULT_SLIP_FALLBACK
+            sl = provisional_sl(d, bid, ask, None, fallback=float(fb))
             sl = self.broker.normalize_price(sl)
         vol = self.broker.normalize_volume(entryLots * 0.01)
         comment = f"chai_{d}_{s['time']}"
@@ -809,12 +815,13 @@ class LiveTrader:
         if t.get("entryTime") is None or t.get("beStop") is None:
             self._be_fix.add(no)
             return
-        # 0亏损模式（exitStopBeMode=entry，2026-10-10）：beStop=进场价=成交bar开盘，
-        # 与成交K线极值无关，无需收盘校正（校正反而会改回极值口径）
-        # 0亏损模式（exitStopBeMode=entry，2026-10-10）：beStop=进场价=成交bar开盘，
-        # 与成交K线极值无关，无需收盘校正（校正反而会改回极值口径）
-        if (getattr(self.engine, "exit_cfg", {}).get("exitStopBeMode")
-                or "extreme") == "entry":
+        # 0亏损（entry，2026-10-10）/笔端点（bi，2026-10-12）模式：beStop=进场价或
+        # 背驰周期笔起点，均为历史固定价，与成交K线极值无关，无需收盘校正（校正
+        # 反而会改回极值口径）。bi 成笔前 beStop=None 已在上方早退分支入 _be_fix
+        # （恰好正确：笔端点落位后同样无需校正，_diff_states 每拍快照可感知改写）
+        be_mode = (getattr(self.engine, "exit_cfg", {}).get("exitStopBeMode")
+                   or "extreme")
+        if be_mode in ("entry", "bi"):
             self._be_fix.add(no)
             return
         fine = self.engine.fine_res
@@ -875,7 +882,10 @@ class LiveTrader:
         """部分平仓（事件带 lots）：fxma 主动止盈分批 / 缠论V1 按比例触发的
         过高低点止盈、止损类部分平仓——按引擎事件手数市价平掉对应手数。
 
+        重放只推进引擎状态，不下单（与 _on_signal / _on_exit 同一口径）。
         手数低于 volume_min → 全平降级（同 half 降级口径）；≥ 券商剩余手数 → 全平。"""
+        if self.replaying:
+            return
         if row is None:
             live_store.log_event(self.session, "partial_close_skip",
                                  {"tradeNo": no, "why": "no_row"}, symbol=self.cfg["symbol"])
@@ -920,6 +930,8 @@ class LiveTrader:
                         f"trade#{no} 分批失败 retcode={r.retcode}，待 reconcile 收敛")
 
     def _modify_stop(self, no, t, row, sl, reason):
+        if self.replaying:
+            return
         if row is None or row["shadow"] or not row["position_ticket"]:
             if row is not None:
                 live_store.upsert_trade({"session": self.session,
@@ -943,6 +955,8 @@ class LiveTrader:
                                          f"{m.retcode}，旧 SL 仍在场，下拍重试")
 
     def _half_close(self, no, t, row):
+        if self.replaying:
+            return
         if row is None or row["shadow"] or not row["position_ticket"]:
             if row is not None:
                 live_store.upsert_trade({"session": self.session,
@@ -1367,6 +1381,9 @@ def main(argv=None):
         return
     try:
         trader.start(once=args.once)
+    except Exception as exc:
+        log(f"[live] 启动失败：{exc}")
+        raise
     finally:
         feed.close()
         broker.close()

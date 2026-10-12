@@ -249,7 +249,9 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
   test("TP1 → 止损移至 beStop → 盘中破坏 beStop 记 stopBe（跳空按开盘成交）", () => {
     const mr = { bis: [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)], bars: MR_BARS };
     const px = { bis: [bi("up", 50, 300, 4440, 4450)], bars: altBars([0, 100, 200, 300, 400]) };
-    const sim = simulatePosition(SIG(), 4463, mr, px);
+    // beMode 钉 extreme（py ecfg() 同惯例）：新默认 entry=进场价 4450 会在 bar200
+    // （high 4451）提前打保本，本用例验证的是极值口径的 4455 迁移与跳空成交
+    const sim = simulatePosition(SIG(), 4463, mr, px, { exitCfg: { beMode: "extreme" } });
     assert.equal(sim.beStop, 4455);
     assert.deepEqual(sim.events.map(e => e.type), ["breakeven", "stopBe"]);
     assert.equal(sim.events[1].time, 400);
@@ -262,12 +264,81 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
                  bars: MR_BARS, atr: 2 };
     // 进场K线 high 4452：beStop = 4452 + (3 + 1×2) = 4457
     const sim = simulatePosition(SIG(), 4463, mr, { bars: altBars([0, 100, 200, 300, 400]) },
-                                 { slipBe: 3, kBe: 1 });
+                                 { slipBe: 3, kBe: 1, exitCfg: { beMode: "extreme" } });
     assert.equal(sim.beStop, 4457);
     // kBe=0 → 纯固定滑点（回归）
     const sim0 = simulatePosition(SIG(), 4463, mr, { bars: altBars([0, 100, 200, 300, 400]) },
-                                  { slipBe: 3, kBe: 0 });
+                                  { slipBe: 3, kBe: 0, exitCfg: { beMode: "extreme" } });
     assert.equal(sim0.beStop, 4455);
+  });
+
+  test("beMode=entry（默认）：beStop=进场价 4450，保本出场=0亏损口径（成对 py TestStopBeMode）", () => {
+    const mr = { bis: [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)], bars: MR_BARS };
+    const px = { bis: [bi("up", 50, 300, 4440, 4450)], bars: altBars([0, 100, 200, 300, 400]) };
+    const sim = simulatePosition(SIG(), 4463, mr, px); // 默认 EXIT_CFG.beMode=entry
+    assert.equal(sim.beStop, 4450);
+    // bar200：TP1 迁移当拍 high 4451 > 4450 即打保本；跳空按开盘 max(4450,4450)=4450
+    assert.deepEqual(sim.events.map(e => e.type), ["breakeven", "stopBe"]);
+    assert.equal(sim.events[1].time, 200);
+    assert.equal(sim.events[1].price, 4450);
+    assert.equal(sim.closed, true);
+  });
+
+  test("beMode=bi：beStop=背驰周期首笔有利方向笔起点±滑点（short: down 起点 4450+3）", () => {
+    const mr = { bis: [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)], bars: MR_BARS };
+    const px = { bis: [bi("up", 50, 300, 4440, 4450)], bars: altBars([0, 100, 200, 300, 400]) };
+    const sim = simulatePosition(SIG(), 4463, mr, px, { exitCfg: { beMode: "bi" } });
+    assert.equal(sim.beStop, 4453); // tp1=down(100→200) 起点 4450 + slipBe 3
+    // bar200 TP1 迁移至 4453（high 4451 未破）；bar400 high 4456 破 → stopBe @4453
+    assert.deepEqual(sim.events.map(e => e.type), ["breakeven", "stopBe"]);
+    assert.equal(sim.events[1].time, 400);
+    assert.equal(sim.events[1].price, 4453);
+    assert.equal(sim.closed, true);
+  });
+
+  test("beMode=bi：无有利方向笔 → beStop 待定（null，成笔前不迁移）", () => {
+    const mr = { bis: [bi("up", 0, 700, 4440, 4455)], bars: MR_BARS }; // short 盼 down 笔，不存在
+    const px = { bis: [bi("up", 50, 300, 4440, 4450)], bars: altBars([0, 100, 200, 300, 400]) };
+    const sim = simulatePosition(SIG(), 4463, mr, px, { exitCfg: { beMode: "bi" } });
+    assert.equal(sim.beStop, null);
+    assert.ok(!sim.events.some((e) => e.type === "breakeven" || e.type === "stopBe"));
+  });
+
+  test("beMode=bi：half 抢先（t5=350 早于成笔 500）→ 止损暂留支阻位，成笔那拍迁至笔端点（成对 py be_active 回落）", () => {
+    const mr = {
+      bis: [bi("up", 0, 100, 4440, 4450), bi("down", 100, 500, 4450, 4430)],
+      bars: [
+        bar(100, 4450, 4452, 4448, 4451), bar(200, 4450, 4451, 4440, 4445),
+        bar(300, 4455, 4458, 4442, 4446), bar(400, 4456, 4459, 4444, 4448),
+        bar(500, 4450, 4456, 4446, 4452), bar(600, 4452, 4455, 4448, 4450),
+      ],
+    };
+    // px 首个 fav(down) 形成段起点 150，5 块合并K → t5=350（< tp1.time 500）；
+    // 末根 down 终点 4446 ≥ 前一 down 终点 4445 → 不破前低（tp3a=null，隔离出纯 half 路径）。
+    // mr bar300/400 high 4458/4459 破 4453 但未破支阻 4463——若 bi 成笔前误迁保本位，
+    // 本用例会在 bar300 提前 stopBe 出局（回归锚点）
+    const px = { bars: altBars([0, 50, 100, 150, 200, 250, 300, 350]),
+                 bis: [bi("down", 0, 50, 4460, 4440), bi("up", 50, 150, 4440, 4450),
+                       bi("down", 150, 250, 4450, 4445), bi("up", 250, 300, 4445, 4448),
+                       bi("down", 300, 350, 4448, 4446)] };
+    const sim = simulatePosition(SIG(), 4463, mr, px, { exitCfg: { beMode: "bi" } });
+    assert.equal(sim.beStop, 4453);
+    // half 成交于下一开盘 400（彼时 beStop 未落位，止损仍 4463 → 400 前 high 4459 不触发
+    // stopSr）；bar500 成笔落位 4453，当拍 high 4456 破位 → stopBe 全平 @4453
+    assert.deepEqual(sim.events.map((e) => e.type), ["half", "stopBe"]);
+    assert.equal(sim.events[0].time, 400);
+    assert.equal(sim.events[1].time, 500);
+    assert.equal(sim.events[1].price, 4453);
+    assert.equal(sim.closed, true);
+  });
+
+  test("findBiEvent：返回增量键 startPrice（bi 口径取「有利方向笔起点」，成对 py）", () => {
+    const bis = [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430),
+                 bi("up", 200, 300, 4430, 4448)];
+    assert.deepEqual(findBiEvent(bis, 100, "down"),
+                     { time: 200, price: 4430, startTime: 100, startPrice: 4450 });
+    const ev = findBiEvent(bis, 100, "up", false, true); // breakPrev：up(200→300) 未过前高 4450 → null
+    assert.equal(ev, null);
   });
 
   test("TP2 顺势：形成段≥5块 → 平一半（下一开盘成交），剩余半仓打 beStop 终局", () => {
@@ -281,7 +352,7 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
     const mr = { bis: [bi("up", 0, 700, 4440, 4455)], bars: mrBars }; // 无有利方向笔 → TP1 未触发
     const px = { bars: altBars([0, 100, 200, 300, 400, 500, 600, 700, 800]),
                  bis: [bi("up", 50, 300, 4440, 4450), bi("down", 300, 700, 4450, 4430)] };
-    const sim = simulatePosition(SIG(), 4463, mr, px);
+    const sim = simulatePosition(SIG(), 4463, mr, px, { exitCfg: { beMode: "extreme" } });
     const types = sim.events.map(e => e.type);
     assert.deepEqual(types, ["half", "stopBe"]); // t5=700 → half 成交于下一开盘 800；900 破 beStop
     assert.equal(sim.events[0].time, 800);
@@ -375,7 +446,7 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
                        bi("down", 150, 250, 4450, 4445), bi("up", 250, 300, 4445, 4448),
                        bi("down", 300, 500, 4448, 4435)] };
     const sim = simulatePosition(SIG(), 4463, mr, px,
-                                 { exitCfg: { halfPct: 50, closePct: 25 } });
+                                 { exitCfg: { beMode: "extreme", halfPct: 50, closePct: 25 } });
     assert.deepEqual(sim.events.map((e) => e.type), ["half", "close", "stillOpen"]);
     assert.equal(sim.events[0].lots, 2);           // ⌊4×50%⌋：总仓位基数、整数手
     assert.equal(sim.events[1].lots, 1);           // ⌊4×25%⌋=1（非剩余 2×25%=0.5）
@@ -391,11 +462,12 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
     const mr = { bis: [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)], bars: mrBars };
     const px = { bis: [bi("up", 50, 300, 4440, 4450)], bars: altBars([0, 100, 200, 300, 400]) };
     // 默认关：只有 TP1 保本迁移（旧基线可比）
-    const sim0 = simulatePosition(SIG(), 4463, mr, px);
+    const sim0 = simulatePosition(SIG(), 4463, mr, px, { exitCfg: { beMode: "extreme" } });
     assert.ok(!sim0.events.some((e) => e.type === "halfMr"));
     assert.deepEqual(sim0.events.map((e) => e.type), ["breakeven", "stillOpen"]);
     // 开启 25%：tp1=200 → halfMr 成交于下一开盘 300，halfMr latch 后不再重复
-    const sim = simulatePosition(SIG(), 4463, mr, px, { exitCfg: { halfMrOn: true, halfMrPct: 25 } });
+    const sim = simulatePosition(SIG(), 4463, mr, px,
+                                 { exitCfg: { beMode: "extreme", halfMrOn: true, halfMrPct: 25 } });
     const mrs = sim.events.filter((e) => e.type === "halfMr");
     assert.equal(mrs.length, 1);
     assert.equal(mrs[0].time, 300);
@@ -430,7 +502,7 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
       { time: 250, price: 4442, direction: "short", strategyKey: "wait3Sell" }, // 4443 < beStop 4455 上移
     ];
     const sim = simulatePosition(SIG(), 4463, mr, px,
-                                 { exitCfg: { trailOn: true, trailSlip: 1 },
+                                 { exitCfg: { beMode: "extreme", trailOn: true, trailSlip: 1 },
                                    trailSigs: sigs });
     const types = sim.events.map((e) => e.type);
     // trailPct 默认 25% 部分平仓 → 终态仍持仓（stillOpen）
@@ -451,7 +523,7 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
     const px = { bis: [bi("up", 50, 300, 4440, 4450)], bars: altBars([0, 100, 200, 300, 400, 500]) };
     const sigs = [{ time: 250, price: 4444, direction: "short", strategyKey: "wait3Sell" }];
     const sim = simulatePosition(SIG(), 4463, mr, px,
-                                 { exitCfg: { trailOn: true, trailSlip: 1, trailPct: 25 },
+                                 { exitCfg: { beMode: "extreme", trailOn: true, trailSlip: 1, trailPct: 25 },
                                    trailSigs: sigs });
     const types = sim.events.map((e) => e.type);
     assert.deepEqual(types, ["breakeven", "trailRaise", "trailStop", "stopSr"]);
@@ -476,7 +548,7 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
                  bis: [bi("down", 0, 50, 4460, 4440), bi("up", 50, 150, 4440, 4450),
                        bi("down", 150, 250, 4450, 4445), bi("up", 250, 300, 4445, 4448),
                        bi("down", 300, 500, 4448, 4435)] };
-    const sim = simulatePosition(SIG(), 4463, mr, px);
+    const sim = simulatePosition(SIG(), 4463, mr, px, { exitCfg: { beMode: "extreme" } });
     const types = sim.events.map(e => e.type);
     // half/close 默认均部分平仓 → 终态仍持仓（stillOpen）
     assert.deepEqual(types, ["half", "close", "stillOpen"]); // bar500 同拍挂 half，close 顺延下一拍

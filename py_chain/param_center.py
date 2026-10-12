@@ -74,8 +74,9 @@ CHAN_BI_KEYS = (
 POINTS_CHAN_KEYS = ("divergeDurRatio", "secondDivergeGate")  # anchorUndecided* 已淘汰（2026-10-10 提前入列）
 ENTRY_CHAN_KEYS = (
     "sinkFallback", "sinkFallbackRearm",
-    "nearEqualAtrK", "nearEqualPct",
+    "macdDivergeBodyOn", "macdDivergeTol",
     "expectBiEnough", "expectBiMinBars", "divergeConfirm", "macdZeroTol",
+    "strong2BuyMacdOn",
     "entryMacdShrink", "stopEntryBarFloor",
     "divergeReferByZs", "sinkSkipLevel",
 )
@@ -225,7 +226,7 @@ PARAM_MODULES = {
             "exitStopSrPct": ("支阻止损平仓比例", "触发时平总仓位（初始手数）的百分比；100=全平，部分平仓后剩余由其它方式了结", 1, 100),
             "exitStopBeOn": ("保本止损", "TP1保本迁移（背驰周期首笔有利方向笔完成→止损上移保本位）后穿越保本位 → 离场", None, None),
             "exitStopBePct": ("保本止损平仓比例", "触发时平总仓位（初始手数）的百分比；100=全平", 1, 100),
-            "exitStopBeMode": ("保本位模式", "extreme=极值±滑点：保本位=进场成交K线极值±保本滑点（被打到至少亏滑点+进场K线逆向波幅）；entry=0亏损（默认）：保本位=进场价（保本滑点不参与；穿越后下一开盘成交，跳空仍可能略有出入）", ("extreme", "entry"), None),
+            "exitStopBeMode": ("保本位模式", "extreme=极值±滑点：保本位=进场成交K线极值±保本滑点（被打到至少亏滑点+进场K线逆向波幅）；entry=0亏损（默认）：保本位=进场价（保本滑点不参与；穿越后下一开盘成交，跳空仍可能略有出入）；bi=笔端点±滑点：背驰周期首笔有利方向笔确认当拍保本位=该笔起点±保本滑点（滑点取开仓时快照；成笔前无值，止损暂留支阻位，成笔那拍迁移）", ("extreme", "entry", "bi"), None),
             "exitHalfMrOn": ("背驰周期够笔", "背驰周期向有利方向走出5块合并K（预期口径，不等确认笔）或首笔有利方向确认笔完成（TP1同事件源），不限顺势 → 平指定比例，剩余止损移保本位；与「检测周期够笔」同一张卡", None, None),
             "exitHalfMrPct": ("背驰周期够笔平仓比例", "触发时平总仓位（初始手数）的百分比；默认50", 1, 100),
             "exitHalfOn": ("检测周期够笔", "检测周期向有利方向走出5块合并K（预期口径，锚点=末笔终点块与进场块较晚者，不等确认笔）或末笔翻为有利方向确认笔，不限顺势 → 平指定比例，剩余止损移保本位", None, None),
@@ -239,14 +240,15 @@ PARAM_MODULES = {
             "exitTrailSlip": ("跟踪止盈滑点", "止损上移到参照点价后向不利侧偏移的点数（同 fxma tpTrailSlipPts；仅跟踪止盈启用时生效）", 0.0, 100.0),
             "sinkFallback": ("M1下沉链回退", "下沉停止级无候选时沿链向上一级重评", None, None),
             "sinkFallbackRearm": ("M1终局后重置去重", "同向持仓终局后重置段去重（同段可再进一次）", None, None),
-            "nearEqualAtrK": ("M2近等容差ATR", "创新低/新高近等容差（×ATR；0=关闭）", 0.0, 5.0),
-            "nearEqualPct": ("M2近等容差比例", "近等容差价格比例（0=关闭）", 0.0, 0.05),
+            "macdDivergeBodyOn": ("MACD背驰容差", "与容差同一张卡，在进场闸门。开=影线未过时再比笔端点K实体（默认开）；关=只比影线", None, None),
+            "macdDivergeTol": ("背驰容差", "MACD背驰固定容差（绝对价差，点）。影线或实体未严格更极端时，价差落在 0 到该值内算近等。0=不放宽。开关关着仍用于影线", 0.0, 100.0),
             "expectBiEnough": ("M4预期够笔", "允许预期段在合并K线够笔后进场；结构预期本身在普通分型确认后立即参与", None, None),
             "expectBiMinBars": ("M4够笔K线数", "预期够笔的本级合并K线块数门槛（含起点所在块）", 1, 100),
             "divergeConfirm": ("M4背驰确认后成交", "开启=分型右邻K收盘后的下一根开盘成交（默认当下）", None, None),
             "entryMacdShrink": ("进场MACD柱缩闸", "开启=背驰级别上一根已收K线柱状体(|MACD|)较前一根缩小才出信号（确认背驰且柱缩，下一根开盘进场）", None, None),
             "stopEntryBarFloor": ("进场K线止损下限", "开启=止损至少在进场背驰周期K线极值外侧加滑点处（运行中外推、收盘冻结，与支阻位止损取更宽者）", None, None),
-            "macdZeroTol": ("2买卖0轴容差", "2买 DIF > -该值 / 2卖 DIF < +该值 视为动能还在（0=严格 0 轴）", 0.0, 100.0),
+            "macdZeroTol": ("黄白线容差", "强2类买卖点黄白线容差：开闸后强二买 DIF > -该值才进（0=严格 0 轴）。1买/2卖的 0 轴判定仍用该值", 0.0, 100.0),
+            "strong2BuyMacdOn": ("强2类买卖点黄白线", "与容差同一张卡，在进场闸门。开=强二买开单要求 DIF 高于 -容差；关=强二买不看黄白线（默认）", None, None),
             "divergeReferByZs": ("背驰参照按中枢",
                                  "背驰参照笔=入中枢段（跳过当前段之前中枢内部/之后的同向笔，"
                                  "背驰=入中枢段vs出中枢段，中枢内部振荡段不参与比较）；"

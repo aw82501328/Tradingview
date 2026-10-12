@@ -476,6 +476,27 @@ class TestExitModesParams(unittest.TestCase):
             self.assertEqual(defaults[k], v)
             self.assertIn(k, param_center.PARAM_MODULES["entry"]["params"])
 
+    def test_exit_stop_be_mode_enum(self):
+        # entry.exitStopBeMode 三口径枚举（2026-10-10 extreme/entry；2026-10-12 加 bi）：
+        # 合法值通过、非法值 raise；默认 = mark_entry.EXIT_STOP_BE_MODE；保存-生效往返
+        from py_chain import mark_entry
+        self.assertEqual(param_center.defaults_of("entry")["exitStopBeMode"],
+                         mark_entry.EXIT_STOP_BE_MODE)
+        for ok in ("extreme", "entry", "bi"):
+            self.assertEqual(param_center.normalize("entry", {"exitStopBeMode": ok}),
+                             {"exitStopBeMode": ok})
+        for bad in ("xx", 240, None):
+            with self.assertRaises(ValueError):
+                param_center.normalize("entry", {"exitStopBeMode": bad})
+        schema = param_center.schema_of("entry")["exitStopBeMode"]
+        self.assertEqual(schema["type"], "str")
+        self.assertEqual(schema["choices"], ["extreme", "entry", "bi"])
+        param_center.update("entry", {"exitStopBeMode": "bi"})
+        self.assertEqual(param_center.effective("entry")["exitStopBeMode"], "bi")
+        param_center.reset("entry")
+        self.assertEqual(param_center.effective("entry")["exitStopBeMode"],
+                         mark_entry.EXIT_STOP_BE_MODE)
+
     def test_update_rejects_all_off(self):
         with self.assertRaises(ValueError):
             param_center.update("entry", {

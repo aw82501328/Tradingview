@@ -296,7 +296,7 @@ def _sig_brief(s):
 def _scoped_miss_note(base, matched, rows, suppressed):
     """选中行在重算里对不上时的说明。全部对上返回空串。
 
-    对不上不能把合计写成 0：空列表的合计也是 0，和保本平仓分不清。
+    对不上表示没开单。运行结果把重算合计记 0，与保本平仓（行还在、盈亏为 0）靠这句说明分开。
     """
     got = {_pos_key(r, True) for r in matched or []}
     notes = []
@@ -322,9 +322,9 @@ def _scoped_miss_note(base, matched, rows, suppressed):
                            and not isinstance(pnl, bool) else "—")
                 text += (f"，同时刻 {blocker.get('periodX')} {blocker.get('strategyKey')}"
                          f" 已成交（{pnl_txt}）")
-            text += "。合计仍保留原来的冻结值，没有写成 0。"
+            text += "。没开单。"
         else:
-            text = "重算结果里没有这行。合计仍保留原来的冻结值，没有写成 0。"
+            text = "重算结果里没有这行。没开单。"
         notes.append(text)
     return "".join(notes)
 
@@ -522,7 +522,7 @@ class EvalManager:
         self._case(case_id)
         refs = [b["name"] for b in self.list_baselines() if case_id in b.get("caseIds", [])]
         if refs:
-            raise ValueError("用例被基线引用，请先删除或重建基线：" + "、".join(refs))
+            raise ValueError("用例被基线引用，请先从基线移出该用例：" + "、".join(refs))
         (self.case_dir / f"{case_id}.json").unlink()
 
     # ---------------- 盈利用例（回测合计） ----------------
@@ -865,6 +865,10 @@ class EvalManager:
                     entry = entry or {}
                     exp[cid] = {"total": entry.get("total"), "frozenAt": entry.get("frozenAt")}
                 bl = {**bl, "expected": exp}
+            # 列表只要通过数。对照进出场只在明细接口返回
+            lr = bl.get("lastRun")
+            if isinstance(lr, dict) and "details" in lr:
+                bl = {**bl, "lastRun": {k: v for k, v in lr.items() if k != "details"}}
             out.append(bl)
         out.sort(key=lambda b: b.get("createdAt") or 0, reverse=True)
         return out
@@ -883,17 +887,23 @@ class EvalManager:
         bl = self._baseline(baseline_id)
         if bl.get("kind") == "pnl":
             names = {c["id"]: c for c in self._read_cases()}
+            run_details = (bl.get("lastRun") or {}).get("details") or {}
             out = []
             for cid in bl.get("caseIds", []):
                 c = names.get(cid)
                 if not c:
                     continue
                 exp = (bl.get("expected") or {}).get(cid) or {}
+                current = run_details.get(cid) if isinstance(run_details, dict) else None
+                if not isinstance(current, dict) or "actualTotal" not in current:
+                    current = None
                 out.append({"caseId": cid, "caseName": c.get("name"),
                             "symbol": c.get("symbol"), "kind": "pnl",
                             "total": exp.get("total"), "frozenAt": exp.get("frozenAt"),
-                            "positions": exp.get("positions") or []})
+                            "positions": exp.get("positions") or [],
+                            "current": current})
             return {"name": bl["name"], "kind": "pnl", "updatedAt": bl.get("updatedAt"),
+                    "lastRunAt": (bl.get("lastRun") or {}).get("at") if run_details else None,
                     "cases": out}
         cases = {c["id"]: c for c in self.list_cases()}
         out = []
@@ -908,6 +918,43 @@ class EvalManager:
                         "bis": exp.get("bis") or {}, "marks": exp.get("marks") or {}})
         return {"name": bl["name"], "updatedAt": bl.get("updatedAt"),
                 "cases": out}
+
+    def remove_baseline_case(self, baseline_id, case_id):
+        """从已建基线移出一条用例。用例文件和其他基线不动。
+
+        同步去掉冻结期望和最近一次运行摘要，通过数按剩下的用例重算。
+        不改 updatedAt，列表上的期望冻结时间仍是上次冻结时刻。
+        """
+        if not isinstance(case_id, str) or not case_id:
+            raise ValueError("caseId 不能为空")
+        bl = self._baseline(baseline_id)
+        ids = list(bl.get("caseIds") or [])
+        if case_id not in ids:
+            raise ValueError("该用例不在这条基线里")
+        with self._job_lock:
+            with self._state_lock:
+                if self._job and self._job.get("state") == "running":
+                    raise BusyError("已有评估任务在运行，请稍候")
+        ids.remove(case_id)
+        bl["caseIds"] = ids
+        expected = dict(bl.get("expected") or {})
+        expected.pop(case_id, None)
+        bl["expected"] = expected
+        lr = bl.get("lastRun")
+        if isinstance(lr, dict):
+            cases = dict(lr.get("cases") or {})
+            cases.pop(case_id, None)
+            lr["cases"] = cases
+            lr["total"] = len(cases)
+            lr["pass"] = sum(1 for v in cases.values() if v)
+            details = lr.get("details")
+            if isinstance(details, dict):
+                details.pop(case_id, None)
+                if not details:
+                    lr.pop("details", None)
+            bl["lastRun"] = lr
+        _write_json(self.bl_dir / f"{bl['id']}.json", bl)
+        return {"baselineId": bl["id"], "caseIds": ids}
 
     def delete_baseline(self, baseline_id):
         self._baseline(baseline_id)
@@ -1139,22 +1186,23 @@ class EvalManager:
             if scoped:
                 matched = _subset_rows(exp_positions, rows)
                 miss = _scoped_miss_note(exp_positions, matched, rows, suppressed)
-                total = None if miss else compute_summary(matched)["total"]
+                # 没开单：合计记 0，不再沿用冻结盈利。行还在则照旧加总（含盈亏刚好为 0 的保本）
+                total = 0 if miss else compute_summary(matched)["total"]
             else:
                 miss = ""
+                matched = rows
                 total = compute_summary(rows)["total"]
             exp_total = exp.get("total")
             if scoped and not exp.get("positions"):
                 exp_total = case.get("expectedTotal")
             ok = (not miss) and exp_total == total
-            delta = None if miss or exp_total is None or total is None else round(total - exp_total, 2)
+            delta = None if exp_total is None or total is None else round(total - exp_total, 2)
             details = {"kind": "pnl", "expectedTotal": exp_total,
-                       "actualTotal": total, "delta": delta}
+                       "actualTotal": total, "delta": delta,
+                       "positions": align_positions(
+                           exp_positions, matched, extras=not scoped, with_entry=scoped)}
             if miss:
                 details["unmatched"] = miss
-            elif not ok:
-                details["positions"] = align_positions(
-                    exp_positions, rows, extras=not scoped, with_entry=scoped)
             self._set_item(job, idx, state="done", ok=ok, drift=drift,
                            driftDiffs=drift_diffs, details=details)
             positions_out = rows
@@ -1245,20 +1293,32 @@ class EvalManager:
             job["baselineId"] = bl["id"]
 
     def _record_last_run(self, job):
-        """把运行摘要写回各基线文件（仅摘要，差异明细不落盘）。"""
+        """把运行摘要写回各基线文件。盈利用例另存冻结与重算对照，供明细并排显示。"""
         by_bl = {}
         for item in job["items"]:
-            d = by_bl.setdefault(item["baselineId"], {"cases": {}})
+            d = by_bl.setdefault(item["baselineId"], {"cases": {}, "details": {}})
             d["cases"][item["caseId"]] = bool(item["ok"])
+            det = item.get("details") if item.get("kind") == "pnl" else None
+            if isinstance(det, dict) and det.get("kind") == "pnl":
+                d["details"][item["caseId"]] = {
+                    "expectedTotal": det.get("expectedTotal"),
+                    "actualTotal": det.get("actualTotal"),
+                    "delta": det.get("delta"),
+                    "unmatched": det.get("unmatched") or "",
+                    "positions": det.get("positions") or [],
+                }
         for bid, d in by_bl.items():
             try:
                 bl = self._baseline(bid)
             except ValueError:
                 continue
             total = len(d["cases"])
-            bl["lastRun"] = {"at": time.time(),
-                             "pass": sum(1 for v in d["cases"].values() if v),
-                             "total": total, "cases": d["cases"]}
+            last = {"at": time.time(),
+                    "pass": sum(1 for v in d["cases"].values() if v),
+                    "total": total, "cases": d["cases"]}
+            if d["details"]:
+                last["details"] = d["details"]
+            bl["lastRun"] = last
             _write_json(self.bl_dir / f"{bid}.json", bl)
 
     def run_compare(self, baseline_id):

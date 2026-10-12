@@ -640,9 +640,11 @@ class TestFillEntryBarSeed(unittest.TestCase):
 
 
 class TestStopBeMode(unittest.TestCase):
-    """保本位模式（exitStopBeMode，2026-10-10）：
+    """保本位模式（exitStopBeMode，2026-10-10；2026-10-12 三口径）：
     entry（默认，0亏损）= 进场价（保本滑点不参与，滑点/ATR 系数均不生效）；
-    extreme = 成交K线极值±保本滑点（含成交 bar 缺失时 开盘价±滑点 兜底）。"""
+    extreme = 成交K线极值±保本滑点（含成交 bar 缺失时 开盘价±滑点 兜底）；
+    bi = 笔端点±滑点（背驰周期首笔有利方向笔确认那拍 beStop=该笔起点±开仓时点
+    快照滑点，成笔前无值——half 抢先置 beDone 时穿越暂回落支阻位）。"""
 
     def _fill(self, **kw):
         lows = kw.pop("lows", [100, 98, 97, 96, 88, 90])   # 0,180,...,900（900 低点 90）
@@ -694,6 +696,83 @@ class TestStopBeMode(unittest.TestCase):
         tr = execute_pending_exit(pos, bar(500, 95, 96, 94, 95))
         self.assertEqual(tr["exitPrice"], 95.0)
         self.assertEqual(tr["pnl"], 0.0)
+
+    # ---- bi 口径（笔端点±滑点，2026-10-12）：成笔前无值、成笔那拍惰性落位 ----
+
+    def test_bi_mode_pending_at_fill(self):
+        # 开仓：beStop=None（待定）+ 滑点快照入 pos；进场叙事「笔端点待定」
+        tr = self._fill(mp={"exitStopBeMode": "bi"})
+        self.assertIsNone(tr["beStop"])
+        self.assertEqual(tr["slipBeEff"], 3.0)
+        self.assertIn("笔端点待定", tr["entryWhy"])
+
+    def test_bi_mode_lands_at_bi_start_on_tp1(self):
+        # 成笔那拍（TP1 同事件源）：beStop = 背驰周期首笔有利方向笔起点 ∓ 开仓快照滑点
+        pos = make_pos(direction="long", entryPrice=95.0, stopRef=93.0, beStop=None,
+                       planDirection="多头多")
+        pos["exitCfg"] = ecfg(exitStopBeMode="bi", exitHalfOn=False)
+        pos["slipBeEff"] = 3.0
+        pos["lotsLeft"] = 4.0
+        mark_bis = [bi("up", 0, 100, 100.0, 94.0), bi("down", 100, 300, 94.0, 90.0),
+                    bi("up", 300, 500, 90.0, 96.0)]   # 首笔有利 up：起点 90 → beStop=87
+        px_bis = [bi("up", 50, 300, 4440, 4450)]
+        r = advance_exit_decision(pos, 500, bar(500, 95, 96, 94.5, 95.5), mark_bis, px_bis)
+        self.assertIsNone(r)                       # TP1 仅状态迁移（breakeven），不成交
+        self.assertEqual(pos["beStop"], 87.0)      # 笔起点 90 − 滑点 3
+        self.assertTrue(pos["beDone"])
+        be = [e for e in pos["exits"] if e["type"] == "breakeven"][-1]
+        self.assertIn("笔端点 90.00-保本滑点 3.00", be["why"])
+
+    def test_bi_mode_value_independent_of_be_on(self):
+        # exitStopBeOn=False（TP1 不触发）：成笔后 beStop 仍落位——half「移保本」可用
+        pos = make_pos(direction="long", entryPrice=95.0, stopRef=93.0, beStop=None,
+                       planDirection="多头多")
+        pos["exitCfg"] = ecfg(exitStopBeMode="bi", exitStopBeOn=False, exitHalfOn=False)
+        pos["slipBeEff"] = 3.0
+        pos["lotsLeft"] = 4.0
+        mark_bis = [bi("down", 0, 100, 96.0, 94.0), bi("up", 100, 400, 90.0, 96.0)]
+        r = advance_exit_decision(pos, 400, bar(400, 95, 96, 94.5, 95.5), mark_bis, [])
+        self.assertIsNone(r)
+        self.assertEqual(pos["beStop"], 87.0)
+        self.assertFalse(pos["beDone"])            # TP1 关闭：只落值不迁移
+
+    def test_bi_mode_half_before_bi_falls_back_to_sr(self):
+        # half（检测周期够笔）抢在成笔前置 beDone：beStop 仍 None → 叙事打「待定」、
+        # 穿越暂按支阻位 stopSr（be_active 回落）；成笔那拍 beStop 落位并迁 stopBe
+        pos = make_pos(direction="long", entryPrice=95.0, stopRef=93.0, beStop=None,
+                       planDirection="多头多")
+        pos["exitCfg"] = ecfg(exitStopBeMode="bi", exitStopSrPct=25)  # half 默认开
+        pos["slipBeEff"] = 3.0
+        pos["lotsLeft"] = 4.0
+        px_bis = [bi("down", 0, 100, 96.0, 94.0), bi("up", 100, 300, 94.0, 99.0)]
+        mark_bis = [bi("down", 0, 400, 96.0, 91.0)]   # 背驰周期尚无有利方向确认笔
+        # t=300：检测周期末笔有利（endTime 300 > 进场）→ half 触发；叙事含「待定」不崩
+        r = advance_exit_decision(pos, 300, bar(300, 95, 96, 94.5, 95.5), mark_bis, px_bis)
+        self.assertEqual(r, "half")
+        self.assertIsNone(pos["beStop"])
+        self.assertIn("待定", pos["pendingWhy"])
+        execute_pending_exit(pos, bar(400, 95, 96, 94, 95))   # half 成交，置 beDone
+        self.assertTrue(pos["beDone"])
+        # t=420：低点 92.5 破支阻 93 → stopSr（若误判 stopBe 则 beStop=None 不触发）
+        mark_bis.append(bi("up", 400, 450, 91.0, 97.0))       # endTime 450 > t，未成笔
+        r2 = advance_exit_decision(pos, 420, bar(420, 95, 96, 92.5, 93.5), mark_bis, px_bis)
+        self.assertEqual(r2, "stopSr")
+        self.assertIsNone(pos["beStop"])
+        execute_pending_exit(pos, bar(430, 93, 94, 92, 93))   # 25% 部分平，仓位续存
+        # t=450：成笔那拍 beStop 落位 = 笔起点 91 − 3 = 88；低点 87.5 破位 → stopBe
+        r3 = advance_exit_decision(pos, 450, bar(450, 95, 96, 87.5, 94.0), mark_bis, px_bis)
+        self.assertEqual(pos["beStop"], 88.0)
+        self.assertEqual(r3, "stopBe")
+
+    def test_find_bi_event_returns_start_price(self):
+        # 增量键 startPrice（bi 口径取「有利方向笔起点」，既有调用者不感知）
+        from py_chain.mark_entry import find_bi_event
+        bis = [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430),
+               bi("up", 200, 300, 4430, 4448)]
+        ev = find_bi_event(bis, 100, "down")
+        self.assertEqual(ev["startPrice"], 4450)
+        self.assertEqual(ev["startTime"], 100)
+        self.assertIsNone(find_bi_event(bis, 100, "up", break_prev=True))
 
 
 def ecfg(**over):

@@ -72,6 +72,10 @@ const CHAN_CFG = {
   // （=该点所在笔起点）——过=强、已完成未过=弱、未完成=null（弱先行，滚动翻强）。
   // 与 py_chain/chan_core.py CHAN_CFG.secondDivergeGate 同步。
   secondDivergeGate: true,
+  // 强二买开单 0 轴闸（2026-10-12，默认关）：开=DIF > -macdZeroTol 才进；关=强二买不看 0 轴。
+  // 过前高闸对强二买取消。1买的「等待回调后做2买」仍保留过前高与 0 轴。
+  // 与 py_chain/chan_core.py CHAN_CFG.strong2BuyMacdOn 同步。
+  strong2BuyMacdOn: false,
   debug: false,   // 调试打印（buildBi / 买卖点识别过程）
   nearDoubleFixed: 2.0, // 近等双顶/双底固定容差（品种报价单位绝对价差，如黄金 2.0=2 美元）；
                         // thr = 该值（2026-10-02 起取消 ATR 项/价格比例项/15m双动能确认）。
@@ -251,7 +255,7 @@ function mergeStep(merged, direction, bar) {
       highTime: b.time, lowTime: b.time,
       rawHigh: b.high, rawLow: b.low, rawHighTime: b.time, rawLowTime: b.time,
     };
-    if (b._preHigh !== undefined) m._wickHigh = b._preHigh;
+    if (b._preHigh !== undefined) { m._wickHigh = b._preHigh; m._wickHighTime = b.time; }
     absorbBody(m, b);
     merged.push(m);
   };
@@ -320,10 +324,12 @@ function mergeStep(merged, direction, bar) {
     }
     // 冲高插针真高（_wickHigh）随覆盖范围传播：markWickBars 压平长上影前的真实高点
     // （_preHigh，块级旁路字段）。fractalSideRealWick 开启时分型邻侧比较用
-    // max(high, _wickHigh)——被压平的邻侧上影不再误杀中间分型。只进邻侧比较通道，
+    // max(high, _wickHigh)——被压平的邻侧上影不再误杀中间分型；fixBiExtremes
+    // 上涨镜像恢复用它作端点候选价（2026-10-12）。只进邻侧比较/端点恢复通道，
     // 不写入 rawHigh/high——合并结构与跳空检测保持压平语义（与 _origLow 同模式）。
     if (bar._preHigh !== undefined && bar._preHigh > (last._wickHigh !== undefined ? last._wickHigh : -Infinity)) {
       last._wickHigh = bar._preHigh;
+      last._wickHighTime = bar.time;
     }
     last._rawCount += 1;
     last.time = bar.time;
@@ -519,16 +525,29 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, res =
   //   60m 8-28 22:00 bar 同型（H4631.98→L4530.02，崩盘低点被 up 合并抬到 4596.26）
   //   → 右 bar（23:00 L4524.125）< 起点 4571.66 → 同样被拒。
   //   对比 7-15 反弹顶 4074.175：三根最低 4035.955 > 起点底 4017.475 → 健康反弹通过。
-  const fractalRangeClear = (a, b) => {
+  // 起点侧与段同侧两根。振幅 ≥ 单根长K豁免点数的K线跳过（与终点侧同一豁免）：
+  // 大振幅K不抬高「必须脱离」的阈值。两根都跳过时该侧不阻挡。
+  // 两根都不是长K时，结果与原先 min/max 两根完全一致。
+  // 例：15m 2026-09-09 23:15 底的左邻是 22:45/23:00 合并长K（高点 4423.535），
+  // 9-10 2:00 顶 4421.65 只低不到 2 点，这段上涨已经够笔，不能被这根长K否决。
+  const startSideRange = (a) => {
     const i = a.mergedIdx;
+    const idxs = a.type === "top" ? [i, i + 1] : [i - 1, i];
+    const thr = wideBarPointsOf(res);
+    const skipWide = thr > 0;
+    let low = null, high = null;
+    for (const idx of idxs) {
+      const m = merged[idx];
+      if (skipWide && (m.high - m.low) >= thr) continue;
+      low = low === null ? m.low : Math.min(low, m.low);
+      high = high === null ? m.high : Math.max(high, m.high);
+    }
+    return { low, high };
+  };
+
+  const fractalRangeClear = (a, b) => {
     const j = b.mergedIdx;
-    // 起点侧：与段同侧的两根（中心 + 终点方向邻 bar）
-    const rangeLow = a.type === "top"
-      ? Math.min(merged[i].low, merged[i + 1].low)
-      : Math.min(merged[i - 1].low, merged[i].low);
-    const rangeHigh = a.type === "top"
-      ? Math.max(merged[i].high, merged[i + 1].high)
-      : Math.max(merged[i - 1].high, merged[i].high);
+    const { low: rangeLow, high: rangeHigh } = startSideRange(a);
     // 终点侧三根。本周期振幅 ≥ 单根长K豁免点数的K线不参与（大振幅K不作为反向贯穿证据）。
     // 三根都被豁免时，终点侧不构成反向贯穿。证据为实体极值（bodyTop/bodyBottom，
     // 缺失回退 open/close 再回退影线）：影线刺穿起点极值不算（2026-10-01 起，如
@@ -548,13 +567,57 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, res =
     }
     if (a.type === "top" && b.type === "bottom") {
       const endOk = endHigh === null || endHigh < a.high;
-      return b.low < rangeLow && endOk;
+      const startOk = rangeLow === null || b.low < rangeLow;
+      return startOk && endOk;
     }
     if (a.type === "bottom" && b.type === "top") {
       const endOk = endLow === null || endLow > a.low;
-      return b.high > rangeHigh && endOk;
+      const startOk = rangeHigh === null || b.high > rangeHigh;
+      return startOk && endOk;
     }
     return true;
+  };
+
+  // 结构价与长影真价里的更极端者。与 py_chain _bar_extreme_low/_bar_extreme_high 对齐。
+  const barExtremeLow = (m) => {
+    const ol = m._origLow;
+    if (ol != null && ol < m.low) return { p: ol, t: m._origLowTime || m.lowTime || m.time };
+    return { p: m.low, t: m.lowTime || m.time };
+  };
+  const barExtremeHigh = (m) => {
+    const wh = m._wickHigh;
+    if (wh != null && wh > m.high) return { p: wh, t: m._wickHighTime || m.highTime || m.time };
+    return { p: m.high, t: m.highTime || m.time };
+  };
+
+  // last 与 k 同类型时，(last, k) 内比本笔起点 prev 更极端的反向价。
+  // 比较含长影压平前的真低/真高：15m 2026-09-09 23:15 插针 4375.155 低于
+  // 23:00 结构低 4380.39，底应落在 23:15。同价取更晚的一根。没有则 null。
+  const deeperOppositeBar = (prev, last, k) => {
+    const lo = last.mergedIdx + 1;
+    const hi = k.mergedIdx;
+    if (lo >= hi) return null;
+    const eps = 1e-9;
+    if (last.type === "top") {
+      const floor = prev.low;
+      let bestI = -1, bestP = null, bestT = null;
+      for (let i = lo; i < hi; i++) {
+        const { p, t } = barExtremeLow(merged[i]);
+        if (bestP === null || p <= bestP + eps) { bestI = i; bestP = p; bestT = t; }
+      }
+      if (bestP === null || bestP >= floor - eps) return null;
+      const m = merged[bestI];
+      return { mergedIdx: bestI, type: "bottom", high: m.high, low: bestP, time: bestT };
+    }
+    const ceil = prev.high;
+    let bestI = -1, bestP = null, bestT = null;
+    for (let i = lo; i < hi; i++) {
+      const { p, t } = barExtremeHigh(merged[i]);
+      if (bestP === null || p >= bestP - eps) { bestI = i; bestP = p; bestT = t; }
+    }
+    if (bestP === null || bestP <= ceil + eps) return null;
+    const m = merged[bestI];
+    return { mergedIdx: bestI, type: "top", high: bestP, low: m.low, time: bestT };
   };
 
   // 相邻分型是否已成笔（与阶段二追加成笔同口径）。同类型不成笔。
@@ -702,10 +765,33 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, res =
         // 否则端点后移并带走修正线索，等后续真正成笔的底/顶再补。
         if (more && last._shiftMid) {
           if (shiftBreakRestore(last, k)) continue;
-          k._shiftAnchor = last._shiftAnchor;
-          k._shiftMid = last._shiftMid;
         }
-        if (more) result[result.length - 1] = k;
+        if (result.length >= 2) {
+          // 中间反向极值已经和两端都成笔时拆开（与 py _bridge_same_type_extreme 对齐）。
+          // 更极端的不再直接后移端点。更低的顶/更高的底也不再丢掉：前一段已经够笔，
+          // 这一段也够笔，k 是新端点。例：15m 21:30→23:15 下跌够笔，23:15→9-10 2:00
+          // 顶 4421.65 上涨够笔，2:00 虽低于 21:30 的 4434.175 仍是端点。
+          // 拆不开仍按原行为：更极端的替换，不够极端的丢掉（近等取后等规则依赖后移）。
+          const prev = result[result.length - 2];
+          const bridge = prev.type !== last.type ? deeperOppositeBar(prev, last, k) : null;
+          if (bridge && pairFormsBi(last, bridge) && pairFormsBi(bridge, k)) {
+            if (CHAN_CFG.debug) {
+              const kind = last.type === "top" ? "顶" : "底";
+              const mid = bridge.type === "bottom" ? "底" : "顶";
+              const px = bridge.type === "bottom" ? bridge.low : bridge.high;
+              console.log(`[阶段二] 同型跨更极值拆笔: ${kind}@${last.mergedIdx} 保留，接入${mid}@${bridge.mergedIdx}(${px})，再接入${kind}@${k.mergedIdx}`);
+            }
+            result.push(bridge, k);
+            continue;
+          }
+        }
+        if (more) {
+          if (last._shiftMid) {
+            k._shiftAnchor = last._shiftAnchor;
+            k._shiftMid = last._shiftMid;
+          }
+          result[result.length - 1] = k;
+        }
       } else {
         // 跳空锁定的端点：仅当后续同类型分型「突破」锁定价格时才解锁替换
         if (k.type === "top") { if (k.high > last.high) result[result.length - 1] = k; }
@@ -1027,11 +1113,25 @@ function fixBiExtremes(bis, merged) {
   for (let i = 0; i < bis.length; i++) {
     const b = bis[i];
     if (b.gapLocked) continue; // 跳空成笔端点固定在缺口处
-    const next = bis[i + 1];
-    if (!next) continue; // 最后一笔由 extendLastBi 负责延伸
-    // 不含下一笔终点分型（避免笔退化）；顶/底分支各自决定是否扫本笔端点分型中心：
-    const toIdx = next.endIdx - 1;
+    const next = bis[i + 1]; // 末笔恢复（2026-10-12 用户规则）时 next 可为 null
+    // 末笔恢复（2026-10-12 用户规则：长影压平后若无更低/更高的实体极值成笔，长影
+    // 即该笔最低/最高点）：端点恢复同样作用于最后一笔——realtime 进场评估读的恰是
+    // 末笔（逆势够笔闸从 bis[bis.length-1].endTime 起数合并K）。9-4 23:21 XAUUSD 15m：
+    // 插针真低 4365.57 未恢复，下跌笔端点停在 22:45@4417.34，2卖信号漏发。
+    // 末笔扫描上界 = 自身终点分型（endIdx）；endIdx 之后的块属形成中的下一笔，不扫。
+    const isLast = !next;
+    // 非末笔：不含下一笔终点分型（避免笔退化）；顶/底分支各自决定是否扫本笔端点分型中心：
+    const toIdx = isLast ? b.endIdx : next.endIdx - 1;
     let extreme = null;
+    // 影线候选守卫（2026-10-12，与 py_chain/chan_core.py 同步）：长影=「该笔」最低/最高点
+    // ⇒ 影线须超过笔区间全部**结构**极值才可恢复端点。近等取后顶/后底可能有意把端点放在
+    // 较低的实体极值上（9-18 案例：后顶 4397.045，笔内结构高点 4399.67、下跌腿被压平上影
+    // 4398.2——影线不是该笔绝对极值，不得抬端点）；rawLow/rawHigh（包含掩盖）不受此守卫。
+    let segHi = -Infinity, segLo = Infinity;
+    for (let k = b.startIdx; k <= toIdx; k++) {
+      if (merged[k].high > segHi) segHi = merged[k].high;
+      if (merged[k].low < segLo) segLo = merged[k].low;
+    }
     // 内部块后向扫描（endInnerRecoverOn，2026-10-09，与 py_chain/chan_core.py 同步）：
     // 被包含合并吞掉的更极端真低/真高也可能藏在终点分型**之前**的笔内部块（例：60m
     // 2026-10-07 19:00 被 20:00 插针K线包含、升序合并取高低后 4066.53 从结构消失，
@@ -1058,10 +1158,18 @@ function fixBiExtremes(bis, merged) {
         // （_origLow，如 1h 9-2 4282.625）是本次修复目标，必须恢复。
         // 中心之后的 bar 两者都认（rawLow 恢复 = 原行为，4010.41 先例）。
         const isCenter = k === b.endIdx;
-        const candLow = isCenter && mk._origLow === undefined
-          ? undefined
-          : (mk._origLow !== undefined ? mk._origLow : mk.rawLow);
+        let candLow, isWick = false;
+        if (isCenter) {
+          candLow = mk._origLow;
+          isWick = candLow !== undefined;
+        } else if (mk._origLow !== undefined) {
+          candLow = mk._origLow;
+          isWick = true;
+        } else {
+          candLow = mk.rawLow;
+        }
         if (candLow === undefined || candLow >= mk.low) continue; // 未被合并/压平掩盖
+        if (isWick && candLow >= segLo - eps) continue; // 影线未超过笔区间结构最低点 → 非该笔绝对极值，不恢复（守卫）
         if (candLow < b.endPrice - eps && (!extreme || candLow < extreme.price)) {
           extreme = {
             price: candLow,
@@ -1071,8 +1179,10 @@ function fixBiExtremes(bis, merged) {
         }
       }
     } else {
-      // 终点是顶：保持 endIdx+1 起扫（上影压平不产生 _origHigh，分型中心自身即端点
-      // 价，无同类需求；避免影响 4443.715 类历史验收结构）
+      // 终点是顶：保持 endIdx+1 起扫、分型中心不扫（中心走 _topCand 端点价通道）。
+      // 候选真高（2026-10-12 镜像规则，与 py_chain/chan_core.py 同步）= rawHigh（被包含
+      // 合并掩盖）或 _wickHigh（长上影压平前真实高点——压平后无更高实体极值成笔时，
+      // 长影即该笔最高点，恢复为端点），两者取更极端。
       let k0 = b.endIdx + 1;
       if (k0 > toIdx) {
         if (!innerOn) continue;
@@ -1080,15 +1190,19 @@ function fixBiExtremes(bis, merged) {
       } else if (innerOn) {
         k0 = b.startIdx + 1;
       }
-      // 被包含合并掩盖的更高真实高点（rawHigh 原值；9-3 16:00 类插针已被
-      // markWickBars 压平，其影线价不再出现在 rawHigh 中，不会把 17:00 顶
-      // 4442.04 平移回插针价）
       for (let k = k0; k <= toIdx; k++) {
         if (k === b.endIdx) continue; // 分型中心自身 high 即端点价，保持原语义不扫
         const mk = merged[k];
-        if (mk.rawHigh === undefined || mk.rawHigh <= mk.high) continue; // 未被掩盖
-        if (mk.rawHigh > b.endPrice + eps && (!extreme || mk.rawHigh > extreme.price)) {
-          extreme = { price: mk.rawHigh, time: mk.rawHighTime, idx: k };
+        const cands = [
+          [mk.rawHigh, mk.rawHighTime, false],
+          [mk._wickHigh, mk._wickHighTime, true],
+        ];
+        for (const [candHigh, candT, isWick] of cands) {
+          if (candHigh === undefined || candHigh <= mk.high) continue; // 未被合并/压平掩盖
+          if (isWick && candHigh <= segHi + eps) continue; // 影线未超过笔区间结构最高点 → 非该笔绝对极值，不恢复（守卫）
+          if (candHigh > b.endPrice + eps && (!extreme || candHigh > extreme.price)) {
+            extreme = { price: candHigh, time: candT, idx: k };
+          }
         }
       }
     }
@@ -1100,12 +1214,14 @@ function fixBiExtremes(bis, merged) {
     b.endIdx = extreme.idx;
     b.span = b.type === "up" ? b.endPrice - b.startPrice : b.startPrice - b.endPrice;
     b.rawCount = countRaw(merged, b.startIdx, b.endIdx);
-    // 下一笔起点联动（保持两笔端点连续）
-    next.startPrice = extreme.price;
-    next.startTime = extreme.time;
-    next.startIdx = extreme.idx;
-    next.span = next.type === "up" ? next.endPrice - next.startPrice : next.startPrice - next.endPrice;
-    next.rawCount = countRaw(merged, next.startIdx, next.endIdx);
+    // 下一笔起点联动（保持两笔端点连续）；末笔无下一笔，恢复终点即形成段起点
+    if (next) {
+      next.startPrice = extreme.price;
+      next.startTime = extreme.time;
+      next.startIdx = extreme.idx;
+      next.span = next.type === "up" ? next.endPrice - next.startPrice : next.startPrice - next.endPrice;
+      next.rawCount = countRaw(merged, next.startIdx, next.endIdx);
+    }
   }
   return bis;
 }
@@ -1753,7 +1869,7 @@ function appendThirdPoints(points, thirdList, familyTypes, class2Type) {
 
 /**
  * 买点识别（2026-10-11 统一二买定义）：二买族（2买/类2买）由 secondPointSeries 发射
- * （1买后抬低序列 + secondDivergeGate 弱档大周期背驰闸 + strong 强弱）；上级上涨笔窗口仍产
+ * （1买后抬低序列：首个=2买，其后每个仍高于锚价的下跌端点=类2买；+ secondDivergeGate 弱档大周期背驰闸 + strong 强弱）；上级上涨笔窗口仍产
  * twoBuyMeta 供 3买/类3买锚定。3/类3/4/类4 依赖中枢；1买不变。
  * 返回按 time 升序（稳定排序；同刻保持识别序 2/类2→1买→3/4类，尾点=时间最新）。
  */
@@ -1785,12 +1901,13 @@ function upperDivergeAt(upperBis, upperMacd, macdArr, tRef, isSell) {
 /**
  * 2买/2卖族序列发射（2026-10-11 用户规则：统一二买定义，替代上级窗口/中枢口径；
  * 与 py_chain/chan_core.py _second_point_series 同步）：
- *   锚 = 本级最新 1买/1卖；其后首个抬低/压低笔端点为 2买/2卖，此后每个严格更高抬低/
- * 更低压低为 类2买/类2卖；端点破锚价 → 锚滚动、整条序列作废；介于前一点与锚价之间
- * → 不标、序列等待。背驰闸（secondDivergeGate 开，2026-10-12 收窄为仅拦弱档）：
+ *   锚 = 本级最新 1买/1卖；其后首个抬低/压低笔端点为 2买/2卖。端点破锚价 → 锚滚动、
+ * 整条序列作废。买侧（2026-10-12）：锚后每个仍高于锚价的下跌端点都标，首个为 2买，
+ * 其后为类2买，不再要求严格高于上一个已标出的二买点。卖侧：此后每个严格更低压低为
+ * 类2卖；介于前一点与锚价之间 → 不标、序列等待。背驰闸（secondDivergeGate 开，2026-10-12 收窄为仅拦弱档）：
  * 上级末两根确认同向笔 isBiDiverge 无背驰时弱/未定点不标（未定型翻强后才出现、
  * 回调段成笔才判断），强档（strong=true）放行；不可判定/无上级（日线）→ 放行。
- * 被闸点仍推进序列结构（后续仍是类2买，不重编号）。强弱 strong：紧邻前一根反向笔
+ * 被闸点仍推进序列结构（后续点仍是类2买/类2卖，不重编号）。强弱 strong：紧邻前一根反向笔
  * 终点 vs 再前一根反向笔终点（=该点所在笔起点）——过=强、已完成未过=弱、
  * 未走完/不可比=null（弱先行）。
  */
@@ -1826,7 +1943,8 @@ function secondPointSeries(bis, firstPts, upperBis, upperMacd, macdArr, isSell) 
     if (b.type !== want || (b.endTime || 0) <= anchorT) continue;
     const p = b.endPrice;
     if (!(isSell ? p < anchorP : p > anchorP)) return []; // 破锚价：1买/1卖 滚动、序列作废重找
-    if (prevPx != null && !(isSell ? p < prevPx : p > prevPx)) continue; // 介于：不标、序列等待
+    // 卖侧仍要求严格更低压低；买侧不再要求高于上一个已标二买点
+    if (isSell && prevPx != null && !(p < prevPx)) continue; // 介于：不标、序列等待
     let strong = null;
     if (i >= 1 && bis[i - 1].type === rev && !bis[i - 1]._forming) {
       let prevRev = null;
@@ -1839,7 +1957,7 @@ function secondPointSeries(bis, firstPts, upperBis, upperMacd, macdArr, isSell) 
       }
     }
     if (gateBlock && (strong !== true || b._forming)) {
-      prevPx = p; // 被闸点仍推进序列结构：后续仍是类2买，不重编号
+      prevPx = p; // 被闸点仍推进序列结构：后续点仍是类2买/类2卖，不重编号
       continue;
     }
     out.push({

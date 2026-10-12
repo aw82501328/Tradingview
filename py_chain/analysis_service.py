@@ -444,6 +444,8 @@ class AnalysisManager:
             command.append("--exit-stop-sr-pct=" + str(pm["entry"].get("exitStopSrPct", 100)))
             command.append("--exit-stop-be-on=" + ("1" if pm["entry"].get("exitStopBeOn", True) else "0"))
             command.append("--exit-stop-be-pct=" + str(pm["entry"].get("exitStopBePct", 100)))
+            # 保本位模式（extreme|entry|bi；2026-10-12 三口径补齐，JS beMode 同名解析）
+            command.append("--exit-stop-be-mode=" + str(pm["entry"].get("exitStopBeMode", "entry")))
             command.append("--exit-half-mr-on=" + ("1" if pm["entry"].get("exitHalfMrOn", False) else "0"))
             command.append("--exit-half-mr-pct=" + str(pm["entry"].get("exitHalfMrPct", 50)))
             command.append("--exit-half-on=" + ("1" if pm["entry"].get("exitHalfOn", True) else "0"))

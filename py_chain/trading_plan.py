@@ -491,6 +491,9 @@ def predictPlan(res, bis, upperBis, macdArr, lastPrice, bars, atr=0, barSec=None
             out["reason"] = reason
         out["strategyLabel"] = out["strategy"]
         out["pointDesc"] = f"{p['type']}@{fmtT(p['time'])}({p['price']:.2f})"
+        # 档位标签（强二买/强类2买/…）供进场闸区分：强二买与 1买同文案「等待回调后做2买」，
+        # 开单条件不同（强二买取消过前高，0 轴改配置）
+        out["pointCls"] = cls
         return out
 
     # 3/4. 买卖双侧各自扫锚（2026-10-10 用户规则：两侧独立、互不影响）：
@@ -527,6 +530,7 @@ def predictPlan(res, bis, upperBis, macdArr, lastPrice, bars, atr=0, barSec=None
         out["altStrategy"] = alt["strategy"]
         out["altReason"] = alt["reason"]
         out["altPointDesc"] = alt.get("pointDesc")
+        out["altPointCls"] = alt.get("pointCls")
     return out
 
 
@@ -639,8 +643,10 @@ def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=No
             "reason": p.get("reason", ""),
             "pointDesc": p.get("pointDesc", ""),
         }
+        if p.get("pointCls"):
+            row["pointCls"] = p["pointCls"]
         # 2026-10-10 买卖双侧独立：另一侧锚字段透传（评估器主侧+alt 侧并行评估）
-        for _k in ("altDirection", "altStrategy", "altReason", "altPointDesc"):
+        for _k in ("altDirection", "altStrategy", "altReason", "altPointDesc", "altPointCls"):
             if p.get(_k) is not None:
                 row[_k] = p[_k]
         planRows[res] = row

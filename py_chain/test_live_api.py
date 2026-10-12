@@ -108,7 +108,10 @@ class TestTradingPost(LiveApiBase):
 
     def test_enable_back_without_session_web_fallback(self):
         live_store.save_state(self._key(live_api.TRADING_KEY), {"enabled": False})
-        handled, reply = self._post({"enabled": True})   # strategy 缺省 → 默认
+        with patch.object(live_api, "begin_launch",
+                          return_value={"starting": False, "launch_phase": "",
+                                        "launch_error": ""}):
+            handled, reply = self._post({"enabled": True})   # strategy 缺省 → 默认
         obj, code = reply[0]
         self.assertEqual(code, 200)
         self.assertTrue(obj["enabled"])

@@ -226,7 +226,8 @@ class TestFibAnchorWindow(unittest.TestCase):
         self.assertEqual(len(fibs_b), 6)
 
     def test_last_stroke_extending_uses_final_bi(self):
-        # 延伸中（末根K线=极值K线，gap=0）→ 参照=末笔 up 104→120 → SUP 3 条
+        # 延伸中（末根K线=极值K线，gap=0）→ 主侧参照=末笔 up 104→120 → SUP 3 条；
+        # 反向侧（2026-10-12 双侧）=最近下跌笔 119→104 → RES 3 条
         bars = {"3": [bar(t, 121, 99, 110) for t in range(1, 901)]}   # 末根 t=900=末笔终点
         with patch("py_chain.sr_flip.findBuyPoints", return_value=list(self.buy)), \
              patch("py_chain.sr_flip.findSellPoints", return_value=list(self.sell)):
@@ -234,21 +235,31 @@ class TestFibAnchorWindow(unittest.TestCase):
                                  fibLevels=[0.382, 0.5, 0.618],
                                  periodAtrsIn={"3": 1}, fibLastStroke=True)
         fibs = [f for f in out["merged"] if f.get("fib")]
-        self.assertEqual(len(fibs), 3)
-        self.assertTrue(all(f["type"] == "SUP" for f in fibs))
-        self.assertEqual(sorted(round(f["price"], 6) for f in fibs),
+        sups = [f for f in fibs if f["type"] == "SUP"]
+        ress = [f for f in fibs if f["type"] == "RES"]
+        self.assertEqual(len(sups), 3)
+        self.assertEqual(len(ress), 3)
+        self.assertEqual(sorted(round(f["price"], 6) for f in sups),
                          sorted([round(120 - r * 16, 6) for r in (0.382, 0.5, 0.618)]))
-        self.assertTrue(all(f["fromPoint"]["type"] == "最近段" for f in fibs))
+        self.assertEqual(sorted(round(f["price"], 6) for f in ress),
+                         sorted([round(104 + r * 15, 6) for r in (0.382, 0.5, 0.618)]))
+        self.assertTrue(all(f["fromPoint"]["type"] == "最近段" for f in sups))
+        self.assertTrue(all(f["fromPoint"]["type"] == "最近反向段" for f in ress))
 
     def test_last_stroke_retracing_uses_second_last_bi(self):
-        # 回撤中（极值K线距末根 > 一根间距）→ 参照=bis[-2]（与回撤同向的推进笔）
+        # 回撤中（极值K线距末根 > 一根间距）→ 主侧参照=bis[-2]（与回撤同向的推进笔）
         # 本夹具 bis[-1]=up(850,900,104,120)、bis[-2]=down(800,850,119,104)；
-        # bars 到 t=1000 → gap=100 > spacing=1 → 参照 down 119→104 → RES 3 条
+        # bars 到 t=1000 → gap=100 > spacing=1 → 主侧参照 down 119→104 → RES 3 条；
+        # 反向侧（2026-10-12 双侧）=末笔 up 104→120 → SUP 3 条
         fibs = self._fibs(fibLastStroke=True)[1]
-        self.assertEqual(len(fibs), 3)
-        self.assertTrue(all(f["type"] == "RES" for f in fibs))
-        self.assertEqual(sorted(round(f["price"], 6) for f in fibs),
+        ress = [f for f in fibs if f["type"] == "RES"]
+        sups = [f for f in fibs if f["type"] == "SUP"]
+        self.assertEqual(len(ress), 3)
+        self.assertEqual(len(sups), 3)
+        self.assertEqual(sorted(round(f["price"], 6) for f in ress),
                          sorted([round(104 + r * 15, 6) for r in (0.382, 0.5, 0.618)]))
+        self.assertEqual(sorted(round(f["price"], 6) for f in sups),
+                         sorted([round(120 - r * 16, 6) for r in (0.382, 0.5, 0.618)]))
         # 与白名单点无关
         with patch("py_chain.sr_flip.findBuyPoints", return_value=[]), \
              patch("py_chain.sr_flip.findSellPoints", return_value=[]):
@@ -260,7 +271,7 @@ class TestFibAnchorWindow(unittest.TestCase):
         # 默认 False = 白名单口径（双侧 6 条）；cache 不同口径不串
         self.assertEqual(len(self._fibs()[1]), 6)
         wc = {}
-        self.assertEqual(len(self._fibs(fibLastStroke=True, work_cache=wc)[1]), 3)
+        self.assertEqual(len(self._fibs(fibLastStroke=True, work_cache=wc)[1]), 6)
         self.assertEqual(len(self._fibs(work_cache=wc)[1]), 6)
 
     def test_last_stroke_user_case_240_res_4320(self):
@@ -280,12 +291,16 @@ class TestFibAnchorWindow(unittest.TestCase):
                                  fibLevels=[0.382, 0.5, 0.618],
                                  periodAtrsIn={"240": 1}, fibLastStroke=True)
         fibs = [f for f in out["merged"] if f.get("fib")]
-        self.assertEqual(len(fibs), 3)
-        self.assertTrue(all(f["type"] == "RES" for f in fibs))
-        rb = fibs[0]["referBi"]
+        ress = [f for f in fibs if f["type"] == "RES"]
+        sups = [f for f in fibs if f["type"] == "SUP"]
+        # 主侧：参照 down 4397→4244.3 → RES 3 条（0.5=4320.65 用户预期数字）
+        # 反向侧（2026-10-12 双侧）：末笔 up 4244.3→4315.8 → SUP 3 条
+        self.assertEqual(len(ress), 3)
+        self.assertEqual(len(sups), 3)
+        rb = ress[0]["referBi"]
         self.assertEqual(rb["startPrice"], 4397.0)
         self.assertEqual(rb["endPrice"], 4244.3)
-        mid = [f for f in fibs if abs(f["ratio"] - 0.5) < 1e-9][0]
+        mid = [f for f in ress if abs(f["ratio"] - 0.5) < 1e-9][0]
         self.assertAlmostEqual(mid["price"], 4320.65, places=2)   # 用户预期数字
 
     def test_last_stroke_dirty_alternation_falls_back(self):
@@ -302,9 +317,13 @@ class TestFibAnchorWindow(unittest.TestCase):
                                  fibLevels=[0.5], periodAtrsIn={"3": 1},
                                  fibLastStroke=True)
         fibs = [f for f in out["merged"] if f.get("fib")]
-        self.assertEqual(len(fibs), 1)
-        self.assertEqual(fibs[0]["type"], "SUP")    # 末笔 up 本身
-        self.assertAlmostEqual(fibs[0]["price"], 120 - 0.5 * 10, places=9)
+        # 脏数据回退末笔 up → 主侧 SUP 1 条；反向侧=最近下跌笔 down 120→100 → RES 1 条
+        sups = [f for f in fibs if f["type"] == "SUP"]
+        ress = [f for f in fibs if f["type"] == "RES"]
+        self.assertEqual(len(sups), 1)
+        self.assertEqual(len(ress), 1)
+        self.assertAlmostEqual(sups[0]["price"], 120 - 0.5 * 10, places=9)   # 末笔 up 本身
+        self.assertAlmostEqual(ress[0]["price"], 100 + 0.5 * 20, places=9)
 
 
 class TestNormalizeMinuteAsOf(unittest.TestCase):

@@ -102,9 +102,11 @@ EXIT_STOP_SR_ON = True     # 支阻止损：初始止损位（支阻±滑点/进
 EXIT_STOP_SR_PCT = 100.0
 EXIT_STOP_BE_ON = True     # 保本止损：TP1 保本迁移后保本位 beStop 穿越离场
 EXIT_STOP_BE_PCT = 100.0
-# 保本位模式（2026-10-10 双口径）：extreme=进场成交K线极值±保本滑点（原行为——
-# beStop 天然在进场价亏一侧，被打到至少亏滑点+进场K线逆向波幅）；entry=0亏损
-# （默认，2026-10-10 黄金参数页生效值：beStop=进场价，保本滑点不参与；穿越后下一开盘成交，跳空仍可能略有出入）
+# 保本位模式（2026-10-10 双口径；2026-10-12 三口径）：extreme=进场成交K线极值±保本
+# 滑点（原行为——beStop 天然在进场价亏一侧，被打到至少亏滑点+进场K线逆向波幅）；
+# entry=0亏损（默认，2026-10-10 黄金参数页生效值：beStop=进场价，保本滑点不参与；
+# 穿越后下一开盘成交，跳空仍可能略有出入）；bi=笔端点±滑点（2026-10-12：背驰周期
+# 首笔有利方向笔确认当拍 beStop=该笔起点±保本滑点，成笔前无值——引擎惰性落位）
 EXIT_STOP_BE_MODE = "entry"
 EXIT_HALF_MR_ON = False    # 背驰周期够笔（2026-10-08 拆分）：背驰周期首笔有利方向笔完成
                            # （同 TP1 保本事件源，不限顺势）→ 平指定比例，剩余止损移保本位；
@@ -871,9 +873,11 @@ def near_zone(price, srLevels, direction, nearTol):
     return best
 
 
-def strategyExtraOk(key, bis, upperBis, macdArr, barSec, zs_exit_weak_ratio=ZS_EXIT_WEAK_RATIO):
+def strategyExtraOk(key, bis, upperBis, macdArr, barSec, zs_exit_weak_ratio=ZS_EXIT_WEAK_RATIO,
+                    point_cls=None):
     """各策略专属条件（原 evaluateEntry 第 2 步抽取为独立函数，确认制/当下制共用）。
     zs_exit_weak_ratio：出中枢力度衰减比例（参数中心可调，默认 ZS_EXIT_WEAK_RATIO）。
+    point_cls：计划锚点档位（强二买/1买等同文案「等待回调后做2买」，开单条件按档区分）。
     @returns None（全部通过）或 失败原因字符串"""
     if key == "wait2Sell":
         if not brokePrevLow(bis):
@@ -881,10 +885,16 @@ def strategyExtraOk(key, bis, upperBis, macdArr, barSec, zs_exit_weak_ratio=ZS_E
         if not macdBelowZero(macdArr):
             return "MACD 未下0轴或反弹过0轴"
     elif key == "wait2Buy":
-        if not brokePrevHigh(bis):
-            return "上涨段未过前高"
-        if not macdAboveZero(macdArr):
-            return "MACD 未上0轴或回调破0轴"
+        # 强二买（2026-10-12）：取消过前高；0 轴改为 strong2BuyMacdOn，默认关。
+        # 1买及其他仍走原两道（过前高 + DIF > -macdZeroTol）。
+        if point_cls == "强二买":
+            if CHAN_CFG.get("strong2BuyMacdOn") and not macdAboveZero(macdArr):
+                return "MACD 未上0轴或回调破0轴"
+        else:
+            if not brokePrevHigh(bis):
+                return "上涨段未过前高"
+            if not macdAboveZero(macdArr):
+                return "MACD 未上0轴或回调破0轴"
     elif key == "wait1Sell":
         if not brokePrevHigh(bis):
             return "未够笔且过高点"
@@ -937,7 +947,8 @@ def evaluateEntry(ctx, strategy):
 
     # 2. 各策略专属条件（与当下制共用 strategyExtraOk）
     extraReason = strategyExtraOk(key, bis, upperBis, macdArr, barSec,
-                                  ctx.get("zs_exit_weak_ratio", ZS_EXIT_WEAK_RATIO))
+                                  ctx.get("zs_exit_weak_ratio", ZS_EXIT_WEAK_RATIO),
+                                  point_cls=ctx.get("pointCls"))
     if extraReason is not None:
         return {"ok": False, "reason": extraReason}
 
@@ -976,15 +987,40 @@ def _barsSince(times, t0, tCut):
     return i1 - i0
 
 
-def _nearEqualTol(periodData, res, referPrice):
-    """M2（默认关，nearEqualAtrK/nearEqualPct <= 0）：创新低/新高的近等容差
-    = max(nearEqualAtrK × 该级 ATR, nearEqualPct × |参照价|)；与 60m 近等双底同口径。"""
-    kA = float(CHAN_CFG.get("nearEqualAtrK", 0.0) or 0.0)
-    kP = float(CHAN_CFG.get("nearEqualPct", 0.0) or 0.0)
-    if kA <= 0 and kP <= 0:
-        return 0.0
-    atr = (periodData.get(res) or {}).get("atr") or 0.0
-    return max(kA * atr, kP * abs(referPrice))
+def _macdDivergeTol():
+    """MACD背驰固定容差（绝对价差，默认 0）。0=不放宽，只有严格更极端才过。"""
+    return float(CHAN_CFG.get("macdDivergeTol", 0.0) or 0.0)
+
+
+def _priceExtreme(cur, ref, want_lower, tol):
+    """极值比较。严格更极端返回 strict；未严格突破但价差落在 [0, tol] 返回 near；否则 None。
+    做多 want_lower 看更低，做空看更高。tol<=0 时没有近等档。"""
+    if want_lower:
+        if cur < ref:
+            return "strict"
+        gap = cur - ref
+    else:
+        if cur > ref:
+            return "strict"
+        gap = ref - cur
+    if tol > 0 and 0 <= gap <= tol:
+        return "near"
+    return None
+
+
+def _endpointBody(bars, bi, want_lower):
+    """笔端点 K 的实体价：底 = min(open, close)，顶 = max(open, close)。
+    取本级 bars 里 time == endTime 的那根（进行中段含盘中合成 K）。对不上开收盘返回 None。"""
+    if not bars or not bi or bi.get("endTime") is None:
+        return None
+    t = bi["endTime"]
+    i = bisect.bisect_left(bars, t, key=lambda b: b.get("time"))
+    if i >= len(bars) or bars[i].get("time") != t:
+        return None
+    o, c = bars[i].get("open"), bars[i].get("close")
+    if o is None or c is None:
+        return None
+    return min(o, c) if want_lower else max(o, c)
 
 
 def _biDivergeStrictAll(bi, refer, macdArr):
@@ -1030,22 +1066,28 @@ def _evalRealtimeNode(periodData, node, wantDir, tCut, periodTimes, minBars):
     refer = pickDivergeRefer(bis, F, intervalSecOf(res), parentBi=parentBi)
     if refer is None:
         return None, "no_refer", {"res": res, "segStart": F.get("startTime")}
-    strictNew = F["endPrice"] < refer["endPrice"] if wantDir == "long" \
-        else F["endPrice"] > refer["endPrice"]
-    madeNew = strictNew
-    tol = 0.0
-    if not madeNew:
-        # M2 近等容差（默认关）：做多 F 略高于参照低点（F ≥ 参照，gap = F − 参照 ∈ [0, tol]）；
-        # 做空对称（F 略低于参照高点）。近等二底/二顶不创新极值但动能衰竭的形态。
-        tol = _nearEqualTol(periodData, res, refer["endPrice"])
-        if tol > 0:
-            gap = (F["endPrice"] - refer["endPrice"]) if wantDir == "long" \
-                else (refer["endPrice"] - F["endPrice"])
-            madeNew = 0 <= gap <= tol
-    if not madeNew:
-        return None, "no_new_extreme", {
+    # 先比笔端点影线（endPrice）。严格更极端直接过；未严格突破时价差 ∈ [0, tol] 算近等。
+    # 影线两档都不过、且 macdDivergeBodyOn（默认开）时，再比同一根端点 K 的实体。
+    want_lower = wantDir == "long"
+    tol = _macdDivergeTol()
+    kind = _priceExtreme(F["endPrice"], refer["endPrice"], want_lower, tol)
+    body_cur = body_ref = None
+    body_on = bool(CHAN_CFG.get("macdDivergeBodyOn"))
+    if kind is None and body_on:
+        bars = pd.get("bars") or []
+        body_cur = _endpointBody(bars, F, want_lower)
+        body_ref = _endpointBody(bars, refer, want_lower)
+        if body_cur is not None and body_ref is not None:
+            kind = _priceExtreme(body_cur, body_ref, want_lower, tol)
+    if kind is None:
+        ctx = {
             "res": res, "extreme": F["endPrice"], "refExtreme": refer["endPrice"],
             "tol": tol, "refTime": refer.get("endTime"), "segStart": F.get("startTime")}
+        if body_on:
+            ctx["bodyExtreme"] = body_cur
+            ctx["bodyRef"] = body_ref
+        return None, "no_new_extreme", ctx
+    strictNew = kind == "strict"
     # 当下对比 MACD：窗口取 [refer.startTime, F.endTime] 的切片（避免全量数组线性扫）
     macdArr = pd.get("macdArr") or []
     macdT = pd.get("macdTimes") or [m["time"] for m in macdArr]
@@ -1090,9 +1132,10 @@ def realtimeLowerDiverge(periodData, X, wantDir, tCut,
     候选条件（与确认制 findDivergePoints 同一套背驰标准，对象换成该级形成中段）：
       - 段方向匹配（做多→形成中下跌段 / 做空→形成中上涨段）；
       - 段长 ≥ minBars（够笔门槛，见 REALTIME_MIN_BARS）；
-      - 创新低/新高：段当前极值 < refer.endPrice（多）/ > refer.endPrice（空）；
-        M2 近等容差（nearEqualAtrK/nearEqualPct，默认关）放宽为 nearTol 带内，
-        且近等带内要求三判据 AND（_biDivergeStrictAll），候选带 nearEqual=True；
+      - 创新低/新高：先比笔端点影线 endPrice（严格更极端，或价差 ∈ [0, macdDivergeTol]）；
+        影线不过且 macdDivergeBodyOn（默认开）时再比该 K 实体
+        （底 min(open,close) / 顶 max(open,close)）。仅落在容差内（未严格突破）
+        要求三判据 AND（_biDivergeStrictAll），候选带 nearEqual=True；
       - isBiDiverge（当下对比，2026-10-01 起双判据 AND）：DIF低点抬高（多）/DIF高点变低（空）
         且（时长可比时）绿柱/红柱面积变小；时长比>3 时面积不计入，DIF 单判据兜底。
     参照笔 = 向前最近同向**已完成**笔（跳过幅度 < 当前段 50% 的次级别回调），
@@ -1260,7 +1303,8 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
             candidates.append(plan)
         altRow = {"strategy": plan.get("altStrategy") if plan else None,
                   "direction": plan.get("altDirection") if plan else None,
-                  "reason": plan.get("altReason") if plan else None}
+                  "reason": plan.get("altReason") if plan else None,
+                  "pointCls": plan.get("altPointCls") if plan else None}
         if altRow["strategy"] and altRow["direction"] != "观望":
             candidates.append(altRow)
         if not candidates:
@@ -1333,7 +1377,7 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
             upRes = upperResOf(X)
             upperBis = periodData[upRes]["bis"] if (upRes and upRes in periodData) else None
             extraReason = strategyExtraOk(key, bis, upperBis, pd["macdArr"], intervalSecOf(X),
-                                          zs_ratio)
+                                          zs_ratio, point_cls=plan.get("pointCls"))
             if extraReason is not None:
                 _rej("strategy_extra", seg_start=segStart, skey=key, ctx={"reason": extraReason})
                 continue
@@ -1505,7 +1549,8 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
             candidates.append(plan)
         altRow = {"strategy": plan.get("altStrategy") if plan else None,
                   "direction": plan.get("altDirection") if plan else None,
-                  "reason": plan.get("altReason") if plan else None}
+                  "reason": plan.get("altReason") if plan else None,
+                  "pointCls": plan.get("altPointCls") if plan else None}
         if altRow["strategy"] and altRow["direction"] != "观望":
             candidates.append(altRow)
         if not candidates:
@@ -1529,6 +1574,7 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
                 continue
             if trend_dir and trend_dir != strategy["direction"]:
                 continue  # 逆参考周期方向的信号跳过（顺势过滤，按侧独立过滤）
+            ctx["pointCls"] = plan.get("pointCls")
             evalRes = evaluateEntry(ctx, strategy)
             if not evalRes["ok"]:
                 if on_reject is not None:
@@ -1733,7 +1779,9 @@ def find_bi_event(bis, from_t, bi_type, require_post_start=False, break_prev=Fal
                              开始的新反向笔，排除进场前已存在的同向笔——进场背驰点
                              本身常是「创新高/新低」笔）
     @param break_prev        True 时再要求端点破前一同向笔端点（up 过前高 / down 破前底）
-    @returns None | {time, price, startTime}（笔完成时间 endTime、端点价、起点时间）
+    @returns None | {time, price, startTime, startPrice}（笔完成时间 endTime、端点价、
+             起点时间/起点价——startPrice 供保本位 bi 口径取「有利方向笔起点」，
+             2026-10-12 增量键，既有调用者不感知）
     """
     if not bis:
         return None
@@ -1756,7 +1804,8 @@ def find_bi_event(bis, from_t, bi_type, require_post_start=False, break_prev=Fal
                 continue
             # 被破的前一同向笔端点（TP3a 出场叙事/日志用；增量键，既有调用者不感知）
             return {"time": b["endTime"], "price": b["endPrice"],
-                    "startTime": b["startTime"],
+                    "startTime": b["startTime"], "startPrice": b["startPrice"],
                     "refTime": bis[j]["endTime"], "refPrice": bis[j]["endPrice"]}
-        return {"time": b["endTime"], "price": b["endPrice"], "startTime": b["startTime"]}
+        return {"time": b["endTime"], "price": b["endPrice"],
+                "startTime": b["startTime"], "startPrice": b["startPrice"]}
     return None

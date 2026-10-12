@@ -49,7 +49,9 @@
   任务结束后恢复任务前的进程内画笔参数（`chan_core.apply_cfg`，try/finally）。
   笔与买卖点全过才算通过；旧基线无 marks 时只比笔。
 - **res=ALL**：期望与比对覆盖全部 5 个周期（30S 不参与）。
-- **删除保护**：用例被基线引用时禁止删除（提示基线名）；删除基线不影响用例/快照。
+- **删除保护**：用例被基线引用时禁止删除（提示基线名，须先从基线移出）；删除基线不影响用例/快照。
+  基线明细可把某一条用例移出这条基线（`caseIds`、冻结期望、最近运行摘要一起去掉，通过数按剩余用例重算）；
+  用例文件和其他基线不动。移出后基线可以没有用例，整条删除仍走「删除」。
 - **lastRun 摘要**写回基线文件（仅通过数/逐用例布尔，不存差异明细）。
 - **冻结明细视图**：基线列表「明细」按钮 / 冻结完成的「查看冻结明细」→ `bl-bis` 渲染
   逐笔 11 字段表 + 逐周期买卖点表（随时可看）。差异展开顶部「差异笔清单 / 差异点清单」
@@ -63,6 +65,7 @@
 - POST `create-case {name,res,fromTs?,toTs?}`、`delete-case {id}`、
   `create-baseline {name,caseIds}`、`refresh-baseline {id}`（重冻期望）、
   `rename-baseline {id,name,note?}`、`delete-baseline {id}`、
+  `remove-baseline-case {id,caseId}`（从已建基线移出一条用例）、
   `run {baselineIds}`（空=全部）
 
 ## 与既有基线工具的关系

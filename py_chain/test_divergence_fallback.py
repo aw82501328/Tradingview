@@ -63,15 +63,17 @@ class TestSinkFallback(unittest.TestCase):
 
     def setUp(self):
         self.saved = {k: CHAN_CFG.get(k) for k in
-                      ("sinkFallback", "sinkFallbackRearm", "nearEqualAtrK", "nearEqualPct",
-                       "expectBiEnough", "divergeConfirm", "entryMacdShrink")}
+                      ("sinkFallback", "sinkFallbackRearm", "macdDivergeBodyOn", "macdDivergeTol",
+                       "expectBiEnough", "divergeConfirm", "entryMacdShrink", "divergeReferByZs")}
         CHAN_CFG["sinkFallback"] = False
         CHAN_CFG["sinkFallbackRearm"] = False
-        CHAN_CFG["nearEqualAtrK"] = 0.0
-        CHAN_CFG["nearEqualPct"] = 0.0
+        CHAN_CFG["macdDivergeBodyOn"] = True
+        CHAN_CFG["macdDivergeTol"] = 0.0
         CHAN_CFG["expectBiEnough"] = False
         CHAN_CFG["divergeConfirm"] = False
         CHAN_CFG["entryMacdShrink"] = False
+        # 合成笔会走出中枢，入中枢参照会改到更早的下跌笔
+        CHAN_CFG["divergeReferByZs"] = False
 
     def tearDown(self):
         CHAN_CFG.update(self.saved)
@@ -98,14 +100,13 @@ class TestSinkFallback(unittest.TestCase):
         self.assertEqual(out, [])  # 停止级与上级均无背驰 → 无候选
 
     def test_near_equal_band_requires_all_criteria(self):
-        # 15m 末段 98.5 vs 参照 98（未严格创新低，价差 0.5 ∈ 容差带 max(0.3×10, 0.001×98)=3）
+        # 15m 末段 98.5 vs 参照 98（未严格创新低，价差 0.5 ∈ 固定容差 3）
         pd = buildPeriodData(f15End=98.5)
         # 末段 MACD：三判据全面衰竭（浅绿 + DIF 抬高 + 峰值小）→ AND 过
         pd["15"]["macdArr"] = [macd(810, -8, -8), macd(850, -8, -8),
                                macd(1050, -0.5, -0.5), macd(1200, -0.5, -0.5)]
         CHAN_CFG["sinkFallback"] = True
-        CHAN_CFG["nearEqualAtrK"] = 0.3
-        CHAN_CFG["nearEqualPct"] = 0.001
+        CHAN_CFG["macdDivergeTol"] = 3.0
         out = realtimeLowerDiverge(pd, "60", "long", 1305, periodTimes=PERIOD_TIMES)
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]["res"], "15")
@@ -117,8 +118,7 @@ class TestSinkFallback(unittest.TestCase):
         pd["15"]["macdArr"] = [macd(810, -8, -8), macd(850, -8, -8),
                                macd(1050, -0.5, -9.0), macd(1200, -0.5, -9.0)]
         CHAN_CFG["sinkFallback"] = True
-        CHAN_CFG["nearEqualAtrK"] = 0.3
-        CHAN_CFG["nearEqualPct"] = 0.001
+        CHAN_CFG["macdDivergeTol"] = 3.0
         out = realtimeLowerDiverge(pd, "60", "long", 1305, periodTimes=PERIOD_TIMES)
         self.assertEqual(out, [])
 
@@ -129,12 +129,13 @@ class TestExpectBi(unittest.TestCase):
     def setUp(self):
         self.saved = {k: CHAN_CFG.get(k) for k in
                       ("sinkFallback", "expectBiEnough", "expectBiMinBars", "divergeConfirm",
-                       "entryMacdShrink")}
+                       "entryMacdShrink", "divergeReferByZs")}
         CHAN_CFG["sinkFallback"] = True   # 预期模式下停止级 3m 失败需回退到 15
         CHAN_CFG["expectBiEnough"] = True
         CHAN_CFG["expectBiMinBars"] = 5
         CHAN_CFG["divergeConfirm"] = False
         CHAN_CFG["entryMacdShrink"] = False
+        CHAN_CFG["divergeReferByZs"] = False
 
     def tearDown(self):
         CHAN_CFG.update(self.saved)
@@ -217,15 +218,16 @@ class TestEntryMacdShrink(unittest.TestCase):
 
     def setUp(self):
         self.saved = {k: CHAN_CFG.get(k) for k in
-                      ("sinkFallback", "sinkFallbackRearm", "nearEqualAtrK", "nearEqualPct",
-                       "expectBiEnough", "divergeConfirm", "entryMacdShrink")}
+                      ("sinkFallback", "sinkFallbackRearm", "macdDivergeBodyOn", "macdDivergeTol",
+                       "expectBiEnough", "divergeConfirm", "entryMacdShrink", "divergeReferByZs")}
         CHAN_CFG["sinkFallback"] = True       # 回退命中 15m（与 test_fallback_hits_upper_level 同型）
         CHAN_CFG["sinkFallbackRearm"] = False
-        CHAN_CFG["nearEqualAtrK"] = 0.0
-        CHAN_CFG["nearEqualPct"] = 0.0
+        CHAN_CFG["macdDivergeBodyOn"] = True
+        CHAN_CFG["macdDivergeTol"] = 0.0
         CHAN_CFG["expectBiEnough"] = False
         CHAN_CFG["divergeConfirm"] = False
         CHAN_CFG["entryMacdShrink"] = True
+        CHAN_CFG["divergeReferByZs"] = False
 
     def tearDown(self):
         CHAN_CFG.update(self.saved)
