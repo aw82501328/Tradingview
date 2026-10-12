@@ -623,7 +623,7 @@ function exitModeRowsHtml(m) {
       m.overrides[onKey] !== undefined || m.overrides[pctKey] !== undefined);
     return `<div class="prow exit-group${isMod ? ' mod' : ''}">
       <div class="pname"><span class="plabel">够笔止盈（两源各自开关+比例）<span class="badge">已修改</span></span>
-      <span class="pdef">统一口径（2026-10-10）：向有利方向走出5块合并K即够笔（不限顺势，不等确认笔；确认笔兜底）；检测周期锚点含进场块下限</span></div>
+      <span class="pdef">向有利方向走出5块合并K即够笔（不限顺势，不等确认笔；确认笔兜底）；检测周期锚点含进场块下限</span></div>
       ${rows.map(([onKey, pctKey]) => exitLineHtml(m, onKey, pctKey)).join('')}</div>`;
   }).join('');
 }
@@ -651,7 +651,7 @@ function applyExitModeDim() {
 
 // 近等双顶规则更新句：卡片说明里用黄字标出（悬停 title 仍是纯文本）
 const PNEW_OPEN = '末根不等顶分型确认即可后移；';
-const PNEW_FIXED = '2026-10-02起总容差=该值（取消ATR项/价格比例项/15m双动能确认）；先影线后实体：后实体不低于前实体直接后移，更低则差≤该值才后移。';
+const PNEW_FIXED = '总容差=该值；先影线后实体：后实体不低于前实体直接后移，更低则差≤该值才后移。';
 const PNEW_BY_KEY = {
   nearDoubleFixed: PNEW_FIXED,
   nearDouble3: PNEW_OPEN,
@@ -949,7 +949,7 @@ function fxmaTpRowsHtml(m) {
   <div class="prow tp-card${mode === 'points' ? ' sel' : ''}${(modeMod || m.overrides.tpPts !== undefined) ? ' mod' : ''}" title="${tp.desc}">
     ${dot('points')}
     <span class="pname"><span class="plabel">止盈点数<span class="tp-tag">固定点数</span><span class="badge">已修改</span></span>
-    <span class="pdef">默认 ${tp.default} 点 · 满仓一笔，盘中触价全平（旧行为）</span></span>
+    <span class="pdef">默认 ${tp.default} 点 · 满仓一笔，盘中触价全平</span></span>
     <span class="zs-side">${num('tpPts', '点数', '止盈点数')}</span>
   </div>
   <div class="prow tp-card${mode === 'structure' ? ' sel' : ''}${(modeMod || m.overrides.tpNearPts !== undefined) ? ' mod' : ''}" title="${near.desc}">

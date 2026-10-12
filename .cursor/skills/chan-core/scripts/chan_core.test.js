@@ -1243,9 +1243,26 @@ describe("统一二买定义 secondPointSeries（2026-10-11）", () => {
     ]);
   });
 
-  test("ON+背驰不成立：二买族不标", () => {
+  test("ON+背驰不成立：仅拦弱档（强档照标，与 py 同步）", () => {
     const pts = core.findBuyPoints(bisBuy(), upper(), macdLow, 900, 0, 0, upperMacd(false));
-    assert.deepEqual(pts.map(p => [p.type, p.time]), [["1买", 400]]);
+    assert.deepEqual(pts.map(p => [p.type, p.time, p.strong ?? null]), [
+      ["1买", 400, null],
+      ["类2买", 800, true],   // 2买@600（弱）被闸；被闸点不重编号（仍是类2买）
+      ["类2买", 1000, true],
+    ]);
+  });
+
+  test("ON+背驰不成立：未定型与回调段未成笔均不标（与 py 同步）", () => {
+    const bis = bisBuy();
+    bis[3]._forming = true;
+    bis[3].enough = 5;   // enough 使 _forming 笔仍入列（提前入列口径）
+    bis[6]._forming = true;
+    bis[6].enough = 5;
+    const pts = core.findBuyPoints(bis, upper(), macdLow, 900, 0, 0, upperMacd(false));
+    assert.deepEqual(pts.map(p => [p.type, p.time, p.strong ?? null]), [
+      ["1买", 400, null],
+      ["类2买", 1000, true],
+    ]);
   });
 
   test("OFF：忽略背驰闸", () => {

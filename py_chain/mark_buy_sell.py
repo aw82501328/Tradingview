@@ -95,7 +95,7 @@ def compute_period_marks(res, bis, upperBis, rawBars, atr, macdArr, pi, periodMa
     @param pi           本周期在 periods 列表中的下标（0 为最大周期，一买锚定跳过）
     @param periodMarks  已计算出的上级周期标记 { 周期: [marks] }（跨周期共振用）
     @param periods      周期列表（从大到小）
-    @param upperMacdArr 可选：上一级别 MACD（二买族大周期背驰闸；缺省区间套兜底）
+    @param upperMacdArr 可选：上一级别 MACD（弱2类买卖点大周期背驰闸；缺省区间套兜底）
     @returns marks 列表，每项 { label, time, price, rawTime, rawPrice, color }
     """
     barSec = intervalSecOf(res)

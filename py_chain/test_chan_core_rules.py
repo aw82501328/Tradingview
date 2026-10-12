@@ -515,8 +515,9 @@ class TestBuildZsPassThroughLeave(unittest.TestCase):
 
 
 class TestSecondPointSeries(unittest.TestCase):
-    """2026-10-11 统一二买定义：二买族 = 1买/1卖后抬低/压低序列 + secondDivergeGate
-    大周期背驰闸 + strong 强弱二分（强=紧邻前反向笔终点过再前一根反向笔终点）。"""
+    """2026-10-11 统一二买定义 + 2026-10-12 闸门收窄：二买族 = 1买/1卖后抬低/压低序列
+    + secondDivergeGate 弱档大周期背驰闸（无背驰只拦弱/未定点，强档放行）+ strong
+    强弱二分（强=紧邻前反向笔终点过再前一根反向笔终点）。"""
 
     def b(self, t0, t1, typ, p0, p1):
         return {"type": typ, "startTime": t0, "endTime": t1,
@@ -565,10 +566,28 @@ class TestSecondPointSeries(unittest.TestCase):
             ("类2买", 1000, 448.0, True),    # 460 > 458 → 强
         ])
 
-    def test_on_no_diverge_blocks_series(self):
+    def test_on_no_diverge_blocks_weak_only(self):
+        # 2026-10-12 闸门收窄：无大周期背驰只拦弱档——2买@600（弱）不标，
+        # 强档 类2买@800/1000 照标；被闸点不重编号（仍是类2买）
         pts = cc.findBuyPoints(self._bis_buy(), self._upper(), self.MACD_LOW, 900,
                                0.0, 0.0, upperMacd=self._upper_macd(False))
-        self.assertEqual([(p["type"], p["time"]) for p in pts], [("1买", 400)])
+        self.assertEqual([(p["type"], p["time"], p.get("strong")) for p in pts],
+                         [("1买", 400, None),
+                          ("类2买", 800, True),
+                          ("类2买", 1000, True)])
+
+    def test_on_no_diverge_undetermined_and_forming_not_marked(self):
+        # 闸拦截期：未定型（前反弹笔 _forming → strong=None）与回调段未成笔
+        # （点笔 _forming，过前高=strong=True）均不标；强档已成型点照标
+        bis = self._bis_buy()
+        bis[3]["_forming"] = True
+        bis[3]["enough"] = 5   # enough 使 _forming 笔仍入列（提前入列口径）
+        bis[6]["_forming"] = True
+        bis[6]["enough"] = 5
+        pts = cc.findBuyPoints(bis, self._upper(), self.MACD_LOW, 900,
+                               0.0, 0.0, upperMacd=self._upper_macd(False))
+        self.assertEqual([(p["type"], p["time"], p.get("strong")) for p in pts],
+                         [("1买", 400, None), ("类2买", 1000, True)])
 
     def test_off_ignores_divergence_gate(self):
         saved = cc.CHAN_CFG.get("secondDivergeGate")

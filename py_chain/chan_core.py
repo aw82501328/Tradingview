@@ -80,12 +80,12 @@ CHAN_CFG = {
     # 画笔链路零影响。关=回退旧口径（创新低/新高 + 背驰 AND）。
     # 与 .cursor/skills/chan-core/scripts/chan_core.js CHAN_CFG.firstNoDiverge 同步。
     "firstNoDiverge": True,
-    # 二买族大周期背驰闸（2026-10-11 用户规则，统一二买定义，默认开）：2买/类2买/2卖/类2卖
-    # = 本级最新 1买/1卖 后的抬低/压低序列（首个=2买族，此后每个严格更高抬低/更低压低=类2买族，
-    # 无中枢/上级窗口约束；端点破锚价→序列作废重找）。开=序列需大周期背驰：上级末两根确认
-    # 同向笔 isBiDiverge（上级自身 MACD；不可判定→不标，无上级（日线）→豁免）；关=仅抬低/压低
-    # 序列，无其他条件。每点带 strong：紧邻前一根反向笔终点 vs 再前一根反向笔终点（=该点所在
-    # 笔起点，即「同周期前一个下跌/上涨段最后一笔的起点」）——过=强、已完成未过=弱、未完成=None
+    # 弱2类买卖点大周期背驰闸（2026-10-11 统一二买定义引入，2026-10-12 收窄为仅拦弱档，
+    # 默认开）：二买族序列定义不变（本级最新 1买/1卖 后抬低/压低序列，破锚价作废重找）。
+    # 开=无大周期背驰（上级末两根确认同向笔 isBiDiverge，上级自身 MACD；不可判定/无上级
+    # （日线）→放行）时弱/未定点不标，仅强档（strong=True 且回调段已成笔）可标；关=不检查
+    # 背驰。每点带 strong：紧邻前一根反向笔终点 vs 再前一根反向笔终点（=该点所在笔起点，
+    # 即「同周期前一个下跌/上涨段最后一笔的起点」）——过=强、已完成未过=弱、未完成=None
     # （弱先行，滚动翻强）。与 .cursor/skills/chan-core/scripts/chan_core.js 同步。
     "secondDivergeGate": True,
     "nearDoubleFixed": 2.0,  # 近等双顶/双底固定容差（品种报价单位的绝对价差，如黄金 2.0=2 美元）；
@@ -3035,7 +3035,8 @@ def _find2WinSlot(cache, macdArr, kind):
 
 
 def _upper_diverge_at(upperBis, upperMacd, macdArr, tRef, is_sell):
-    """大周期背驰闸（2026-10-11 用户规则，secondDivergeGate 开时二买族的硬门槛）：
+    """弱2类买卖点大周期背驰闸（secondDivergeGate 开时弱档硬门槛，2026-10-12 收窄：
+    仅拦弱/未定点，强档不受此闸）：
     上级末两根确认同向笔（买侧=下跌笔、卖侧=上涨笔）isBiDiverge——优先上级自身 MACD
     （upperMacd）；缺省时区间套兜底：本级 macd 在上级两笔时间窗内取指标对比。
     参照 = 覆盖/先于 tRef（锚点时刻）的最近一根同向笔 vs 其前一根同向笔。
@@ -3062,8 +3063,10 @@ def _second_point_series(bis, firstPts, upperBis, upperMacd, macdArr, is_sell):
       锚 = 本级最新 1买/1卖；其后首个抬低（down 端点 > 锚价）/压低（up 端点 < 锚价）为
     2买/2卖，此后每个严格更高抬低/更低压低为 类2买/类2卖；端点破锚价 → 锚将滚动、
     整条序列作废（返回空）；介于前一点与锚价之间 → 不标、序列等待（prev_px 单调口径）。
-      背驰闸（secondDivergeGate 开）：上级末两根确认同向笔 isBiDiverge（大周期背驰 →
-    上涨/下跌预期），作用于整条序列；不可判定 → 不标；无上级（日线）→ 豁免。
+      背驰闸（secondDivergeGate 开，2026-10-12 收窄为仅拦弱档）：上级末两根确认同向笔
+    isBiDiverge 无背驰时弱/未定点不标（未定型翻强后才出现、回调段成笔才判断），强档
+    （strong=True）放行；不可判定/无上级（日线）→ 放行。被闸点仍推进序列结构
+    （后续更高抬低/更低压低仍是类2买，不重编号）。
       强弱（strong 字段，type 字符串不变）：每点取紧邻前一根反向笔终点 vs 再前一根
     反向笔终点（=该点所在笔起点，即「同周期前一个下跌/上涨段最后一笔的起点」）——
     过=强、已完成未过=弱、未走完/不可比=None（弱先行，滚动翻强）。2卖镜像。
@@ -3082,11 +3085,12 @@ def _second_point_series(bis, firstPts, upperBis, upperMacd, macdArr, is_sell):
         ab = (max(cands, key=lambda b: b["endPrice"]) if is_sell
               else min(cands, key=lambda b: b["endPrice"]))
         anchor_t, anchor_p = ab["endTime"], ab["endPrice"]
+    # 仅明确的 False 拦截；不可判定（上级同向确认笔不足两根/数据窗口有限）→ 放行，
+    # 与「无上级（日线）豁免」同一降级口径。2026-10-12 收窄：gate_block 只拦弱/未定点
+    # （强档放行），不再整条序列拦截
+    gate_block = False
     if CHAN_CFG.get("secondDivergeGate", True) and (upperBis or []):
-        # 仅明确的 False 拦截；不可判定（上级同向确认笔不足两根/数据窗口有限）→ 放行，
-        # 与「无上级（日线）豁免」同一降级口径
-        if _upper_diverge_at(upperBis, upperMacd, macdArr, anchor_t, is_sell) is False:
-            return []
+        gate_block = _upper_diverge_at(upperBis, upperMacd, macdArr, anchor_t, is_sell) is False
     out = []
     prev_px = None
     for i, b in enumerate(bis):
@@ -3103,6 +3107,9 @@ def _second_point_series(bis, firstPts, upperBis, upperMacd, macdArr, is_sell):
             if prev_rev is not None:
                 strong = bool((bis[i - 1]["endPrice"] < prev_rev["endPrice"]) if is_sell
                               else (bis[i - 1]["endPrice"] > prev_rev["endPrice"]))
+        if gate_block and (strong is not True or b.get("_forming")):
+            prev_px = p  # 被闸点仍推进序列结构：后续更高抬低/更低压低仍是类2买，不重编号
+            continue
         out.append({"type": ("2卖" if is_sell else "2买") if prev_px is None
                     else ("类2卖" if is_sell else "类2买"),
                     "time": b["endTime"], "price": p, "strong": strong})
@@ -3114,8 +3121,9 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
                   upperMacd=None):
     """买点识别（MACD 背驰 + 抬高结构 + 中枢类2/3）。
     2买/类2买（2026-10-11 统一二买定义，_second_point_series）：本级最新 1买 后抬低序列
-    （首个=2买、此后每个严格更高抬低=类2买）+ 可选大周期背驰闸（secondDivergeGate，
-    上级末两根确认下跌笔 isBiDiverge，upperMacd 优先/缺省区间套兜底）+ 每点 strong 强弱。
+    （首个=2买、此后每个严格更高抬低=类2买）+ 可选大周期背驰闸（secondDivergeGate 仅拦
+    弱档：上级末两根确认下跌笔 isBiDiverge 无背驰时弱/未定不标，强档放行；upperMacd
+    优先/缺省区间套兜底）+ 每点 strong 强弱。
     上级上涨笔窗口仍产 twoBuyMeta（zg/seg 边界）供 3买/类3买锚定，不再发射二买族。
     3买/类3买/4买/类4买：离 zg 后回踩 > zg-thirdZsTol；同段按顺序全部标出；无中枢不标。
     1买逻辑不变。
@@ -3179,7 +3187,7 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
             lows = [{"biIdx": i, "time": t, "price": p} for i, t, p in downLows[lo:hi]]
             lows.sort(key=lambda x: x["time"])
             # firstLow 仅作 twoBuyMeta/3买 锚（2026-10-11 起二买族由 _second_point_series
-            # 统一发射：1买后抬低序列 + 大周期背驰闸 + 强弱二分，不再依赖上级窗口/中枢）
+            # 统一发射：1买后抬低序列 + 弱档背驰闸 + 强弱二分，不再依赖上级窗口/中枢）
             firstLow = next((l for l in lows if l["price"] > up["startPrice"]), None)
             if firstLow is None:
                 continue
@@ -3232,7 +3240,7 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
     for fb in firstBuys:
         points.append({"type": "1买", "time": fb["time"], "price": fb["price"]})
 
-    # 二买族序列（2026-10-11 统一二买定义）：1买 后抬低序列 + 大周期背驰闸 + 强弱二分
+    # 二买族序列（2026-10-11 统一二买定义）：1买 后抬低序列 + 弱档大周期背驰闸 + 强弱二分
     points.extend(_second_point_series(bis, firstBuys, upperBis, upperMacd, macdArr, False))
 
     # 3买 / 类3买：仅对有中枢的 2买段；扫到下一个窗口锚（下一个 meta 的 firstLow）之前。
@@ -3277,7 +3285,7 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
 def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.0, cache=None,
                    upperMacd=None):
     """卖点识别（与买点对称）：二卖族（2卖/类2卖）由 _second_point_series 统一发射
-    （1卖 后压低序列 + secondDivergeGate 大周期背驰闸 + strong 强弱）；上级下跌笔窗口
+    （1卖 后压低序列 + secondDivergeGate 弱档大周期背驰闸 + strong 强弱）；上级下跌笔窗口
     仍产 twoSellMeta（zd/seg 边界）供 3卖/类3卖锚定。3/类3/4/类4 卖依赖中枢。
     返回按 time 升序（稳定排序；同刻保持识别序 2/类2→1卖→3/4类，尾点=时间最新）。
     """
@@ -3414,7 +3422,7 @@ def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0
     for as_ in anchoredSells:
         points.append({"type": "1卖", "time": as_["time"], "price": as_["price"]})
 
-    # 二卖族序列（2026-10-11 统一二卖定义）：1卖 后压低序列 + 大周期背驰闸 + 强弱二分。
+    # 二卖族序列（2026-10-11 统一二卖定义）：1卖 后压低序列 + 弱档大周期背驰闸 + 强弱二分。
     # 锚用本级原始 firstSells（anchoredSells 是图表/校准锚定，可能移到上级端点，
     # 序列语义看本级结构，不随锚定漂移）。
     points.extend(_second_point_series(bis, firstSells, upperBis, upperMacd,

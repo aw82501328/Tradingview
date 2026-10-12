@@ -516,7 +516,7 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
     // 主循环：从大到小逐周期计算并标记
     let currentRes = prepRes;
     let upperBis = null; // 上一级周期的笔（用于一买锚定）
-    let upperMacdArr = null; // 上一级周期 MACD（二买族大周期背驰闸，与 upperBis 同步级联）
+    let upperMacdArr = null; // 上一级周期 MACD（弱2类买卖点大周期背驰闸，与 upperBis 同步级联）
     const periodMarks = {}; // 各周期已生成的标记（用于跨周期共振判定：上级买卖点 ↔ 本级别1类）
     for (let pi = 0; pi < PERIODS.length; pi++) {
       const res = PERIODS[pi];
@@ -543,7 +543,7 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
       const atr = calcATR(rawBars, 14);
       const macdArr = calcMACD(rawBars);
 
-      // 计算买卖点（2026-10-11 统一二买定义：二买族=1买/1卖后抬低/压低序列+大周期背驰闸+强弱二分；
+      // 计算买卖点（2026-10-11 统一二买定义：二买族=1买/1卖后抬低/压低序列+弱档大周期背驰闸+强弱二分；
       // 区间套窗口仅作 3买/3卖 中枢锚）1买/1卖 创新低/新高即标记（firstNoDiverge）
       let buyPts = findBuyPoints(curBis, upperBis, macdArr, intervalSecOf(res), CLASS2_ZS_TOL, THIRD_ZS_TOL, upperMacdArr);
       let sellPts = findSellPoints(curBis, upperBis, macdArr, intervalSecOf(res), CLASS2_ZS_TOL, THIRD_ZS_TOL, upperMacdArr);
