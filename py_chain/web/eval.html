@@ -53,8 +53,11 @@ tr:last-child td{border-bottom:0}
 .help-box{margin:0 0 12px}
 .help-box ol{margin:0;padding-left:1.4em}
 .help-box li{margin:4px 0}
-.bar{height:8px;background:#131c29;border:1px solid var(--line);border-radius:6px;overflow:hidden;margin:6px 0 4px}
+.bar{height:10px;background:#131c29;border:1px solid var(--line);border-radius:6px;overflow:hidden;margin:8px 0 4px}
 .bar-fill{height:100%;width:0;background:var(--primary);transition:width .4s}
+.bar-fill.busy{width:36%;animation:bar-slide 1.15s ease-in-out infinite}
+@keyframes bar-slide{from{transform:translateX(-120%)}to{transform:translateX(320%)}}
+.run-status{margin:2px 0 0;font-size:15px;font-variant-numeric:tabular-nums}
 .summary-row{display:flex;gap:18px;align-items:center;flex-wrap:wrap;font-size:13px;margin:4px 0 10px}
 .bl-group-title{display:flex;gap:10px;align-items:center;margin:16px 0 4px;font-size:13.5px;font-weight:600;color:#cfe0f8;white-space:nowrap}
 .case-row,.pnl-case-row{cursor:pointer}
@@ -145,7 +148,7 @@ const num=v=>typeof v==='number'?v.toLocaleString('zh-CN'):esc(v);
 const MARK_FIELDS=new Set(['rawCount','span','gapLocked','macdCross']);
 const PERIOD_ORDER=['D','240','60','15','3'];
 
-let barsInfo=null, cases=[], baselines=[], runState=null, pollTimer=null, toastTimer;
+let barsInfo=null, cases=[], baselines=[], runState=null, pollTimer=null, elapsedTimer=null, toastTimer;
 
 async function api(path,body){
   const r=await fetch('/api/eval/'+path, body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -230,6 +233,32 @@ async function refreshRunState(then){
 function schedulePoll(){
   if(pollTimer)return;
   pollTimer=setInterval(()=>act(async()=>await refreshRunState()),1500);
+}
+function fmtDur(sec){
+  sec=Math.max(0,Math.floor(sec));
+  const h=Math.floor(sec/3600), m=Math.floor((sec%3600)/60), s=sec%60;
+  if(h)return `${h}小时${m}分${s}秒`;
+  if(m)return `${m}分${s}秒`;
+  return `${s}秒`;
+}
+function elapsedSec(){
+  if(!runState||!runState.startedAt)return 0;
+  const end=runState.state==='running'?(Date.now()/1000):(runState.finishedAt||Date.now()/1000);
+  return Math.max(0, end-runState.startedAt);
+}
+function paintElapsed(){
+  const el=$('runElapsed');
+  if(el)el.textContent='已运行 '+fmtDur(elapsedSec());
+}
+function scheduleElapsed(){
+  paintElapsed();
+  if(elapsedTimer)return;
+  elapsedTimer=setInterval(paintElapsed,1000);
+}
+function stopElapsed(){
+  if(!elapsedTimer)return;
+  clearInterval(elapsedTimer);
+  elapsedTimer=null;
 }
 
 /* ---------- 结果渲染 ---------- */
@@ -434,21 +463,44 @@ function renderResults(){
   const body=$('runBody'),meta=$('runMeta'),title=$('resultTitle');
   const prevSnap=lastRunSnap;
   lastRunSnap=runState&&runState.id?{id:runState.id,state:runState.state}:null;
-  if(!runState||runState.state==='idle'){body.innerHTML='<p class="muted">尚未运行。点击基线的「运行」或「▶ 跑全部基线」。</p>';meta.textContent='';return}
+  if(!runState||runState.state==='idle'){stopElapsed();body.innerHTML='<p class="muted">尚未运行。点击基线的「运行」或「▶ 跑全部基线」。</p>';meta.textContent='';return}
   const items=runState.items||[];
   const justFinished=prevSnap&&prevSnap.id===runState.id&&prevSnap.state==='running'&&runState.state!=='running';
   if(justFinished&&runState.mode==='run'&&items.some(i=>i.drift))
     toast('当前参数与冻住的不一致，差异已列在结果里。本次运行仍用冻住的参数');
   if(runState.state==='running'){
     const done=items.filter(i=>i.state!=='pending'&&i.state!=='running').length;
-    const pct=items.length?done/items.length*100:0;
+    const prog=runState.progress||null;
+    const cur=items.find(i=>i.state==='running');
+    const curName=cur?(cur.caseName||cur.caseId||''):'';
     const kinds=new Set(items.map(i=>i.kind||'bi'));
-    const cap=kinds.has('pnl')&&!kinds.has('bi')?'正在重算回测合计…':kinds.has('pnl')?'正在重算…':'正在重算（Python build_bis）…';
-    body.innerHTML=`<div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div><p class="caption">${done} / ${items.length} 用例 · ${cap}</p>${driftNotice(items,runState.mode)}`;
-    meta.textContent=runState.mode==='freeze'?('冻结期望 · '+esc(runState.freezeName||'')):'运行基线';
+    const fallback=kinds.has('pnl')&&!kinds.has('bi')?'正在重算回测合计…':kinds.has('pnl')?'正在重算…':'正在重算（Python build_bis）…';
+    let pct=items.length?done/items.length*100:0;
+    let indeterminate=true;
+    let engineTxt=fallback;
+    if(prog&&prog.total>0){
+      pct=Math.min(100,prog.done/prog.total*100);
+      indeterminate=prog.done<=0;
+      const shown=pct>=10?Math.floor(pct)+'%':(Math.round(pct*10)/10)+'%';
+      engineTxt=`${esc(prog.label||'进度')} ${num(prog.done)} / ${num(prog.total)} 根 · ${shown}`;
+    }else if(prog&&prog.label){
+      engineTxt=esc(prog.label);
+    }else if(done>0){
+      indeterminate=false;
+    }
+    const bar=indeterminate
+      ?'<div class="bar"><div class="bar-fill busy"></div></div>'
+      :`<div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div>`;
+    const bits=[`${done} / ${items.length} 用例`];
+    if(curName)bits.push(esc(curName));
+    bits.push(engineTxt);
+    body.innerHTML=`<p class="run-status"><span id="runElapsed">已运行 ${fmtDur(elapsedSec())}</span></p>${bar}<p class="caption">${bits.join(' · ')}</p>${driftNotice(items,runState.mode)}`;
+    meta.textContent=runState.mode==='freeze'?('冻结期望 · '+(runState.freezeName||'')):'运行基线';
     title.textContent='④ 运行结果';
+    scheduleElapsed();
     return;
   }
+  stopElapsed();
   const mode=runState.mode;
   const isRun=mode==='run';
   const okCount=items.filter(i=>i.ok).length;

@@ -847,7 +847,7 @@ class BacktestEngine:
         mp = module_params or {}
         # plan 模块的 trendRes（顺势参考周期）/ rangeRes（震荡判定参考周期）单独取出：
         # 不混入震荡阈值 plan_cfg；trendRes "" = 关闭顺势过滤；rangeRes "" = 关闭
-        # 震荡闸门（关闭后小周期不自判震荡，4小时与日线仍自判，无「只作锚」固定观望）
+        # 震荡闸门（关闭后任何周期的计划行都不自判震荡，无「只作锚」固定观望）
         plan_mp = dict(mp.get("plan") or {})
         tr = plan_mp.pop("trendRes", mp.get("trendRes"))
         self.trend_res = DEFAULT_TREND_RES if tr is None else tr

@@ -744,13 +744,14 @@ class EvalManager:
         finally:
             chan_core.apply_cfg(saved)
 
-    def _replay_positions(self, replay):
+    def _replay_positions(self, replay, job=None):
         """用冻结参数重跑引擎，得到与信号表相同口径的进出场行。K 线按窗口从本地库读。"""
         from . import engine_dispatch
         from .webapp import SignalLog
         saved = dict(chan_core.CHAN_CFG)
         try:
             chan_core.apply_cfg(replay.get("chan_cfg") or {})
+            self._note_progress(job, 0, 0, "正在读取K线")
             bars = data_store.load_store(
                 replay["symbol"], periods=replay["periods"],
                 from_ts=replay["data_from_ts"], to_ts=replay.get("to_ts"))
@@ -765,6 +766,9 @@ class EvalManager:
                 log.fill_suppressed(mode, s, symbol=symbol, strategy=strategy)
                 suppressed.append(_sig_brief(s))
 
+            def _on_progress(i, n):
+                self._note_progress(job, i, n, "回测进度")
+
             result = engine.run(
                 start_ts=replay.get("start_ts"),
                 log=lambda *a, **k: None,
@@ -772,6 +776,7 @@ class EvalManager:
                 on_trade=lambda tr: log.fill_trade(mode, tr, symbol=symbol, strategy=strategy),
                 on_exit=lambda tr: log.fill_exit(mode, tr, symbol=symbol, strategy=strategy),
                 on_suppressed=_on_suppressed,
+                on_progress=_on_progress,
                 journal=False,
             )
             for tr in result.get("trades") or []:
@@ -1057,6 +1062,24 @@ class EvalManager:
         with self._state_lock:
             job["items"][idx] = {**job["items"][idx], **kv}
 
+    def _note_progress(self, job, done, total, label):
+        """把当前重放进度写进任务快照，供页面进度条轮询。
+
+        未跨过 1% 且距上次不足 0.4 秒则跳过，避免每根 K 线都抢状态锁。
+        """
+        if job is None:
+            return
+        now = time.time()
+        done = int(done or 0)
+        total = int(total or 0)
+        with self._state_lock:
+            prev = job.get("progress")
+            if isinstance(prev, dict) and prev.get("total") == total and total > 0 and done < total:
+                advanced = done - int(prev.get("done") or 0)
+                if advanced * 100 < total and now - float(prev.get("at") or 0) < 0.4:
+                    return
+            job["progress"] = {"done": done, "total": total, "label": label, "at": now}
+
     def _worker(self, job):
         try:
             saved_cfg = dict(chan_core.CHAN_CFG)  # 任务结束恢复进程内画笔参数
@@ -1141,11 +1164,11 @@ class EvalManager:
         payload = {k: (replay or {}).get(k) for k in fields}
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
 
-    def _cached_replay(self, replay, replay_cache):
+    def _cached_replay(self, replay, replay_cache, job=None):
         """按冻结参数取重跑结果。同组后续用例直接用已有进出场行。"""
         key = self._replay_group_key(replay)
         if key not in replay_cache:
-            replay_cache[key] = self._replay_positions(replay)
+            replay_cache[key] = self._replay_positions(replay, job)
         return replay_cache[key]
 
     def _handle_pnl(self, job, idx, case, computed, replay_cache):
@@ -1174,7 +1197,7 @@ class EvalManager:
             computed[case["id"]] = {"case": case, "kind": "pnl",
                                     "positions": positions, "total": total}
             return
-        rows, suppressed = self._cached_replay(replay, replay_cache)
+        rows, suppressed = self._cached_replay(replay, replay_cache, job)
         # 按行加入的用例只比选中行；整包方案仍比这次回测的合计
         scoped = case.get("scope") == "rows"
         if job["mode"] == "run":

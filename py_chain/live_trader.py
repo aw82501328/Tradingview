@@ -41,7 +41,7 @@ DEFAULT_LIVE_CONFIG = {
         "max_positions": 2, "day_loss_halt_pct": 3.0, "equity_floor": 0,
         "max_spread_entry": 0.5, "hard_spread_alert": 1.5,
         "entry_session_block_srv": [["21:55", "22:15"]], "weekend": "drop",
-        "orphan_policy": "close",
+        "orphan_policy": "alert",
     },
     "broker": {"deviation_pts": 50, "order_retry": 3, "modify_retry": 3,
                "clamp_stops_level": True},
@@ -94,6 +94,32 @@ def load_config(path=None, cli_overrides=None):
 
 def _abspath(p):
     return p if os.path.isabs(p) else os.path.join(REPO_ROOT, p)
+
+
+# 页面可选开单手数（回测手，1 = 0.01 标准手）。缺省仍用配置 lots。
+ORDER_LOTS_CHOICES = (1, 2, 3, 5, 10, 20, 50, 100)
+
+
+def resolve_order_settings(strategy, cfg):
+    """页面 kv 优先，缺键回落配置。返回 (shadow, lots)。
+
+    order_mode@策略：shadow / live。order_lots@策略：回测手，须在可选列表内。
+    不改 live_config，因此不触发参数漂移拒启。"""
+    mode_kv = live_store.load_state(live_store.state_key("order_mode", strategy)) or {}
+    lots_kv = live_store.load_state(live_store.state_key("order_lots", strategy)) or {}
+    mode = mode_kv.get("mode")
+    if mode == "shadow":
+        shadow = True
+    elif mode == "live":
+        shadow = False
+    else:
+        shadow = bool((cfg.get("run") or {}).get("shadow"))
+    raw = lots_kv.get("lots")
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw in ORDER_LOTS_CHOICES:
+        lots = raw
+    else:
+        lots = max(1, int(cfg.get("lots") or 1))
+    return shadow, lots
 
 
 def in_block_windows(srv_ts, windows):
@@ -229,6 +255,10 @@ class LiveTrader:
         self._last_prune = 0.0
         self._day_guard = None     # 内存缓存（避免每拍读库）
         self._trading_enabled = True  # 页面交易开关 kv 缓存（缺键=开启，向后兼容）
+        # 页面开单模式/手数（缺键=配置；有持仓时手数延到空仓再生效）
+        self._order_shadow = bool(cfg["run"]["shadow"])
+        self._order_lots = max(1, int(cfg["lots"]))
+        self._lots_pending = False
         self._last_ckpt = (0, 0.0) # (fine_last, wall_ts)：fine 未推进且 <60s 跳过写库
         self.pre_tick_hook = None  # 测试钩子：每轮 tick 开头调用（忽略异常）
 
@@ -337,9 +367,10 @@ class LiveTrader:
                 "spec": spec, "config_hash": h, "shadow": c["run"]["shadow"]})
         self._refresh_day_guard()
         self._refresh_trading_enabled()
+        self._refresh_order_settings()
         self.reconcile()
-        self.log(f"[live] 就绪：session={self.session} shadow={c['run']['shadow']} "
-                 f"lots={c['lots']}（{vol} 手）")
+        self.log(f"[live] 就绪：session={self.session} shadow={self._order_shadow} "
+                 f"lots={self._order_lots}（{self._order_lots * 0.01:.2f} 手）")
         if once:
             self.tick()
             return
@@ -498,6 +529,7 @@ class LiveTrader:
             except Exception as e:
                 self.log(f"[live] pre_tick_hook 异常（忽略）：{e}")
         self._refresh_trading_enabled()
+        self._refresh_order_settings()
         tail = self.feed.tail()
         last_ts = max((bs[-1]["time"] for bs in tail.values() if bs), default=0)
         if not last_ts:
@@ -1004,8 +1036,8 @@ class LiveTrader:
     # -- 风控门（只挡镜像侧） ---------------------------------------------------
 
     def _entry_gate(self, direction, entry_lots=None):
-        rc, rk = self.cfg["run"], self.cfg["risk"]
-        if rc["shadow"]:
+        rk = self.cfg["risk"]
+        if self._order_shadow:
             return False, "shadow模式"
         if not self._trading_enabled:
             return False, "策略交易已关闭(页面开关)"
@@ -1017,13 +1049,17 @@ class LiveTrader:
         srv = self._server_now()
         if srv is not None and in_block_windows(srv, rk.get("entry_session_block_srv")):
             return False, "时段阻断"
-        vol_new = (entry_lots if entry_lots is not None else self.cfg["lots"]) * 0.01
-        if vol_new > rk["max_volume_per_order"] + 1e-9:
-            return False, f"单笔手数{vol_new}>{rk['max_volume_per_order']}"
+        vol_new = (entry_lots if entry_lots is not None else self._order_lots) * 0.01
+        # 页面选定手数即本笔授权：配置上限仍兜住未抬高的部分，选定更大时放行这一档
+        order_cap = max(float(rk["max_volume_per_order"]), self._order_lots * 0.01)
+        if vol_new > order_cap + 1e-9:
+            return False, f"单笔手数{vol_new}>{order_cap}"
         rows = [r for r in live_store.open_trades(self.session) if not r["shadow"]]
         open_vol = sum(r["volume_left"] or 0 for r in rows)
-        if open_vol + vol_new > rk["max_total_open_volume"] + 1e-9:
-            return False, f"总敞口{open_vol + vol_new:.2f}>{rk['max_total_open_volume']}"
+        total_cap = max(float(rk["max_total_open_volume"]),
+                        self._order_lots * 0.01 * int(rk["max_positions"]))
+        if open_vol + vol_new > total_cap + 1e-9:
+            return False, f"总敞口{open_vol + vol_new:.2f}>{total_cap}"
         if len(rows) + 1 > rk["max_positions"]:
             return False, f"持仓数{len(rows) + 1}>{rk['max_positions']}"
         # 账户级合计守卫（多策略并存=路径A 多进程，2026-09-30 第二策略接入补齐）：
@@ -1084,6 +1120,42 @@ class LiveTrader:
             self._last_ckpt = (0, 0.0)   # 值变化→强制下拍立即写心跳，回报生效状态
         self._trading_enabled = val
 
+    def _refresh_order_settings(self):
+        """每拍重读页面开单模式/手数（order_mode / order_lots @策略）。
+
+        缺键回落配置。手数在空仓时写入引擎，下一笔信号按新手数开；
+        有持仓时先记下，本笔出场手数不变，空仓后再生效。"""
+        shadow, lots = resolve_order_settings(self.cfg.get("strategy"), self.cfg)
+        if shadow != self._order_shadow or lots != self._order_lots:
+            self._last_ckpt = (0, 0.0)
+            if shadow != self._order_shadow:
+                self.log(f"[live] 开单模式：{'影子（不下单）' if shadow else '实单'}")
+            if lots != self._order_lots:
+                self.log(f"[live] 开单手数：{lots} 回测手（{lots * 0.01:.2f} 标准手）")
+        self._order_shadow = shadow
+        self._order_lots = lots
+        self._apply_engine_lots()
+
+    def _apply_engine_lots(self):
+        """把页面手数写进引擎。有持仓或正在重放时不改，避免半路改掉本笔出场手数。"""
+        eng = self.engine
+        if eng is None or self.replaying:
+            return
+        if int(eng.lots) == int(self._order_lots):
+            if self._lots_pending:
+                self._lots_pending = False
+                self._last_ckpt = (0, 0.0)
+            return
+        if self._open:
+            if not self._lots_pending:
+                self._lots_pending = True
+                self._last_ckpt = (0, 0.0)
+                self.log(f"[live] 有持仓，开单手数 {self._order_lots} 回测手待空仓后生效")
+            return
+        eng.lots = int(self._order_lots)
+        self._lots_pending = False
+        self.log(f"[live] 引擎手数已改为 {eng.lots} 回测手")
+
     # -- 对账 -----------------------------------------------------------------
 
     def reconcile(self):
@@ -1092,7 +1164,7 @@ class LiveTrader:
         pos = {(p["ticket"]): p for p in self.broker.positions()}
         actions = reconcile_plan(rows, pos, {no: t for no, t in self._open.items()},
                                  detached=self._detached,
-                                 orphan_policy=self.cfg["risk"].get("orphan_policy", "close"))
+                                 orphan_policy=self.cfg["risk"].get("orphan_policy", "alert"))
         for a in actions:
             kind = a["action"]
             no = a.get("engine_trade_no")
@@ -1149,7 +1221,10 @@ class LiveTrader:
         self._last_ckpt = (fine_ts, now)
         live_store.save_state(self._skey("heartbeat"), {
             "ts": int(now), "fine_last": fine_ts,
-            "trading_enabled": self._trading_enabled})
+            "trading_enabled": self._trading_enabled,
+            "order_shadow": self._order_shadow,
+            "order_lots": self._order_lots,
+            "lots_pending": self._lots_pending})
         live_store.save_state(self._skey("engine_cursor"), {
             "session": self.session,
             "T_start": (live_store.load_state(self._skey("session"), {}) or {}).get("T_start"),
@@ -1224,7 +1299,7 @@ class LiveTrader:
         return round(pnl, 2), dev
 
 
-def reconcile_plan(rows, broker_pos, engine_open, detached=(), orphan_policy="close"):
+def reconcile_plan(rows, broker_pos, engine_open, detached=(), orphan_policy="alert"):
     """对账判定（纯函数）：输入镜像行/券商持仓/引擎 open trade，产出动作表。
 
     动作：alert_mismatch / catchup_close / detach / orphan_close / alert_missing_row。
@@ -1256,13 +1331,14 @@ def reconcile_plan(rows, broker_pos, engine_open, detached=(), orphan_policy="cl
             if eng_open:          # 引擎有仓、券商无（宕机期 SL 打掉/手动平）→ 脱钩
                 actions.append({"action": "detach", "engine_trade_no": no, "ticket": ticket})
             # 引擎已平 + 券商已无 = 一致（终局平仓成功）
-    # 孤儿仓：券商有、无任何镜像行引用（shadow/detached 引用也算已认领）
+    # 孤儿仓：券商有、本机会话无镜像（例如另一台机器开的仓）。
+    # 策略没在本机触发平仓就只告警，不发平仓单；显式 orphan_policy=close 才平。
     for ticket in sorted(set(by_ticket) - claimed):
         if orphan_policy == "close":
             actions.append({"action": "orphan_close", "ticket": ticket})
         else:
             actions.append({"action": "alert_mismatch",
-                            "detail": f"孤儿仓 ticket={ticket}（policy={orphan_policy}）"})
+                            "detail": f"孤儿仓 ticket={ticket}（policy={orphan_policy}，不平）"})
     # 引擎 open 但无镜像行（异常）
     row_nos = {r["engine_trade_no"] for r in rows}
     for no in engine_open:

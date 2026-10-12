@@ -13,7 +13,7 @@ _os.environ.setdefault("PY_CHAIN_BT_JOURNAL", "0")  # 引擎测试不落交易�
   - compute_plan(range_res=...)：参考周期 regime 震荡 → 更低周期观望；非震荡 →
     更低周期直接走趋势分支；参考周期及以上（240/D）固定观望只作锚；参考周期
     笔 <2（含无数据）→ 更低周期观望·笔数据不足；
-    "" 关闭 → 小周期不自判震荡（240/日线仍自判 A/B；240 震荡不再封锁低周期、
+    "" 关闭 → 任何周期（含 240/日线）的计划行都不自判震荡（240 震荡不再封锁低周期、
     240/D 恢复正常计划行、无 regime 传递）；
     work_cache 二次调用复用一致
 
@@ -127,15 +127,14 @@ class TestPredictPlanRangeGate(unittest.TestCase):
                            atr=self.atr, barSec=self.sec, **kw)
 
     def test_own_judgment_range(self):
-        # 小周期不自判：15m 自身虽满足 A 支，也不再震荡观望
+        # 参考周期关闭：15m / 4小时 / 日线自身虽满足 A 支，计划行也不再震荡观望
         row = self._plan()
         self.assertNotIn("震荡整理", row["strategy"])
-        # 4小时仍自判 A/B
-        big = predictPlan("240", alt_bis(0, 14400, 6, 4100.0, 4110.0), None, [],
-                          4105.0, flat_bars(0, 14400, 40, 4099.0, 4111.0),
-                          atr=100.0, barSec=14400)
-        self.assertEqual(big["direction"], "观望")
-        self.assertIn("震荡整理", big["strategy"])
+        for res, sec in (("240", 14400), ("D", 86400)):
+            big = predictPlan(res, alt_bis(0, sec, 6, 4100.0, 4110.0), None, [],
+                              4105.0, flat_bars(0, sec, 40, 4099.0, 4111.0),
+                              atr=100.0, barSec=sec)
+            self.assertNotIn("震荡整理", big["strategy"], res)
 
     def test_gate_range_blocks_with_source_name(self):
         row = self._plan(range_gate={"range": True, "resName": "4小时", "reason": "4小时：xxx"})
@@ -257,10 +256,10 @@ class TestComputePlanRangeRes(unittest.TestCase):
             self.assertIn("参考周期", rows[res]["strategy"], res)
 
     def test_off_mode_self_judgment(self):
-        # "" 关闭：小周期不自判；240 自身震荡不再封锁更低周期、
-        # 240/D 恢复正常计划行（不再「只作锚」）、无 regime 传递
+        # "" 关闭：计划行不自判；240 自身震荡不再封锁更低周期、
+        # 240/D 恢复正常计划行（不再「只作锚」、也不再自判震荡）、无 regime 传递
         periodBis, barsByPeriod, periodAtr = self._build(
-            bis240=alt_bis(0, 14400, 6, 4100.0, 4110.0),    # 240 自判 → A 支震荡
+            bis240=alt_bis(0, 14400, 6, 4100.0, 4110.0),    # 若自判会是 A 支震荡
             bars240=flat_bars(0, 14400, 40, 4099.0, 4111.0),
             bis_low=trend_bis(0, 900, 6, 4200.0, 30.0),    # 更低周期自判 → 非震荡走趋势分支
             bars_low=trend_bars(0, 900, 40, 4200.0, 8.0),
@@ -272,13 +271,10 @@ class TestComputePlanRangeRes(unittest.TestCase):
             self.assertNotIn("震荡整理", rows[res]["strategy"], res)
             self.assertNotIn("参考周期", rows[res]["strategy"], res)
             self.assertNotIn("笔数据不足", rows[res]["strategy"], res)
-        # 240 自判 A 支震荡 → 正常「震荡整理」计划行（非「参考周期只作锚」）
-        self.assertEqual(rows["240"]["direction"], "观望")
-        self.assertIn("震荡整理", rows["240"]["strategy"])
-        self.assertNotIn("参考周期", rows["240"]["strategy"])
-        # D 自判（本组 D 数据为小区间交替笔+平K → A 支震荡观望）
-        self.assertIn("震荡整理", rows["D"]["strategy"])
-        self.assertNotIn("参考周期", rows["D"]["strategy"])
+        # 240/D 计划行不再自判 A 支（也不是「参考周期只作锚」）
+        for res in ("240", "D"):
+            self.assertNotIn("震荡整理", rows[res]["strategy"], res)
+            self.assertNotIn("参考周期", rows[res]["strategy"], res)
 
     def test_off_mode_cache_not_shared_with_gate(self):
         # 关闭/开启两模式交替调用同一 work_cache：计划行不串缓存（键含 range_res）

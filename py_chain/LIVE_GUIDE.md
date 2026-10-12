@@ -73,7 +73,7 @@ schtasks /Create /TN "live_trader" /RL HIGHEST /SC ONSTART /RU <用户名> ^
 | 日亏熔断 | 当日 equity 回撤 ≥ `day_loss_halt_pct`(3%) | 停新开仓，存量管理到终局 |
 | 点差门 | 点差 > `max_spread_entry`(0.5) | 该笔落 shadow（引擎照常），出场永不被拦 |
 | 手数上限 | 单笔/总敞口/仓位数 | 拒新开仓（shadow） |
-| 对账 | 每 `reconcile_min` 分钟 | 孤儿仓平掉；券商侧消失的仓脱钩；量不齐告警 |
+| 对账 | 每 `reconcile_min` 分钟 | 孤儿仓默认只告警不平（`orphan_policy=close` 才平）；券商侧消失的仓脱钩；量不齐告警 |
 | 实盘双条件 | `require_mode:"real"` + `data/LIVE_ARMED`（内容=确认日期） | 缺一拒启 |
 | 参数漂移 | module_params.json / live 配置变更后重启 | 拒自动恢复，`--accept-param-drift` 显式放行 |
 

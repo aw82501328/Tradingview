@@ -5,7 +5,7 @@
  * 覆盖：
  *   - predictPlan(rangeGate=…)：regime 震荡 → 观望（strategy 注明来源周期）；
  *     非震荡 → 跳过自身 A/B 直接走趋势分支（替换语义）；insufficient → 观望·笔数据不足；
- *     无 rangeGate → 小周期不自判；4小时与日线仍自判 A/B
+ *     无 rangeGate → 任何周期（含 4 小时、日线）的计划行都不自判 A/B
  *   - planGateRow：笔 <2 → insufficient；自身判震荡（A 支）→ range:true；强趋势 → range:false
  *   - TREND_RES / RANGE_RES 默认口径与 py_chain/trading_plan.py 常量一致
  *
@@ -87,15 +87,17 @@ describe("predictPlan rangeGate（参考周期闸门替换语义）", () => {
     assert.equal(row.label, "数据不足");
   });
 
-  test("无 rangeGate → 小周期不自判；4小时仍自判 A/B", () => {
+  test("无 rangeGate → 4小时与日线计划行也不自判 A/B", () => {
     const small = predictPlan({ res: "15", bis: SELF_RANGE.bis, bars: SELF_RANGE.bars,
       atr: SELF_RANGE.atr, lastPrice: 4205 });
     assert.notEqual(small.label, "震荡观望");
     assert.ok(!small.strategy.includes("震荡整理"));
-    const big = predictPlan({ res: "240", bis: altBis(0, 14400, 6, 4100, 4110),
-      bars: flatBars(0, 14400, 40, 4099, 4111), atr: 100, lastPrice: 4105 });
-    assert.equal(big.label, "震荡观望");
-    assert.match(big.strategy, /震荡整理/);
+    for (const [res, sec] of [["240", 14400], ["D", 86400]]) {
+      const big = predictPlan({ res, bis: altBis(0, sec, 6, 4100, 4110),
+        bars: flatBars(0, sec, 40, 4099, 4111), atr: 100, lastPrice: 4105 });
+      assert.notEqual(big.label, "震荡观望");
+      assert.ok(!big.strategy.includes("震荡整理"));
+    }
   });
 });
 

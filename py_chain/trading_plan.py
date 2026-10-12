@@ -392,12 +392,11 @@ def predictPlan(res, bis, upperBis, macdArr, lastPrice, bars, atr=0, barSec=None
     """核心：对单个周期生成「方向 + 策略」。
 
     判定顺序：
-      1. 震荡优先——判定源（2026-09-16 闸门；2026-10-11 小周期不再自判）：
+      1. 震荡优先——判定源（2026-09-16 闸门；2026-10-12 关闭后不再自判）：
          range_gate 给定时用参考周期 regime
          （替换语义：regime 震荡 → 观望；regime 非震荡 → 跳过本周期 A/B 支直接走趋势分支；
          regime 带 insufficient 标记（参考周期笔 <2）→ 直接观望「笔数据不足」）；
-         range_gate 为空时，仅 4 小时与日线自判 A/B（横盘 / 未离开中枢且现价在箱内
-         → 观望）。严格低于 4 小时的周期不自判震荡，直接走趋势与买卖点。
+         range_gate 为空时，各周期（含 4 小时与日线）不自判 A/B，直接走趋势与买卖点。
       2. 趋势：获取本周期买卖点（findBuyPoints/findSellPoints）：
          - 先匹配最后一笔终点上的买卖点 → 按类型映射策略；
          - 若最后一笔终点无买卖点 → 再向前获取一笔（逐笔向前扫描最近笔端点）；
@@ -424,13 +423,8 @@ def predictPlan(res, bis, upperBis, macdArr, lastPrice, bars, atr=0, barSec=None
                                  "观望等待方向选择"),
                     "reason": range_gate.get("reason", ""), "label": "震荡观望"}
         # regime 非震荡 → 跳过本周期 A/B 支，直接走趋势分支
-    elif (intervalSecOf(res) or 0) >= (intervalSecOf("240") or 14400):
-        # 4小时与日线：rangeRes 关闭时仍自判 A/B。小周期（严格低于 4 小时）不进这里。
-        v = _rangeVerdict(bis, bars, atr, upperBis, lastPrice, barSec, range_cfg)
-        if v is not None:
-            return dict(v, res=res)
-    # 小周期不自判震荡（2026-10-11）：rangeRes 关闭时直接走下方趋势/买卖点。
-    # rangeRes 开启时更低周期带 range_gate，不会落到本段。
+    # range_gate 为空（参考周期关闭）：日线、4 小时及更低周期都不自判 A/B
+    # （2026-10-12）。A/B 只留在 _plan_gate_row，供参考周期开启时算 regime。
 
     # 2. 趋势 → 获取本周期买卖点
     buyPts = []
@@ -551,10 +545,10 @@ def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=No
                         但不再做计划行判定（无自身 A/B、无买卖点匹配）；
                         严格更低的周期只看该周期 regime（_plan_gate_row）：震荡 → 观望；
                         非震荡 → 直接走趋势分支；笔 <2 → 观望「笔数据不足」
-                        （不回退自身判定——引擎内自身 A/B 只剩参考周期给自己判这一处）。
-                      - 关闭（2026-10-08；2026-10-11 小周期不再自判）：无参考周期、
-                        无「只作锚」、无 regime 传递。严格低于 4 小时的周期不自判震荡，
-                        直接走趋势/买卖点；4 小时与日线仍自判 A/B。与图表 JS 同口径。
+                        （不回退自身判定——A/B 只在 _plan_gate_row 里给参考周期算 regime）。
+                      - 关闭（2026-10-12）：无参考周期、无「只作锚」、无 regime 传递。
+                        日线、4 小时及更低周期的计划行都不自判震荡，直接走趋势/买卖点。
+                        与图表 JS 同口径。
     """
     from .sr_flip import _bis_fingerprint
     if range_res is None:
@@ -564,7 +558,7 @@ def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=No
     periodAtr = periodAtr or {}
     planRows = {}
     cfg_fp = tuple(sorted((cfg or {}).items())) if cfg else ()
-    gate_on = bool(range_res)  # "" = 关闭：无参考周期锚/regime；小周期不自判震荡
+    gate_on = bool(range_res)  # "" = 关闭：无参考周期锚/regime；计划行不自判震荡
     ref_sec = (intervalSecOf(range_res) or 0) if gate_on else 0
     ref_name = trend_res_name(range_res) if gate_on else ""
     upperBis = None
@@ -668,8 +662,8 @@ TREND_RES = ""
 
 # 震荡判定参考周期（2026-09-16 闸门口径；2026-10-08 增加「关闭」项，参数中心 plan 模块
 # rangeRes 可配）："" = 关闭（默认，2026-10-10）→ 无参考周期闸门。
-# 2026-10-11：关闭后严格低于 4 小时的周期不自判震荡，直接走买卖点；
-# 4 小时与日线仍自判 A/B（与图表 JS trading_plan.js 同口径）；
+# 2026-10-12：关闭后任何周期（含 4 小时、日线）的计划行都不自判震荡，直接走买卖点
+# （与图表 JS trading_plan.js 同口径）；A/B 仅在参考周期开启时用作 regime 门。
 # "240" = 4小时；"D" = 日线。
 # 开启时：更低周期只看该周期 regime（compute_plan → _plan_gate_row →
 # predictPlan(range_gate=…)，参考周期笔不足 → 观望）；参考周期自身与更高周期

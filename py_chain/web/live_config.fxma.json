@@ -20,7 +20,7 @@
     "hard_spread_alert": 1.5,
     "entry_session_block_srv": [["21:55", "22:15"]],
     "weekend": "drop",
-    "orphan_policy": "close",
+    "orphan_policy": "alert",
     "max_account_total_volume": 0.1,
     "max_account_positions": 4
   },

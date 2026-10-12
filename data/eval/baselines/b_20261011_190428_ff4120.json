@@ -451,7 +451,7 @@
  "createdAt": 1791716668.020143,
  "updatedAt": 1791716668.020143,
  "lastRun": {
-  "at": 1791790977.596619,
+  "at": 1791807009.4560454,
   "pass": 4,
   "total": 6,
   "cases": {
@@ -594,7 +594,7 @@
        "symbol": "OANDA:XAUUSD",
        "markRes": "3",
        "mode": "eval",
-       "id": 91,
+       "id": 99,
        "lots": 4,
        "price": 4307.99,
        "nearSr": 4322.93362,

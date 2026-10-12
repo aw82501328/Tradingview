@@ -7,6 +7,8 @@ GET 只读：仅查 bars.db 的 live_* 表，不触碰 ChartLock/三模式互斥
 POST /api/live/trading（2026-09-29 策略交易开关）：写 live_state kv
 （trading_enabled@<策略>）+ live_events 审计行，不改 live_config
 （避免参数漂移守卫拒启）；live_trader 每拍重读该 kv 生效。
+POST /api/live/settings（开单模式/手数）：写 order_mode / order_lots，
+同样不改 live_config；live_trader 每拍重读，空仓后手数写入引擎。
 enabled=true 且进程不在线时，另起线程打开已保存账号的 MT5 终端并启动
 live_trader（2026-10-12）。enabled=false 只停新开仓，不关终端、不杀进程。
 
@@ -52,8 +54,41 @@ def _ini_value(path, key):
     return ""
 
 
+def _installed_exes():
+    """数据目录 origin.txt 指向的 terminal64.exe。"""
+    base = os.path.join(os.environ.get("APPDATA", ""), "MetaQuotes", "Terminal")
+    exes = []
+    if not os.path.isdir(base):
+        return exes
+    for name in os.listdir(base):
+        origin = os.path.join(base, name, "origin.txt")
+        if not os.path.isfile(origin):
+            continue
+        install = _read_utf16(origin).strip().strip("\x00")
+        exe = os.path.join(install, "terminal64.exe")
+        if os.path.isfile(exe) and exe not in exes:
+            exes.append(exe)
+    return exes
+
+
+def _current_login(exe):
+    """该终端当前登录号。未登录或连不上则为 0。读完即断开，不占连接。"""
+    import MetaTrader5 as mt5
+    if not mt5.initialize(exe):
+        return 0
+    acc = mt5.account_info()
+    mt5.shutdown()
+    if acc is None:
+        return 0
+    return int(acc.login or 0)
+
+
 def terminal_exe_for(login):
-    """定位已保存该账号的 terminal64.exe（common.ini 最新的一份）。"""
+    """定位已保存该账号的 terminal64.exe。
+
+    先看 common.ini 的 Login（多份时取最新）。这份 EXNESS 终端更新后不写
+    common.ini，账号在已登录会话里，再按 origin.txt 的安装路径对当前登录号。
+    """
     base = os.path.join(os.environ["APPDATA"], "MetaQuotes", "Terminal")
     if not os.path.isdir(base):
         raise RuntimeError("未找到 MT5 终端数据目录")
@@ -74,9 +109,12 @@ def terminal_exe_for(login):
         mtime = os.path.getmtime(common)
         if best is None or mtime > best[0]:
             best = (mtime, exe)
-    if best is None:
-        raise RuntimeError(f"未找到已保存账号 {want} 的 MT5 终端")
-    return best[1]
+    if best is not None:
+        return best[1]
+    for exe in _installed_exes():
+        if _current_login(exe) == int(want):
+            return exe
+    raise RuntimeError(f"未找到已保存账号 {want} 的 MT5 终端")
 
 
 def _ps(script):
@@ -324,11 +362,27 @@ def _pnl_summary(closed):
     }
 
 
+def _effective_order(sid, session):
+    """当前生效的开单模式与手数。配置读不到时回落会话快照。"""
+    from .live_trader import ORDER_LOTS_CHOICES, resolve_order_settings
+    try:
+        cfg, _ = _strategy_cfg(sid)
+    except Exception:
+        cfg = {
+            "strategy": sid,
+            "run": {"shadow": bool(session.get("shadow", True))},
+            "lots": int(session.get("lots") or 2),
+        }
+    shadow, lots = resolve_order_settings(sid, cfg)
+    return ("shadow" if shadow else "live"), lots, list(ORDER_LOTS_CHOICES)
+
+
 def _strategy_snapshot(sid):
     """单策略快照：无会话也占位（offline 空表），保证 tab 列表稳定。"""
     spec = module_registry.STRATEGIES.get(sid) or {}
     session = live_store.load_state(live_store.state_key("session", sid)) or {}
     hb = live_store.load_state(live_store.state_key("heartbeat", sid)) or {}
+    order_mode, order_lots, order_choices = _effective_order(sid, session)
     cursor = live_store.load_state(live_store.state_key("engine_cursor", sid)) or {}
     out = {
         "ok": True, "strategy": sid,
@@ -336,6 +390,8 @@ def _strategy_snapshot(sid):
         "online": _heartbeat_online(sid),
         "session": session, "heartbeat": hb, "engine_cursor": cursor,
         "trading_enabled": _trading_enabled(sid),
+        "order_mode": order_mode, "order_lots": order_lots,
+        "order_lots_choices": order_choices,
         "open_trades": [], "closed_trades": [], "orders": [], "events": [],
         "pnl_summary": None,
     }
@@ -373,8 +429,40 @@ def set_trading(strategy_id, enabled):
     return {"strategy": sid, "enabled": bool(enabled)}
 
 
+def set_order_settings(strategy_id, mode=None, lots=None):
+    """写开单模式/手数 kv + 审计。不改 live_config。进程离线也照记，在线后下一拍生效。"""
+    from .live_trader import ORDER_LOTS_CHOICES, resolve_order_settings
+    if mode is None and lots is None:
+        raise ValueError("须指定 mode 或 lots")
+    sid = module_registry.normalize_strategy(strategy_id)
+    live_store.ensure_tables()
+    session = live_store.load_state(live_store.state_key("session", sid)) or {}
+    if mode is not None:
+        if mode not in ("shadow", "live"):
+            raise ValueError("mode 须为 shadow 或 live")
+        live_store.save_state(live_store.state_key("order_mode", sid), {"mode": mode})
+        live_store.log_event(session.get("id") or f"web:{sid}", "order_mode",
+                             {"strategy": sid, "mode": mode})
+    if lots is not None:
+        if isinstance(lots, bool) or not isinstance(lots, int):
+            raise ValueError("lots 须为整数回测手")
+        if lots not in ORDER_LOTS_CHOICES:
+            raise ValueError("lots 不在可选手数内")
+        live_store.save_state(live_store.state_key("order_lots", sid), {"lots": lots})
+        live_store.log_event(session.get("id") or f"web:{sid}", "order_lots",
+                             {"strategy": sid, "lots": lots})
+    try:
+        cfg, _ = _strategy_cfg(sid)
+    except Exception:
+        cfg = {"strategy": sid, "run": {"shadow": True}, "lots": 2}
+    shadow, lots_eff = resolve_order_settings(sid, cfg)
+    return {"strategy": sid,
+            "order_mode": "shadow" if shadow else "live",
+            "order_lots": lots_eff}
+
+
 def handle(handler, app, method):
-    """webapp 路由挂载点（GET /live、/api/live/overview；POST /api/live/trading）。"""
+    """webapp 路由挂载点（GET /live、/api/live/overview；POST /api/live/trading、/api/live/settings）。"""
     path = handler.path.split("?", 1)[0]
     if method == "GET":
         if path == "/api/live/overview":
@@ -397,6 +485,20 @@ def handle(handler, app, method):
             result = set_trading(body.get("strategy"), body["enabled"])
             if body["enabled"]:
                 result.update(begin_launch(result["strategy"]))
+        except (ValueError, TypeError, RuntimeError) as exc:
+            handler._send_json({"ok": False, "error": str(exc)}, 400)
+        except Exception as exc:
+            handler._send_json({"ok": False, "error": str(exc)}, 503)
+        else:
+            handler._send_json({"ok": True, **result})
+        return True
+    if method == "POST" and path == "/api/live/settings":
+        try:
+            body = handler._read_body()
+            if not isinstance(body, dict):
+                raise ValueError("请求体须为对象")
+            result = set_order_settings(body.get("strategy"),
+                                        body.get("mode"), body.get("lots"))
         except (ValueError, TypeError, RuntimeError) as exc:
             handler._send_json({"ok": False, "error": str(exc)}, 400)
         except Exception as exc:

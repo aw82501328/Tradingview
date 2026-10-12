@@ -31,6 +31,13 @@
   .tgl-btn.stop  { background: #3b2226; border-color: #6b3a40; color: #e0938f; }
   .tgl-btn.start { background: #0d3b31; border-color: #1d5c4c; color: #7fe0b0; }
   .tgl-btn:disabled { opacity: .5; cursor: default; }
+  .order-ctl { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+               margin: -6px 0 16px; }
+  .order-ctl label { font-size: 12px; color: var(--muted);
+                     display: flex; align-items: center; gap: 6px; }
+  .order-ctl select { background: var(--card); color: var(--text);
+                      border: 1px solid var(--border); border-radius: 8px;
+                      padding: 6px 8px; font-size: 13px; }
   .pend { font-size: 11px; color: #f0b90b; margin-left: 8px; margin-bottom: 8px; }
   .loaderr { font-size: 12px; color: #e0938f; padding: 8px 2px; align-self: center; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
@@ -61,12 +68,14 @@
 <h1>实盘监控</h1>
 <div class="sub">数据源 bars.db live_* 表 · 每 5s 刷新 · 记录时间均为北京时间（UTC+8） · 策略按 TAB 分离 ·
 打开页面不会自动启动 · 「开启交易」打开 MT5 并启动实盘进程 · 「关闭交易」只停新开仓 ·
+模式与开单手数在下方选择，下一拍生效，不必重启进程 ·
 运行手册见 <a href="/live" onclick="return false">py_chain/LIVE_GUIDE.md</a></div>
 
 <div class="tabbar">
   <div class="stabs" id="strategy-tabs" role="tablist"></div>
   <div id="trade-ctl"></div>
 </div>
+<div class="order-ctl" id="order-ctl"></div>
 
 <div class="grid" id="stats"></div>
 
@@ -119,7 +128,8 @@ const esc = s => String(s ?? '—').replace(/[&<>"]/g,
 const dirCls = d => d === 'long' ? 'long' : 'short';
 const dirTxt = d => d === 'long' ? '多' : '空';
 
-let active = null, strategies = [], toggling = false;
+let active = null, strategies = [], toggling = false, applying = false;
+const stdLots = n => (Number(n) * 0.01).toFixed(2);
 const current = () => strategies.find(s => s.strategy === active) || strategies[0];
 
 function fillTable(tid, rows, emptyId, rowHtml) {
@@ -143,6 +153,7 @@ function renderTabs() {
       render(current());
     });
   renderToggle();
+  renderOrderCtl();
 }
 
 function renderToggle() {
@@ -172,12 +183,11 @@ async function toggleTrading() {
   const s = current();
   const startStack = !s.online;
   const target = startStack ? true : !s.trading_enabled;
-  const modeNote = s.session && s.session.id
-    ? (s.session.shadow ? 'shadow，只记录不下单' : '实单') : '按配置文件';
+  const modeNote = s.order_mode === 'live' ? '实单' : '影子，只记录不下单';
   const msg = startStack
     ? `确认开启「${s.strategy_title}」？将打开 MT5 终端并启动实盘进程（${modeNote}）。`
     : target
-    ? `确认开启「${s.strategy_title}」策略交易？开启后将恢复真实下单（若非 shadow 模式）。`
+    ? `确认开启「${s.strategy_title}」策略交易？开启后将按当前模式开新仓（${modeNote}）。`
     : `确认关闭「${s.strategy_title}」策略交易？关闭后停止新开仓，存量持仓照常管理出场，新信号转 shadow 记录。`;
   if (!confirm(msg)) return;
   toggling = true;
@@ -195,10 +205,79 @@ async function toggleTrading() {
   await refresh();
 }
 
+function renderOrderCtl() {
+  const s = current();
+  const box = document.getElementById('order-ctl');
+  if (!s || !box) return;
+  const modeEl = document.getElementById('order-mode');
+  const lotsEl = document.getElementById('order-lots');
+  if (applying) {
+    const btn = document.getElementById('order-apply');
+    if (btn) btn.disabled = true;
+    return;
+  }
+  if (modeEl && document.activeElement === modeEl) return;
+  if (lotsEl && document.activeElement === lotsEl) return;
+  const choices = s.order_lots_choices || [];
+  const hb = s.heartbeat || {};
+  const modePend = s.online && hb.order_shadow != null &&
+    ((hb.order_shadow && s.order_mode !== 'shadow') ||
+     (!hb.order_shadow && s.order_mode !== 'live'));
+  const lotsPend = s.online && hb.order_lots != null && hb.order_lots !== s.order_lots;
+  let hint = '';
+  if (modePend || lotsPend) hint = '待进程生效…';
+  else if (s.online && hb.lots_pending) hint = '有持仓，新手数在空仓后的下一笔生效';
+  box.innerHTML = `
+    <label>模式
+      <select id="order-mode">
+        <option value="shadow" ${s.order_mode === 'shadow' ? 'selected' : ''}>影子（不下单）</option>
+        <option value="live" ${s.order_mode === 'live' ? 'selected' : ''}>实单</option>
+      </select>
+    </label>
+    <label>开单手数
+      <select id="order-lots">
+        ${choices.map(n => `<option value="${n}" ${n === s.order_lots ? 'selected' : ''}>${stdLots(n)} 标准手</option>`).join('')}
+      </select>
+    </label>
+    <button class="tgl-btn" id="order-apply" type="button">应用</button>
+    ${hint ? `<span class="pend">${esc(hint)}</span>` : ''}`;
+  document.getElementById('order-apply').onclick = applyOrderSettings;
+}
+
+async function applyOrderSettings() {
+  if (applying) return;
+  const s = current();
+  const mode = document.getElementById('order-mode').value;
+  const lots = Number(document.getElementById('order-lots').value);
+  if (mode === s.order_mode && lots === s.order_lots) return;
+  const modeTxt = mode === 'live' ? '实单（新信号会向 MT5 开仓）' : '影子（只记录，不向 MT5 发单）';
+  const msg = `确认把「${s.strategy_title}」改为${modeTxt}，开单 ${stdLots(lots)} 标准手？` +
+    '有持仓时本笔手数不变，空仓后的下一笔按新手数开。';
+  if (!confirm(msg)) {
+    renderOrderCtl();
+    return;
+  }
+  applying = true;
+  renderOrderCtl();
+  try {
+    const r = await fetch('/api/live/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ strategy: s.strategy, mode, lots })
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw Error(d.error || `请求失败 ${r.status}`);
+  } catch (e) { alert(e.message); }
+  applying = false;
+  await refresh();
+}
+
 function renderLoadError(msg) {
   document.getElementById('strategy-tabs').innerHTML =
     `<span class="loaderr">${esc(msg)}</span>`;
   document.getElementById('trade-ctl').innerHTML = '';
+  const box = document.getElementById('order-ctl');
+  if (box) box.innerHTML = '';
 }
 
 async function refresh() {
@@ -224,10 +303,10 @@ function render(s) {
       <b><span class="badge ${s.online ? 'on' : 'off'}">${s.online ? '在线' : '离线'}</span></b></div>
     <div class="stat"><label>交易策略</label><b>${esc(s.strategy_title || s.strategy || '—')}</b></div>
     <div class="stat"><label>会话</label><b class="mono">${esc(sess.id || '—')}</b></div>
-    <div class="stat"><label>模式</label><b>${sess.shadow ? 'shadow（不下单）' : '实单'}</b></div>
+    <div class="stat"><label>模式</label><b>${s.order_mode === 'live' ? '实单' : '影子（不下单）'}</b></div>
     <div class="stat"><label>策略交易</label>
       <b><span class="badge ${s.trading_enabled ? 'on' : 'off'}">${s.trading_enabled ? '开启' : '已关闭'}</span></b></div>
-    <div class="stat"><label>品种/手数</label><b>${esc(sess.symbol || '—')} · ${esc(sess.lots ?? '—')}回测手</b></div>
+    <div class="stat"><label>品种/手数</label><b>${esc(sess.symbol || '—')} · ${stdLots(s.order_lots)} 标准手</b></div>
     <div class="stat"><label>心跳</label><b>${hbAge === null ? '—' : hbAge + 's 前'}</b></div>
     <div class="stat"><label>引擎推进至</label><b>${s.engine_cursor && s.engine_cursor.fine_last ? fmtT(s.engine_cursor.fine_last) : '—'}</b></div>`;
 

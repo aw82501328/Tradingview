@@ -67,8 +67,15 @@ def symbol_suffix(symbol):
 
 def contract_mult_of(symbol):
     """合约乘数 = 每标准手规模 × 0.01（1 回测手 = 0.01 标准手）；未知/None → 1.0。
-    纯函数不读任何配置，bt_batch 子进程可安全调用。"""
-    size = SYMBOL_CONTRACTS.get(symbol_suffix(symbol))
+    纯函数不读任何配置，bt_batch 子进程可安全调用。
+    经纪商后缀（Exness Standard 的 XAUUSDm）先归到已知品种再取规模。"""
+    suf = symbol_suffix(symbol)
+    size = SYMBOL_CONTRACTS.get(suf)
+    if size is None and suf:
+        for known, val in SYMBOL_CONTRACTS.items():
+            if suf.startswith(known):
+                size = val
+                break
     return 1.0 if size is None else size * 0.01
 # 止损位滑点（绝对价格）：正确侧支阻位外侧偏移（short 上方+ / long 下方−）
 DEFAULT_SLIP_STOP = 3.0

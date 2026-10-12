@@ -67,7 +67,7 @@ const RANGE_CFG = {
 // 震荡判定参考周期（对齐 py_chain/trading_plan.py RANGE_RES；WEB 参数中心 plan 模块
 // rangeRes，analysis_service 透传 --range-res）。开启（"240"/"D"）= 参考周期闸门：
 // 更低周期不自判 A/B、只听参考周期 regime，参考周期及以上只作锚不交易；
-// ""（off，默认）= 关闭 → 小周期（低于4小时）不自判震荡，4小时与日线仍自判 A/B
+// ""（off，默认）= 关闭 → 任何周期（含 4 小时、日线）的计划行都不自判震荡
 const RANGE_RES_ARG = getStrArg("range-res", "");
 const RANGE_RES = (RANGE_RES_ARG === "off" || RANGE_RES_ARG === "") ? "" : RANGE_RES_ARG;
 
@@ -398,8 +398,8 @@ function classifySecond(bis, macdArr, p, cfg) {
  *      rangeGate 给定时用参考周期 regime（替换语义：regime 震荡 → 观望（strategy
  *      注明来源周期）；regime 非震荡 → 跳过本周期 A/B 支直接走趋势分支；regime 带
  *      insufficient（参考周期笔 <2）→ 观望·笔数据不足）；
- *      rangeGate 为空时，仅 4 小时与日线自判 A/B（横盘 / 未离开中枢且现价在箱内
- *      → 观望）。严格低于 4 小时的周期不自判震荡，直接走趋势与买卖点（2026-10-11）；
+ *      rangeGate 为空时，任何周期（含 4 小时、日线）都不自判 A/B，直接走趋势与买卖点
+ *      （2026-10-12）；
  *   2. 趋势：获取最近笔端点上的买卖点（findBuyPoints/findSellPoints）：
  *      - 先匹配最后一笔终点上的买卖点 → 按类型映射策略；
  *      - 若最后一笔终点无买卖点（空）→ 再向前获取一笔（逐笔向前扫描最近笔端点），
@@ -415,7 +415,7 @@ function classifySecond(bis, macdArr, p, cfg) {
  *   lastPrice  当前最新价（判断是否在中枢区间内）
  *   bars       本周期实时K线（供震荡判定，可为空）
  *   rangeGate  参考周期震荡 regime（planGateRow 结果；对齐 py_chain range_gate
- *              替换语义；缺省时仅 4 小时与日线自判 A/B，小周期不自判）
+ *              替换语义；缺省时任何周期都不自判 A/B）
  * @returns {object} { res, direction, strategy, reason, label, pointDesc }
  *   pointDesc  找到的最近买卖点描述（如 "1卖@8-17 18:00(30262.95)"，供图上标注；震荡/无匹配时为空）
  */
@@ -439,45 +439,9 @@ function predictPlan(opts) {
                reason: rangeGate.reason || "", label: "震荡观望" };
     }
     // regime 非震荡 → 跳过本周期 A/B 支，直接走趋势分支
-  } else if ((intervalSecOf(res) || 0) >= (intervalSecOf("240") || 14400)) {
-  // 4小时与日线：rangeRes 关闭时仍自判 A/B。小周期（严格低于 4 小时）不进这里，直接走趋势。
-  // 1. 震荡优先（A：isRangeBound 横盘判定，RANGE_CFG 来自参数中心/CLI；rangeBoundOn 关闭则跳过）
-  if (RANGE_CFG.rangeBoundOn !== false) {
-    const rb = isRangeBound(bis, bars, atr, RANGE_CFG);
-    if (rb && rb.range) {
-      const reason = `最近 ${rb.rangeBarN} 根K线区间 ${rb.kSpan.toFixed(2)}（${rb.kAtr.toFixed(1)}×ATR）${rb.winBiCount > 0
-        ? `，笔端点区间 ${rb.biSpan.toFixed(2)}（${rb.biAtr.toFixed(1)}×ATR），涨跌交替无明确方向`
-        : `，窗口内无笔`}，判定为震荡整理`;
-      return { res, direction: "观望", strategy: "震荡整理，观望等待方向选择", reason, label: "震荡观望" };
-    }
   }
-
-  // 1b. 震荡判定（B：存在未离开的中枢且当前价在中枢区间内；rangeZsOn 关闭则跳过）
-  // 中枢必须构建在「上一级别同一笔」内（buildZSByUpper 分解约束，与 chan-zs 中枢 SKILL 一致）：
-  // 用上级笔时间区间把本级别笔切段，每段内独立构建中枢，保证中枢不跨上级笔端点。
-  // 只取「上一级别最后一笔」对应段的中枢（无上级笔时退化为本级别全量 buildZS）。
-  if (RANGE_CFG.rangeZsOn !== false) {
-    let zss = [];
-    try {
-      if (upperBis && upperBis.length > 0) {
-        zss = buildZSByUpper(bis, upperBis, barSec);
-      } else {
-        zss = buildZS(bis, barSec);
-      }
-    } catch (e) {
-      if (DEBUG) console.log(`[计划] ${res} buildZS 失败: ${e.message}`);
-    }
-    const upperLast = upperBis && upperBis.length > 0 ? upperBis[upperBis.length - 1] : null;
-    const zsList = upperLast
-      ? zss.filter(z => z.upperStart != null && z.upperStart >= upperLast.startTime - barSec)
-      : zss;
-    const lastZS = zsList[zsList.length - 1];
-    if (lastZS && lastZS.exitTime == null && lastPrice != null && lastPrice >= lastZS.zd && lastPrice <= lastZS.zg) {
-      const reason = `存在未离开中枢 [${lastZS.zd.toFixed(2)}, ${lastZS.zg.toFixed(2)}]（归属上一级别同一笔内），当前价 ${lastPrice.toFixed(2)} 位于中枢内，判定为震荡整理`;
-      return { res, direction: "观望", strategy: "震荡整理（中枢内），观望等待方向选择", reason, label: "震荡观望" };
-    }
-  }
-  } // 4小时/日线自判 A/B 结束；小周期不自判，落到下方趋势分支
+  // rangeGate 为空（参考周期关闭）：任何周期都不自判 A/B，直接走趋势。
+  // A/B 只留在 rangeVerdict，供参考周期开启时由 planGateRow 算 regime。
 
   // 2. 趋势 → 获取本周期买卖点
   let buyPts = [], sellPts = [];
@@ -583,14 +547,53 @@ function predictPlan(opts) {
 // ============================================================
 
 /**
+ * A/B 震荡判定（对齐 py_chain _rangeVerdict）。只给参考周期开启时的 regime 门用，
+ * 计划行在参考周期关闭时不再调用。
+ * @returns {{direction:string, strategy:string, reason:string, label:string}|null}
+ */
+function rangeVerdict(res, bis, bars, atr, upperBis, lastPrice, barSec) {
+  if (RANGE_CFG.rangeBoundOn !== false) {
+    const rb = isRangeBound(bis, bars, atr, RANGE_CFG);
+    if (rb && rb.range) {
+      const reason = `最近 ${rb.rangeBarN} 根K线区间 ${rb.kSpan.toFixed(2)}（${rb.kAtr.toFixed(1)}×ATR）${rb.winBiCount > 0
+        ? `，笔端点区间 ${rb.biSpan.toFixed(2)}（${rb.biAtr.toFixed(1)}×ATR），涨跌交替无明确方向`
+        : `，窗口内无笔`}，判定为震荡整理`;
+      return { direction: "观望", strategy: "震荡整理，观望等待方向选择", reason, label: "震荡观望" };
+    }
+  }
+  if (RANGE_CFG.rangeZsOn !== false) {
+    let zss = [];
+    try {
+      if (upperBis && upperBis.length > 0) {
+        zss = buildZSByUpper(bis, upperBis, barSec);
+      } else {
+        zss = buildZS(bis, barSec);
+      }
+    } catch (e) {
+      if (DEBUG) console.log(`[计划] ${res} buildZS 失败: ${e.message}`);
+    }
+    const upperLast = upperBis && upperBis.length > 0 ? upperBis[upperBis.length - 1] : null;
+    const zsList = upperLast
+      ? zss.filter(z => z.upperStart != null && z.upperStart >= upperLast.startTime - barSec)
+      : zss;
+    const lastZS = zsList[zsList.length - 1];
+    if (lastZS && lastZS.exitTime == null && lastPrice != null && lastPrice >= lastZS.zd && lastPrice <= lastZS.zg) {
+      const reason = `存在未离开中枢 [${lastZS.zd.toFixed(2)}, ${lastZS.zg.toFixed(2)}]（归属上一级别同一笔内），当前价 ${lastPrice.toFixed(2)} 位于中枢内，判定为震荡整理`;
+      return { direction: "观望", strategy: "震荡整理（中枢内），观望等待方向选择", reason, label: "震荡观望" };
+    }
+  }
+  return null;
+}
+
+/**
  * 参考周期震荡 regime：笔 <2 → insufficient（更低周期观望·笔数据不足）；
- * 否则以参考周期自身数据走 predictPlan 的 A/B 自判——label=「震荡观望」即 regime 震荡。
+ * 否则用 rangeVerdict 做 A/B——命中即 regime 震荡。计划行本身不走这条。
  * @param {string} res       参考周期名（如 "240"）
  * @param {Array}  bis       参考周期笔列表
  * @param {Array}  bars      参考周期K线
  * @param {number} atr       参考周期 ATR
  * @param {Array}  upperBis  参考周期的上一级笔（B 支中枢归属用，可为空）
- * @param {Array}  macdArr   参考周期 MACD（可为空）
+ * @param {Array}  macdArr   参考周期 MACD（可为空，签名与旧调用对齐）
  * @param {number} lastPrice 最新价
  * @returns {{range:boolean, resName:string, reason:string, insufficient?:boolean}}
  */
@@ -600,8 +603,8 @@ function planGateRow(res, bis, bars, atr, upperBis, macdArr, lastPrice) {
     return { range: true, insufficient: true, resName: name,
              reason: `${name}笔数据不足（少于2笔），无法判定震荡/趋势，观望` };
   }
-  const row = predictPlan({ res, bis, upperBis, macdArr, atr, lastPrice, bars });
-  if (row.label === "震荡观望") return { range: true, resName: name, reason: row.reason || "" };
+  const v = rangeVerdict(res, bis, bars, atr, upperBis, lastPrice, intervalSecOf(res) || 60);
+  if (v) return { range: true, resName: name, reason: v.reason || "" };
   return { range: false, resName: name, reason: "" };
 }
 
@@ -1102,7 +1105,7 @@ async function main() {
     }
 
     // 逐周期：从大到小计算交易计划并收集报告行（表格形式统一输出）
-    // 震荡判定参考周期闸门（对齐 py_chain compute_plan；--range-res="" 关闭 → 小周期不自判）
+    // 震荡判定参考周期闸门（对齐 py_chain compute_plan；--range-res="" 关闭 → 计划行不自判）
     const gateOn = !!RANGE_RES;
     const refSec = gateOn ? (intervalSecOf(RANGE_RES) || 0) : 0;
     const refName = gateOn ? trendResName(RANGE_RES) : "";
@@ -1113,7 +1116,7 @@ async function main() {
                     reason: `${refName}笔数据不足（少于2笔），无法判定震荡/趋势，观望` };
     }
     if (gateOn) console.log(`[震荡闸门] 参考周期 ${refName}：开启（更低周期不自判 A/B 只听门，${refName}及以上只作锚）`);
-    else console.log("[震荡闸门] rangeRes 已关闭：低于4小时的周期不自判震荡，直接走买卖点；4小时与日线仍自判 A横盘/B中枢内");
+    else console.log("[震荡闸门] rangeRes 已关闭：日线、4小时及更低周期的计划行都不自判震荡，直接走买卖点");
     let currentRes = prepRes;
     let upperBis = null;
     let upperMacdArr = null; // 与 upperBis 同步级联：上一（更大）周期 MACD（二买族背驰闸）

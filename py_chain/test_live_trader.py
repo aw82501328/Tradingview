@@ -115,9 +115,9 @@ class TestReconcilePlan(unittest.TestCase):
 
     def test_orphan_closed(self):
         a = reconcile_plan([], {999: self._pos(999)}, {})
-        self.assertEqual([x["action"] for x in a], ["orphan_close"])
-        a2 = reconcile_plan([], {999: self._pos(999)}, {}, orphan_policy="alert")
-        self.assertEqual([x2["action"] for x2 in a2], ["alert_mismatch"])
+        self.assertEqual([x["action"] for x in a], ["alert_mismatch"])
+        a2 = reconcile_plan([], {999: self._pos(999)}, {}, orphan_policy="close")
+        self.assertEqual([x2["action"] for x2 in a2], ["orphan_close"])
 
     def test_engine_open_without_row_alerts(self):
         a = reconcile_plan([], {}, {7: object()})

@@ -4,6 +4,8 @@
 
 # EXNESS MT5 实盘（mt5_feed.py / mt5_broker.py；仅 Windows，需本机 MT5 终端）
 MetaTrader5>=5.0.6180 ; sys_platform == "win32"
+# Windows 没有系统 IANA 时区库；zoneinfo 解析 America/New_York 依赖此包
+tzdata>=2024.1 ; sys_platform == "win32"
 
 # TradingView Desktop CDP 连接（data_loader.py，回测/监控/数据拉取用）
 websocket-client>=1.6

@@ -264,16 +264,16 @@ PARAM_MODULES = {
         # 键序 = 参数页 3 类分组（震荡 / 顺势 / 其他；params.html PLAN_GROUPS 同步维护）
         "params": {
             # ---- 震荡 ----
-            "rangeRes": ("震荡判定参考周期", "4小时/日线=参考周期判震荡→更低周期观望，参考周期及以上只作锚不交易；关闭=低于4小时的周期不自判震荡直接走买卖点，4小时与日线仍自判",
+            "rangeRes": ("震荡判定参考周期", "4小时/日线=参考周期判震荡→更低周期观望，参考周期及以上只作锚不交易；关闭=日线、4小时及更低周期都不自判震荡，直接走买卖点",
                          ("", "240", "D"), None),
-            "rangeBoundOn": ("横盘判定", "A 类震荡判定（K线窄带+笔端点+涨跌交替）；参考周期开=只判参考周期、更低周期听门；参考周期关=只用于4小时与日线；本开关关闭=跳过此类",
+            "rangeBoundOn": ("横盘判定", "A 类震荡判定（K线窄带+笔端点+涨跌交替）；参考周期开=只判参考周期、更低周期听门；参考周期关=计划行不自判；本开关关闭=跳过此类",
                              None, None),
             "rangeBarN": ("震荡窗口K线数", "最近N根K线的区间判定窗口", 5, 500),
             "rangeBiN": ("震荡最近笔数", "最近N笔端点极差与涨跌交替判定", 2, 50),
             "rangeKMult": ("K线区间阈值(×ATR)", "窗口高低差 ≤ 该值×ATR 判震荡", 0.5, 50.0),
             "rangeBiMult": ("笔端点阈值(×ATR)", "笔端点极差 ≤ 该值×ATR 判震荡", 0.5, 50.0),
             "rangeBreakMult": ("突破跳过阈值(×ATR)", "末笔端点越过窗口另一端 >该值×ATR 视为突破（跳过震荡判定）", 0.0, 10.0),
-            "rangeZsOn": ("中枢内判定", "B 类震荡判定（未离开中枢且现价在箱内）；参考周期开=只判参考周期、更低周期听门；参考周期关=只用于4小时与日线；本开关关闭=跳过此类",
+            "rangeZsOn": ("中枢内判定", "B 类震荡判定（未离开中枢且现价在箱内）；参考周期开=只判参考周期、更低周期听门；参考周期关=计划行不自判；本开关关闭=跳过此类",
                           None, None),
             # ---- 顺势 ----
             "trendRes": ("顺势参考周期", "参考周期方向过滤更低周期进场（关闭/4小时/日线；规则见本页下方说明）",
@@ -468,11 +468,17 @@ _SR_RUNTIME_KEYS = frozenset((
 
 
 def entry_symbol_id(symbol):
-    """解析品种桶 id。空/未传 → 黄金页（XAUUSD）；未列入五品种 → None（走代码默认）。"""
+    """解析品种桶 id。空/未传 → 黄金页（XAUUSD）；未列入五品种 → None（走代码默认）。
+    经纪商后缀（XAUUSDm）归到同一品种桶，参数中心仍用 XAUUSD。"""
     if not symbol:
         return "XAUUSD"
     suf = mark_entry.symbol_suffix(symbol)
-    return suf if suf in SYMBOLS else None
+    if suf in SYMBOLS:
+        return suf
+    for known in SYMBOLS:
+        if suf.startswith(known):
+            return known
+    return None
 
 
 symbol_id = entry_symbol_id  # 别名：全模块按品种取桶
