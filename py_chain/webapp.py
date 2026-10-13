@@ -1387,7 +1387,7 @@ class LiveWorker(ModeWorker):
                             use_cache=cfg.get("use_cache", False), log=self.log,
                             lots=param_center.lots_of(pm["entry"], cfg.get("symbol")),
                             module_params=param_center.engine_module_params(pm),
-                            sr_kwargs=sr_service.symbol_sr_kwargs(cfg.get("symbol")))
+                            sr_kwargs=sr_service.symbol_sr_kwargs(cfg.get("symbol"), periods))
         self.monitor = m
         self.log("实时监控就绪（Ctrl+C 无效，用停止按钮）")
         while not self._stop_evt.is_set():
@@ -1452,7 +1452,7 @@ class ReplayWorker(ModeWorker):
                               use_cache=cfg.get("use_cache", False), log=self.log,
                               lots=param_center.lots_of(pm["entry"], cfg.get("symbol")),
                               module_params=param_center.engine_module_params(pm),
-                              sr_kwargs=sr_service.symbol_sr_kwargs(cfg.get("symbol")))
+                              sr_kwargs=sr_service.symbol_sr_kwargs(cfg.get("symbol"), periods))
         self.monitor = m
         m.enter_replay()
         self.log(f"回放自动播放已启动：速度 {m.speed_ms}ms/根，默认驻留 3m")

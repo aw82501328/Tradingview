@@ -92,6 +92,14 @@ def clamp_tp(ref_price, tp, direction, spec):
     return min(tp, normalize_price(ref_price - min_d, spec))
 
 
+def _money(v):
+    """成交金额字段：缺值按 0。"""
+    try:
+        return float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def fld(obj, name):
     """MT5 返回元素的通用字段读取：兼容 np.void（下标式）与 namedtuple（属性式）。
     2026-09-24 真机实测：copy_rates/history_deals 为 numpy 结构化元素（仅下标），
@@ -108,7 +116,8 @@ def position_row(p):
     return {
         "ticket": fld(p, "ticket"), "type": fld(p, "type"),
         "volume": fld(p, "volume"), "sl": fld(p, "sl"), "tp": fld(p, "tp"),
-        "price_open": fld(p, "price_open"), "profit": fld(p, "profit"),
+        "price_open": fld(p, "price_open"), "price_current": fld(p, "price_current"),
+        "profit": fld(p, "profit"), "swap": fld(p, "swap"),
         "comment": fld(p, "comment"), "magic": fld(p, "magic"),
         "time": fld(p, "time"),
     }
@@ -405,7 +414,10 @@ class MT5Broker:
                         "deal_time": int(fld(d, "time")), "entry": fld(d, "entry"),
                         "direction": "long" if fld(d, "type") == _BUY else "short",
                         "volume": fld(d, "volume"), "price": fld(d, "price"),
-                        "profit": fld(d, "profit"),
+                        "profit": _money(fld(d, "profit")),
+                        "commission": _money(fld(d, "commission")),
+                        "swap": _money(fld(d, "swap")),
+                        "fee": _money(fld(d, "fee")),
                         "position_id": fld(d, "position_id"),
                         "comment": fld(d, "comment")})
         return out

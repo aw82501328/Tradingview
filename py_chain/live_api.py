@@ -392,6 +392,8 @@ def _strategy_snapshot(sid):
         "trading_enabled": _trading_enabled(sid),
         "order_mode": order_mode, "order_lots": order_lots,
         "order_lots_choices": order_choices,
+        "broker_book": live_store.load_state(
+            live_store.state_key("broker_book", sid)) or None,
         "open_trades": [], "closed_trades": [], "orders": [], "events": [],
         "pnl_summary": None,
     }
@@ -431,23 +433,23 @@ def set_trading(strategy_id, enabled):
 
 def set_order_settings(strategy_id, mode=None, lots=None):
     """写开单模式/手数 kv + 审计。不改 live_config。进程离线也照记，在线后下一拍生效。"""
-    from .live_trader import ORDER_LOTS_CHOICES, resolve_order_settings
+    from .live_trader import lots_in_range, resolve_order_settings
     if mode is None and lots is None:
         raise ValueError("须指定 mode 或 lots")
     sid = module_registry.normalize_strategy(strategy_id)
     live_store.ensure_tables()
     session = live_store.load_state(live_store.state_key("session", sid)) or {}
     if mode is not None:
-        if mode not in ("shadow", "live"):
-            raise ValueError("mode 须为 shadow 或 live")
-        live_store.save_state(live_store.state_key("order_mode", sid), {"mode": mode})
+        if mode != "live":
+            raise ValueError("影子单已取消，mode 只接受 live")
+        live_store.save_state(live_store.state_key("order_mode", sid), {"mode": "live"})
         live_store.log_event(session.get("id") or f"web:{sid}", "order_mode",
-                             {"strategy": sid, "mode": mode})
+                             {"strategy": sid, "mode": "live"})
     if lots is not None:
         if isinstance(lots, bool) or not isinstance(lots, int):
             raise ValueError("lots 须为整数回测手")
-        if lots not in ORDER_LOTS_CHOICES:
-            raise ValueError("lots 不在可选手数内")
+        if not lots_in_range(lots):
+            raise ValueError("手数须在 0.01～100 标准手之间，步进 0.01")
         live_store.save_state(live_store.state_key("order_lots", sid), {"lots": lots})
         live_store.log_event(session.get("id") or f"web:{sid}", "order_lots",
                              {"strategy": sid, "lots": lots})

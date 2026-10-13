@@ -5,13 +5,13 @@
 - 引擎=决策真相：backtest.py 零改动，只信 bar；券商 SL=生存保底。
 - 镜像执行：信号拍立即市价单（≈引擎「下一开盘」口径）；TP1 保本/TP2 半仓/止损外推
   由持仓 dict 原地状态 diff 捕获后改单/平仓。
-- **风控门只挡镜像侧，永不挡 step_to**：门控跳过下单 → trade 标记 shadow=1（引擎照常
-  管理生命周期，对账豁免）；同向互斥的 suppressed 信号若已提前下单 → 立即市价平掉
-  自愈（记录 undo_entry 偏差）。
-- 重启恢复=确定性重放：execute=False 预热到 T_start → execute=True 重放到当前
-  （replaying 标志抑制下单）→ 按 live_trades/live_orders 挂接 MT5 ticket → 对账。
+- **风控门只挡下单，永不挡 step_to**：门控跳过时不记影子仓。同向互斥的 suppressed
+  信号若已提前下单 → 立即市价平掉自愈（记录 undo_entry 偏差）。
+- 重启恢复=确定性重放：停机缺口先补进 bars.db，再 execute=False 预热到 T_start
+  → execute=True 重放到当前（replaying 标志抑制下单）→ 按 live_trades/live_orders
+  挂接 MT5 ticket → 对账。
 
-用法：py -3.12 -m py_chain.live_trader [--shadow] [--once] [--audit] [--config 路径]
+用法：py -3.12 -m py_chain.live_trader [--once] [--audit] [--config 路径]
 """
 
 import hashlib
@@ -21,6 +21,7 @@ import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from . import chan_core, data_store, live_store, param_center
 from .backtest import BacktestEngine, DEFAULT_PERIODS
@@ -96,30 +97,32 @@ def _abspath(p):
     return p if os.path.isabs(p) else os.path.join(REPO_ROOT, p)
 
 
-# 页面可选开单手数（回测手，1 = 0.01 标准手）。缺省仍用配置 lots。
-ORDER_LOTS_CHOICES = (1, 2, 3, 5, 10, 20, 50, 100)
+# 页面下拉预设（回测手，1 = 0.01 标准手）：0.04 / 0.2 / 0.4 / 0.8。
+# 手工输入同样按回测手整数接受，步进 0.01 标准手，范围 0.01～100。
+ORDER_LOTS_CHOICES = (4, 20, 40, 80)
+ORDER_LOTS_MIN = 1
+ORDER_LOTS_MAX = 10000
+
+
+def lots_in_range(raw):
+    """页面手数是否可开：正整数回测手，且在 ORDER_LOTS_MIN～MAX。"""
+    return (isinstance(raw, int) and not isinstance(raw, bool)
+            and ORDER_LOTS_MIN <= raw <= ORDER_LOTS_MAX)
 
 
 def resolve_order_settings(strategy, cfg):
-    """页面 kv 优先，缺键回落配置。返回 (shadow, lots)。
+    """页面手数 kv 优先，缺键回落配置。返回 (False, lots)。
 
-    order_mode@策略：shadow / live。order_lots@策略：回测手，须在可选列表内。
+    影子单已取消，不再读取 order_mode / run.shadow。
+    order_lots@策略：回测手，下拉预设或手工输入均可。
     不改 live_config，因此不触发参数漂移拒启。"""
-    mode_kv = live_store.load_state(live_store.state_key("order_mode", strategy)) or {}
     lots_kv = live_store.load_state(live_store.state_key("order_lots", strategy)) or {}
-    mode = mode_kv.get("mode")
-    if mode == "shadow":
-        shadow = True
-    elif mode == "live":
-        shadow = False
-    else:
-        shadow = bool((cfg.get("run") or {}).get("shadow"))
     raw = lots_kv.get("lots")
-    if isinstance(raw, int) and not isinstance(raw, bool) and raw in ORDER_LOTS_CHOICES:
+    if lots_in_range(raw):
         lots = raw
     else:
         lots = max(1, int(cfg.get("lots") or 1))
-    return shadow, lots
+    return False, lots
 
 
 def in_block_windows(srv_ts, windows):
@@ -163,6 +166,9 @@ def config_hash(pm, cfg):
     h = hashlib.sha256()
     h.update(mp_raw.encode("utf-8"))
     h.update(json.dumps(cfg, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+    # 策略口径版本：支阻/滑点改为与回测同一参数中心路径后，旧会话不能按原
+    # trade 序号重放挂接（决策已变）。哈希变化 → 参数漂移守卫拒自动恢复。
+    h.update(b"chan-live-parity-20261013")
     return h.hexdigest()[:16]
 
 
@@ -223,6 +229,10 @@ class ReplayFeed:
     def history(self, min_depth_days=365):
         return {}   # 回放数据已在（bar 库直读）
 
+    def fill_gap(self, from_ts, to_ts, fine_res):
+        """回放数据已在库里。不拉、不推进游标。返回 None 表示未补。"""
+        return None
+
     def staleness_sec(self):
         return 0
 
@@ -255,8 +265,8 @@ class LiveTrader:
         self._last_prune = 0.0
         self._day_guard = None     # 内存缓存（避免每拍读库）
         self._trading_enabled = True  # 页面交易开关 kv 缓存（缺键=开启，向后兼容）
-        # 页面开单模式/手数（缺键=配置；有持仓时手数延到空仓再生效）
-        self._order_shadow = bool(cfg["run"]["shadow"])
+        # 影子单已取消。手数：页面 kv 优先，有持仓时延到空仓再生效。
+        self._order_shadow = False
         self._order_lots = max(1, int(cfg["lots"]))
         self._lots_pending = False
         self._last_ckpt = (0, 0.0) # (fine_last, wall_ts)：fine 未推进且 <60s 跳过写库
@@ -348,6 +358,7 @@ class LiveTrader:
             t_start = int(st["T_start"])
             self.log(f"[live] 恢复会话 {self.session}（T_start="
                      f"{datetime.fromtimestamp(t_start, timezone.utc)}，确定性重放）")
+            self._fill_bar_gap()
             self._build_engine(t_start, rc["warmup_days"])
             self._restore(t_start)
         else:
@@ -369,12 +380,44 @@ class LiveTrader:
         self._refresh_trading_enabled()
         self._refresh_order_settings()
         self.reconcile()
+        self._publish_broker_book()
         self.log(f"[live] 就绪：session={self.session} shadow={self._order_shadow} "
                  f"lots={self._order_lots}（{self._order_lots * 0.01:.2f} 手）")
         if once:
             self.tick()
             return
         self.run_forever()
+
+    def _fine_period(self):
+        """恢复补缺口用的最小周期及其秒数，与 _build_engine 的 fine 口径一致。"""
+        from . import module_registry
+        from .chan_core import intervalSecOf
+        from .fx_ma import parse_multi as fxma_parse_multi, ENTRY_RES_OPTIONS
+        engine_id = module_registry.STRATEGIES[self.cfg.get("strategy")]["engine"]
+        if engine_id == "fx_ma":
+            pm = self._pm or param_center.effective_all(self.cfg["symbol"])
+            entry_res = fxma_parse_multi(pm["fxma"].get("entryRes", "3,15,60"),
+                                         ENTRY_RES_OPTIONS, "entryRes")
+            fine = min(entry_res, key=lambda r: intervalSecOf(r) or 0)
+            return str(fine), (intervalSecOf(fine) or 180)
+        return "3", 180
+
+    def _fill_bar_gap(self):
+        """停机恢复：fine 末根落后当前超过一根时，先把缺口补进 bars.db。
+
+        必须在 _build_engine 之前。补进库的 K 由随后的 _restore 在 replaying
+        里走完，历史信号记成 replay_signal，不按实盘下单。"""
+        fine, sec = self._fine_period()
+        now = int(self.feed.current_time())
+        last = data_store.latest_stored(self.cfg["db_symbol"], fine)
+        if last is None or now - int(last) <= sec:
+            return
+        n = self.feed.fill_gap(int(last), now, fine)
+        if n is None:
+            return
+        bj = datetime.fromtimestamp(int(last), ZoneInfo("Asia/Shanghai"))
+        self.log(f"[live] 行情缺口 {now - int(last)}s，补入 {fine}×{n}"
+                 f"（末根 {bj.strftime('%Y-%m-%d %H:%M')}）")
 
     def _build_engine(self, t_start, warmup_days):
         """从 bars.db 载入 [T_start-预热窗, 当前] 构建引擎（当前=feed.current_time，
@@ -428,13 +471,21 @@ class LiveTrader:
                  f"{datetime.fromtimestamp(bars['3'][0]['time'], timezone.utc)} ~ "
                  f"{datetime.fromtimestamp(bars['3'][-1]['time'], timezone.utc)}）")
         from . import sr_service
+        # 滑点/近支阻/出场方式与回测缺省回填同一来源（参数中心该品种 entry 桶）。
+        # 回测卡上的显式覆盖只作用于那次回测，实盘没有这层覆盖。
+        ep = pm["entry"]
         self.engine = BacktestEngine(
             bars, periods=periods, warmup_bars=0, lots=self.cfg["lots"],
             contract_mult=contract_mult_of(self.cfg["symbol"]),
+            slip_stop=ep["slip_stop"],
+            slip_fallback=ep["slip_fallback"],
+            slip_be=ep["slip_be"],
+            slip_stop_atr_k=ep["slip_stop_atr_k"],
+            slip_fallback_atr_k=ep["slip_fallback_atr_k"],
+            slip_be_atr_k=ep["slip_be_atr_k"],
+            near=ep["near"],
             module_params=param_center.engine_module_params(pm),
-            # 支阻参数：仅支阻区间模式（mode=zones）下发品种桶（区间须在实盘生效）；
-            # 经典模式 None=引擎默认口径，行为与 2026-10-08 前逐位不变
-            sr_kwargs=sr_service.symbol_sr_kwargs(self.cfg.get("symbol")),
+            sr_kwargs=sr_service.symbol_sr_kwargs(self.cfg.get("symbol"), periods),
             fill_at_open_bar=True,   # 逐拍同拍成交（见 backtest.py 注释；批量口径不变）
             fine_res="3")            # 显式固定 fine=3m：OANDA 补深 240/D 后各周期数据
                                     # 跨度不齐，自动探测会误选 240 作时间轴（2026-09-24
@@ -533,6 +584,7 @@ class LiveTrader:
         tail = self.feed.tail()
         last_ts = max((bs[-1]["time"] for bs in tail.values() if bs), default=0)
         if not last_ts:
+            self._publish_broker_book()
             return
         for res, bars in tail.items():
             fresh = self._fresh_bars(res, bars)
@@ -555,6 +607,7 @@ class LiveTrader:
         st = self.feed.staleness_sec()
         if st is not None and st > 300:
             self._alert("stale_feed", f"行情滞后 {st}s")
+        self._publish_broker_book()
 
     def _fresh_bars(self, res, bars):
         """过滤并入前的 bar 列表（防 no-op 覆盖风暴）：
@@ -592,7 +645,10 @@ class LiveTrader:
         self._diff_states()
 
     def _identity(self, d):
-        return (d.get("direction"), d.get("strategyKey"), d.get("signalTime", d.get("time")))
+        """挂单匹配键。同一时刻 15 分钟与 60 分钟会发出相同 direction/strategyKey/time，
+        必须带上 periodX，否则互斥平仓会摘掉另一张单。"""
+        return (d.get("direction"), d.get("strategyKey"),
+                d.get("signalTime", d.get("time")), d.get("periodX"))
 
     def _pop_pending(self, identity):
         for i, p in enumerate(self._pending):
@@ -611,16 +667,10 @@ class LiveTrader:
         identity = self._identity(s)
         d = s["direction"]
         entryLots = s.get("lots", self.cfg["lots"])   # fxma structure=半仓
-        # 风控门（只挡镜像侧）：被挡 → 成交拍落 shadow
+        # 风控门只挡下单，不记影子仓
         ok, reason = self._entry_gate(d, entryLots)
         if not ok:
-            self._pending.append({"identity": identity, "status": "blocked",
-                                  "reason": reason})
-            live_store.log_order(self.session, "entry", engine_trade_no=None,
-                                 direction=d, volume=entryLots * 0.01,
-                                 price=s.get("price"), sl=s.get("nearSr"),
-                                 ok=0, retcode=0, retcomment=f"gate:{reason}", shadow=1)
-            self._alert("gate_blocked", f"进场被门控拦截（shadow）：{reason} {d} "
+            self._alert("gate_blocked", f"进场被门控拦截（不下单）：{reason} {d} "
                                         f"{s['strategyKey']}")
             return
         bid, ask = self.broker.quote()
@@ -666,7 +716,7 @@ class LiveTrader:
                                   "retcode": r.retcode})
             live_store.log_order(self.session, "entry", direction=d, volume=vol,
                                  ok=0, retcode=r.retcode, retcomment=r.retcomment, raw=r.raw)
-            self._alert("order_failed", f"进场单失败 retcode={r.retcode}（成交拍将落 shadow）")
+            self._alert("order_failed", f"进场单失败 retcode={r.retcode}（不下单、不记影子仓）")
 
     def _on_fill(self, t):
         """成交拍：挂接引擎 trade ↔ 既有订单，SL 对齐到引擎冻结 stopRef。"""
@@ -685,8 +735,15 @@ class LiveTrader:
         p = self._pop_pending(identity)   # 重放恢复时 pending 为空 → p=None（只挂接不动券商）
         row = live_store.get_trade(self.session, no)
         vol = round((t.get("lots", self.cfg["lots"])) * 0.01, 2)   # fxma structure=半仓
+        ordered = bool(p and p.get("status") == "ordered")
+        if row is None and not ordered:
+            # 没有券商成交：不记影子仓，也不放进镜像，避免后续当持仓管理
+            self._open.pop(no, None)
+            self._snap.pop(no, None)
+            if not self.replaying and p and p.get("status") == "failed":
+                self._alert("order_failed", f"trade#{no} 引擎成交但订单失败，不记影子仓")
+            return
         if row is None:
-            shadow = 0 if (p and p.get("status") == "ordered") else 1
             row = live_store.upsert_trade({
                 "session": self.session, "engine_trade_no": no,
                 "direction": t["direction"], "entry_time": t["entryTime"],
@@ -694,8 +751,8 @@ class LiveTrader:
                 "position_ticket": (p or {}).get("position_ticket"),
                 "volume_open": vol, "volume_left": vol,
                 "engine_stop": t["stopRef"],
-                "broker_sl": (p or {}).get("sl") if p and p.get("status") == "ordered" else None,
-                "shadow": shadow, "state": "open",
+                "broker_sl": (p or {}).get("sl"),
+                "shadow": 0, "state": "open",
                 "engine_json": self._engine_json(t)})
         # 状态迁移恢复（be/half 可能发生在宕机窗口）
         if row["state"] not in ("closed", "detached"):
@@ -710,13 +767,8 @@ class LiveTrader:
             return   # 重放/异常：不动券商
         if p.get("order_row_id"):
             live_store.update_order_trade_no(p["order_row_id"], no)   # 进场单回填挂接
-        if p["status"] == "failed":
-            live_store.upsert_trade({"session": self.session, "engine_trade_no": no,
-                                     "shadow": 1})
-            self._alert("fill_shadow", f"trade#{no} 引擎成交但订单失败 → shadow")
+        if p["status"] != "ordered":
             return
-        if p["status"] == "blocked":
-            return   # 门控拦截：行已 shadow
         # SL/TP 对齐：临时 SL → 引擎冻结 stopRef；fxma 同时对齐固定止盈 tpRef
         if t["stopRef"] is not None and p.get("sl") is not None:
             eps = (self.broker.spec()["point"] or 0.01)
@@ -1037,8 +1089,6 @@ class LiveTrader:
 
     def _entry_gate(self, direction, entry_lots=None):
         rk = self.cfg["risk"]
-        if self._order_shadow:
-            return False, "shadow模式"
         if not self._trading_enabled:
             return False, "策略交易已关闭(页面开关)"
         if self._halted_day:
@@ -1125,14 +1175,11 @@ class LiveTrader:
 
         缺键回落配置。手数在空仓时写入引擎，下一笔信号按新手数开；
         有持仓时先记下，本笔出场手数不变，空仓后再生效。"""
-        shadow, lots = resolve_order_settings(self.cfg.get("strategy"), self.cfg)
-        if shadow != self._order_shadow or lots != self._order_lots:
+        _shadow, lots = resolve_order_settings(self.cfg.get("strategy"), self.cfg)
+        if lots != self._order_lots:
             self._last_ckpt = (0, 0.0)
-            if shadow != self._order_shadow:
-                self.log(f"[live] 开单模式：{'影子（不下单）' if shadow else '实单'}")
-            if lots != self._order_lots:
-                self.log(f"[live] 开单手数：{lots} 回测手（{lots * 0.01:.2f} 标准手）")
-        self._order_shadow = shadow
+            self.log(f"[live] 开单手数：{lots} 回测手（{lots * 0.01:.2f} 标准手）")
+        self._order_shadow = False
         self._order_lots = lots
         self._apply_engine_lots()
 
@@ -1206,6 +1253,23 @@ class LiveTrader:
                                  symbol=self.cfg["symbol"])
 
     # -- 检查点/告警 ------------------------------------------------------------
+
+    def _publish_broker_book(self):
+        """每拍把本策略 magic + 品种的 MT5 持仓和会话起点后的历史成交写入账本。
+
+        页面三块（持仓/已平仓/盈亏）只读这份账本。读失败不覆盖上一拍。"""
+        if not self.session:
+            return
+        try:
+            st = live_store.load_state(self._skey("session")) or {}
+            t0 = int(st.get("T_start") or 0)
+            positions = self.broker.positions()
+            deals = self.broker.deals_since(t0) if t0 else []
+            book = build_broker_book(positions, deals)
+            book["updated_at"] = int(time.time())
+            live_store.save_state(self._skey("broker_book"), book)
+        except Exception as e:
+            self.log(f"[live] 券商账本读取失败：{e}")
 
     def _checkpoint(self):
         fine_ts = 0
@@ -1297,6 +1361,92 @@ class LiveTrader:
         if close_result.deal_price is not None and engine_exit_price is not None:
             dev = round(close_result.deal_price - engine_exit_price, 3)
         return round(pnl, 2), dev
+
+
+def _deal_net(d):
+    """一笔成交的净额：盈亏 + 手续费 + 库存费 + 费用，与终端历史同一笔合计一致。"""
+    return sum(float(d.get(k) or 0) for k in ("profit", "commission", "swap", "fee"))
+
+
+def _vwap(parts):
+    vol = sum(v for _, v in parts)
+    if vol <= 0:
+        return None
+    return sum(p * v for p, v in parts) / vol
+
+
+def build_broker_book(positions, deals):
+    """把 MT5 持仓和历史成交收成页面账本。纯函数。
+
+    仍在 positions 里的仓号算持仓；已经不在的按 position_id 归成已平仓。
+    影子单没有券商仓，不会出现在这里。净盈亏含手续费和库存费。"""
+    opens = []
+    open_ids = set()
+    for p in positions or []:
+        ticket = p.get("ticket")
+        if ticket:
+            open_ids.add(ticket)
+        ptype = p.get("type")
+        direction = ptype if ptype in ("long", "short") else (
+            "long" if ptype in (0, None) else "short")
+        if ptype is None and p.get("direction") in ("long", "short"):
+            direction = p["direction"]
+        opens.append({
+            "ticket": ticket,
+            "direction": direction,
+            "time": int(p.get("time") or 0),
+            "volume": p.get("volume"),
+            "price_open": p.get("price_open"),
+            "sl": p.get("sl"),
+            "price_current": p.get("price_current"),
+            "profit": round(float(p.get("profit") or 0), 2),
+            "swap": round(float(p.get("swap") or 0), 2),
+        })
+    groups = {}
+    for d in deals or []:
+        pid = d.get("position_id")
+        if not pid or pid in open_ids:
+            continue
+        groups.setdefault(pid, []).append(d)
+    closed = []
+    for pid, rows in groups.items():
+        ins = [r for r in rows if int(r.get("entry") or 0) == 0]
+        outs = [r for r in rows if int(r.get("entry") or 0) in (1, 3)]
+        if ins:
+            direction = ins[0].get("direction") or "long"
+        elif outs:
+            direction = "short" if outs[0].get("direction") == "long" else "long"
+        else:
+            direction = (rows[0].get("direction") or "long")
+        vol_rows = ins or outs or rows
+        volume = round(sum(float(r.get("volume") or 0) for r in vol_rows), 2)
+        open_px = _vwap([(float(r["price"]), float(r.get("volume") or 0))
+                         for r in ins if r.get("price") is not None])
+        close_px = _vwap([(float(r["price"]), float(r.get("volume") or 0))
+                          for r in outs if r.get("price") is not None])
+        times = ins or rows
+        close_times = outs or rows
+        closed.append({
+            "position_id": pid,
+            "direction": direction,
+            "open_time": min(int(r.get("deal_time") or 0) for r in times),
+            "close_time": max(int(r.get("deal_time") or 0) for r in close_times),
+            "volume": volume,
+            "price_open": None if open_px is None else round(open_px, 5),
+            "price_close": None if close_px is None else round(close_px, 5),
+            "net": round(sum(_deal_net(r) for r in rows), 2),
+        })
+    closed.sort(key=lambda r: r["close_time"], reverse=True)
+    opens.sort(key=lambda r: r["time"], reverse=True)
+    return {
+        "open": opens,
+        "closed": closed,
+        "summary": {
+            "closed": len(closed),
+            "net": round(sum(r["net"] for r in closed), 2),
+            "floating": round(sum(r["profit"] for r in opens), 2),
+        },
+    }
 
 
 def reconcile_plan(rows, broker_pos, engine_open, detached=(), orphan_policy="alert"):

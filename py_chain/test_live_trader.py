@@ -280,9 +280,9 @@ class TestRestartInvariance(LiveIntegrationBase):
 
 
 class TestGateShadow(LiveIntegrationBase):
-    """风控门只挡镜像侧：shadow 行=引擎有仓券商无仓，事件不丢。"""
+    """影子单已取消：配置里的 shadow 不再落影子仓，进场按实单走。"""
 
-    def test_shadow_mode_blocks_entries(self):
+    def test_shadow_config_does_not_write_shadow_rows(self):
         cfg = self._cfg()
         cfg["run"]["shadow"] = True
         feed = ReplayFeed("OANDA:XAUUSD", DEFAULT_PERIODS, T0, T1)
@@ -291,9 +291,8 @@ class TestGateShadow(LiveIntegrationBase):
         t.start(once=True)
         self._run(t, feed)
         trades = live_store.all_trades(t.session)
-        self.assertGreaterEqual(len(trades), 3)
-        self.assertTrue(all(r["shadow"] == 1 for r in trades), "shadow 模式全部落 shadow")
-        self.assertEqual(self.broker.positions(), [])   # 一张真单都没有
+        self.assertTrue(all(r["shadow"] == 0 for r in trades), "不再写影子仓")
+        self.assertTrue(all(o["shadow"] == 0 for o in live_store.orders_of(t.session)))
 
 
 class TestTradingToggle(LiveIntegrationBase):
@@ -332,12 +331,9 @@ class TestTradingToggle(LiveIntegrationBase):
         trader.start(once=True)                           # start 即读 kv 生效
         self._run(trader, feed)
         trades = live_store.all_trades(trader.session)
-        self.assertGreaterEqual(len(trades), 3)
-        self.assertTrue(all(r["shadow"] == 1 for r in trades), "关闭后全部落 shadow")
+        self.assertEqual(trades, [])
         self.assertEqual(self.broker.positions(), [])     # 一张真单都没有
-        self.assertTrue(any(o["retcomment"] == "gate:策略交易已关闭(页面开关)"
-                            for o in live_store.orders_of(trader.session)))
-        # _alert 统一写 kind="alert"，gate_blocked 在 payload.kind
+        self.assertFalse(any(o["shadow"] for o in live_store.orders_of(trader.session)))
         evs = live_store.recent_events(trader.session, n=500)
         self.assertTrue(any(e["kind"] == "alert"
                             and isinstance(e["payload"], dict)
@@ -347,8 +343,6 @@ class TestTradingToggle(LiveIntegrationBase):
     def test_tick_rereads_toggle_mid_run(self):
         trader, feed = self._trader()
         trader.start(once=True)
-        # 跑到首个真实成交且无在途已下单未成交的挂单（否则其成交拍落在 cut 后仍非
-        # shadow）后写关闭 kv → 下一拍起生效
         while not feed.done():
             trader.tick()
             filled = any(not r["shadow"] for r in live_store.all_trades(trader.session))
@@ -356,14 +350,14 @@ class TestTradingToggle(LiveIntegrationBase):
             if filled and not inflight:
                 break
         cut = feed.cursor
+        before = len(live_store.all_trades(trader.session))
         live_store.save_state(self.KEY, {"enabled": False})
         self._run(trader, feed)
         trades = live_store.all_trades(trader.session)
         self.assertTrue(any(not r["shadow"] and r["entry_time"] <= cut for r in trades),
                         "关闭前应有真实成交")
-        after = [r for r in trades if r["entry_time"] > cut]
-        self.assertTrue(after, "关闭后应仍有新信号")
-        self.assertTrue(all(r["shadow"] == 1 for r in after), "关闭后进场全落 shadow")
+        self.assertEqual(len(trades), before, "关闭后不再记新仓，也不记影子仓")
+        self.assertTrue(all(r["shadow"] == 0 for r in trades))
 
     def test_heartbeat_carries_trading_enabled(self):
         live_store.save_state(self.KEY, {"enabled": False})

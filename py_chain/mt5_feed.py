@@ -331,6 +331,47 @@ class MT5Feed:
                 data_store.upsert_bars(self.db_symbol, res, closed_bars(out[res], res, now))
         return out
 
+    def fill_gap(self, from_ts, to_ts, fine_res):
+        """按区间补停机缺口：M1 从末根往前一个最粗周期拉到 to_ts，重采样后只入库
+        已收盘、且新于该周期库内末根的桶。
+
+        不用 tail() 的固定 1560 根（约 26 小时），跨周末也能盖住。往前多拉一个最粗
+        周期，是为了把「末根时刻尚未收盘」的 15/60/240/D 桶用完整 M1 写全，避免
+        只拉末根之后的 M1 拼出残桶覆盖旧值。返回 fine 周期新写入根数。"""
+        from_ts = int(from_ts)
+        to_ts = int(to_ts)
+        lookback = max(
+            (86400 if res == "D" else (BIN_SEC.get(res) or 14400))
+            for res in self.periods)
+        pull_from = max(0, from_ts - lookback)
+        m1_all = []
+        cur = pull_from
+        chunk = 30 * 86400
+        while cur < to_ts:
+            nxt = min(cur + chunk, to_ts)
+            m1_all.extend(self.m1_range(cur, nxt))
+            cur = nxt
+        by_t = {}
+        for b in m1_all:
+            if session_keep(b["time"], self.weekend):
+                by_t[b["time"]] = b
+        m1 = [by_t[t] for t in sorted(by_t)]
+        if not m1:
+            return 0
+        m1_first = m1[0]["time"]
+        now = int(time.time())
+        n_fine = 0
+        for res in self.periods:
+            last = data_store.latest_stored(self.db_symbol, res)
+            bars = resample(m1, res, weekend="keep")
+            fresh = [b for b in closed_bars(bars, res, now)
+                     if b["time"] >= m1_first
+                     and (last is None or b["time"] > int(last))]
+            data_store.upsert_bars(self.db_symbol, res, fresh)
+            if str(res) == str(fine_res):
+                n_fine = len(fresh)
+        return n_fine
+
     def history(self, min_depth_days=365, chunk_days=30, store=True):
         """深拉 M1（分块）→ 重采样 → 入库。返回 {res: {count, first, last}} 深度摘要。
 

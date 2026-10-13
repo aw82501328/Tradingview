@@ -343,10 +343,9 @@ def engine_kwargs_of(cfg):
 
     2026-09-26 引擎同步（用户拍板）：lookbackBars → clusterLookbackBars（密集区
     限窗，0=不限=全前缀旧口径）；fibLastStroke 恒 True（fib=末段趋势侧口径——
-    fib 在引擎默认 srTypes 里关闭，仅显式开启时生效）。回测/分析与控制台同口径；
-    live 实盘不传 sr kwargs，仍为旧口径（例外，如需另做）——2026-10-08 起部分
-    打破：支阻区间模式（mode=zones）经 symbol_sr_kwargs() 下发实盘（区间必须在
-    实盘生效）；经典模式实盘仍不传（引擎默认口径，行为不变）。
+    fib 在引擎默认 srTypes 里关闭，仅显式开启时生效）。回测/分析与控制台同口径。
+    2026-10-13 起实盘/监控经 symbol_sr_kwargs() 走与回测相同的品种桶（经典模式
+    与支阻区间都下发，不再在 levels 时退回引擎默认）。
 
     2026-10-08 支阻位模式：mode ∈ {"levels","zones"}（缺省 levels=经典支阻位，
     行为逐位不变）；zones → compute_srflip srMode="zones" 整系统切换为支阻区间
@@ -396,20 +395,16 @@ def engine_kwargs_of(cfg):
     }
 
 
-def symbol_sr_kwargs(symbol=None):
-    """实盘支阻参数：品种桶（param_center.effective_sr）→ compute_srflip kwargs。
+def symbol_sr_kwargs(symbol=None, periods=None):
+    """实盘/监控支阻参数，与回测未指定支阻预设时同一条路径。
 
-    仅当支阻位模式=zones（支阻区间）时返回 kwargs——区间必须在实盘生效；
-    levels（经典支阻位）返回 None=引擎默认口径，实盘行为与 2026-10-08 前逐位
-    不变。读桶/映射异常一律 None（实盘不因参数页坏值起不来，引擎默认兜底）。"""
-    try:
-        from . import param_center
-        cfg = param_center.effective_sr(symbol)
-        if str(cfg.get("mode") or "levels").strip() != "zones":
-            return None
-        return engine_kwargs_of(cfg)
-    except Exception:
-        return None
+    品种桶 effective_sr → normalize_sr_cfg → engine_kwargs_of
+    （BacktestWorker._sr_preset_kwargs 的桶分支）。经典模式与支阻区间都下发。
+    回测卡另选预设名时只影响那次回测，实盘始终用参数中心当前品种桶。"""
+    from .backtest import DEFAULT_PERIODS
+    from .webapp import BacktestWorker
+    use = list(periods or DEFAULT_PERIODS)
+    return BacktestWorker._sr_preset_kwargs({"symbol": symbol}, use)
 
 
 def build_chain_result(bars_by_period, cfg, log=None, bis_by_period=None, engine_extra=None):

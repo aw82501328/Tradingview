@@ -330,8 +330,7 @@ def _build_monitor_engine(periods, bars_by_period, symbol, lots=DEFAULT_LOTS,
                           sr_kwargs=None):
     """按注册表 engine 标识构建监控引擎（2026-09-30 第二策略分发）：
     chan → BacktestEngine（periods/lots/module_params 原口径；sr_kwargs 为支阻
-    参数中心品种桶映射——2026-10-08 起仅支阻区间模式（mode=zones）下发，
-    经典模式 None=引擎默认口径，行为不变）；
+    参数中心品种桶，与回测未指定预设时相同，经典模式与支阻区间都下发）；
     其他（fx_ma）→ 引擎类 + engine_kwargs（webapp Worker 预计算的品种桶参数）。"""
     from . import engine_dispatch
     cls = engine_dispatch.engine_class_of(strategy)

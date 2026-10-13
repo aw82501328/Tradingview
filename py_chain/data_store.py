@@ -287,6 +287,22 @@ def earliest_stored(symbol, res):
             conn.close()
 
 
+def latest_stored(symbol, res):
+    """该周期已存储的最晚时间戳（无数据返回 None）——实盘停机缺口的末根。"""
+    with _store_lock:
+        conn = _connect()
+        try:
+            actual = _resolve_symbol(conn, symbol)
+            if not actual:
+                return None
+            row = conn.execute(
+                "SELECT MAX(time) FROM bars WHERE symbol=? AND res=?",
+                (actual, res)).fetchone()
+            return row[0]
+        finally:
+            conn.close()
+
+
 def stats():
     """全库汇总统计：概览 + 每品种×周期的月度覆盖与缺口分析（回测前看清数据是否够用）。
 

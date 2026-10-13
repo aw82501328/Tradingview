@@ -35,9 +35,26 @@
                margin: -6px 0 16px; }
   .order-ctl label { font-size: 12px; color: var(--muted);
                      display: flex; align-items: center; gap: 6px; }
-  .order-ctl select { background: var(--card); color: var(--text);
+  .order-ctl select, .order-ctl input { background: var(--card); color: var(--text);
                       border: 1px solid var(--border); border-radius: 8px;
                       padding: 6px 8px; font-size: 13px; }
+  .lots-combo { position: relative; display: inline-flex; align-items: center; }
+  .lots-combo input { width: 88px; padding-right: 22px; }
+  .lots-caret { position: absolute; right: 0; top: 0; bottom: 0; width: 28px;
+                background: transparent; border: 0; cursor: pointer; padding: 0; }
+  .lots-caret::after { content: ""; position: absolute; left: 8px; top: 50%;
+                       margin-top: -2px; border-left: 4px solid transparent;
+                       border-right: 4px solid transparent;
+                       border-top: 5px solid var(--muted); }
+  .lots-menu { position: absolute; left: 0; right: 0; top: calc(100% + 4px);
+               margin: 0; padding: 4px 0; list-style: none; z-index: 5;
+               background: var(--card); color: var(--text);
+               border: 1px solid var(--border); border-radius: 8px; }
+  .lots-menu button { display: block; width: 100%; box-sizing: border-box;
+                      text-align: left; background: transparent; border: 0;
+                      color: var(--text); padding: 6px 8px; font-size: 13px;
+                      cursor: pointer; }
+  .lots-menu button:hover { background: #2a2f3a; }
   .pend { font-size: 11px; color: #f0b90b; margin-left: 8px; margin-bottom: 8px; }
   .loaderr { font-size: 12px; color: #e0938f; padding: 8px 2px; align-self: center; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
@@ -68,7 +85,8 @@
 <h1>实盘监控</h1>
 <div class="sub">数据源 bars.db live_* 表 · 每 5s 刷新 · 记录时间均为北京时间（UTC+8） · 策略按 TAB 分离 ·
 打开页面不会自动启动 · 「开启交易」打开 MT5 并启动实盘进程 · 「关闭交易」只停新开仓 ·
-模式与开单手数在下方选择，下一拍生效，不必重启进程 ·
+模式在下方选择，开单手数可下拉或手工输入，下一拍生效，不必重启进程 ·
+持仓、已平仓、盈亏来自 MT5（本策略、本品种、当前会话起点之后），不含影子单 ·
 运行手册见 <a href="/live" onclick="return false">py_chain/LIVE_GUIDE.md</a></div>
 
 <div class="tabbar">
@@ -80,34 +98,34 @@
 <div class="grid" id="stats"></div>
 
 <div class="card">
-  <h2>盈亏汇总（已平仓） <span class="badge" id="pnl-closed">0 笔</span></h2>
+  <h2>盈亏汇总 <span class="badge" id="pnl-closed">0 笔</span></h2>
   <div class="grid" id="pnl-stats" style="margin-bottom:0"></div>
-  <div class="empty" id="pnl-empty">暂无已平仓交易</div>
+  <div class="empty" id="pnl-empty">尚未从 MT5 同步</div>
 </div>
 
 <div class="card">
   <h2>当前持仓 <span class="badge" id="open-count">0</span></h2>
   <table id="open-table"><thead><tr>
-    <th>#</th><th>方向</th><th>进场时间</th><th>引擎价</th><th>剩余手数</th>
-    <th>引擎止损</th><th>券商SL</th><th>保本/够笔</th><th>shadow</th><th>ticket</th>
+    <th>ticket</th><th>方向</th><th>开仓时间</th><th>手数</th><th>开仓价</th>
+    <th>止损</th><th>现价</th><th>浮动盈亏</th><th>库存费</th>
   </tr></thead><tbody></tbody></table>
-  <div class="empty" id="open-empty">无持仓</div>
+  <div class="empty" id="open-empty">尚未从 MT5 同步</div>
 </div>
 
 <div class="card">
   <h2>已平仓 <span class="badge" id="closed-count">0</span></h2>
   <table id="closed-table"><thead><tr>
-    <th>#</th><th>方向</th><th>进场</th><th>出场</th><th>类型</th>
-    <th>引擎盈亏</th><th>券商盈亏</th><th>偏差</th><th>状态</th>
+    <th>仓号</th><th>方向</th><th>开仓</th><th>平仓</th><th>手数</th>
+    <th>开仓价</th><th>平仓价</th><th>净盈亏</th>
   </tr></thead><tbody></tbody></table>
-  <div class="empty" id="closed-empty">暂无平仓</div>
+  <div class="empty" id="closed-empty">尚未从 MT5 同步</div>
 </div>
 
 <div class="card">
   <h2>订单动作日志 <span class="badge" id="order-count">0</span></h2>
   <table id="order-table"><thead><tr>
     <th>时间</th><th>动作</th><th>trade#</th><th>方向</th><th>手数</th>
-    <th>SL</th><th>成交价</th><th>结果</th><th>shadow</th>
+    <th>SL</th><th>成交价</th><th>结果</th>
   </tr></thead><tbody></tbody></table>
   <div class="empty" id="order-empty">暂无订单</div>
 </div>
@@ -129,7 +147,27 @@ const dirCls = d => d === 'long' ? 'long' : 'short';
 const dirTxt = d => d === 'long' ? '多' : '空';
 
 let active = null, strategies = [], toggling = false, applying = false;
-const stdLots = n => (Number(n) * 0.01).toFixed(2);
+document.addEventListener('click', e => {
+  const menu = document.getElementById('order-lots-menu');
+  const combo = document.querySelector('.lots-combo');
+  if (!menu || menu.hidden || !combo || combo.contains(e.target)) return;
+  menu.hidden = true;
+  const toggle = document.getElementById('order-lots-toggle');
+  if (toggle) toggle.setAttribute('aria-expanded', 'false');
+});
+const stdText = n => String(Math.round(Number(n)) / 100);
+const px = n => (n == null || n === '' || !Number.isFinite(Number(n)))
+  ? '—' : String(Math.round(Number(n) * 1000) / 1000);
+const money = n => (n == null || !Number.isFinite(Number(n))) ? '—' : Number(n).toFixed(2);
+const moneyCls = n => Number(n) >= 0 ? 'long' : 'short';
+function parseStdLots(text) {
+  const raw = String(text ?? '').trim();
+  const std = Number(raw);
+  if (!raw || !Number.isFinite(std) || std <= 0) return null;
+  const lots = Math.round(std * 100);
+  if (lots < 1 || lots > 10000 || Math.abs(std * 100 - lots) > 1e-4) return null;
+  return lots;
+}
 const current = () => strategies.find(s => s.strategy === active) || strategies[0];
 
 function fillTable(tid, rows, emptyId, rowHtml) {
@@ -183,12 +221,11 @@ async function toggleTrading() {
   const s = current();
   const startStack = !s.online;
   const target = startStack ? true : !s.trading_enabled;
-  const modeNote = s.order_mode === 'live' ? '实单' : '影子，只记录不下单';
   const msg = startStack
-    ? `确认开启「${s.strategy_title}」？将打开 MT5 终端并启动实盘进程（${modeNote}）。`
+    ? `确认开启「${s.strategy_title}」？将打开 MT5 终端并启动实盘进程（实单）。`
     : target
-    ? `确认开启「${s.strategy_title}」策略交易？开启后将按当前模式开新仓（${modeNote}）。`
-    : `确认关闭「${s.strategy_title}」策略交易？关闭后停止新开仓，存量持仓照常管理出场，新信号转 shadow 记录。`;
+    ? `确认开启「${s.strategy_title}」策略交易？开启后新信号会向 MT5 开仓。`
+    : `确认关闭「${s.strategy_title}」策略交易？关闭后停止新开仓，存量持仓照常管理出场，被拦的信号不记仓。`;
   if (!confirm(msg)) return;
   toggling = true;
   renderToggle();
@@ -209,49 +246,63 @@ function renderOrderCtl() {
   const s = current();
   const box = document.getElementById('order-ctl');
   if (!s || !box) return;
-  const modeEl = document.getElementById('order-mode');
   const lotsEl = document.getElementById('order-lots');
   if (applying) {
     const btn = document.getElementById('order-apply');
     if (btn) btn.disabled = true;
     return;
   }
-  if (modeEl && document.activeElement === modeEl) return;
   if (lotsEl && document.activeElement === lotsEl) return;
+  const menuEl = document.getElementById('order-lots-menu');
+  if (menuEl && !menuEl.hidden) return;
   const choices = s.order_lots_choices || [];
   const hb = s.heartbeat || {};
-  const modePend = s.online && hb.order_shadow != null &&
-    ((hb.order_shadow && s.order_mode !== 'shadow') ||
-     (!hb.order_shadow && s.order_mode !== 'live'));
   const lotsPend = s.online && hb.order_lots != null && hb.order_lots !== s.order_lots;
   let hint = '';
-  if (modePend || lotsPend) hint = '待进程生效…';
+  if (lotsPend) hint = '待进程生效…';
   else if (s.online && hb.lots_pending) hint = '有持仓，新手数在空仓后的下一笔生效';
   box.innerHTML = `
-    <label>模式
-      <select id="order-mode">
-        <option value="shadow" ${s.order_mode === 'shadow' ? 'selected' : ''}>影子（不下单）</option>
-        <option value="live" ${s.order_mode === 'live' ? 'selected' : ''}>实单</option>
-      </select>
-    </label>
     <label>开单手数
-      <select id="order-lots">
-        ${choices.map(n => `<option value="${n}" ${n === s.order_lots ? 'selected' : ''}>${stdLots(n)} 标准手</option>`).join('')}
-      </select>
+      <span class="lots-combo">
+        <input id="order-lots" inputmode="decimal" autocomplete="off"
+               value="${stdText(s.order_lots)}">
+        <button type="button" class="lots-caret" id="order-lots-toggle"
+                aria-label="预设手数" aria-expanded="false"></button>
+        <ul class="lots-menu" id="order-lots-menu" hidden>
+          ${choices.map(n => `<li><button type="button" data-lots="${stdText(n)}">${stdText(n)}</button></li>`).join('')}
+        </ul>
+      </span>
+      标准手
     </label>
     <button class="tgl-btn" id="order-apply" type="button">应用</button>
     ${hint ? `<span class="pend">${esc(hint)}</span>` : ''}`;
   document.getElementById('order-apply').onclick = applyOrderSettings;
+  const toggle = document.getElementById('order-lots-toggle');
+  const menu = document.getElementById('order-lots-menu');
+  if (toggle && menu) toggle.onclick = () => {
+    menu.hidden = !menu.hidden;
+    toggle.setAttribute('aria-expanded', menu.hidden ? 'false' : 'true');
+  };
+  if (menu) menu.querySelectorAll('button').forEach(b => {
+    b.onclick = () => {
+      const input = document.getElementById('order-lots');
+      if (input) input.value = b.dataset.lots;
+      menu.hidden = true;
+      if (toggle) toggle.setAttribute('aria-expanded', 'false');
+    };
+  });
 }
 
 async function applyOrderSettings() {
   if (applying) return;
   const s = current();
-  const mode = document.getElementById('order-mode').value;
-  const lots = Number(document.getElementById('order-lots').value);
-  if (mode === s.order_mode && lots === s.order_lots) return;
-  const modeTxt = mode === 'live' ? '实单（新信号会向 MT5 开仓）' : '影子（只记录，不向 MT5 发单）';
-  const msg = `确认把「${s.strategy_title}」改为${modeTxt}，开单 ${stdLots(lots)} 标准手？` +
+  const lots = parseStdLots(document.getElementById('order-lots').value);
+  if (lots == null) {
+    alert('开单手数须在 0.01～100 标准手之间，步进 0.01');
+    return;
+  }
+  if (lots === s.order_lots) return;
+  const msg = `确认把「${s.strategy_title}」开单手数改为 ${stdText(lots)} 标准手？` +
     '有持仓时本笔手数不变，空仓后的下一笔按新手数开。';
   if (!confirm(msg)) {
     renderOrderCtl();
@@ -263,7 +314,7 @@ async function applyOrderSettings() {
     const r = await fetch('/api/live/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ strategy: s.strategy, mode, lots })
+      body: JSON.stringify({ strategy: s.strategy, lots })
     });
     const d = await r.json();
     if (!r.ok || !d.ok) throw Error(d.error || `请求失败 ${r.status}`);
@@ -303,51 +354,55 @@ function render(s) {
       <b><span class="badge ${s.online ? 'on' : 'off'}">${s.online ? '在线' : '离线'}</span></b></div>
     <div class="stat"><label>交易策略</label><b>${esc(s.strategy_title || s.strategy || '—')}</b></div>
     <div class="stat"><label>会话</label><b class="mono">${esc(sess.id || '—')}</b></div>
-    <div class="stat"><label>模式</label><b>${s.order_mode === 'live' ? '实单' : '影子（不下单）'}</b></div>
     <div class="stat"><label>策略交易</label>
       <b><span class="badge ${s.trading_enabled ? 'on' : 'off'}">${s.trading_enabled ? '开启' : '已关闭'}</span></b></div>
-    <div class="stat"><label>品种/手数</label><b>${esc(sess.symbol || '—')} · ${stdLots(s.order_lots)} 标准手</b></div>
+    <div class="stat"><label>品种/手数</label><b>${esc(sess.symbol || '—')} · ${stdText(s.order_lots)} 标准手</b></div>
     <div class="stat"><label>心跳</label><b>${hbAge === null ? '—' : hbAge + 's 前'}</b></div>
     <div class="stat"><label>引擎推进至</label><b>${s.engine_cursor && s.engine_cursor.fine_last ? fmtT(s.engine_cursor.fine_last) : '—'}</b></div>`;
 
-  const pnl = s.pnl_summary;
+  const book = s.broker_book;
+  const hasBook = !!(book && book.summary);
+  const sum = hasBook ? book.summary : null;
   const pnlStats = document.getElementById('pnl-stats');
-  document.getElementById('pnl-empty').style.display = pnl && pnl.closed ? 'none' : 'block';
-  pnlStats.style.display = pnl && pnl.closed ? '' : 'none';
-  document.getElementById('pnl-closed').textContent = pnl ? pnl.closed + ' 笔' : '0 笔';
-  pnlStats.innerHTML = pnl ? `
-    <div class="stat"><label>合计盈亏（引擎）</label><b class="${(pnl.engine_pnl || 0) >= 0 ? 'long' : 'short'}">${esc(pnl.engine_pnl?.toFixed(2))}</b></div>
-    <div class="stat"><label>合计盈亏（券商）</label><b class="${(pnl.broker_pnl || 0) >= 0 ? 'long' : 'short'}">${pnl.broker_pnl == null ? '—' : esc(pnl.broker_pnl.toFixed(2))}</b></div>
-    <div class="stat"><label>胜率</label><b>${pnl.win_rate == null ? '—' : (pnl.win_rate * 100).toFixed(1) + '%'}</b></div>
-    <div class="stat"><label>平均偏差</label><b>${pnl.avg_deviation == null ? '—' : esc(pnl.avg_deviation.toFixed(2))}</b></div>` : '';
+  document.getElementById('pnl-empty').textContent = '尚未从 MT5 同步';
+  document.getElementById('pnl-empty').style.display = hasBook ? 'none' : 'block';
+  pnlStats.style.display = hasBook ? '' : 'none';
+  document.getElementById('pnl-closed').textContent = sum ? sum.closed + ' 笔' : '0 笔';
+  pnlStats.innerHTML = sum ? `
+    <div class="stat"><label>已平仓笔数</label><b>${sum.closed}</b></div>
+    <div class="stat"><label>合计净盈亏</label><b class="${moneyCls(sum.net)}">${money(sum.net)}</b></div>
+    <div class="stat"><label>持仓浮动盈亏</label><b class="${moneyCls(sum.floating)}">${money(sum.floating)}</b></div>` : '';
 
-  document.getElementById('open-count').textContent = s.open_trades.length;
-  fillTable('#open-table', s.open_trades, 'open-empty', t => `<tr>
-    <td>${t.engine_trade_no}</td>
+  const opens = hasBook ? (book.open || []) : [];
+  document.getElementById('open-empty').textContent = hasBook ? '无持仓' : '尚未从 MT5 同步';
+  document.getElementById('open-count').textContent = hasBook ? opens.length : 0;
+  fillTable('#open-table', opens, 'open-empty', t => `<tr>
+    <td class="mono muted">${esc(t.ticket)}</td>
     <td class="${dirCls(t.direction)}">${dirTxt(t.direction)}</td>
-    <td class="mono">${fmtT(t.entry_time)}</td>
-    <td class="mono">${esc(t.entry_price?.toFixed(2))}</td>
-    <td class="mono">${esc(t.volume_left)}</td>
-    <td class="mono">${esc(t.engine_stop?.toFixed(2))}</td>
-    <td class="mono">${esc(t.broker_sl?.toFixed(2))}</td>
-    <td>${t.be_done ? '✓保本 ' : ''}${t.half_done ? '✓够笔' : ''}</td>
-    <td>${t.shadow ? 'shadow' : ''}</td>
-    <td class="mono muted">${esc(t.position_ticket || '—')}</td></tr>`);
+    <td class="mono">${fmtT(t.time)}</td>
+    <td class="mono">${esc(t.volume)}</td>
+    <td class="mono">${px(t.price_open)}</td>
+    <td class="mono">${px(t.sl)}</td>
+    <td class="mono">${px(t.price_current)}</td>
+    <td class="mono ${moneyCls(t.profit)}">${money(t.profit)}</td>
+    <td class="mono">${money(t.swap)}</td></tr>`);
 
-  document.getElementById('closed-count').textContent = s.closed_trades.length;
-  fillTable('#closed-table', s.closed_trades, 'closed-empty', t => `<tr>
-    <td>${t.engine_trade_no}</td>
+  const closed = hasBook ? (book.closed || []) : [];
+  document.getElementById('closed-empty').textContent = hasBook ? '暂无平仓' : '尚未从 MT5 同步';
+  document.getElementById('closed-count').textContent = hasBook ? closed.length : 0;
+  fillTable('#closed-table', closed, 'closed-empty', t => `<tr>
+    <td class="mono muted">${esc(t.position_id)}</td>
     <td class="${dirCls(t.direction)}">${dirTxt(t.direction)}</td>
-    <td class="mono">${fmtT(t.entry_time)}</td>
-    <td class="mono">${fmtT(t.exit_time)}</td>
-    <td>${esc(t.exit_type)}</td>
-    <td class="mono">${esc(t.engine_pnl?.toFixed(2))}</td>
-    <td class="mono">${esc(t.broker_pnl?.toFixed(2))}</td>
-    <td class="mono">${esc(t.deviation)}</td>
-    <td class="muted">${esc(t.state)}</td></tr>`);
+    <td class="mono">${fmtT(t.open_time)}</td>
+    <td class="mono">${fmtT(t.close_time)}</td>
+    <td class="mono">${esc(t.volume)}</td>
+    <td class="mono">${px(t.price_open)}</td>
+    <td class="mono">${px(t.price_close)}</td>
+    <td class="mono ${moneyCls(t.net)}">${money(t.net)}</td></tr>`);
 
-  document.getElementById('order-count').textContent = s.orders.length;
-  fillTable('#order-table', s.orders, 'order-empty', o => `<tr>
+  const orders = (s.orders || []).filter(o => !o.shadow);
+  document.getElementById('order-count').textContent = orders.length;
+  fillTable('#order-table', orders, 'order-empty', o => `<tr>
     <td class="mono">${fmtT(o.ts_utc)}</td>
     <td>${esc(o.action)}</td>
     <td>${o.engine_trade_no ?? '—'}</td>
@@ -355,8 +410,7 @@ function render(s) {
     <td class="mono">${esc(o.volume)}</td>
     <td class="mono">${esc(o.sl?.toFixed ? o.sl.toFixed(2) : o.sl)}</td>
     <td class="mono">${esc(o.deal_price?.toFixed ? o.deal_price.toFixed(2) : o.deal_price)}</td>
-    <td class="${o.ok ? '' : 'short'}">${o.ok ? '成功' : '失败 ' + esc(o.retcode)}${o.retcomment ? ' ' + esc(o.retcomment).slice(0, 40) : ''}</td>
-    <td>${o.shadow ? 'shadow' : ''}</td></tr>`);
+    <td class="${o.ok ? '' : 'short'}">${o.ok ? '成功' : '失败 ' + esc(o.retcode)}${o.retcomment ? ' ' + esc(o.retcomment).slice(0, 40) : ''}</td></tr>`);
 
   fillTable('#event-table', s.events, 'event-empty', e => `<tr>
     <td class="mono">${fmtT(e.ts_utc)}</td>
