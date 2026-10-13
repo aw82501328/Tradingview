@@ -97,7 +97,7 @@ import time
 
 from .chan_core import (
     buildBi, fixBiExtremes, calcATR, calcMACD, intervalSecOf, fmtT,
-    nearDoubleOn, CHAN_CFG, lockedPivotsOf,
+    nearDoubleOn, CHAN_CFG, lockedPivotsOf, changed_bi_span,
     MacdAccumulator, AtrAccumulator, extendLastBi, extendLastBiFrom,
 )
 from .mark_buy_sell import compute_all_marks
@@ -904,6 +904,8 @@ class BacktestEngine:
         self._wick = {res: {"prev": None, "prev2": None, "pending": None} for res in self.periods}
         self._trimmed = {res: [] for res in self.periods}  # 压平后K线（merge/延伸用，与原始bar一一对应）
         self._marks = {}
+        # 上次结构化笔端点指纹：with_marks 时用来判断哪些周期要按区间套重算买卖点
+        self._bis_fp = None
         self._sr = None
         self._plan = {}
         self._entries = {}
@@ -1917,10 +1919,23 @@ class BacktestEngine:
             # 1. 买卖点（全链路完整性；默认关闭以提速，可由 --with-marks 开启）
             if self.with_marks:
                 try:
+                    spans = None
+                    if self._bis_fp is not None:
+                        spans = {
+                            res: changed_bi_span(self._bis_fp.get(res), periodBis.get(res) or [])
+                            for res in core
+                        }
                     self._marks = compute_all_marks(periodBis, barsByPeriod, core,
                                                     fromTs=None, periodMacd=periodMacd,
                                                     periodAtr=periodAtr,
+                                                    changed_spans=spans, prev_marks=self._marks,
                                                     **self.marks_params)
+                    self._bis_fp = {
+                        res: [(b.get("type"), b.get("startTime"), b.get("endTime"),
+                               b.get("startPrice"), b.get("endPrice"))
+                              for b in (periodBis.get(res) or [])]
+                        for res in core
+                    }
                 except Exception:
                     self._marks = {}
             # 2. 支阻位（密集区 + 黄金分割；传 periodMacdIn 复用增量 MACD 缓存）

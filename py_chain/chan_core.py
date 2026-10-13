@@ -3274,6 +3274,315 @@ def _second_point_series(bis, firstPts, upperBis, upperMacd, macdArr, is_sell):
     return out
 
 
+def _lower_vertex_of(lower_bis, t, p, bar_sec, is_top, lo=None, hi=None):
+    """大级别笔端点落到本级顶点（一类点必须落在小级别）。
+
+    搜索阶梯（2026-10-13 定稿）：
+      1. ±1 根本级K内同价顶点（校准已对齐的常态），取离 t 最近；
+      2. 上级一根K覆盖窗 [t, t+parent) 内同价顶点，取最晚（双底/双顶取后）；
+      3. 笔跨度内同价顶点（近等后移/合并造成时差），取离 t 最近；
+      4. 跨度内该方向同角色顶点的极值——底=上涨笔起点/下跌笔终点取最低、顶对称，
+         同价取最晚；这是「笔内部的小级别起点/终点」的结构表达（上级笔端点是
+         本笔区间极值，跨度内同角色极值不会越过 p）；
+      5. 跨度内没有任何同角色顶点 → 保持大级别时刻（小级别在该笔内无结构）。
+    lo/hi 为跨度搜索界（起点侧 [t-1bar, min(笔末,t+parent)]，终点侧
+    [笔首, min(笔末+parent, 下一个上级顶点)]）：上界不越过下一个上级顶点，
+    防止短笔几何下把后面别笔区域的小级别顶点搜进来。
+    """
+    if not lower_bis or t is None or p is None:
+        return t, p
+    peps = 0.01
+    teps = bar_sec or 0
+    parent = teps * 6  # 本级约 4~6 根覆盖上级一根（3m←15m 为 5，D←4h 为 6）
+    if teps <= 0:
+        return t, p
+    if lo is None:
+        lo = t - teps
+    if hi is None:
+        hi = t + parent
+    verts = []
+    for b in lower_bis:
+        st, et = b.get("startTime"), b.get("endTime")
+        sp, ep = b.get("startPrice"), b.get("endPrice")
+        ty = b.get("type")
+        if st is not None and sp is not None:
+            verts.append((st, sp, ty == "up"))      # 笔起点：up=底角色
+        if et is not None and ep is not None:
+            verts.append((et, ep, ty == "down"))    # 笔终点：down=底角色
+    if not verts:
+        return t, p
+
+    def same_price(vp):
+        return abs(vp - p) <= peps
+
+    # 1. ±1 根本级K内同价（最近）
+    on_grid = [(vt, vp) for vt, vp, _ in verts if same_price(vp) and abs(vt - t) <= teps]
+    if on_grid:
+        on_grid.sort(key=lambda x: abs(x[0] - t))
+        return on_grid[0]
+    # 2. 覆盖窗内同价（最晚）
+    inside = [(vt, vp) for vt, vp, _ in verts
+              if same_price(vp) and t <= vt < min(hi, t + parent)]
+    if inside:
+        vt, vp = max(inside, key=lambda x: x[0])
+        return vt, vp
+    # 3. 笔跨度内同价（离 t 最近）
+    span = [(vt, vp) for vt, vp, _ in verts if same_price(vp) and lo <= vt <= hi]
+    if span:
+        span.sort(key=lambda x: abs(x[0] - t))
+        return span[0]
+    # 4. 跨度内该方向同角色极值（底=最低 / 顶=最高，同价取最晚）
+    pool = [(vt, vp) for vt, vp, bottom in verts
+            if lo <= vt <= hi and bottom == (not is_top)]
+    if pool:
+        if is_top:
+            vt, vp = max(pool, key=lambda x: (x[1], x[0]))
+        else:
+            vt, vp = min(pool, key=lambda x: (x[1], -x[0]))
+        return vt, vp
+    # 5. 小级别在该笔内无结构 → 保持大级别时刻
+    return t, p
+
+
+def project_first_points(lower_bis, upper_bis, bar_sec):
+    """一类买卖点（2026-10-13）：有上级笔时，小级别一类点就是大级别已确认笔的端点。
+
+    上涨笔起点=1买、终点=1卖；下跌笔起点=1卖、终点=1买。同笔不标，共用端点时抑制优先。
+    起终点都落到大级别笔内部的小级别顶点（_lower_vertex_of 阶梯：±1根K同价 →
+    覆盖窗同价 → 笔跨度同价 → 跨度内同角色极值；仅跨度内无同角色顶点才保持
+    大级别时刻）。无上级笔返回 None（最高级别仍走本级创新低/创新高）。
+    """
+    if not upper_bis:
+        return None
+    upper = confirmedStructureBis(upper_bis)
+    if not upper:
+        return {"buys": [], "sells": []}
+    suppressed = set()
+    buys, sells = {}, {}
+
+    def put(typ, time, price, same):
+        if same or time in suppressed:
+            suppressed.add(time)
+            buys.pop(time, None)
+            sells.pop(time, None)
+            return
+        if time in buys or time in sells:
+            return
+        (buys if typ == "1买" else sells)[time] = {"type": typ, "time": time, "price": price}
+
+    teps = bar_sec or 0
+    parent = teps * 6
+    uverts = sorted({b["startTime"] for b in upper} | {b["endTime"] for b in upper})
+
+    def next_upper_vert(t):
+        """t 之后最近的上级顶点时刻（不含 t）；没有则 None。"""
+        for v in uverts:
+            if v > t:
+                return v
+        return None
+
+    for ub in upper:
+        same = isSameAsUpperBi(ub, lower_bis, bar_sec) is not None
+        up = ub["type"] == "up"
+        st_t, et_t = ub["startTime"], ub["endTime"]
+        # 端点方向与跨度搜索界（上界不越过下一个上级顶点，短笔几何下防越界）：
+        # 起点侧 [t-1bar, min(笔末, t+parent)]，终点侧 [笔首, min(笔末+parent, 下一顶点)]
+        hi_s = min(et_t, st_t + parent)
+        nxt_e = next_upper_vert(et_t)
+        hi_e = et_t + parent if nxt_e is None else min(et_t + parent, nxt_e)
+        st, sp = _lower_vertex_of(lower_bis, st_t, ub["startPrice"], bar_sec,
+                                  is_top=not up, lo=st_t - teps, hi=hi_s)
+        et, ep = _lower_vertex_of(lower_bis, et_t, ub["endPrice"], bar_sec,
+                                  is_top=up, lo=st_t, hi=hi_e)
+        if up:
+            put("1买", st, sp, same)
+            put("1卖", et, ep, same)
+        else:
+            put("1卖", st, sp, same)
+            put("1买", et, ep, same)
+    return {"buys": [buys[t] for t in sorted(buys)],
+            "sells": [sells[t] for t in sorted(sells)]}
+
+
+def unformed_tail_span(upper_bis):
+    """大级别末尾还没走成笔的时间段。已够笔的形成段不算。没有这种尾段时返回 None。"""
+    if not upper_bis:
+        return None
+    last = upper_bis[-1]
+    if last.get("_forming") and last.get("enough"):
+        return None
+    confirmed = confirmedStructureBis(upper_bis)
+    if not confirmed:
+        t0 = upper_bis[0].get("startTime") or 0
+        t1 = last.get("coverageEnd") or last.get("endTime") or 0
+        return {"t0": t0, "t1": t1} if t1 > t0 else None
+    end = confirmed[-1]["endTime"]
+    if last.get("_forming") and not last.get("enough"):
+        t1 = last.get("coverageEnd") or last.get("endTime") or end
+    elif not last.get("_forming"):
+        t1 = last.get("coverageEnd") or end
+    else:
+        t1 = end
+    if not (t1 > end):
+        return None
+    return {"t0": end, "t1": t1}
+
+
+def _in_unformed_tail(t, span):
+    return bool(span) and t > span["t0"] and t <= span["t1"] + 1
+
+
+def _self_first_in_span(bis, idx_arr, macd_arr, is_sell, span):
+    """未成笔尾段内的本级一类。参照笔可在尾段之前。"""
+    out = []
+    if not span:
+        return out
+    for k in range(1, len(idx_arr)):
+        cur = bis[idx_arr[k]]
+        if not _in_unformed_tail(cur["endTime"], span):
+            continue
+        refer = None
+        for j in range(k - 1, -1, -1):
+            cand = bis[idx_arr[j]]
+            if cand["span"] < cur["span"] * 0.5:
+                continue
+            refer = cand
+            break
+        if refer is None:
+            continue
+        newer = cur["endPrice"] > refer["endPrice"] if is_sell else cur["endPrice"] < refer["endPrice"]
+        if not newer:
+            continue
+        if isBiDiverge(cur, refer, macd_arr) or bool(CHAN_CFG.get("firstNoDiverge", True)):
+            out.append({"biIdx": idx_arr[k], "time": cur["endTime"], "price": cur["endPrice"]})
+    return out
+
+
+def _append_unformed_tail_points(points, bis, upper_bis, macd_arr, bar_sec, is_sell, t3tol):
+    """未成笔尾段里小级别多空买卖点都标。一类只追加，不改尾段之前的二类锚。"""
+    span = unformed_tail_span(upper_bis)
+    if not span:
+        return
+    want = "up" if is_sell else "down"
+    idx_arr = [i for i, b in enumerate(bis) if b["type"] == want]
+    tail_first = _self_first_in_span(bis, idx_arr, macd_arr, is_sell, span)
+    first_type = "1卖" if is_sell else "1买"
+    have = {p["time"] for p in points if p["type"] == first_type}
+    for f in tail_first:
+        if f["time"] in have:
+            continue
+        have.add(f["time"])
+        points.append({"type": first_type, "time": f["time"], "price": f["price"]})
+    if tail_first:
+        local = _second_point_series(bis, tail_first, None, None, macd_arr, is_sell)
+        seen = {(p["type"], p["time"]) for p in points}
+        for p in local:
+            if not _in_unformed_tail(p["time"], span):
+                continue
+            key = (p["type"], p["time"])
+            if key in seen:
+                continue
+            seen.add(key)
+            points.append(p)
+    idxs = [i for i, b in enumerate(bis) if _in_unformed_tail(b["endTime"], span)]
+    if len(idxs) < 3:
+        return
+    zss = buildZS([bis[i] for i in idxs], bar_sec or 0)
+    if not zss:
+        return
+    zs = zss[-1]
+    edge = zs["zd"] if is_sell else zs["zg"]
+    if edge is None:
+        return
+    end_i = idxs[-1] + 1
+    tol = float(t3tol or 0)
+    valids = []
+    for i in range(idxs[0], end_i):
+        if not _in_unformed_tail(bis[i]["endTime"], span):
+            continue
+        if bis[i]["type"] != ("down" if is_sell else "up"):
+            continue
+        if (bis[i]["endPrice"] >= edge) if is_sell else (bis[i]["endPrice"] <= edge):
+            continue
+        for mm in range(i + 1, end_i):
+            if bis[mm]["type"] != ("up" if is_sell else "down"):
+                continue
+            if not _in_unformed_tail(bis[mm]["endTime"], span):
+                break
+            ok = bis[mm]["endPrice"] < edge + tol if is_sell else bis[mm]["endPrice"] > edge - tol
+            if ok:
+                valids.append({"time": bis[mm]["endTime"], "price": bis[mm]["endPrice"]})
+            break
+    if not valids:
+        return
+    third = [{"type": _leave_point_type(k, is_sell), "time": v["time"], "price": v["price"]}
+             for k, v in enumerate(valids)]
+    _append_third_points(points, third, _LEAVE_SELL if is_sell else _LEAVE_BUY,
+                         "类2卖" if is_sell else "类2买")
+
+
+def changed_bi_span(prev_fp, cur_bis):
+    """前后两版笔从第一处端点差异起到两侧尾部的时间并集。无差异返回 None。
+
+    prev_fp 为 None 且 cur 非空 → 整段都算变化。prev_fp 元素是
+    (type, startTime, endTime, startPrice, endPrice) 或笔 dict。
+    """
+    cur = cur_bis or []
+
+    def key_of(b):
+        if isinstance(b, dict):
+            return (b.get("type"), b.get("startTime"), b.get("endTime"),
+                    b.get("startPrice"), b.get("endPrice"))
+        return tuple(b)
+
+    def touch_span(b, acc):
+        k = key_of(b)
+        st, en = k[1], k[2]
+        if acc[0] is None or st < acc[0]:
+            acc[0] = st
+        if acc[1] is None or en > acc[1]:
+            acc[1] = en
+
+    if prev_fp is None:
+        if not cur:
+            return None
+        return {"t0": cur[0].get("startTime"), "t1": cur[-1].get("endTime")}
+    n = min(len(prev_fp), len(cur))
+    i = 0
+    while i < n and key_of(prev_fp[i]) == key_of(cur[i]):
+        i += 1
+    if i == len(prev_fp) and i == len(cur):
+        return None
+    acc = [None, None]
+    for k in range(i, len(prev_fp)):
+        touch_span(prev_fp[k], acc)
+    for k in range(i, len(cur)):
+        touch_span(cur[k], acc)
+    if acc[0] is None:
+        return None
+    return {"t0": acc[0], "t1": acc[1]}
+
+
+def nested_dirty_periods(periods, changed_spans):
+    """区间套：从第一个有变化的周期起，该周期及全部更小周期都要重算。changed_spans 为 None → 全部。"""
+    if changed_spans is None:
+        return {res: {"t0": float("-inf"), "t1": float("inf")} for res in periods}
+    dirty = False
+    span = None
+    out = {}
+    for res in periods:
+        s = changed_spans.get(res) if changed_spans else None
+        if s:
+            dirty = True
+            if span is None:
+                span = {"t0": s["t0"], "t1": s["t1"]}
+            else:
+                span = {"t0": min(span["t0"], s["t0"]), "t1": max(span["t1"], s["t1"])}
+        if dirty:
+            out[res] = span or {"t0": float("-inf"), "t1": float("inf")}
+    return out
+
+
 def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.0, cache=None,
                   upperMacd=None):
     """买点识别（MACD 背驰 + 抬高结构 + 中枢类2/3）。
@@ -3283,12 +3592,14 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
     优先/缺省区间套兜底）+ 每点 strong 强弱。
     上级上涨笔窗口仍产 twoBuyMeta（zg/seg 边界）供 3买/类3买锚定，不再发射二买族。
     3买/类3买/4买/类4买：离 zg 后回踩 > zg-thirdZsTol；同段按顺序全部标出；无中枢不标。
-    1买逻辑不变。
+    有上级笔时 1买 = 上级上涨笔内部的小级别起点或下跌笔内部的小级别终点（同笔不标）；无上级仍是本级创新低。
+    未成笔尾段内的小级别多空买卖点都追加。
     返回按 time 升序（稳定排序；同刻保持识别序 2/类2→1买→3/4类，尾点=时间最新）。
     """
     bis = pointEligibleBis(bis)
     knownUpper = confirmedStructureBis(upperBis)
-    if len(bis) < 3:
+    projected = project_first_points(bis, upperBis, barSec)
+    if projected is None and len(bis) < 3:
         return []
     c2tol = float(class2ZsTol or 0)
     t3tol = float(thirdZsTol or 0)
@@ -3304,11 +3615,14 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
         upperByType = {"up": [u for u in knownUpper if u["type"] == "up"],
                        "down": [u for u in knownUpper if u["type"] == "down"]}
 
-    # 候选一买：创新低 + MACD 背驰；同笔例外（S1 记录化：冻结前缀重放 + 尾部续算）
-    recs = _find1RecordsSlot(cache, macdArr, "find1buy") \
-        if (cache is not None and len(bis) >= _FIND1_MIN_BIS) else []
-    firstBuys = _firstPointsLoop(bis, downIdx, upperByType, knownUpper, macdArr,
-                                 barSec, recs, is_sell=False)
+    if projected is not None:
+        # 2026-10-13：1买取上级笔底部端点。无上级才走创新低记录缓存。
+        firstBuys = [{"biIdx": -1, "time": p["time"], "price": p["price"]} for p in projected["buys"]]
+    else:
+        recs = _find1RecordsSlot(cache, macdArr, "find1buy") \
+            if (cache is not None and len(bis) >= _FIND1_MIN_BIS) else []
+        firstBuys = _firstPointsLoop(bis, downIdx, upperByType, knownUpper, macdArr,
+                                     barSec, recs, is_sell=False)
     firstBuy = firstBuys[-1] if firstBuys else None
 
     points = []
@@ -3435,6 +3749,8 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
             third_out.append({"type": _leave_point_type(k, False),
                               "time": v["time"], "price": v["price"]})
     _append_third_points(points, third_out, _LEAVE_BUY, "类2买")
+    if projected is not None:
+        _append_unformed_tail_points(points, bis, upperBis, macdArr, barSec, False, t3tol)
     points.sort(key=lambda p: p["time"])  # 时间升序稳定排序；同刻保持识别序（2/类2→1买→3/4类）
     return points
 
@@ -3444,11 +3760,14 @@ def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0
     """卖点识别（与买点对称）：二卖族（2卖/类2卖）由 _second_point_series 统一发射
     （1卖 后压低序列 + secondDivergeGate 弱档大周期背驰闸 + strong 强弱）；上级下跌笔窗口
     仍产 twoSellMeta（zd/seg 边界）供 3卖/类3卖锚定。3/类3/4/类4 卖依赖中枢。
+    有上级笔时 1卖 = 上级上涨笔内部的小级别终点或下跌笔内部的小级别起点（同笔不标）；无上级仍是本级创新高。
+    未成笔尾段内的小级别多空买卖点都追加。
     返回按 time 升序（稳定排序；同刻保持识别序 2/类2→1卖→3/4类，尾点=时间最新）。
     """
     bis = pointEligibleBis(bis)
     knownUpper = confirmedStructureBis(upperBis)
-    if len(bis) < 3:
+    projected = project_first_points(bis, upperBis, barSec)
+    if projected is None and len(bis) < 3:
         return []
     c2tol = float(class2ZsTol or 0)
     t3tol = float(thirdZsTol or 0)
@@ -3464,34 +3783,34 @@ def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0
         upperByType = {"up": [u for u in knownUpper if u["type"] == "up"],
                        "down": [u for u in knownUpper if u["type"] == "down"]}
 
-    # 候选一卖：创新高 + MACD 背驰；同笔例外（S1 记录化：冻结前缀重放 + 尾部续算）
-    recs = _find1RecordsSlot(cache, macdArr, "find1sell") \
-        if (cache is not None and len(bis) >= _FIND1_MIN_BIS) else []
-    firstSells = _firstPointsLoop(bis, upIdx, upperByType, knownUpper, macdArr,
-                                  barSec, recs, is_sell=True)
+    if projected is not None:
+        # 端点本身就是 1卖，不再二次锚定
+        firstSells = [{"biIdx": -1, "time": p["time"], "price": p["price"]} for p in projected["sells"]]
+        anchoredSells = list(firstSells)
+    else:
+        recs = _find1RecordsSlot(cache, macdArr, "find1sell") \
+            if (cache is not None and len(bis) >= _FIND1_MIN_BIS) else []
+        firstSells = _firstPointsLoop(bis, upIdx, upperByType, knownUpper, macdArr,
+                                      barSec, recs, is_sell=True)
+        anchoredSells = []
+        seenSellPos = set()
+        anchorPre = _anchorSellPre(knownUpper) if knownUpper else None
+        for fs in firstSells:
+            anchored = fs
+            if knownUpper:
+                a = anchorFirstSell(fs, knownUpper, _pre=anchorPre)
+                if a is not None:
+                    bi_i = _nearestUpBiIdx(upIdx, upTimes, a["time"])
+                    anchored = {
+                        "biIdx": bi_i if bi_i is not None else fs["biIdx"],
+                        "time": a["time"],
+                        "price": a["price"],
+                    }
+            if anchored["time"] in seenSellPos:
+                continue
+            seenSellPos.add(anchored["time"])
+            anchoredSells.append(anchored)
     firstSell = firstSells[-1] if firstSells else None
-
-    anchoredSells = []
-    seenSellPos = set()
-    # 锚定链路预计算（每调用一次；O(U)）——单调性守卫失败回退线性原路径
-    anchorPre = _anchorSellPre(knownUpper) if knownUpper else None
-    for fs in firstSells:
-        anchored = fs
-        if knownUpper:
-            a = anchorFirstSell(fs, knownUpper, _pre=anchorPre)
-            if a is not None:
-                # 最近 up 笔：upTimes 升序 → bisect（严格 < 先见者胜、等距取先者，
-                # 与原全量扫描逐位一致）
-                bi_i = _nearestUpBiIdx(upIdx, upTimes, a["time"])
-                anchored = {
-                    "biIdx": bi_i if bi_i is not None else fs["biIdx"],
-                    "time": a["time"],
-                    "price": a["price"],
-                }
-        if anchored["time"] in seenSellPos:
-            continue
-        seenSellPos.add(anchored["time"])
-        anchoredSells.append(anchored)
 
     points = []
     twoSellMeta = []
@@ -3617,6 +3936,8 @@ def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0
             third_out.append({"type": _leave_point_type(k, True),
                               "time": v["time"], "price": v["price"]})
     _append_third_points(points, third_out, _LEAVE_SELL, "类2卖")
+    if projected is not None:
+        _append_unformed_tail_points(points, bis, upperBis, macdArr, barSec, True, t3tol)
     points.sort(key=lambda p: p["time"])  # 时间升序稳定排序；同刻保持识别序（2/类2→1卖→3/4类）
     return points
 

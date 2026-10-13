@@ -4,7 +4,9 @@
 
 纯函数模块：基于各周期笔（chan-bi 画笔产出）、上级笔（区间套锚定）与 MACD，
 计算每周期 1/2/3 类买卖点标记，含：
-  - 一买锚定（anchorFirstBuy + snapToOwnBar 映射到本周期 bar 边界）
+  - 一类点落点（findBuyPoints/findSellPoints 内 project_first_points：上级笔
+    内部的小级别起点/终点顶点 + snapToOwnBar 吸附到本周期 bar 边界，2026-10-13
+    起不再二次锚定回上级端点）
   - 邻近合并（mergeNearFirstSecond：1买与2买价格很近 → 合并为「真1买」，1卖/2卖对称）
   - 每类保留最近 keep 个（keepRecentAll：每周期不分类，买+卖合并后只保留时间最近 keep 个）
   - 跨周期共振（本级别 1买/1卖 与紧邻上级 1/2/3 类买卖点同点位 → 标绿）
@@ -16,7 +18,7 @@ import re
 
 from .chan_core import (
     calcATR, calcMACD, intervalSecOf, fmtT,
-    findBuyPoints, findSellPoints, anchorFirstBuy, anchorFirstSell,
+    findBuyPoints, findSellPoints,
     snapToOwnBar, keepRecentAll,
 )
 
@@ -105,23 +107,10 @@ def compute_period_marks(res, bis, upperBis, rawBars, atr, macdArr, pi, periodMa
     sellPts = findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol,
                              upperMacd=upperMacdArr)
 
-    # 一买锚定：除最大周期外，每个一买都锚定到上一级某笔的底部端点
+    # 2026-10-13：一类点已在 findBuyPoints 内落到「上级笔内部的小级别起点/终点」
+    # 顶点（project_first_points），不再做 anchorFirstBuy 二次锚定——那会把点拉回
+    # 上级端点/上级K开盘时刻。展示时间统一由下方 snapToOwnBar 吸附到本周期 bar。
     anchoredBuyPts = buyPts
-    firstBuyPts = [p for p in buyPts if p["type"] == "1买"]
-    if firstBuyPts and pi > 0 and upperBis:
-        anchoredMarks = []
-        seenMarkPos = set()
-        for cand in firstBuyPts:
-            anchored = anchorFirstBuy(cand, upperBis)
-            if anchored is None:
-                continue
-            snapTime = snapToOwnBar(anchored["price"], anchored["time"], rawBars)
-            # 多个候选锚定到同一上级底（同一位置）时只保留一个
-            if snapTime in seenMarkPos:
-                continue
-            seenMarkPos.add(snapTime)
-            anchoredMarks.append({"type": "1买", "time": snapTime, "price": anchored["price"]})
-        anchoredBuyPts = [p for p in buyPts if p["type"] != "1买"] + anchoredMarks
 
     # 1类 与 2类 价格很接近 → 合并标注「真1买/真1卖」
     nearPrice = max(atr * nearAtrRatio, 0.05)
@@ -168,7 +157,8 @@ def compute_period_marks(res, bis, upperBis, rawBars, atr, macdArr, pi, periodMa
 def compute_all_marks(bisByPeriod, barsByPeriod, periods, fromTs=None,
                       nearAtrRatio=NEAR_ATR_RATIO, keep=KEEP,
                       periodMacd=None, periodAtr=None,
-                      class2ZsTol=CLASS2_ZS_TOL, thirdZsTol=THIRD_ZS_TOL):
+                      class2ZsTol=CLASS2_ZS_TOL, thirdZsTol=THIRD_ZS_TOL,
+                      changed_spans=None, prev_marks=None):
     """按周期从大到小计算全部买卖点标记。
 
     @param bisByPeriod   各周期笔 { 周期: [bis] }
@@ -177,14 +167,25 @@ def compute_all_marks(bisByPeriod, barsByPeriod, periods, fromTs=None,
     @param fromTs        起始日期时间戳（过滤该时间之后的笔；None 不过滤）
     @param periodMacd    可选：各周期预计算 MACD { 周期: [macdArr] }
     @param periodAtr     可选：各周期预计算 ATR { 周期: atr }
+    @param changed_spans 可选：各周期笔变化时间段。None=全量重算；
+                         有值时从第一个变化周期起，该周期及更小周期整表重算，更大周期沿用 prev_marks
+    @param prev_marks    上次各周期标记，供未变化的大级别沿用
     @returns { 周期: [marks] }，marks 含 { label, time, price, rawTime, rawPrice, color }
     """
-    from .chan_core import structurePeriods
+    from .chan_core import structurePeriods, nested_dirty_periods
     bisByPeriod = structurePeriods(bisByPeriod, barsByPeriod)
     periodMacd = periodMacd or {}
     periodAtr = periodAtr or {}
+    prev_marks = prev_marks or {}
+    dirty = nested_dirty_periods(periods, changed_spans)
     periodMarks = {}
     for pi, res in enumerate(periods):
+        # 更大级别笔没变：沿用上次标记，供下级共振上色；本级不重算
+        if changed_spans is not None and res not in dirty:
+            kept = prev_marks.get(res)
+            if kept:
+                periodMarks[res] = kept
+            continue
         curBis = bisByPeriod.get(res, []) or []
         if not curBis:
             continue

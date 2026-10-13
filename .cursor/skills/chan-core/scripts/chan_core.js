@@ -1714,12 +1714,10 @@ function nearDoubleOn(res) {
 
 /**
  * 判断本周期某笔是否与上一级别某笔完全重合（起点、终点时间与价格一致）。
- * 完全重合说明本周期该笔内部无更细结构（整笔就是上一级别的一笔），
- * 本级别无从选有效参照（跨上级笔边界的比较无意义）→ 上级笔已结束时由
- * 本周期做「同笔」纯结构标记（免参照/创新低/背驰）；上级笔仍为末笔
- * （延伸中、反向笔未确认）时不标记。
+ * 完全重合（同笔）说明本周期该笔内部无更细结构。一类买卖点：同笔的两个端点不标记。
  * 时间容差 = 本周期 1 个 bar（低级别笔用更低一级校准，与上级笔端点可能有最多一个bar的偏差）。
- * @returns 命中的上级笔对象（与 upperBis 内元素同引用）| null（未命中/空表），
+ * 比较对称：把上级笔当作第一参、本级笔列表当作第二参，可判断「该上级笔是否同笔」。
+ * @returns 命中的列表内笔对象（同引用）| null（未命中/空表），
  *          调用方可按真值使用（旧 bool 契约兼容）。
  */
 function isSameAsUpperBi(bi, upperBis, barSec) {
@@ -1736,6 +1734,309 @@ function isSameAsUpperBi(bi, upperBis, barSec) {
     }
   }
   return null;
+}
+
+/**
+ * 大级别笔端点落到本级顶点（一类点必须落在小级别）。
+ * 搜索阶梯（2026-10-13 定稿）：
+ *   1. ±1 根本级K内同价顶点（校准已对齐的常态），取离 t 最近；
+ *   2. 上级一根K覆盖窗 [t, t+parent) 内同价顶点，取最晚（双底/双顶取后）；
+ *   3. 整根大级别笔跨度内同价顶点（近等后移/合并造成时差），取离 t 最近；
+ *   4. 跨度内该方向同角色顶点的极值——底=上涨笔起点/下跌笔终点取最低、顶对称，
+ *      同价取最晚；这是「笔内部的小级别起点/终点」的结构表达（上级笔端点是
+ *      本笔区间极值，跨度内同角色极值不会越过 p）；
+ *   5. 跨度内没有任何同角色顶点 → 保持大级别时刻（小级别在该笔内无结构）。
+ * lo/hi 为跨度搜索界（起点侧 [t-1bar, min(笔末,t+parent)]，终点侧
+ * [笔首, min(笔末+parent, 下一个上级顶点)]）：上界不越过下一个上级顶点，
+ * 防止短笔几何下把后面别笔区域的小级别顶点搜进来。
+ */
+function lowerVertexOf(lowerBis, t, p, barSec, isTop, lo, hi) {
+  if (!lowerBis || !lowerBis.length || t == null || p == null) return [t, p];
+  const pEps = 0.01;
+  const tEps = barSec || 0;
+  const parent = tEps * 6; // 本级约 4~6 根覆盖上级一根（3m←15m 为 5，D←4h 为 6）
+  if (tEps <= 0) return [t, p];
+  if (lo == null) lo = t - tEps;
+  if (hi == null) hi = t + parent;
+  const verts = [];
+  for (const b of lowerBis) {
+    if (b.startTime != null && b.startPrice != null) {
+      verts.push([b.startTime, b.startPrice, b.type === "up"]);      // 笔起点：up=底角色
+    }
+    if (b.endTime != null && b.endPrice != null) {
+      verts.push([b.endTime, b.endPrice, b.type === "down"]);        // 笔终点：down=底角色
+    }
+  }
+  if (!verts.length) return [t, p];
+  const samePrice = (vp) => Math.abs(vp - p) <= pEps;
+  // 1. ±1 根本级K内同价（最近）
+  const onGrid = verts.filter(([vt, vp]) => samePrice(vp) && Math.abs(vt - t) <= tEps);
+  if (onGrid.length) {
+    onGrid.sort((a, b) => Math.abs(a[0] - t) - Math.abs(b[0] - t));
+    return [onGrid[0][0], onGrid[0][1]];
+  }
+  // 2. 覆盖窗内同价（最晚）
+  const winHi = Math.min(hi, t + parent);
+  const inside = verts.filter(([vt, vp]) => samePrice(vp) && vt >= t && vt < winHi);
+  if (inside.length) {
+    let best = inside[0];
+    for (const v of inside) if (v[0] > best[0]) best = v;
+    return [best[0], best[1]];
+  }
+  // 3. 笔跨度内同价（离 t 最近）
+  const span = verts.filter(([vt, vp]) => samePrice(vp) && vt >= lo && vt <= hi);
+  if (span.length) {
+    span.sort((a, b) => Math.abs(a[0] - t) - Math.abs(b[0] - t));
+    return [span[0][0], span[0][1]];
+  }
+  // 4. 跨度内该方向同角色极值（底=最低 / 顶=最高，同价取最晚）
+  const pool = verts.filter(([vt, , bottom]) => vt >= lo && vt <= hi && bottom === !isTop);
+  if (pool.length) {
+    let best = pool[0];
+    for (const v of pool) {
+      const better = isTop
+        ? (v[1] > best[1] || (v[1] === best[1] && v[0] > best[0]))
+        : (v[1] < best[1] || (v[1] === best[1] && v[0] > best[0]));
+      if (better) best = v;
+    }
+    return [best[0], best[1]];
+  }
+  // 5. 小级别在该笔内无结构 → 保持大级别时刻
+  return [t, p];
+}
+
+/**
+ * 一类买卖点（2026-10-13）：有上级笔时，小级别一类点就是大级别已确认笔的端点。
+ * 以上涨为例，下跌对称：
+ *   上涨笔内部的小级别起点 = 1买，内部的小级别终点 = 1卖；
+ *   下跌笔内部的小级别起点 = 1卖，内部的小级别终点 = 1买。
+ * 同笔（本级某笔与该上级笔起终点重合）不标记该笔的两个端点；
+ * 相邻笔共用端点时，同笔抑制优先，不能被另一笔补回来。
+ * 起终点都落到大级别笔内部的小级别顶点（lowerVertexOf 阶梯：±1根K同价 →
+ * 覆盖窗同价 → 笔跨度同价 → 跨度内同角色极值；仅跨度内无同角色顶点才保持
+ * 大级别时刻）。
+ * 无上级笔返回 null（最高级别仍走本级创新低/创新高）。仅已确认笔，延伸中的末笔不取端点。
+ * @returns {{buys: Array<{type,time,price}>, sells: Array<{type,time,price}>}|null}
+ */
+function projectFirstPoints(lowerBis, upperBis, barSec) {
+  if (!upperBis || !upperBis.length) return null;
+  const upper = confirmedStructureBis(upperBis);
+  if (!upper.length) return { buys: [], sells: [] };
+  const suppressed = new Set();
+  const buys = new Map();
+  const sells = new Map();
+  const put = (type, time, price, same) => {
+    if (same || suppressed.has(time)) {
+      suppressed.add(time);
+      buys.delete(time);
+      sells.delete(time);
+      if (CHAN_CFG.debug && same) {
+        console.log(`[一类跳过-同笔] ${type}@${fmtT(time)}(${price})`);
+      }
+      return;
+    }
+    if (buys.has(time) || sells.has(time)) return;
+    const bucket = type === "1买" ? buys : sells;
+    bucket.set(time, { type, time, price });
+  };
+  const tEps = barSec || 0;
+  const parent = tEps * 6;
+  const uverts = [...new Set(upper.reduce((acc, b) => {
+    acc.push(b.startTime, b.endTime);
+    return acc;
+  }, []))].sort((a, b) => a - b);
+  const nextUpperVert = (t) => {
+    for (const v of uverts) if (v > t) return v;
+    return null;
+  };
+  for (const ub of upper) {
+    const same = !!isSameAsUpperBi(ub, lowerBis, barSec);
+    const up = ub.type === "up";
+    const stT = ub.startTime, etT = ub.endTime;
+    // 端点方向与跨度搜索界（上界不越过下一个上级顶点，短笔几何下防越界）：
+    // 起点侧 [t-1bar, min(笔末, t+parent)]，终点侧 [笔首, min(笔末+parent, 下一顶点)]
+    const hiS = Math.min(etT, stT + parent);
+    const nxtE = nextUpperVert(etT);
+    const hiE = nxtE == null ? etT + parent : Math.min(etT + parent, nxtE);
+    const [st, sp] = lowerVertexOf(lowerBis, stT, ub.startPrice, barSec,
+      !up, stT - tEps, hiS);
+    const [et, ep] = lowerVertexOf(lowerBis, etT, ub.endPrice, barSec,
+      up, stT, hiE);
+    if (up) {
+      put("1买", st, sp, same);
+      put("1卖", et, ep, same);
+    } else {
+      put("1卖", st, sp, same);
+      put("1买", et, ep, same);
+    }
+  }
+  const list = (m) => [...m.values()].sort((a, b) => a.time - b.time);
+  return { buys: list(buys), sells: list(sells) };
+}
+
+/**
+ * 前后两版笔从第一处端点差异起到两侧尾部的时间并集。无差异返回 null。
+ * prev 可以是笔对象数组，或已存的 [type, startTime, endTime, startPrice, endPrice] 行。
+ * prev 缺省（第一次）且 cur 非空 → 整段都算变化。
+ */
+function biEndpointKey(b) {
+  if (Array.isArray(b)) return b.join("|");
+  return [b.type, b.startTime, b.endTime, b.startPrice, b.endPrice].join("|");
+}
+function changedBiSpan(prevBis, curBis) {
+  const prev = prevBis || null;
+  const cur = curBis || [];
+  if (!prev) {
+    if (!cur.length) return null;
+    return { t0: cur[0].startTime, t1: cur[cur.length - 1].endTime };
+  }
+  const n = Math.min(prev.length, cur.length);
+  let i = 0;
+  while (i < n && biEndpointKey(prev[i]) === biEndpointKey(cur[i])) i++;
+  if (i === prev.length && i === cur.length) return null;
+  let t0 = Infinity, t1 = -Infinity;
+  const touch = (b) => {
+    const st = Array.isArray(b) ? b[1] : b.startTime;
+    const en = Array.isArray(b) ? b[2] : b.endTime;
+    if (st < t0) t0 = st;
+    if (en > t1) t1 = en;
+  };
+  for (let k = i; k < prev.length; k++) touch(prev[k]);
+  for (let k = i; k < cur.length; k++) touch(cur[k]);
+  if (t0 === Infinity) return null;
+  return { t0, t1 };
+}
+
+/**
+ * 大级别末尾还没走成笔的时间段。
+ * 已确认笔结束之后，到覆盖末端；若最后是未够笔的形成段（enough 不为真），也算未成笔。
+ * 已够笔的形成段按笔方向处理，不在此段。没有这种尾段时返回 null。
+ */
+function unformedTailSpan(upperBis) {
+  if (!upperBis || !upperBis.length) return null;
+  const last = upperBis[upperBis.length - 1];
+  if (last._forming && last.enough) return null;
+  const confirmed = confirmedStructureBis(upperBis);
+  if (!confirmed.length) {
+    const t0 = upperBis[0].startTime || 0;
+    const t1 = last.coverageEnd || last.endTime || 0;
+    return t1 > t0 ? { t0, t1 } : null;
+  }
+  const end = confirmed[confirmed.length - 1].endTime;
+  let t1 = end;
+  if (last._forming && !last.enough) t1 = last.coverageEnd || last.endTime || end;
+  else if (!last._forming) t1 = last.coverageEnd || end;
+  if (!(t1 > end)) return null;
+  return { t0: end, t1 };
+}
+
+function inUnformedTail(t, span) {
+  return !!(span && t > span.t0 && t <= span.t1 + 1);
+}
+
+/** 未成笔尾段内的本级一类：创新低=1买 / 创新高=1卖（与最高级别同一口径）。参照笔可在尾段之前。 */
+function selfFirstInSpan(bis, idxArr, macdArr, isSell, span) {
+  const out = [];
+  if (!span) return out;
+  for (let k = 1; k < idxArr.length; k++) {
+    const cur = bis[idxArr[k]];
+    if (!inUnformedTail(cur.endTime, span)) continue;
+    let refer = null;
+    for (let j = k - 1; j >= 0; j--) {
+      const cand = bis[idxArr[j]];
+      if (cand.span < cur.span * 0.5) continue;
+      refer = cand;
+      break;
+    }
+    if (!refer) continue;
+    const newer = isSell ? cur.endPrice > refer.endPrice : cur.endPrice < refer.endPrice;
+    if (!newer) continue;
+    const diverge = isBiDiverge(cur, refer, macdArr);
+    if (diverge || CHAN_CFG.firstNoDiverge !== false) {
+      out.push({ biIdx: idxArr[k], time: cur.endTime, price: cur.endPrice });
+    }
+  }
+  return out;
+}
+
+/**
+ * 未成笔尾段里，小级别多空买卖点都标（2026-10-13 补充）。
+ * 一类用本级创新极值，只追加、不改尾段之前的二类锚；
+ * 二类只收尾段内的点；三类在尾段自己的中枢上按本侧离开规则补，不看大级别方向。
+ */
+function appendUnformedTailPoints(points, bis, upperBis, macdArr, barSec, isSell, t3tol) {
+  const span = unformedTailSpan(upperBis);
+  if (!span) return;
+  const want = isSell ? "up" : "down";
+  const idxArr = [];
+  bis.forEach((b, i) => { if (b.type === want) idxArr.push(i); });
+  const tailFirst = selfFirstInSpan(bis, idxArr, macdArr, isSell, span);
+  const firstType = isSell ? "1卖" : "1买";
+  const haveFirst = new Set(points.filter(p => p.type === firstType).map(p => p.time));
+  for (const f of tailFirst) {
+    if (haveFirst.has(f.time)) continue;
+    haveFirst.add(f.time);
+    points.push({ type: firstType, time: f.time, price: f.price });
+    if (CHAN_CFG.debug) console.log(`[一类-未成笔尾] ${firstType}@${fmtT(f.time)}(${f.price})`);
+  }
+  if (tailFirst.length) {
+    const local = secondPointSeries(bis, tailFirst, null, null, macdArr, isSell);
+    const seen = new Set(points.map(p => p.type + "@" + p.time));
+    for (const p of local) {
+      if (!inUnformedTail(p.time, span)) continue;
+      const key = p.type + "@" + p.time;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      points.push(p);
+    }
+  }
+  const idxs = [];
+  for (let i = 0; i < bis.length; i++) {
+    if (inUnformedTail(bis[i].endTime, span)) idxs.push(i);
+  }
+  if (idxs.length < 3) return;
+  const zss = buildZS(idxs.map(i => bis[i]), barSec || 0);
+  if (!zss.length) return;
+  const zs = zss[zss.length - 1];
+  const edge = isSell ? zs.zd : zs.zg;
+  if (edge == null) return;
+  const endI = idxs[idxs.length - 1] + 1;
+  const valids = [];
+  for (let i = idxs[0]; i < endI; i++) {
+    if (!inUnformedTail(bis[i].endTime, span)) continue;
+    if (bis[i].type !== (isSell ? "down" : "up")) continue;
+    if (isSell ? bis[i].endPrice >= edge : bis[i].endPrice <= edge) continue;
+    for (let mm = i + 1; mm < endI; mm++) {
+      if (bis[mm].type !== (isSell ? "up" : "down")) continue;
+      if (!inUnformedTail(bis[mm].endTime, span)) break;
+      const ok = isSell ? bis[mm].endPrice < edge + (+t3tol || 0) : bis[mm].endPrice > edge - (+t3tol || 0);
+      if (ok) valids.push({ time: bis[mm].endTime, price: bis[mm].endPrice });
+      break;
+    }
+  }
+  if (!valids.length) return;
+  const third = valids.map((v, k) => ({ type: leavePointType(k, isSell), time: v.time, price: v.price }));
+  appendThirdPoints(points, third, isSell ? LEAVE_SELL : LEAVE_BUY, isSell ? "类2卖" : "类2买");
+}
+
+function nestedDirtyPeriods(periods, changedSpans) {
+  if (!changedSpans) {
+    const all = {};
+    for (const res of periods) all[res] = { t0: -Infinity, t1: Infinity };
+    return all;
+  }
+  let dirty = false;
+  let span = null;
+  const out = {};
+  for (const res of periods) {
+    const s = changedSpans[res];
+    if (s) {
+      dirty = true;
+      span = span ? { t0: Math.min(span.t0, s.t0), t1: Math.max(span.t1, s.t1) } : { t0: s.t0, t1: s.t1 };
+    }
+    if (dirty) out[res] = span || { t0: -Infinity, t1: Infinity };
+  }
+  return out;
 }
 
 /**
@@ -1971,8 +2272,9 @@ function secondPointSeries(bis, firstPts, upperBis, upperMacd, macdArr, isSell) 
 
 function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, upperMacd) {
   bis = pointEligibleBis(bis);
-  const knownUpper = confirmedStructureBis(upperBis);
-  if (bis.length < 3) return [];
+  // 有上级笔：1买 = 上级上涨笔内部的小级别起点 / 上级下跌笔内部的小级别终点（同笔不标）。无上级才要求本级至少 3 笔。
+  const projected = projectFirstPoints(bis, upperBis, barSec);
+  if (!projected && bis.length < 3) return [];
   const c2tol = +(class2ZsTol || 0);
   const t3tol = +(thirdZsTol || 0);
   const downIdx = [];
@@ -1980,56 +2282,43 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, 
   const downLows = downIdx.map(i => ({ biIdx: i, time: bis[i].endTime, price: bis[i].endPrice }));
   const idxByEndTime = {};
   bis.forEach((b, i) => { if (idxByEndTime[b.endTime] == null) idxByEndTime[b.endTime] = i; });
-  let upperByType = null;
-  if (knownUpper.length > 0) {
-    upperByType = {
-      up: knownUpper.filter(u => u.type === "up"),
-      down: knownUpper.filter(u => u.type === "down"),
-    };
-  }
 
-  const firstBuys = [];
-  for (let k = 1; k < downIdx.length; k++) {
-    const cur = bis[downIdx[k]];
-    // 同笔例外仅确认笔；forming 段（列表已过滤为 enough ≥5 合并块）直接走参照/创新低
-    // 路径——2026-10-10 提前入列：新低的 1买 当下可见（与 py_chain/chan_core.py 同步）
-    let sameUpper = null;
-    if (!cur._forming) {
-      sameUpper = upperByType != null
-        ? isSameAsUpperBi(cur, upperByType[cur.type] || [], barSec)
-        : null;
+  let firstBuys;
+  if (projected) {
+    // 2026-10-13：1买取上级笔底部端点（落到本级顶点），不再用本级创新低/背驰，也不再二次锚定
+    firstBuys = projected.buys.map(p => ({ biIdx: -1, time: p.time, price: p.price }));
+    if (CHAN_CFG.debug) {
+      for (const fb of firstBuys) console.log(`[一买] 上级笔端点 ${fmtT(fb.time)}(${fb.price})`);
     }
-    if (sameUpper) {
-      if (sameUpper === knownUpper[knownUpper.length - 1]) {
-        if (CHAN_CFG.debug) console.log(`[一买跳过-上级末笔延伸中] ${fmtT(cur.endTime)}(${cur.endPrice}) 与上级末笔重合，上级反向笔未确认`);
-        continue;
+  } else {
+    firstBuys = [];
+    for (let k = 1; k < downIdx.length; k++) {
+      const cur = bis[downIdx[k]];
+      // 无上级（最高级别）：同笔分支不参与。forming 段走参照/创新低
+      // ——2026-10-10 提前入列：新低的 1买 当下可见（与 py_chain/chan_core.py 同步）
+      let refer = null;
+      for (let j = k - 1; j >= 0; j--) {
+        const cand = bis[downIdx[j]];
+        if (cand.span < cur.span * 0.5) continue;
+        refer = cand;
+        break;
       }
-      if (CHAN_CFG.debug) console.log(`[一买同笔] ${fmtT(cur.endTime)}(${cur.endPrice}) 与上级已结束下跌笔重合，结构同笔标记1买`);
-      firstBuys.push({ biIdx: downIdx[k], time: cur.endTime, price: cur.endPrice });
-      continue;
-    }
-    let refer = null;
-    for (let j = k - 1; j >= 0; j--) {
-      const cand = bis[downIdx[j]];
-      if (cand.span < cur.span * 0.5) continue;
-      refer = cand;
-      break;
-    }
-    if (refer && cur.endPrice < refer.endPrice) {
-      const diverge = isBiDiverge(cur, refer, macdArr);
-      const plain = CHAN_CFG.firstNoDiverge !== false; // 创新低即1买，背驰不计（2026-10-10）
-      if (CHAN_CFG.debug) {
-        const cm = biMacdMetrics(cur, macdArr);
-        const rm = biMacdMetrics(refer, macdArr);
-        const note = plain ? "（firstNoDiverge：创新低即1买，背驰不计）" : "";
-        console.log(
-          `[一买候选] ${fmtT(cur.endTime)}(${cur.endPrice}) vs 参照 ${fmtT(refer.endTime)}(${refer.endPrice}) ` +
-          `| 创新低=${cur.endPrice < refer.endPrice} ` +
-          `| 绿柱面积 ${cm ? cm.greenArea.toFixed(2) : "-"} vs ${rm ? rm.greenArea.toFixed(2) : "-"} ` +
-          `| DIF低点 ${cm ? cm.difLow.toFixed(3) : "-"} vs ${rm ? rm.difLow.toFixed(3) : "-"} | 背驰=${diverge}${note}`
-        );
+      if (refer && cur.endPrice < refer.endPrice) {
+        const diverge = isBiDiverge(cur, refer, macdArr);
+        const plain = CHAN_CFG.firstNoDiverge !== false; // 创新低即1买，背驰不计（2026-10-10）
+        if (CHAN_CFG.debug) {
+          const cm = biMacdMetrics(cur, macdArr);
+          const rm = biMacdMetrics(refer, macdArr);
+          const note = plain ? "（firstNoDiverge：创新低即1买，背驰不计）" : "";
+          console.log(
+            `[一买候选] ${fmtT(cur.endTime)}(${cur.endPrice}) vs 参照 ${fmtT(refer.endTime)}(${refer.endPrice}) ` +
+            `| 创新低=${cur.endPrice < refer.endPrice} ` +
+            `| 绿柱面积 ${cm ? cm.greenArea.toFixed(2) : "-"} vs ${rm ? rm.greenArea.toFixed(2) : "-"} ` +
+            `| DIF低点 ${cm ? cm.difLow.toFixed(3) : "-"} vs ${rm ? rm.difLow.toFixed(3) : "-"} | 背驰=${diverge}${note}`
+          );
+        }
+        if (diverge || plain) firstBuys.push({ biIdx: downIdx[k], time: cur.endTime, price: cur.endPrice });
       }
-      if (diverge || plain) firstBuys.push({ biIdx: downIdx[k], time: cur.endTime, price: cur.endPrice });
     }
   }
   const firstBuy = firstBuys.length ? firstBuys[firstBuys.length - 1] : null;
@@ -2147,6 +2436,8 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, 
     }
   }
   appendThirdPoints(points, thirdOut, LEAVE_BUY, "类2买");
+  // 大级别未成笔的 K 线内部：小级别多空都标（买侧在此补，卖侧对称）
+  if (projected) appendUnformedTailPoints(points, bis, upperBis, macdArr, barSec, false, t3tol);
   points.sort((a, b) => a.time - b.time); // 时间升序稳定排序；同刻保持识别序（2/类2→1买→3/4类）
   return points;
 }
@@ -2157,8 +2448,9 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, 
  */
 function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, upperMacd) {
   bis = pointEligibleBis(bis);
-  const knownUpper = confirmedStructureBis(upperBis);
-  if (bis.length < 3) return [];
+  // 有上级笔：1卖 = 上级上涨笔内部的小级别终点 / 上级下跌笔内部的小级别起点（同笔不标）。无上级才要求本级至少 3 笔。
+  const projected = projectFirstPoints(bis, upperBis, barSec);
+  if (!projected && bis.length < 3) return [];
   const c2tol = +(class2ZsTol || 0);
   const t3tol = +(thirdZsTol || 0);
   const upIdx = [];
@@ -2166,56 +2458,43 @@ function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol,
   const upHighs = upIdx.map(i => ({ biIdx: i, time: bis[i].endTime, price: bis[i].endPrice }));
   const idxByEndTime = {};
   bis.forEach((b, i) => { if (idxByEndTime[b.endTime] == null) idxByEndTime[b.endTime] = i; });
-  let upperByType = null;
-  if (knownUpper.length > 0) {
-    upperByType = {
-      up: knownUpper.filter(u => u.type === "up"),
-      down: knownUpper.filter(u => u.type === "down"),
-    };
-  }
 
-  const firstSells = [];
-  for (let k = 1; k < upIdx.length; k++) {
-    const cur = bis[upIdx[k]];
-    // 同笔例外仅确认笔；forming 段（enough ≥5 合并块）直接走参照/创新高路径
-    // （2026-10-10 提前入列，与 py_chain/chan_core.py 同步）
-    let sameUpper = null;
-    if (!cur._forming) {
-      sameUpper = upperByType != null
-        ? isSameAsUpperBi(cur, upperByType[cur.type] || [], barSec)
-        : null;
+  let firstSells;
+  if (projected) {
+    // 2026-10-13：1卖取上级笔顶部端点，端点本身就是标记位置，不再上移锚定
+    firstSells = projected.sells.map(p => ({ biIdx: -1, time: p.time, price: p.price }));
+    if (CHAN_CFG.debug) {
+      for (const fs of firstSells) console.log(`[一卖] 上级笔端点 ${fmtT(fs.time)}(${fs.price})`);
     }
-    if (sameUpper) {
-      if (sameUpper === knownUpper[knownUpper.length - 1]) {
-        if (CHAN_CFG.debug) console.log(`[一卖跳过-上级末笔延伸中] ${fmtT(cur.endTime)}(${cur.endPrice}) 与上级末笔重合，上级反向笔未确认`);
-        continue;
+  } else {
+    firstSells = [];
+    for (let k = 1; k < upIdx.length; k++) {
+      const cur = bis[upIdx[k]];
+      // 无上级（最高级别）：本级创新高。forming 段走参照路径
+      // （2026-10-10 提前入列，与 py_chain/chan_core.py 同步）
+      let refer = null;
+      for (let j = k - 1; j >= 0; j--) {
+        const cand = bis[upIdx[j]];
+        if (cand.span < cur.span * 0.5) continue;
+        refer = cand;
+        break;
       }
-      if (CHAN_CFG.debug) console.log(`[一卖同笔] ${fmtT(cur.endTime)}(${cur.endPrice}) 与上级已结束上涨笔重合，结构同笔标记1卖`);
-      firstSells.push({ biIdx: upIdx[k], time: cur.endTime, price: cur.endPrice });
-      continue;
-    }
-    let refer = null;
-    for (let j = k - 1; j >= 0; j--) {
-      const cand = bis[upIdx[j]];
-      if (cand.span < cur.span * 0.5) continue;
-      refer = cand;
-      break;
-    }
-    if (refer && cur.endPrice > refer.endPrice) {
-      const diverge = isBiDiverge(cur, refer, macdArr);
-      const plain = CHAN_CFG.firstNoDiverge !== false; // 创新高即1卖，背驰不计（2026-10-10）
-      if (CHAN_CFG.debug) {
-        const cm = biMacdMetrics(cur, macdArr);
-        const rm = biMacdMetrics(refer, macdArr);
-        const note = plain ? "（firstNoDiverge：创新高即1卖，背驰不计）" : "";
-        console.log(
-          `[一卖候选] ${fmtT(cur.endTime)}(${cur.endPrice}) vs 参照 ${fmtT(refer.endTime)}(${refer.endPrice}) ` +
-          `| 创新高=${cur.endPrice > refer.endPrice} ` +
-          `| 红柱面积 ${cm ? cm.redArea.toFixed(2) : "-"} vs ${rm ? rm.redArea.toFixed(2) : "-"} ` +
-          `| DIF高点 ${cm ? cm.difHigh.toFixed(3) : "-"} vs ${rm ? rm.difHigh.toFixed(3) : "-"} | 背驰=${diverge}${note}`
-        );
+      if (refer && cur.endPrice > refer.endPrice) {
+        const diverge = isBiDiverge(cur, refer, macdArr);
+        const plain = CHAN_CFG.firstNoDiverge !== false; // 创新高即1卖，背驰不计（2026-10-10）
+        if (CHAN_CFG.debug) {
+          const cm = biMacdMetrics(cur, macdArr);
+          const rm = biMacdMetrics(refer, macdArr);
+          const note = plain ? "（firstNoDiverge：创新高即1卖，背驰不计）" : "";
+          console.log(
+            `[一卖候选] ${fmtT(cur.endTime)}(${cur.endPrice}) vs 参照 ${fmtT(refer.endTime)}(${refer.endPrice}) ` +
+            `| 创新高=${cur.endPrice > refer.endPrice} ` +
+            `| 红柱面积 ${cm ? cm.redArea.toFixed(2) : "-"} vs ${rm ? rm.redArea.toFixed(2) : "-"} ` +
+            `| DIF高点 ${cm ? cm.difHigh.toFixed(3) : "-"} vs ${rm ? rm.difHigh.toFixed(3) : "-"} | 背驰=${diverge}${note}`
+          );
+        }
+        if (diverge || plain) firstSells.push({ biIdx: upIdx[k], time: cur.endTime, price: cur.endPrice });
       }
-      if (diverge || plain) firstSells.push({ biIdx: upIdx[k], time: cur.endTime, price: cur.endPrice });
     }
   }
   const firstSell = firstSells.length ? firstSells[firstSells.length - 1] : null;
@@ -2224,7 +2503,8 @@ function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol,
   const seenSellPos = new Set();
   for (const fs of firstSells) {
     let anchored = fs;
-    if (upperBis && upperBis.length > 0) {
+    // 上级端点投影已经落在端点上，不再二次锚定（避免被更早的顶搬走）
+    if (!projected && upperBis && upperBis.length > 0) {
       const a = anchorFirstSell(fs, upperBis);
       if (a) {
         let bestBi = null, bestDist = Infinity;
@@ -2357,6 +2637,7 @@ function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol,
     }
   }
   appendThirdPoints(points, thirdOut, LEAVE_SELL, "类2卖");
+  if (projected) appendUnformedTailPoints(points, bis, upperBis, macdArr, barSec, true, t3tol);
   points.sort((a, b) => a.time - b.time); // 时间升序稳定排序；同刻保持识别序（2/类2→1卖→3/4类）
   return points;
 }
@@ -2696,6 +2977,10 @@ module.exports = {
   // 买卖点
   findBuyPoints,
   findSellPoints,
+  projectFirstPoints,
+  unformedTailSpan,
+  changedBiSpan,
+  nestedDirtyPeriods,
   anchorFirstBuy,
   anchorFirstSell,
   isSameAsUpperBi,

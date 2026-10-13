@@ -518,8 +518,12 @@ class TestBuildZsPassThroughLeave(unittest.TestCase):
         # 2026-10-11 统一二买定义：2买 族 = 1买后抬低序列——1买 滚动到 1400@4056.45 后，
         # 旧窗口 2买@1200（先于锚，不再标记）；首个抬低 1600@4093.86 与窗口 3买 同刻，
         # 按「1买→二买族→3买」顺序让位保留离枢身份 3买。
+        # 2026-10-13 落点阶梯：上涨笔起点 (900,4021.82) 的同价小级别起点在
+        # (1000,4021.82)（±1根K内）→ 1买 落小级别 1000，不是上级时刻 900。
         self.assertEqual(got, [
-            ("1买", 1400, 4056.45),
+            ("1买", 1000, 4021.82),
+            ("2买", 1200, 4071.64),
+            ("类2买", 1400, 4056.45),
             ("3买", 1600, 4093.86),
             ("类3买", 1800, 4118.91),
             ("4买", 2000, 4121.06),
@@ -554,7 +558,7 @@ class TestSecondPointSeries(unittest.TestCase):
             self.b(-300, -100, "up",   500.0, 560.0),
             self.b(-100, 0,   "down", 560.0, 470.0),
             self.b(0, 50,     "up",   470.0, 480.0),
-            self.b(50, 1000,  "down", 480.0, 380.0),
+            self.b(50, 400,   "down", 480.0, 435.0),  # 终点即最新 1买@400/435
         ]
 
     def _upper_macd(self, diverge):
@@ -572,6 +576,8 @@ class TestSecondPointSeries(unittest.TestCase):
                                0.0, 0.0, upperMacd=self._upper_macd(True))
         got = [(p["type"], p["time"], p["price"], p.get("strong")) for p in pts]
         self.assertEqual(got, [
+            ("1买", -300, 500.0, None),
+            ("1买", 0, 470.0, None),
             ("1买", 400, 435.0, None),
             ("2买", 600, 441.0, False),      # 首笔上涨 445 未过 455 → 弱
             ("类2买", 800, 443.0, True),     # 458 > 445 → 强
@@ -584,7 +590,9 @@ class TestSecondPointSeries(unittest.TestCase):
         pts = cc.findBuyPoints(self._bis_buy(), self._upper(), self.MACD_LOW, 900,
                                0.0, 0.0, upperMacd=self._upper_macd(False))
         self.assertEqual([(p["type"], p["time"], p.get("strong")) for p in pts],
-                         [("1买", 400, None),
+                         [("1买", -300, None),
+                          ("1买", 0, None),
+                          ("1买", 400, None),
                           ("类2买", 800, True),
                           ("类2买", 1000, True)])
 
@@ -599,7 +607,8 @@ class TestSecondPointSeries(unittest.TestCase):
         pts = cc.findBuyPoints(bis, self._upper(), self.MACD_LOW, 900,
                                0.0, 0.0, upperMacd=self._upper_macd(False))
         self.assertEqual([(p["type"], p["time"], p.get("strong")) for p in pts],
-                         [("1买", 400, None), ("类2买", 1000, True)])
+                         [("1买", -300, None), ("1买", 0, None),
+                          ("1买", 400, None), ("类2买", 1000, True)])
 
     def test_off_ignores_divergence_gate(self):
         saved = cc.CHAN_CFG.get("secondDivergeGate")
@@ -617,7 +626,7 @@ class TestSecondPointSeries(unittest.TestCase):
         pts = cc.findBuyPoints(bis, self._upper(), self.MACD_LOW, 900,
                                0.0, 0.0, upperMacd=self._upper_macd(True))
         self.assertEqual([(p["type"], p["time"]) for p in pts],
-                         [("1买", 400), ("1买", 1100)])
+                         [("1买", -300), ("1买", 0), ("1买", 400)])
 
     def test_sell_mirror_series(self):
         bis = [
@@ -633,7 +642,7 @@ class TestSecondPointSeries(unittest.TestCase):
             self.b(-300, -100, "down", 380.0, 320.0),
             self.b(-100, 0,   "up",   320.0, 410.0),
             self.b(0, 50,     "down", 410.0, 400.0),
-            self.b(50, 1000,  "up",   400.0, 520.0),
+            self.b(50, 400,   "up",   400.0, 465.0),  # 终点即 1卖@400/465
         ]
         umacd = [{"time": t, "dif": 8.0, "dea": 0.0, "macd": 10.0} for t in (-100, -50, 0)]
         for t in range(50, 1001, 50):

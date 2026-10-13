@@ -26,7 +26,7 @@ const {
   calcATR, calcMACD, hasMacdCrossBetween,
   extendLastBi, lowerResOf, calibrateBiTimes, intervalSecOf,
   fmtT, biMacdMetrics, isBiDiverge,
-  findBuyPoints, findSellPoints, anchorFirstBuy, anchorFirstSell,
+  findBuyPoints, findSellPoints,
   isSameAsUpperBi, snapToOwnBar, keepRecentAll,
 } = core;
 
@@ -469,21 +469,6 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
       return r.result.value;
     };
 
-    // 标记前先清除所有周期的旧买卖点标记
-    let clearedAll = 0;
-    if (!DRY) {
-      let currentRes = originalRes;
-      for (const res of PERIODS) {
-        if (res !== currentRes) {
-          await ensureResolution(res);
-          currentRes = res;
-        }
-        const cl = await clearBuySell(res);
-        clearedAll += cl.cleared;
-      }
-      console.log("\n标记前清除旧买卖点:", clearedAll, "个");
-    }
-
     // 收笔要下一级笔：先按周期从小到大取K线并建结构，后面的大到小循环只消费结果
     const barsHeld = {};
     const structuredBis = {};
@@ -513,13 +498,46 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
         lowerStroke).bis;
     }
 
+    // 大级别笔变化时，从该周期起按区间套重算更小周期；未变的大级别沿用上次标记
+    const LOGIC_V = "20261013-upper-endpoint";
+    const statePath = path.join(CACHE_DIR, `buysell_${String(SYMBOL).replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
+    const fpOf = (bis) => (bis || []).map(b => [b.type, b.startTime, b.endTime, b.startPrice, b.endPrice]);
+    let prevState = null;
+    try {
+      if (fs.existsSync(statePath)) prevState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    } catch (e) { prevState = null; }
+    const stateOk = !!(prevState && prevState.v === LOGIC_V && prevState.from === FROM_DATE
+      && JSON.stringify(prevState.periods || []) === JSON.stringify(PERIODS));
+    const changedSpans = {};
+    if (stateOk) {
+      for (const res of PERIODS) {
+        changedSpans[res] = core.changedBiSpan((prevState.fp || {})[res] || [], structuredBis[res] || []);
+      }
+    }
+    const dirtyMap = core.nestedDirtyPeriods(PERIODS, stateOk ? changedSpans : null);
+    const savedMarks = stateOk && prevState.marks ? prevState.marks : {};
+    console.log("\n区间套更新:", stateOk
+      ? (PERIODS.filter(r => dirtyMap[r]).join(",") || "无变化")
+      : "全量（逻辑版本或起始日变化）");
+
     // 主循环：从大到小逐周期计算并标记
     let currentRes = prepRes;
     let upperBis = null; // 上一级周期的笔（用于一买锚定）
     let upperMacdArr = null; // 上一级周期 MACD（弱2类买卖点大周期背驰闸，与 upperBis 同步级联）
     const periodMarks = {}; // 各周期已生成的标记（用于跨周期共振判定：上级买卖点 ↔ 本级别1类）
+    const nextFp = {};
     for (let pi = 0; pi < PERIODS.length; pi++) {
       const res = PERIODS[pi];
+      nextFp[res] = fpOf(structuredBis[res] || []);
+      if (!dirtyMap[res]) {
+        const kept = savedMarks[res] || [];
+        if (kept.length) periodMarks[res] = kept;
+        if ((structuredBis[res] || []).length) upperBis = structuredBis[res];
+        const held = (barsHeld[res] || []).filter(b => b.time + intervalSecOf(res) <= Math.floor(Date.now() / 1000));
+        if (held.length) upperMacdArr = calcMACD(held);
+        console.log(`\n[周期 ${res}] 笔未变，沿用上次买卖点 ${kept.length} 个`);
+        continue;
+      }
       if (res !== currentRes) {
         await ensureResolution(res);
         currentRes = res;
@@ -543,38 +561,17 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
       const atr = calcATR(rawBars, 14);
       const macdArr = calcMACD(rawBars);
 
-      // 计算买卖点（2026-10-11 统一二买定义：二买族=1买/1卖后抬低/压低序列+弱档大周期背驰闸+强弱二分；
-      // 区间套窗口仅作 3买/3卖 中枢锚）1买/1卖 创新低/新高即标记（firstNoDiverge）
+      // 有上级时一类=上级已确认笔端点（同笔不标）；无上级仍创新低/新高。
+      // 二买族仍是一类之后的抬低/压低序列；三类仍用上级方向窗口。
       let buyPts = findBuyPoints(curBis, upperBis, macdArr, intervalSecOf(res), CLASS2_ZS_TOL, THIRD_ZS_TOL, upperMacdArr);
       let sellPts = findSellPoints(curBis, upperBis, macdArr, intervalSecOf(res), CLASS2_ZS_TOL, THIRD_ZS_TOL, upperMacdArr);
 
       // 保留区间套下识别出的全部买卖点，再做邻近合并，最后每周期不分类只保留最近 N 个（默认 10，减少图上标记数量）
 
-      // 一买锚定：除日线外，每个一买都锚定到上一级某笔的底部端点
-      // 注意：2买/类2买 基于结构底，不依赖一买锚定，予以保留
+      // 2026-10-13：一类点已在 findBuyPoints 内落到「上级笔内部的小级别起点/终点」
+      // 顶点（projectFirstPoints），不再做 anchorFirstBuy 二次锚定——那会把点拉回
+      // 上级端点/上级K开盘时刻。展示时间统一由下方 snapToOwnBar 吸附到本周期 bar。
       let anchoredBuyPts = buyPts;
-      const firstBuyPts = buyPts.filter(p => p.type === "1买");
-      if (firstBuyPts.length > 0 && pi > 0) {
-        const anchoredMarks = [];
-        const seenMarkPos = new Set();
-        for (const cand of firstBuyPts) {
-          const anchored = anchorFirstBuy(cand, upperBis);
-          if (anchored) {
-            const snapTime = snapToOwnBar(anchored.price, anchored.time, rawBars);
-            // 多个候选锚定到同一上级底（同一位置）时只保留一个，避免重复标记
-            if (seenMarkPos.has(snapTime)) continue;
-            seenMarkPos.add(snapTime);
-            if (DEBUG) console.log(`[锚定] ${res} 候选一买 ${toT(cand.time)}@${cand.price} → 锚定上级底 ${toT(anchored.time)}@${anchored.price} → 映射到本周期 ${toT(snapTime)}`);
-            anchoredMarks.push({ type: "1买", time: snapTime, price: anchored.price });
-          } else {
-            if (DEBUG) console.log(`[锚定] ${res} 候选一买 ${toT(cand.time)}@${cand.price} 前没有上级笔底部端点，不标记一买`);
-          }
-        }
-        anchoredBuyPts = [
-          ...buyPts.filter(p => p.type !== "1买"),
-          ...anchoredMarks,
-        ];
-      }
 
       // 新增：1类 与 2类 买卖点价格很接近时，直接把 1类 合并到 2类 标记上，标注为「真1买/真1卖」。
       // 判定基于价格（不限制时间差）：1买/1卖 与 2买/2卖 的价差不超过 nearp×ATR（至少 0.05）视为很近
@@ -649,6 +646,9 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
 
       if (DRY) continue;
 
+      const cl = await clearBuySell(res);
+      console.log(`[周期 ${res}] 清除旧买卖点:`, cl.cleared);
+
       // 绘制前确保图表数据覆盖最早标记时间
       if (marks.length > 0) {
         const minT = marks.reduce((m2, mk) => Math.min(m2, mk.time), Infinity);
@@ -668,6 +668,11 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
 
     if (DRY) {
       console.log("\n[DRY RUN] 不绘图。");
+    } else {
+      fs.writeFileSync(statePath, JSON.stringify({
+        v: LOGIC_V, from: FROM_DATE, periods: PERIODS, fp: nextFp, marks: periodMarks,
+      }));
+      console.log("\n已保存买卖点指纹:", statePath);
     }
 
     await client.close();

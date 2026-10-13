@@ -50,9 +50,9 @@
 ### 3.2 计算买卖点（每周期，从大到小）
 
 1. 计算 `atr = calcATR(rawBars, 14)`、`macdArr = calcMACD(rawBars)`；
-2. `findBuyPoints(curBis, upperBis, macdArr, intervalSecOf(res))`、`findSellPoints(...)`（区间套：2买/类2买只在上级上涨笔段内，2卖/类2卖只在上级下跌笔段内）；
+2. `findBuyPoints(curBis, upperBis, macdArr, intervalSecOf(res))`、`findSellPoints(...)`（区间套：2买/类2买只在上级上涨笔段内，2卖/类2卖只在上级下跌笔段内）；有上级时一类点已由 `projectFirstPoints` 落到「上级笔内部的小级别起点/终点」顶点（落点阶梯见 chan-core SKILL `projectFirstPoints` 行）；
 3. **保留全部买卖点**，再做邻近合并（第 5 步）后，按 `--keep` 每周期不分类只保留时间上最近的 N 个（默认 10，见第 6 步）；
-4. **一买锚定**（除日线/最外层外）：每个一买锚定到上一级某笔的底部端点（`anchorFirstBuy`），多个候选锚定到同一上级底只保留一个；找不到锚点则不标记该一买（2买/类2买基于结构底，不依赖一买锚定，保留）；
+4. **一类点不再二次锚定**（2026-10-13 起）：旧 `anchorFirstBuy` 上级端点二次锚定已移除——那会把投影后的小级别落点重新拉回上级端点/上级K开盘时刻（个别情形还会跳到上一笔的底）；重复点位去重由 `projectFirstPoints` 按顶点时刻完成；
 5. **邻近合并**（`mergeNearFirstSecond`）：1类与2类价格差 ≤ `max(atr × NEAR_ATR_RATIO, 0.05)` 时，把 1类 合并到最近的 2类 标记上标注为「真1买/真1卖」（原1类标记移除，2类保留；一个2类标记最多承接一个1类标记；附近无接近2类标记的1类保持原名）；
 6. **每周期不分类保留最近 N 个**（`keepRecentAll`，`--keep=N` 默认 10）：买点+卖点合并按时间排序，每周期只保留时间上最近 N 个标记（不保证每类都有），避免图上标记过多；
 7. **汇总标记**：时间吸附到本周期 bar 边界（`snapToOwnBar`）；文字价格偏移 `max(atr×0.5, 0.05)`（买点在价格下方、卖点在价格上方；真1买/真1卖与2类同点位，偏移双倍避免重叠）；

@@ -78,10 +78,11 @@ let bis = core.buildBi(fractals, merged, atr, macdArr); // ③ 笔构建
 
 | 函数 | 说明 |
 |------|------|
-| `findBuyPoints(bis, upperBis, macdArr, barSec)` | 买点识别（1/2/3买/类2买，含区间套、同笔例外；2026-10-10 起 1买=创新低即标记，背驰非硬门槛〔`firstNoDiverge` 默认开，关=回退旧口径〕） |
-| `findSellPoints(bis, upperBis, macdArr, barSec)` | 卖点识别（1/2/3卖/类2卖，对称逻辑；1卖=创新高即标记〔`firstNoDiverge`〕） |
-| `anchorFirstBuy(cand, upperBis)` | 一买锚定：取候选之前最近的上级底部端点 |
-| `anchorFirstSell(cand, upperBis)` | 一卖锚定：候选在上级上涨笔内则上移到其结束点，否则取最近上级顶部端点 |
+| `findBuyPoints(bis, upperBis, macdArr, barSec)` | 买点识别。有上级时 1买=上级已确认笔端点（上涨起点/下跌终点）经 `projectFirstPoints` 落到笔内部的小级别顶点，同笔不标；无上级时 1买=创新低（`firstNoDiverge`）。二买族锚在最新 1买。未成笔尾段追加本级多空一类 |
+| `findSellPoints(bis, upperBis, macdArr, barSec)` | 卖点识别。有上级时 1卖=上级已确认笔端点（上涨终点/下跌起点）同样落小级别顶点，同笔不标；无上级时 1卖=创新高。对称于买点 |
+| `projectFirstPoints(lowerBis, upperBis, barSec)` | 一类点投影（2026-10-13）：上级已确认笔端点 → 大级别笔**内部的小级别起点/终点**。落点阶梯（`lowerVertexOf`）：±1根本级K同价（最近）→ 上级一根K覆盖窗同价（最晚）→ 笔跨度内同价（最近）→ 跨度内同角色极值（底=上涨笔起点/下跌笔终点取最低，顶对称；「笔内部小级别起点/终点」的结构表达）→ 跨度内无同角色顶点才保持大级别时刻。搜索上界不越过下一个上级顶点（短笔几何防越界）。同笔（`isSameAsUpperBi`）两端都不标且抑制优先 |
+| `anchorFirstBuy(cand, upperBis)` | 一买锚定：取候选之前最近的上级底部端点（历史 API 保留；2026-10-13 起标记主流程不再二次锚定） |
+| `anchorFirstSell(cand, upperBis)` | 一卖锚定：候选在上级上涨笔内则上移到其结束点，否则取最近上级顶部端点（历史 API 保留；主流程已不调用） |
 | `isSameAsUpperBi(bi, upperBis, barSec)` | 本笔与上级某笔完全重合判断（时间容差=本周期1个bar；返回命中笔对象或 null） |
 | `snapToOwnBar(price, refTime, bars)` | 极值价格/时间映射到本周期bar边界 |
 | `keepRecentEach(points)` | 低级别每类买卖点只保留最近一个（历史策略保留，当前主流程已不调用） |
