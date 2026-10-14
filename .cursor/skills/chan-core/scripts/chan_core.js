@@ -1347,6 +1347,7 @@ function buildZS(bis, barSec) {
         exitTime,               // 离开中枢的笔的起点时间（记录，供排查）
         enterEndTime,           // 进入笔终点（外扩前原始时间）
         exitStartTime,          // 离开笔起点（外扩前原始时间）
+        trioEndTime: b3.endTime, // 三笔重叠完成时刻（2026-10-14 规则v2：下一个中枢从此接管，本枢 3类族序列到此为止）
       });
       i = j; // 从离开中枢的笔开始重新扫描
     } else {
@@ -1970,24 +1971,8 @@ function leaveTypeByOrdinal(zsOrdinal, pullOrdinal, isSell) {
   return "类4" + side;
 }
 
-const LEAVE_BUY = ["3买", "类3买", "4买", "类4买"];
-const LEAVE_SELL = ["3卖", "类3卖", "4卖", "类4卖"];
-
-function appendThirdPoints(points, thirdList, familyTypes, class2Type) {
-  const family = new Set(familyTypes);
-  // 2026-10-11 同刻让位范围从 类2 扩到 2买（与 py_chain/_append_third_points 同步）：
-  // 统一二买定义后序列 2买 可与窗口 3买族同端点，按「1买→二买族→3买」顺序保留离枢身份。
-  const fam2 = class2Type.endsWith("买") ? ["2买", "类2买"] : ["2卖", "类2卖"];
-  for (const t of thirdList) {
-    if (points.some(p => family.has(p.type) && p.time === t.time)) continue;
-    let dup = -1;
-    for (let i = 0; i < points.length; i++) {
-      if (fam2.includes(points[i].type) && points[i].time === t.time) { dup = i; break; }
-    }
-    if (dup >= 0) points.splice(dup, 1);
-    points.push(t);
-  }
-}
+// （appendThirdPoints/LEAVE_* 已随 2026-10-14 规则v2 删除：同刻优先级改为一类 >
+//  二类族 > 三类族，三类族不再抢占二类族端点；三类族内部同刻去重在 thirdFamilyV2 完成。）
 
 /**
  * 买/卖点识别（2026-10-14 规则v2）总装：
@@ -2025,29 +2010,15 @@ function pointAllowedByDirection(windows, tailStart, t, side) {
 }
 
 /**
- * 强弱判据（2026-10-14 规则v2）：候选点（bis[i] 端点）之后的反弹笔端点 vs 之前的最近前高/前低。
- * 过前高=强(true)、已完成未过=弱(false)、反弹未走完/缺失=未定型(null，弱先行，重算改判）。
- * 形成中的反弹若当前端点已过前高也判强——笔端点只顺方向延伸，过了不会收回。
- */
-function reboundStrong(bis, i, isSell) {
-  let prevExtreme = null;
-  for (let j = i - 1; j >= 0; j--) {
-    if (bis[j].type === (isSell ? "down" : "up")) { prevExtreme = bis[j].endPrice; break; }
-  }
-  if (prevExtreme == null) return null;
-  const rb = bis[i + 1]; // 反弹笔：候选低点后的 up（买侧）/ 候选高点后的 down（卖侧）
-  if (!rb || rb.type !== (isSell ? "down" : "up")) return null;
-  const passed = isSell ? rb.endPrice < prevExtreme : rb.endPrice > prevExtreme;
-  if (passed) return true;
-  return rb._forming ? null : false;
-}
-
-/**
  * 二类族（2026-10-14 规则v2）：锚=1买/1卖（一类投影点）。锚后低点/高点逐一抬高/压低
  * （首个与锚价比、其后与前一候选比；未抬高的候选只更新参照不标）。首个抬低=2买/2卖；
  * 其后与主点属于同一个中枢（zsCoveringTime 按时间归属，同一段盘整）的抬低=类2买/类2卖
  * （不在同中枢的不标，交给三类规则；主点不在任何中枢内则无类点）。
- * 扫描窗=(锚_i, 锚_{i+1})，方向开窗在 find*Points 统一过滤。每点带 strong（reboundStrong 口径）。
+ * 扫描窗=(锚_i, 锚_{i+1})，方向开窗在 find*Points 统一过滤。
+ * 强弱（用户口径 2026-10-14 定稿）：反弹 = 锚之后到该候选为止的反向极值（买=锚后最高点、
+ * 卖=锚后最低点，滚动累计）；前高/前低 = 锚之前最近的反向端点（即结束于锚的笔的起点）——
+ * 过=强、未过=弱、锚前无参照=null（弱先行）。只用锚到候选之间已成结构，候选出现当下
+ * 即可判强弱，无需等候选后的反弹完成（10-9 案例口径：反弹4143.425 vs 前高4184.385 → 弱二买）。
  * class2ZsTol 参数为兼容保留，规则v2 同中枢按时间归属、不再使用价格容差。
  */
 function secondFamilyV2(bis, firstPts, zss, c2tol, isSell) {
@@ -2055,21 +2026,41 @@ function secondFamilyV2(bis, firstPts, zss, c2tol, isSell) {
   if (!firstPts || !firstPts.length) return out;
   const anchors = firstPts.map(p => ({ time: p.time, price: p.price })).sort((a, b) => a.time - b.time);
   const want = isSell ? "up" : "down"; // 候选笔方向：买=回踩 down 端点 / 卖=反抽 up 端点
+  const rev = isSell ? "down" : "up";  // 反弹笔方向：买=up（锚后高点）/ 卖=down（锚后低点）
   for (let ai = 0; ai < anchors.length; ai++) {
     const anchorT = anchors[ai].time;
     const nextT = ai + 1 < anchors.length ? anchors[ai + 1].time : Infinity;
     let refP = anchors[ai].price; // 抬高/压低参照
     let zs2 = null;               // 主点（2买/2卖）所在中枢；同中枢的后续点才是类点
     let marked = false;
+    // 前高/前低：锚之前最近的反向端点（买=最近的顶角色顶点：up 笔终点 / down 笔起点；卖镜像）
+    let prevExtreme = null, prevT = -Infinity;
+    const wantTop = !isSell;
+    for (const b of bis) {
+      for (const [t, p, isTop] of [
+        [b.startTime, b.startPrice, b.type === "down"],
+        [b.endTime, b.endPrice, b.type === "up"],
+      ]) {
+        if (isTop !== wantTop || t == null || p == null) continue;
+        if (t <= anchorT && t > prevT) { prevT = t; prevExtreme = p; }
+      }
+    }
+    // 反弹极值：锚之后的反向端点滚动极值（买=最高、卖=最低）
+    let reboundExtreme = isSell ? Infinity : -Infinity;
     for (let i = 0; i < bis.length; i++) {
       const b = bis[i];
-      if (b.type !== want) continue;
       const t = b.endTime || 0;
+      if (b.type === rev && t > anchorT) {
+        reboundExtreme = isSell ? Math.min(reboundExtreme, b.endPrice)
+                                : Math.max(reboundExtreme, b.endPrice);
+      }
+      if (b.type !== want) continue;
       if (t <= anchorT || t >= nextT) continue;
       const p = b.endPrice;
       const raised = isSell ? p < refP : p > refP;
       if (!raised) { refP = p; continue; }
-      const strong = reboundStrong(bis, i, isSell);
+      const strong = (prevExtreme == null || !Number.isFinite(reboundExtreme)) ? null
+        : (isSell ? reboundExtreme < prevExtreme : reboundExtreme > prevExtreme);
       if (!marked) {
         out.push({ type: isSell ? "2卖" : "2买", time: t, price: p, strong });
         zs2 = zsCoveringTime(zss, t);
@@ -2090,9 +2081,11 @@ function secondFamilyV2(bis, firstPts, zss, c2tol, isSell) {
 /**
  * 三类及以上族（2026-10-14 规则v2，逐中枢序号制）：价格同向离开中枢边沿（买=上破 zg、
  * 卖=下破 zd）后，回踩/反抽不再进该中枢（容差 t3tol）→ 合格点。序号窗口=每个已收笔同向
- * 上级笔：窗口内第 1 个被同向离开的中枢 → 首个合格点=3类、其后=类3；第 2 个 → 4类/类4；
- * ≥3 封顶类4。回踩重新进入中枢则本轮离开结束、等待下一次离开（每枢计数不重置）。
- * 不归属任何已收笔同向窗口的中枢（反向窗/未收笔尾段内）按时间序继续编号参与，
+ * 上级笔，**窗口内重新起算**：第 1 个被同向离开的中枢 → 首个合格点=3类、其后=类3；第 2 个 →
+ * 4类/类4；≥3 封顶类4。回踩重新进入中枢则本轮离开结束、等待下一次离开（每枢计数不重置）；
+ * **下一个中枢的三笔重叠完成（trioEndTime）后本枢序列永久结束**——「前一个中枢」指最近的
+ * 中枢，远古中枢不能认领新中枢形成之后的回踩（无界前瞻会让 7 月的中枢认领 10 月的回踩）。
+ * 不归属任何已收笔同向窗口的中枢（反向窗/未收笔尾段内）按时间序独立编号参与，
  * 产出的点交由方向开窗统一过滤。同一回踩可同时不回进多个中枢——同刻去重保留
  * 序号较新（后离开）中枢的类型。
  */
@@ -2105,14 +2098,15 @@ function thirdFamilyV2(bis, upperBis, zss, t3tol, isSell) {
   const winDir = isSell ? "down" : "up";   // 序号窗口的同向上级笔
   const eps = 1e-9;
   let j = 0;
-  const processZs = (zs) => {
+  const processZs = (zs, boundT) => {
     const edge = isSell ? zs.zd : zs.zg;
     const rawEnd = zsTimeRange(zs)[1];
     let collect = false, n = 0, left = false;
     for (let i = 0; i < bis.length; i++) {
       const b = bis[i];
       const t = b.endTime || 0;
-      if (t <= rawEnd) continue;
+      if (t < rawEnd) continue;   // 结束于 rawEnd 的笔参与离开判定（上破笔常被 buildZS 吸收为末段延伸笔）
+      if (boundT != null && t >= boundT) break; // 下一中枢已形成：本枢序列到此为止
       if (b.type === breakDir) {
         if (isSell ? b.endPrice < edge - eps : b.endPrice > edge + eps) { collect = true; left = true; }
       } else if (b.type === pullDir && collect) {
@@ -2127,16 +2121,22 @@ function thirdFamilyV2(bis, upperBis, zss, t3tol, isSell) {
     }
     if (left) j++;
   };
+  // 逐中枢处理：边界 = 时间上紧邻的下一个中枢的 trioEndTime（下一个中枢从此接管）
   const matched = new Set();
   for (const ub of conf) {
     if (ub.type !== winDir) continue;
-    for (const zs of zss) {
+    j = 0; // 序号窗口内重新起算（2026-10-14 修正：此前跨窗口累计致现窗口一律类4）
+    for (let k = 0; k < zss.length; k++) {
+      const zs = zss[k];
       if (zs.upperStart !== ub.startTime || zs.upperEnd !== ub.endTime) continue;
       matched.add(zs);
-      processZs(zs);
+      processZs(zs, k + 1 < zss.length ? zss[k + 1].trioEndTime : null);
     }
   }
-  for (const zs of zss) if (!matched.has(zs)) processZs(zs);
+  j = 0; // 反向窗/尾段内的中枢不属任何同向窗口，独立起算
+  for (let k = 0; k < zss.length; k++) {
+    if (!matched.has(zss[k])) processZs(zss[k], k + 1 < zss.length ? zss[k + 1].trioEndTime : null);
+  }
   // 同刻去重：保留序号较新中枢的类型
   const byTime = new Map();
   for (const p of out) {
@@ -2157,7 +2157,7 @@ function thirdFamilyV2(bis, upperBis, zss, t3tol, isSell) {
  * 2买族=1买锚后抬低序列（secondFamilyV2）；3类族=离开中枢回踩不进（thirdFamilyV2）；
  * 方向开窗：已收笔上涨笔窗内只留买点、尾段双向放行。无上级（日线）返回空。
  * macdArr/upperMacd 参数仅为下游调用兼容保留，不再参与判定。
- * 返回按 time 升序（稳定排序；同刻一类优先占刻、三类族让位二类族）。
+ * 返回按 time 升序（稳定排序；同刻优先级 一类 > 二类族 > 三类族）。
  */
 function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, upperMacd) {
   bis = pointEligibleBis(bis);
@@ -2175,13 +2175,18 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, 
   }
   const firstTimes = new Set(points.map(p => p.time));
   const zss = buildZSByUpper(bis, upperBis, barSec);
+  const secondTimes = new Set();
   for (const p of secondFamilyV2(bis, projected.buys, zss, c2tol, false)) {
     if (!allow(p.time) || firstTimes.has(p.time)) continue;
+    secondTimes.add(p.time);
     points.push(p);
   }
-  const thirdKept = thirdFamilyV2(bis, upperBis, zss, t3tol, false)
-    .filter(p => allow(p.time) && !firstTimes.has(p.time));
-  appendThirdPoints(points, thirdKept, LEAVE_BUY, "类2买");
+  // 同刻优先级（2026-10-14 规则v2）：一类 > 二类族 > 三类族——1买锚后首个抬低按定义
+  // 就是 2买，三类族（含类4）不得抢占同一端点（旧「3类族让位2买族」口径废除）。
+  for (const p of thirdFamilyV2(bis, upperBis, zss, t3tol, false)) {
+    if (!allow(p.time) || firstTimes.has(p.time) || secondTimes.has(p.time)) continue;
+    points.push(p);
+  }
   points.sort((a, b) => a.time - b.time);
   return points;
 }
@@ -2190,7 +2195,7 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, 
  * 卖点识别（2026-10-14 规则v2，与买点镜像）：1卖=已收笔上级上涨笔内部的小级别终点/
  * 下跌笔起点（投影，同笔不标）；2卖族=1卖锚后压低序列；3类族=向下离开中枢反抽不进；
  * 方向开窗：已收笔下跌笔窗内只留卖点、尾段双向放行。无上级（日线）返回空。
- * 返回按 time 升序（稳定排序；同刻一类优先占刻、三类族让位二类族）。
+ * 返回按 time 升序（稳定排序；同刻优先级 一类 > 二类族 > 三类族）。
  */
 function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, upperMacd) {
   bis = pointEligibleBis(bis);
@@ -2208,13 +2213,16 @@ function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol,
   }
   const firstTimes = new Set(points.map(p => p.time));
   const zss = buildZSByUpper(bis, upperBis, barSec);
+  const secondTimes = new Set();
   for (const p of secondFamilyV2(bis, projected.sells, zss, c2tol, true)) {
     if (!allow(p.time) || firstTimes.has(p.time)) continue;
+    secondTimes.add(p.time);
     points.push(p);
   }
-  const thirdKept = thirdFamilyV2(bis, upperBis, zss, t3tol, true)
-    .filter(p => allow(p.time) && !firstTimes.has(p.time));
-  appendThirdPoints(points, thirdKept, LEAVE_SELL, "类2卖");
+  for (const p of thirdFamilyV2(bis, upperBis, zss, t3tol, true)) {
+    if (!allow(p.time) || firstTimes.has(p.time) || secondTimes.has(p.time)) continue;
+    points.push(p);
+  }
   points.sort((a, b) => a.time - b.time);
   return points;
 }

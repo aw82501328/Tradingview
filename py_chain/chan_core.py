@@ -27,6 +27,7 @@
 """
 
 import bisect
+import math
 import re
 import threading
 
@@ -2191,6 +2192,7 @@ def buildZS(bis, barSec=0):
                 "exitTime": exitTime,                  # 离开中枢的笔的起点时间（记录，供排查）
                 "enterEndTime": enterEndTime,          # 进入笔终点（外扩前原始时间）
                 "exitStartTime": exitStartTime,        # 离开笔起点（外扩前原始时间）
+                "trioEndTime": b3["endTime"],          # 三笔重叠完成时刻（2026-10-14 规则v2：下一个中枢从此接管）
             })
             i = j  # 从离开中枢的笔开始重新扫描
         else:
@@ -2899,38 +2901,8 @@ def _leave_type_by_ordinal(zs_ordinal, pull_ordinal, is_sell):
     return "类4" + side
 
 
-_LEAVE_BUY = ("3买", "类3买", "4买", "类4买")
-_LEAVE_SELL = ("3卖", "类3卖", "4卖", "类4卖")
-
-
-def _append_third_points(points, third_list, family_types, class2_type):
-    """写入 3/类3/4/类4；与二买族同点时删二买族保留离枢点。
-
-    2026-10-11 起同刻让位范围从 类2 扩到 2买：统一二买定义（1买后抬低序列）后，
-    序列 2买 可与窗口 3买族落在同一端点——按「1买→二买族→3买」的顺序语义，
-    同刻优先保留更具体的离枢身份（3买族），二买族让位。
-    去重/定位用增量索引（离枢点时间集合 + 二买族同刻首现下标表；删除后下标表整体
-    重建——删除罕见，摊销 O(1)），与 any/_findIndex 全量扫描语义逐位一致。"""
-    mc_types = tuple(family_types)
-    fam2 = ("2买", "类2买") if class2_type.endswith("买") else ("2卖", "类2卖")
-    mc_times = {p["time"] for p in points if p["type"] in mc_types}
-    c2_first = {}
-    for i, p in enumerate(points):
-        if p["type"] in fam2 and p["time"] not in c2_first:
-            c2_first[p["time"]] = i
-    for t in third_list:
-        if t["time"] in mc_times:
-            continue
-        dup = c2_first.get(t["time"], -1)
-        if dup >= 0:
-            del points[dup]
-            c2_first = {}
-            for i, p in enumerate(points):
-                if p["type"] in fam2 and p["time"] not in c2_first:
-                    c2_first[p["time"]] = i
-        points.append({"type": t["type"], "time": t["time"], "price": t["price"]})
-        if t["type"] in mc_types:
-            mc_times.add(t["time"])
+# （_append_third_points/_LEAVE_* 已随 2026-10-14 规则v2 删除：同刻优先级改为一类 >
+#  二类族 > 三类族，三类族不再抢占二类族端点；三类族内部同刻去重在 _third_family_v2 完成。）
 
 
 def _direction_windows(upper_bis):
@@ -2958,34 +2930,17 @@ def _point_allowed_by_direction(windows, tail_start, t, side):
     return True
 
 
-def _rebound_str(bis, i, is_sell):
-    """强弱判据（2026-10-14 规则v2）：候选点（bis[i] 端点）之后的反弹笔端点 vs 之前的
-    最近前高/前低。过前高=强(True)、已完成未过=弱(False)、反弹未走完/缺失=未定型
-    (None，弱先行，重算改判）。形成中的反弹若当前端点已过前高也判强——笔端点只顺
-    方向延伸，过了不会收回。"""
-    prev_extreme = None
-    for j in range(i - 1, -1, -1):
-        if bis[j]["type"] == ("down" if is_sell else "up"):
-            prev_extreme = bis[j]["endPrice"]
-            break
-    if prev_extreme is None:
-        return None
-    rb = bis[i + 1] if i + 1 < len(bis) else None  # 反弹笔：低点后 up / 高点后 down
-    if rb is None or rb["type"] != ("down" if is_sell else "up"):
-        return None
-    passed = rb["endPrice"] < prev_extreme if is_sell else rb["endPrice"] > prev_extreme
-    if passed:
-        return True
-    return None if rb.get("_forming") else False
-
-
 def _second_family_v2(bis, firstPts, zss, c2tol, is_sell):
     """二类族（2026-10-14 规则v2）：锚=1买/1卖（一类投影点）。锚后低点/高点逐一抬高/
     压低（首个与锚价比、其后与前一候选比；未抬高的候选只更新参照不标）。首个抬低=
     2买/2卖；其后与主点属于同一个中枢（_zs_covering_time 按时间归属，同一段盘整）
     的抬低=类2买/类2卖（不在同中枢的不标，交给三类规则；主点不在任何中枢内则无类点）。
     扫描窗=(锚_i, 锚_{i+1})，方向开窗在 findBuy/findSellPoints 统一过滤。
-    每点带 strong（_rebound_strong 口径）。c2tol 为兼容保留，规则v2 不再使用价格容差。
+    强弱（用户口径 2026-10-14 定稿）：反弹 = 锚之后到该候选为止的反向极值（买=锚后
+    最高点、卖=锚后最低点，滚动累计）；前高/前低 = 锚之前最近的反向端点（即结束于锚
+    的笔的起点）——过=强、未过=弱、锚前无参照=None（弱先行）。只用锚到候选之间已成
+    结构，候选出现当下即可判强弱，无需等候选后的反弹完成（10-9 案例口径：反弹
+    4143.425 vs 前高 4184.385 → 弱二买）。c2tol 为兼容保留，不再使用价格容差。
     @returns 点列表（{type, time, price, strong}）。"""
     out = []
     if not firstPts:
@@ -2993,16 +2948,34 @@ def _second_family_v2(bis, firstPts, zss, c2tol, is_sell):
     anchors = sorted(({"time": p["time"], "price": p["price"]} for p in firstPts),
                      key=lambda a: a["time"])
     want = "up" if is_sell else "down"  # 候选笔方向：买=回踩 down 端点 / 卖=反抽 up 端点
+    rev = "down" if is_sell else "up"   # 反弹笔方向：买=up（锚后高点）/ 卖=down（锚后低点）
+    want_top = not is_sell              # 买侧前高=顶角色端点；卖侧前低=底角色
     for ai, anchor in enumerate(anchors):
         anchor_t = anchor["time"]
         next_t = anchors[ai + 1]["time"] if ai + 1 < len(anchors) else float("inf")
         ref_p = anchor["price"]  # 抬高/压低参照
         zs2 = None               # 主点（2买/2卖）所在中枢；同中枢的后续点才是类点
         marked = False
-        for i, b in enumerate(bis):
+        # 前高/前低：锚之前最近的反向端点（买=最近的顶角色顶点：up 笔终点 / down 笔起点；卖镜像）
+        prev_extreme = None
+        prev_t = -float("inf")
+        for b in bis:
+            for t, p, is_top in ((b.get("startTime"), b.get("startPrice"), b["type"] == "down"),
+                                 (b.get("endTime"), b.get("endPrice"), b["type"] == "up")):
+                if is_top != want_top or t is None or p is None:
+                    continue
+                if t <= anchor_t and t > prev_t:
+                    prev_t = t
+                    prev_extreme = p
+        # 反弹极值：锚之后的反向端点滚动极值（买=最高、卖=最低）
+        rebound_extreme = float("inf") if is_sell else -float("inf")
+        for b in bis:
+            t = b["endTime"] or 0
+            if b["type"] == rev and t > anchor_t:
+                rebound_extreme = (min(rebound_extreme, b["endPrice"]) if is_sell
+                                   else max(rebound_extreme, b["endPrice"]))
             if b["type"] != want:
                 continue
-            t = b["endTime"] or 0
             if t <= anchor_t or t >= next_t:
                 continue
             p = b["endPrice"]
@@ -3010,7 +2983,11 @@ def _second_family_v2(bis, firstPts, zss, c2tol, is_sell):
             if not raised:
                 ref_p = p
                 continue
-            strong = _rebound_str(bis, i, is_sell)
+            if prev_extreme is None or not math.isfinite(rebound_extreme):
+                strong = None
+            else:
+                strong = (rebound_extreme < prev_extreme if is_sell
+                          else rebound_extreme > prev_extreme)
             if not marked:
                 out.append({"type": "2卖" if is_sell else "2买",
                             "time": t, "price": p, "strong": strong})
@@ -3029,11 +3006,13 @@ def _second_family_v2(bis, firstPts, zss, c2tol, is_sell):
 def _third_family_v2(bis, upper_bis, zss, t3tol, is_sell):
     """三类及以上族（2026-10-14 规则v2，逐中枢序号制）：价格同向离开中枢边沿（买=上破
     zg、卖=下破 zd）后，回踩/反抽不再进该中枢（容差 t3tol）→ 合格点。序号窗口=每个已收笔
-    同向上级笔：窗口内第 1 个被同向离开的中枢 → 首个合格点=3类、其后=类3；第 2 个 →
-    4类/类4；≥3 封顶类4。回踩重新进入中枢则本轮离开结束、等待下一次离开（每枢计数不重置）。
-    不归属任何已收笔同向窗口的中枢（反向窗/未收笔尾段内）按时间序继续编号参与，
-    产出的点交由方向开窗统一过滤。同一回踩可同时不回进多个中枢——同刻去重保留
-    序号较新（后离开）中枢的类型。"""
+    同向上级笔，**窗口内重新起算**：第 1 个被同向离开的中枢 → 首个合格点=3类、其后=类3；
+    第 2 个 → 4类/类4；≥3 封顶类4。回踩重新进入中枢则本轮离开结束、等待下一次离开（每枢
+    计数不重置）；**下一个中枢的三笔重叠完成（trioEndTime）后本枢序列永久结束**——「前一个
+    中枢」指最近的中枢，远古中枢不能认领新中枢形成之后的回踩（无界前瞻会让 7 月的中枢
+    认领 10 月的回踩）。不归属任何已收笔同向窗口的中枢（反向窗/未收笔尾段内）按时间序
+    独立编号参与，产出的点交由方向开窗统一过滤。同一回踩可同时不回进多个中枢——同刻
+    去重保留序号较新（后离开）中枢的类型。"""
     out = []
     if not zss:
         return out
@@ -3044,17 +3023,20 @@ def _third_family_v2(bis, upper_bis, zss, t3tol, is_sell):
     eps = 1e-9
     j = 0
 
-    def process_zs(zs):
+    def process_zs(zs, bound_t):
         nonlocal j
         edge = zs["zd"] if is_sell else zs["zg"]
         raw_end = _zs_time_range(zs)[1]
         collect = False
         n = 0
         left = False
-        for i, b in enumerate(bis):
+        for b in bis:
             t = b["endTime"] or 0
-            if t <= raw_end:
+            if t < raw_end:
+                # 结束于 raw_end 的笔参与离开判定（上破笔常被 buildZS 吸收为末段延伸笔）
                 continue
+            if bound_t is not None and t >= bound_t:
+                break  # 下一中枢已形成：本枢序列到此为止
             if b["type"] == break_dir:
                 if (b["endPrice"] < edge - eps) if is_sell else (b["endPrice"] > edge + eps):
                     collect = True
@@ -3071,18 +3053,23 @@ def _third_family_v2(bis, upper_bis, zss, t3tol, is_sell):
         if left:
             j += 1
 
+    # 逐中枢处理：边界 = 时间上紧邻的下一个中枢的 trioEndTime（下一个中枢从此接管）
     matched = set()
     for ub in conf:
         if ub["type"] != win_dir:
             continue
-        for zs in zss:
+        j = 0  # 序号窗口内重新起算（2026-10-14 修正：此前跨窗口累计致现窗口一律类4）
+        for k, zs in enumerate(zss):
             if zs.get("upperStart") != ub["startTime"] or zs.get("upperEnd") != ub["endTime"]:
                 continue
             matched.add(id(zs))
-            process_zs(zs)
-    for zs in zss:
+            nxt = zss[k + 1].get("trioEndTime") if k + 1 < len(zss) else None
+            process_zs(zs, nxt)
+    j = 0  # 反向窗/尾段内的中枢不属任何同向窗口，独立起算
+    for k, zs in enumerate(zss):
         if id(zs) not in matched:
-            process_zs(zs)
+            nxt = zss[k + 1].get("trioEndTime") if k + 1 < len(zss) else None
+            process_zs(zs, nxt)
     # 同刻去重：保留序号较新中枢的类型
     by_time = {}
     for p in out:
@@ -3319,14 +3306,19 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
             print(f"[一买] 上级笔端点 {fmtT(fb['time'])}({fb['price']})")
     first_times = {p["time"] for p in points}
     zss = buildZSByUpper(bis, upperBis, barSec)
+    second_times = set()
     for p in _second_family_v2(bis, projected["buys"], zss, float(class2ZsTol or 0), False):
         if not allow(p["time"]) or p["time"] in first_times:
             continue
+        second_times.add(p["time"])
         points.append(p)
-    third_kept = [p for p in _third_family_v2(bis, upperBis, zss, t3tol, False)
-                  if allow(p["time"]) and p["time"] not in first_times]
-    _append_third_points(points, third_kept, _LEAVE_BUY, "类2买")
-    points.sort(key=lambda p: p["time"])  # 时间升序稳定排序；同刻一类优先、三类族让位二类族
+    # 同刻优先级（2026-10-14 规则v2）：一类 > 二类族 > 三类族——1买锚后首个抬低按定义
+    # 就是 2买，三类族（含类4）不得抢占同一端点（旧「3类族让位2买族」口径废除）。
+    for p in _third_family_v2(bis, upperBis, zss, t3tol, False):
+        if not allow(p["time"]) or p["time"] in first_times or p["time"] in second_times:
+            continue
+        points.append(p)
+    points.sort(key=lambda p: p["time"])  # 时间升序稳定排序；同刻优先级 一类 > 二类族 > 三类族
     return points
 
 
@@ -3356,13 +3348,16 @@ def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0
             print(f"[一卖] 上级笔端点 {fmtT(fs['time'])}({fs['price']})")
     first_times = {p["time"] for p in points}
     zss = buildZSByUpper(bis, upperBis, barSec)
+    second_times = set()
     for p in _second_family_v2(bis, projected["sells"], zss, float(class2ZsTol or 0), True):
         if not allow(p["time"]) or p["time"] in first_times:
             continue
+        second_times.add(p["time"])
         points.append(p)
-    third_kept = [p for p in _third_family_v2(bis, upperBis, zss, t3tol, True)
-                  if allow(p["time"]) and p["time"] not in first_times]
-    _append_third_points(points, third_kept, _LEAVE_SELL, "类2卖")
+    for p in _third_family_v2(bis, upperBis, zss, t3tol, True):
+        if not allow(p["time"]) or p["time"] in first_times or p["time"] in second_times:
+            continue
+        points.append(p)
     points.sort(key=lambda p: p["time"])
     return points
 

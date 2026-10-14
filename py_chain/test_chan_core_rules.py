@@ -515,19 +515,19 @@ class TestBuildZsPassThroughLeave(unittest.TestCase):
         got = [(p["type"], p["time"], p["price"]) for p in pts]
         # 2026-10-14 规则v2：
         #   1买@1000 = 上涨笔起点 (900,4021.82) 投影到 ±1 根K内同价小级别起点；
-        #   2买@1200(4071.64) = 锚后首个抬低（反弹 4090.02 不过前高 4091.67 → 弱）；
+        #   2买@1200(4071.64) = 锚后首个抬低（锚前无顶点 → strong=None 弱先行）；
         #   1400@4056.45 低于前低 4071.64（未抬低）→ 只更新参照不标；
-        #   低中枢（zd 4071.64）被向上离开后：1600/1800 回踩不进 → 3买/类3买；
-        #   第二中枢（zd 4093.86）被向上离开后 2000 回踩不进 → 4买（窗口内第2个被离开的中枢）；
-        #   2000 同刻低中枢口径是类3买，去重保留序号较新的 4买。
+        #   低中枢被向上离开后 1600 回踩不进 → 3买；1800 起回踩归第二中枢生命周期：
+        #   第二中枢的上破笔（终点4138.06）恰结束于其 rawEnd=1700、被 buildZS 吸收为延伸笔
+        #   ——结束于 rawEnd 的笔参与离开判定（修正）→ 1800 回踩 4118.91>4118.01 不进 →
+        #   4买（窗口内第2个被离开的中枢）；2000 撞下一中枢 trioEnd 边界 → 停。
         self.assertEqual(got, [
             ("1买", 1000, 4021.82),
             ("2买", 1200, 4071.64),
             ("3买", 1600, 4093.86),
-            ("类3买", 1800, 4118.91),
-            ("4买", 2000, 4121.06),
+            ("4买", 1800, 4118.91),
         ])
-        self.assertEqual(next(p for p in pts if p["type"] == "2买").get("strong"), False)
+        self.assertIsNone(next(p for p in pts if p["type"] == "2买").get("strong"))
 
 
 class TestPointRulesV2(unittest.TestCase):
@@ -544,15 +544,15 @@ class TestPointRulesV2(unittest.TestCase):
     MACD_LOW = [{"time": t, "dif": 0.0, "dea": 0.0, "macd": 0.0} for t in range(100, 1001, 50)]
 
     def test_first_raised_low_and_same_zs_class2(self):
-        # 上级：up(0,500] 买侧窗 + down(500,1000] 卖侧窗。锚=1买@0(440)。
-        # 低点 200@441（抬低→2买，反弹450不过前高455→弱）、400@444（抬高且与2买同中枢→类2买，
-        # 反弹470过前高450→强）、600@445（抬高但不在同中枢，且在下跌窗→不标）。
+        # 上级：up(0,500] 买侧窗 + down(500,1000] 卖侧窗。锚=1买@0(440)，锚前顶=(-50,460)=前高。
+        # 低点 200@441（抬低→2买，锚后反弹最高 455 < 460 → 弱）、400@444（抬高且与2买同中枢→类2买，
+        # 反弹最高仍 455 < 460 → 弱）、600@445（抬高但不在同中枢，且在下跌窗→不标）。
         bis = [
             self.b(-50, 0, "down", 460.0, 440.0),
             self.b(0, 100, "up", 440.0, 455.0),
             self.b(100, 200, "down", 455.0, 441.0),   # 2买@200（弱）
             self.b(200, 300, "up", 441.0, 450.0),
-            self.b(300, 400, "down", 450.0, 444.0),   # 类2买@400（强）
+            self.b(300, 400, "down", 450.0, 444.0),   # 类2买@400（弱）
             self.b(400, 500, "up", 444.0, 470.0),
             self.b(500, 600, "down", 470.0, 445.0),   # 下跌窗内 → 方向滤除
             self.b(600, 700, "up", 445.0, 448.0),
@@ -566,7 +566,7 @@ class TestPointRulesV2(unittest.TestCase):
                if p["type"] in ("2买", "类2买")]
         self.assertEqual(got, [
             ("2买", 200, 441.0, False),
-            ("类2买", 400, 444.0, True),
+            ("类2买", 400, 444.0, False),
         ])
 
     def test_not_raised_updates_ref_only(self):
@@ -590,8 +590,9 @@ class TestPointRulesV2(unittest.TestCase):
         self.assertEqual(got, [("2买", 200, 441.0)])
 
     def test_third_family_leave_and_reentry_count_kept(self):
-        # 中枢 zd95/zg110（enterEnd 10、exit 50）：b4 上破 zg=110 离开 → b5 回踩 112 不进 → 3买@60；
-        # b7 回踩 98 重进 → 本轮结束；b8 再次上破 → b9 回踩 113 不进 → 类3买@100（计数不重置）。
+        # 中枢 zd95/zg110（enterEnd 10、trio完成30、exit 40）：b4 上破 zg=110 离开 → b5 回踩 112 不进 → 3买@60；
+        # b7 回踩 98 重进 → 本轮结束；其后 b4~b6 组成的新中枢（zd113/zg130）三笔重叠在 70 完成
+        # → 旧枢序列从 70 起永久关闭，b9 回踩 100@113 不再由旧枢认领（新中枢未离开亦不产点）。
         bis = [
             self.b(0, 10, "up", 80.0, 110.0),
             self.b(10, 20, "down", 110.0, 90.0),
@@ -601,8 +602,8 @@ class TestPointRulesV2(unittest.TestCase):
             self.b(50, 60, "down", 130.0, 112.0),     # 回踩不进 → 3买@60
             self.b(60, 70, "up", 112.0, 135.0),
             self.b(70, 80, "down", 135.0, 98.0),      # 重进中枢 → 本轮离开结束
-            self.b(80, 90, "up", 98.0, 140.0),        # 再次上破
-            self.b(90, 100, "down", 140.0, 113.0),    # 回踩不进 → 类3买@100（n=2）
+            self.b(80, 90, "up", 98.0, 140.0),
+            self.b(90, 100, "down", 140.0, 113.0),    # 旧枢已关闭、新中枢未离开 → 不标
         ]
         upper = [self.b(0, 100, "up", 80.0, 140.0)]
         pts = cc.findBuyPoints(bis, upper, self.MACD_LOW, 900, 0.0, 0.0)
@@ -611,7 +612,35 @@ class TestPointRulesV2(unittest.TestCase):
                if _re.search(r"3买|4买", p["type"])]
         self.assertEqual(got, [
             ("3买", 60, 112.0),
-            ("类3买", 100, 113.0),
+        ])
+
+    def test_two_boxes_fourth_buy_and_bound(self):
+        # 两盒4买：ZS1 zd102/zg110（trio完成于30）上破离开 → 3买@60(115)；80/100/120 的回踩
+        # 虽不回进 ZS1，但新中枢 ZS2 zd130/zg140 在 70 完成三笔重叠 → ZS1 序列关闭不标；
+        # ZS2 上破140离开 → 回踩 155>140 不进 → 4买@120（窗口内第2个被离开的中枢）。
+        bis = [
+            self.b(0, 10, "up", 80.0, 110.0),
+            self.b(10, 20, "down", 110.0, 100.0),     # 2买@20
+            self.b(20, 30, "up", 100.0, 112.0),
+            self.b(30, 40, "down", 112.0, 102.0),     # 类2买@40（与2买同中枢 ZS1）
+            self.b(40, 50, "up", 102.0, 140.0),       # 上破 zg110 → ZS1 离开
+            self.b(50, 60, "down", 140.0, 115.0),     # 回踩不进 → 3买@60
+            self.b(60, 70, "up", 115.0, 150.0),
+            self.b(70, 80, "down", 150.0, 118.0),     # ZS2 三笔重叠于 70 完成 → ZS1 关闭
+            self.b(80, 90, "up", 118.0, 152.0),
+            self.b(90, 100, "down", 152.0, 130.0),    # ZS1 已关闭 → 不标（旧无界前瞻会标类3买）
+            self.b(100, 110, "up", 130.0, 170.0),     # 上破 ZS2 zg140 → 离开
+            self.b(110, 120, "down", 170.0, 155.0),   # 回踩不进 → 4买@120
+        ]
+        upper = [self.b(0, 120, "up", 80.0, 170.0)]
+        pts = cc.findBuyPoints(bis, upper, self.MACD_LOW, 900, 0.0, 0.0)
+        got = [(p["type"], p["time"], p["price"]) for p in pts]
+        self.assertEqual(got, [
+            ("1买", 0, 80.0),
+            ("2买", 20, 100.0),
+            ("类2买", 40, 102.0),
+            ("3买", 60, 115.0),
+            ("4买", 120, 155.0),
         ])
 
     def test_unformed_tail_allows_both_sides(self):
@@ -637,16 +666,17 @@ class TestPointRulesV2(unittest.TestCase):
         ])
 
     def test_undetermined_strong_null(self):
-        # 未定型：候选之后反弹笔尚未出现 → strong=None（弱先行）
+        # 强弱当下即可判定：反弹=锚后最高点455 vs 前高=锚前顶460 → 弱。
+        # 候选是末笔（其后无反弹笔）也不影响——强弱只看锚到候选之间的已成结构。
         bis = [
             self.b(-50, 0, "down", 460.0, 440.0),
             self.b(0, 100, "up", 440.0, 455.0),
-            self.b(100, 200, "down", 455.0, 441.0),   # 2买@200 是末笔 → 反弹未开始
+            self.b(100, 200, "down", 455.0, 441.0),   # 2买@200 是末笔 → 当下即判 弱
         ]
         upper = [self.b(0, 500, "up", 440.0, 470.0)]
         pts = cc.findBuyPoints(bis, upper, self.MACD_LOW, 900, 0.0, 0.0)
         two = next(p for p in pts if p["type"] == "2买")
-        self.assertIsNone(two.get("strong"))
+        self.assertFalse(two.get("strong"))
 
     def test_no_upper_returns_empty(self):
         # 无上级（日线）不标（2026-10-14 规则v2）
