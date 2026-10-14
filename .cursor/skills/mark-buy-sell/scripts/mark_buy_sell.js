@@ -31,6 +31,32 @@ const {
 
 // 笔数据缓存目录：由 chan-bi 画笔 SKILL 落盘，本脚本强制读取（画笔 → 标记 数据依赖）
 const CACHE_DIR = process.env.CHAN_CACHE_DIR || path.join(__dirname, "..", "..", "..", "..", ".cursor", "cache");
+
+// 实例互斥锁（2026-10-14 加固）：webapp 自动任务与手动运行并发时，两个实例在同一张图上
+// 交错「清旧标/画新标」会留残渣（10-14 实测 60m 残 58 个堆积形状、15m/3m 各 100 个）。
+// 锁按图表全局（非按品种）：一张图同时只允许一个标记实例。陈旧判据 = 锁龄 >10 分钟
+// 或持锁进程已不存在（进程崩溃未释放时可被接管）。
+const LOCK_PATH = path.join(CACHE_DIR, "buysell_mark.lock");
+const LOCK_STALE_MS = 10 * 60 * 1000;
+function tryAcquireLock() {
+  const now = Date.now();
+  let prev = null;
+  try { prev = JSON.parse(fs.readFileSync(LOCK_PATH, "utf8")); } catch (e) { prev = null; }
+  if (prev && Number.isFinite(prev.at)) {
+    const stale = now - prev.at > LOCK_STALE_MS;
+    let alive = false;
+    if (!stale && Number.isInteger(prev.pid)) {
+      try { process.kill(prev.pid, 0); alive = true; } catch (e) { alive = (e.code === "EPERM"); }
+    }
+    if (alive) return false;
+    console.log(`锁陈旧（age=${Math.round((now - prev.at) / 1000)}s, pid=${prev.pid} ${stale ? "超时" : "已退出"}），接管`);
+  }
+  fs.writeFileSync(LOCK_PATH, JSON.stringify({ pid: process.pid, at: now }));
+  return true;
+}
+function releaseLock() {
+  try { fs.unlinkSync(LOCK_PATH); } catch (e) {}
+}
 // 品种名中的特殊字符替换为下划线，保证文件名合法（与 chan-bi 落盘规则一致）
 const bisCacheFile = (symbol) => path.join(CACHE_DIR, `bis_${String(symbol).replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
 
@@ -124,11 +150,16 @@ function onlyThisInterval(res) {
 // ============================================================
 
 (async () => {
+  // 实例互斥（2026-10-14 加固）：另一实例运行中则本次直接退出
+  if (!tryAcquireLock()) {
+    console.log("另一 mark-buy-sell 实例正在运行（锁 " + LOCK_PATH + "），本次退出。");
+    return;
+  }
   let client;
   try {
     const targets = await CDP.List({ port: 9222 });
     const pg = targets.find(t => t.type === "page" && t.url.includes("tradingview.com"));
-    if (!pg) { console.log("ERROR: 未找到 TradingView 页面"); process.exit(1); }
+    if (!pg) throw new Error("未找到 TradingView 页面");
     client = await CDP({ target: pg.id, port: 9222 });
     await client.Page.enable();
     await client.Runtime.enable();
@@ -336,14 +367,16 @@ function onlyThisInterval(res) {
       return `${dt.getMonth()+1}-${dt.getDate()} ${p(dt.getHours())}:${p(dt.getMinutes())}`;
     };
 
-    // 清除某周期的旧买卖点标记（title = CHAN_BUYSELL_<周期>）
+    // 清除某周期的旧买卖点标记（title = CHAN_BUYSELL_<周期>）。
+    // 2026-10-14 加固：删除后复核剩余，未删净重试（最多3轮）——单轮枚举删除在形状
+    // 过多/图表忙时会漏（10-14 实测清 10 漏 65），返回 left 供调用方告警。
     const clearBuySell = async (res) => {
       const TITLE = "CHAN_BUYSELL_" + res;
       const r = await client.Runtime.evaluate({
-        expression: `(function() {
+        expression: `(async function() {
           const chart = TradingViewApi.activeChart();
           const TITLE = "${TITLE}";
-          const out = { cleared: 0 };
+          const out = { cleared: 0, left: 0, passes: 0 };
           const readTitle = (id) => {
             try {
               const sh = chart.getShapeById(id);
@@ -351,15 +384,24 @@ function onlyThisInterval(res) {
               return props && props.title ? String(props.title._value) : '';
             } catch(e) { return ''; }
           };
-          const shapes = chart.getAllShapes();
-          for (const s of shapes) {
-            if (readTitle(s.id) === TITLE) {
-              try { chart.removeEntity(s.id); out.cleared++; } catch(e) {}
+          for (let pass = 0; pass < 3; pass++) {
+            out.passes = pass + 1;
+            for (const s of chart.getAllShapes()) {
+              if (readTitle(s.id) === TITLE) {
+                try { chart.removeEntity(s.id); out.cleared++; } catch(e) {}
+              }
             }
+            let left = 0;
+            for (const s of chart.getAllShapes()) {
+              if (readTitle(s.id) === TITLE) left++;
+            }
+            out.left = left;
+            if (left === 0) break;
+            await new Promise(r2 => setTimeout(r2, 800));
           }
           return out;
         })()`,
-        returnByValue: true, awaitPromise: true, timeout: 30000,
+        returnByValue: true, awaitPromise: true, timeout: 60000,
       });
       return r.result.value;
     };
@@ -543,15 +585,26 @@ function onlyThisInterval(res) {
       const spanMerge = !!(stateOk && savedMarks[res] && dirtySpan && dirtySpan.t0 > -Infinity);
       const prevKept = spanMerge
         ? savedMarks[res].filter(m => (m.rawTime ?? m.time) < dirtySpan.t0) : [];
+      // 防堆叠（2026-10-14 加固）：早于已加载K线首根的标记若强行吸附会被夹到第一根
+      // 可见K上（10-14 实测 58 个标记堆在同一根 60m K）——跳过不画，留在状态里，
+      // 待历史K线加载完整的下一次运行补画。容差 1 根K（窗口边缘的正常吸附不受影响）。
+      const firstBarT = rawBars.length ? rawBars[0].time : -Infinity;
+      const barSecRes = intervalSecOf(res);
+      let piledSkipped = 0;
       for (const p of anchoredBuyPts) {
         if (spanMerge && p.time < dirtySpan.t0) continue;
+        if (p.time < firstBarT - barSecRes) { piledSkipped++; continue; }
         const t = snapToOwnBar(p.price, p.time, rawBars);
         marks.push({ label: familyLabel(p), time: t, price: p.price - offset, rawTime: p.time, rawPrice: p.price });
       }
       for (const p of sellPts) {
         if (spanMerge && p.time < dirtySpan.t0) continue;
+        if (p.time < firstBarT - barSecRes) { piledSkipped++; continue; }
         const t = snapToOwnBar(p.price, p.time, rawBars);
         marks.push({ label: familyLabel(p), time: t, price: p.price + offset, rawTime: p.time, rawPrice: p.price });
+      }
+      if (piledSkipped > 0) {
+        console.log(`[防堆叠] ${res}: 跳过 ${piledSkipped} 个早于已加载首根K（${toT(firstBarT)}）的标记——本次不画，下次历史加载完整后补画`);
       }
       {
         const merged = [...prevKept, ...marks]
@@ -585,7 +638,7 @@ function onlyThisInterval(res) {
       if (DRY) continue;
 
       const cl = await clearBuySell(res);
-      console.log(`[周期 ${res}] 清除旧买卖点:`, cl.cleared);
+      console.log(`[周期 ${res}] 清除旧买卖点:`, cl.cleared, cl.left > 0 ? `（告警：仍有 ${cl.left} 个未删净，${cl.passes} 轮尝试）` : "");
 
       // 绘制前确保图表数据覆盖最早标记时间
       if (marks.length > 0) {
@@ -617,5 +670,7 @@ function onlyThisInterval(res) {
   } catch (e) {
     console.log("Error:", e.message);
     if (client) await client.close();
+  } finally {
+    releaseLock();
   }
 })();
