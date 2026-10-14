@@ -78,7 +78,7 @@ let bis = core.buildBi(fractals, merged, atr, macdArr); // ③ 笔构建
 
 | 函数 | 说明 |
 |------|------|
-| `findBuyPoints(bis, upperBis, macdArr, barSec)` | 买点识别。有上级时 1买=上级已确认笔端点（上涨起点/下跌终点）经 `projectFirstPoints` 落到笔内部的小级别顶点，同笔不标；无上级时 1买=创新低（`firstNoDiverge`）。二买族锚在最新 1买。未成笔尾段追加本级多空一类 |
+| `findBuyPoints(bis, upperBis, macdArr, barSec)` | 买点识别。有上级时 1买=上级已确认笔端点（上涨起点/下跌终点）经 `projectFirstPoints` 落到笔内部的小级别顶点，同笔不标；无上级时 1买=创新低（`firstNoDiverge`）。二买族每个 1买 各自成序列（2026-10-14：窗口到下一个 1买，新锚不清前序列）。未成笔尾段追加本级多空一类 |
 | `findSellPoints(bis, upperBis, macdArr, barSec)` | 卖点识别。有上级时 1卖=上级已确认笔端点（上涨终点/下跌起点）同样落小级别顶点，同笔不标；无上级时 1卖=创新高。对称于买点 |
 | `projectFirstPoints(lowerBis, upperBis, barSec)` | 一类点投影（2026-10-13）：上级已确认笔端点 → 大级别笔**内部的小级别起点/终点**。落点阶梯（`lowerVertexOf`）：±1根本级K同价（最近）→ 上级一根K覆盖窗同价（最晚）→ 笔跨度内同价（最近）→ 跨度内同角色极值（底=上涨笔起点/下跌笔终点取最低，顶对称；「笔内部小级别起点/终点」的结构表达）→ 跨度内无同角色顶点才保持大级别时刻。搜索上界不越过下一个上级顶点（短笔几何防越界）。同笔（`isSameAsUpperBi`）两端都不标且抑制优先 |
 | `anchorFirstBuy(cand, upperBis)` | 一买锚定：取候选之前最近的上级底部端点（历史 API 保留；2026-10-13 起标记主流程不再二次锚定） |
@@ -149,3 +149,10 @@ JS/Python的`buildBi`增加可选末参`lowerContext`；用`makeBiLowerContext(r
 3. **平台取后可证伪回退（新规则 `6r`）**：`tryNearEqualSameType` 后移时记 `_platAnchor`；间隔不足分支**入口**（优先于 moreExtreme 顶替/近等后移）若原端点与 k 能完整成笔（`_pair_forms_bi`）且起点侧极值守卫通过（区间内无比起点更极值的同向极值，如 60m 9-18 04:00 底上方藏 4339.72 则不回退）→ 回退原端点并接入 k。例：15m 10-1 02:00 底被近等后移到 03:0、04:30 顶只剩 4 根合并K → 回退后 02:00→04:30 成笔（04:00 长下影压平使包含链多并一块是间隔被挤的诱因）。
 
 回归：15m 全历史 294→342 笔、60m 74→82、240 22→24、D 不变；`_cmp_merge.py`/`_cmp_merge_js.cjs` 生产口径对拍；test_chan_core_rules / test_near_double(.py/.cjs) 断言已按新口径更新。详见 chan-core SPEC §2.1、§2.4.4 与速查表 #6r。
+
+
+## 二买/二卖族每锚独立序列（2026-10-14）
+
+`secondPointSeries` / `_second_point_series` 不再只锚定最新一个 1买/1卖、不再被后续锚滚动清除：逐锚发射，锚 i 的扫描窗口 =（锚_i 时刻，锚_{i+1} 时刻）。窗口内首个抬低/压低笔端点 = 2买/2卖；端点破锚价 → 仅本锚序列作废（含已发射点，与旧单锚语义一致）。背驰闸（secondDivergeGate 仅拦弱档）按各锚自身时刻取值；强弱 strong、被闸点推进序列不重编号不变。
+
+用户口径：二卖在已收盘的上级反向笔内、1卖确定后自然标记——例 60m XAUUSD 10-7 03:00(4184.385) 是 1卖@10-2 20:00(4227.53) 后 4小时已收盘下跌笔（4225.405→4066.535）内的首个次高点；4小时新上涨笔确认出新 1卖@10-12 09:00(4217.395) 后前序列仍保留（同时新锚序列出 2卖@10-13 13:00）。JS/Python 镜像同步（test_chan_core_rules 每锚保留用例 ×2 两侧）；标记层 LOGIC_V → `20261014-second-per-anchor`；全部回测基线不可比。

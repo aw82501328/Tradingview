@@ -440,13 +440,15 @@ class ParamCenterTests(unittest.TestCase):
         param_center._CHAN_CFG_EXPORT_DIR = str(export_dir)
         param_center._DEFAULT_PARAMS_FILE = param_center.PARAMS_FILE  # 守卫对临时存储放行
         try:
-            param_center.update("chan", {"fractalSideRealWick": True}, "OANDA:XAUUSD")
+            # fractalSideRealWick 2026-10-14 起默认开；覆盖值取 False（≠默认，
+            # update 会剔除等于默认的键，True 会被清掉导致桶空不导出）
+            param_center.update("chan", {"fractalSideRealWick": False}, "OANDA:XAUUSD")
             fp = export_dir / "chan_cfg_XAUUSD.json"
             self.assertTrue(fp.exists())
             payload = json.loads(fp.read_text(encoding="utf-8"))
             self.assertEqual(payload["symbol"], "XAUUSD")
             self.assertIn("generatedAt", payload)
-            self.assertTrue(payload["cfg"]["fractalSideRealWick"])
+            self.assertFalse(payload["cfg"]["fractalSideRealWick"])
             self.assertEqual(payload["cfg"]["nearDoubleFixed"],
                              chan_core.CHAN_CFG_DEFAULTS["nearDoubleFixed"])
             param_center.reset("chan", "OANDA:XAUUSD")
@@ -454,6 +456,7 @@ class ParamCenterTests(unittest.TestCase):
         finally:
             param_center._CHAN_CFG_EXPORT_DIR = orig_dir
             param_center._DEFAULT_PARAMS_FILE = orig_default
+
 class TestExitModesParams(unittest.TestCase):
     """出场方式参数（2026-10-08）：schema/默认/至少启用一种约束/engine 透传"""
 

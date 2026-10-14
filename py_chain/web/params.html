@@ -923,7 +923,7 @@ const CHAN_HIDDEN_KEYS = new Set(['fractalSideRealWick']);
 function chanRowsHtml(m) {
   let html = windowDaysRowHtml(m);  // 小周期绘制窗口置顶（2026-10-02 用户指定）
   for (const key of Object.keys(m.schema)) {
-    if (CHAN_HIDDEN_KEYS.has(key)) continue;  // 分型邻侧影线真实价：实验参数，暂不暴露
+    if (CHAN_HIDDEN_KEYS.has(key)) continue;  // 分型邻侧影线真实价：2026-10-14 起默认开（长影压平不能影响笔的高点归属），仍不暴露
     if (key === WICK_MASTER) {
       html += wickRowHtml(m);
       continue;

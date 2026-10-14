@@ -499,7 +499,7 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
     }
 
     // 大级别笔变化时，从该周期起按区间套重算更小周期；未变的大级别沿用上次标记
-    const LOGIC_V = "20261013-upper-endpoint";
+    const LOGIC_V = "20261014-second-per-anchor";
     const statePath = path.join(CACHE_DIR, `buysell_${String(SYMBOL).replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
     const fpOf = (bis) => (bis || []).map(b => [b.type, b.startTime, b.endTime, b.startPrice, b.endPrice]);
     let prevState = null;
