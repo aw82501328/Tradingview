@@ -34,7 +34,7 @@ FIELDS = ["type", "startIdx", "endIdx", "startTime", "endTime",
 MARK_FIELDS = {"rawCount", "span", "gapLocked", "macdCross"}  # 展示分组用（前端）
 # 买卖点标记比对字段（mark_buy_sell.compute_period_marks 输出）
 MARK_CMP_FIELDS = ["label", "time", "price", "rawTime", "rawPrice", "color"]
-MARKS_KWARGS = {"nearAtrRatio", "keep", "class2ZsTol", "thirdZsTol"}  # compute_all_marks 可接受的 points 模块键
+MARKS_KWARGS = {"keep", "thirdZsTol"}  # compute_all_marks 可接受的 points 模块键（nearAtrRatio/class2ZsTol 已随规则v2/v3 移除停用）
 MIN_BARS = 50            # 建用例时所选周期（res=ALL 即全部默认周期）截断后的最少根数
 MAX_DIFFS = 50           # 每周期差异明细上限
 CONTEXT_PAD = 5          # 双侧笔对照窗口（首差异前后各N行）

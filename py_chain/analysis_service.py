@@ -404,7 +404,6 @@ class AnalysisManager:
             command.append("--with-30s")
         if stage == "points":
             command.append("--keep=" + str(cfg["keep"]))
-            command.append("--nearp=" + str(pm["points"]["nearAtrRatio"]))
             command.append("--class2-zs-tol=" + str(pm["points"].get("class2ZsTol", 0)))
             command.append("--third-zs-tol=" + str(pm["points"].get("thirdZsTol", 0)))
         if stage == "zs":

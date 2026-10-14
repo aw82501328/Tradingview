@@ -11,7 +11,6 @@
  *   --periods=...       要标记的周期列表（逗号分隔，默认 D,240,60,15,3）
  *   --dry               只计算不绘图
  *   --debug             打印锚定过程、标记列表等调试信息
- *   --nearp=0.3         1买与2买（1卖与2卖）价差阈值（ATR 倍数），价差不超过该值视为很近并合并标注「真1买/真1卖」
  *   --keep=10           每周期保留的标记总数（不分类，买+卖合并后按时间取最近 N 个）
  *   --class2-zs-tol=0   类2买/类2卖允许越过中枢边界的绝对点数（0=严格）
  *   --third-zs-tol=0    3买/类3买/3卖/类3卖允许进入中枢的绝对点数（0=严格）
@@ -58,9 +57,7 @@ if (CHAN_CFG_JSON) {
   try { Object.assign(core.CHAN_CFG, JSON.parse(CHAN_CFG_JSON)); }
   catch (e) { console.log("警告: --chan-cfg JSON 解析失败，忽略该参数"); }
 }
-// 1类 与 2类 邻近判定：1买/1卖 与 2买/2卖 的「K线最低/最高价差」不超过 nearp×ATR（至少 0.05）时
-// 视为「很近」（不限制时间差），直接把 1类 合并到 2类 标记上标注为「真1买/真1卖」（见 mergeNearFirstSecond）
-const NEAR_ATR_RATIO = Math.max(parseFloat(getArg("nearp", 0.3)) || 0.3, 0);
+// （2026-10-14 规则v3）真1买/真1卖 邻近合并与 --nearp 已按用户要求删除（价格就近不限时间差会跨月误合并，如 7-6 的 1卖 并入 10-13 的 2卖）。
 const FROM_DATE = getStrArg("from", "");
 if (!FROM_DATE) {
   console.log("错误: 必须指定起始日期 --from=YYYY-MM-DD");
@@ -121,48 +118,6 @@ function onlyThisInterval(res) {
   }
 }
 
-/**
- * 新增：1类 与 2类 买卖点价格很接近时，直接把 1类 标记合并到最近的 2类 标记上，标注为「真1买/真1卖」。
- *
- * 缠论中 1买（MACD 背驰底，时间在前）与 2买（其后回调不破前低的确认买点，时间在后）若价格很近
- * （2买 对应K线最低价与 1买 的最低价之差不超过阈值，不限制时间差），说明回调极浅、底部确认
- * 非常强，该 1买 是可靠的「真1买」——直接在 2买 标记上新增「真1买」，避免图上两个紧邻标记。
- * 原 1买 标记移除（由「真1买」替代），2买 标记保留；一个 2类 标记最多承接一个 1类 标记。
- * 1卖/2卖 对称处理（合并为「真1卖」）。附近没有价格接近的 2类 标记的 1类 标记保持原名不变。
- *
- * @param {Array} points 买卖点列表 [{type,time,price}, ...]
- * @param {string} firstType  一买或一卖的类型名（"1买"/"1卖"）
- * @param {string} secondType 二买或二卖的类型名（"2买"/"2卖"）
- * @param {string} mergedType 合并后的类型名（"真1买"/"真1卖"）
- * @param {number} nearPrice  邻近判定阈值（价格）：1类与2类价格差不超过该值视为「很近」
- */
-function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPrice) {
-  const firsts = points.filter(p => p.type === firstType);
-  if (firsts.length === 0) return points;
-  const seconds = points.filter(p => p.type === secondType);
-  if (seconds.length === 0) return points;
-  const usedSecond = new Set();
-  const out = [];
-  for (const p of points) {
-    if (p.type !== firstType) { out.push(p); continue; }
-    // 找时间上在 1类 之后（确认点）、价格最接近、且尚未承接过的 2类 标记
-    let best = null, bestDiff = Infinity;
-    for (const s of seconds) {
-      if (s.time < p.time) continue;
-      if (usedSecond.has(s.time)) continue;
-      const d = Math.abs(s.price - p.price);
-      if (d < bestDiff) { bestDiff = d; best = s; }
-    }
-    if (best && bestDiff <= nearPrice) {
-      usedSecond.add(best.time);
-      out.push({ type: mergedType, time: best.time, price: best.price });
-      if (DEBUG) console.log(`[邻近合并] ${firstType}@${fmtT(p.time)}(${p.price}) 与 ${secondType}@${fmtT(best.time)}(${best.price}) 价差 ${bestDiff.toFixed(3)}，合并为 ${mergedType}@${fmtT(best.time)}`);
-    } else {
-      out.push(p); // 附近无价格接近的 2类 标记，保留原 1类 标记
-    }
-  }
-  return out;
-}
 
 // ============================================================
 // 主流程
@@ -500,7 +455,7 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
 
     // 大级别笔变化时，从该周期起按区间套重算更小周期（2026-10-14 规则v2 起为笔区间粒度：
     // 脏区间 t0 之前沿用上次标记、之后取新算，见下方 marks 合并）；未变的大级别整体沿用
-    const LOGIC_V = "20261014-point-rules-v2";
+    const LOGIC_V = "20261014-point-rules-v3"; // 规则v3：删真1合并与共振变绿（逻辑变更必须升版使状态作废全量重算）
     const statePath = path.join(CACHE_DIR, `buysell_${String(SYMBOL).replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
     const fpOf = (bis) => (bis || []).map(b => [b.type, b.startTime, b.endTime, b.startPrice, b.endPrice]);
     let prevState = null;
@@ -525,7 +480,7 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
     let currentRes = prepRes;
     let upperBis = null; // 上一级周期的笔（用于一买锚定）
     let upperMacdArr = null; // 上一级周期 MACD（弱2类买卖点大周期背驰闸，与 upperBis 同步级联）
-    const periodMarks = {}; // 各周期已生成的标记（用于跨周期共振判定：上级买卖点 ↔ 本级别1类）
+    const periodMarks = {}; // 各周期已生成的标记（落盘状态用；2026-10-14 规则v3 起共振判定已删除）
     const nextFp = {};
     for (let pi = 0; pi < PERIODS.length; pi++) {
       const res = PERIODS[pi];
@@ -567,20 +522,12 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
       let buyPts = findBuyPoints(curBis, upperBis, macdArr, intervalSecOf(res), CLASS2_ZS_TOL, THIRD_ZS_TOL, upperMacdArr);
       let sellPts = findSellPoints(curBis, upperBis, macdArr, intervalSecOf(res), CLASS2_ZS_TOL, THIRD_ZS_TOL, upperMacdArr);
 
-      // 保留区间套下识别出的全部买卖点，再做邻近合并，最后每周期不分类只保留最近 N 个（默认 10，减少图上标记数量）
+      // 保留区间套下识别出的全部买卖点；一类点已在 findBuyPoints 内落到「上级笔内部的
+      // 小级别起点/终点」顶点（projectFirstPoints），展示时间由 snapToOwnBar 吸附到本周期 bar。
+      // （2026-10-14 规则v3）真1买/真1卖 邻近合并已删除。
+      const anchoredBuyPts = buyPts;
 
-      // 2026-10-13：一类点已在 findBuyPoints 内落到「上级笔内部的小级别起点/终点」
-      // 顶点（projectFirstPoints），不再做 anchorFirstBuy 二次锚定——那会把点拉回
-      // 上级端点/上级K开盘时刻。展示时间统一由下方 snapToOwnBar 吸附到本周期 bar。
-      let anchoredBuyPts = buyPts;
-
-      // 新增：1类 与 2类 买卖点价格很接近时，直接把 1类 合并到 2类 标记上，标注为「真1买/真1卖」。
-      // 判定基于价格（不限制时间差）：1买/1卖 与 2买/2卖 的价差不超过 nearp×ATR（至少 0.05）视为很近
-      const nearPrice = Math.max(atr * NEAR_ATR_RATIO, 0.05);
-      anchoredBuyPts = mergeNearFirstSecond(anchoredBuyPts, "1买", "2买", "真1买", nearPrice);
-      sellPts = mergeNearFirstSecond(sellPts, "1卖", "2卖", "真1卖", nearPrice);
-
-      // 汇总标记：把时间吸附到本周期bar边界；rawTime/rawPrice 保存未吸附的原始点位，用于跨周期共振判定
+      // 汇总标记：把时间吸附到本周期bar边界；rawTime/rawPrice 保存未吸附的原始点位（区间套合并与状态持久化用）
       // 二买族标签（2026-10-14 规则v2）：type 不变，图表显示 强二买/弱二买/强类2买…
       // （strong=null 未定型 → 弱先行，反弹完成后重算改判）；与 py_chain/mark_buy_sell.py _family_label 同步。
       const FAMILY_LABEL = { "2买": "二买", "类2买": "类2买", "2卖": "二卖", "类2卖": "类2卖" };
@@ -599,16 +546,12 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
       for (const p of anchoredBuyPts) {
         if (spanMerge && p.time < dirtySpan.t0) continue;
         const t = snapToOwnBar(p.price, p.time, rawBars);
-        // 真1买 与 2买 同点位，文字偏移双倍（更靠下）避免重叠
-        const mul = p.type === "真1买" ? 2 : 1;
-        marks.push({ label: familyLabel(p), time: t, price: p.price - offset * mul, rawTime: p.time, rawPrice: p.price });
+        marks.push({ label: familyLabel(p), time: t, price: p.price - offset, rawTime: p.time, rawPrice: p.price });
       }
       for (const p of sellPts) {
         if (spanMerge && p.time < dirtySpan.t0) continue;
         const t = snapToOwnBar(p.price, p.time, rawBars);
-        // 真1卖 与 2卖 同点位，文字偏移双倍（更靠上）避免重叠
-        const mul = p.type === "真1卖" ? 2 : 1;
-        marks.push({ label: familyLabel(p), time: t, price: p.price + offset * mul, rawTime: p.time, rawPrice: p.price });
+        marks.push({ label: familyLabel(p), time: t, price: p.price + offset, rawTime: p.time, rawPrice: p.price });
       }
       {
         const merged = [...prevKept, ...marks]
@@ -617,26 +560,10 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
         marks.push(...merged);
       }
 
-      // 跨周期共振：本级别的 1买/1卖 若与紧邻上一级别的 1/2/3 类买卖点落在同一点位
-      // （原始时间/价格一致），说明该1类点同时是上级买卖点（如 4小时2买 同时是 1小时1买），
-      // 本级别标记颜色改为绿色，其余保持红色。
-      const RED = '#F23645', GREEN = '#089981';
-      const upperRes = pi > 0 ? PERIODS[pi - 1] : null;
-      const upperMarks = upperRes ? periodMarks[upperRes] : null;
-      const upperClassRe = /^([1234]买|[1234]卖|类[234]买|类[234]卖)$/;
-      for (const mk of marks) {
-        mk.color = RED;
-        if ((mk.label === '1买' || mk.label === '1卖') && upperMarks) {
-          for (const um of upperMarks) {
-            if (!upperClassRe.test(um.label)) continue;
-            if (Math.abs(mk.rawTime - um.rawTime) <= 60 && Math.abs(mk.rawPrice - um.rawPrice) <= Math.max(atr * 0.2, 0.05)) {
-              mk.color = GREEN;
-              if (DEBUG) console.log(`[共振] ${res} ${mk.label}@${toT(mk.rawTime)}(${mk.rawPrice}) 与上级 ${upperRes} ${um.label}@${toT(um.rawTime)}(${um.rawPrice}) 同点位 → 绿色`);
-              break;
-            }
-          }
-        }
-      }
+      // （2026-10-14 规则v3）跨周期共振变绿已按用户要求删除：全部标记固定红色；
+      // color 字段保留恒红（eval 比对字段兼容）。
+      const RED = '#F23645';
+      for (const mk of marks) mk.color = RED;
 
       // 打印结果
       console.log("\n=== 买卖点结果 [周期 " + res + "] ===");
@@ -645,10 +572,10 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
       console.log("买点:", anchoredBuyPts.length ? anchoredBuyPts.map(p => `${p.type}@${toT(p.time)}(${p.price})`).join(", ") : "无");
       console.log("卖点:", sellPts.length ? sellPts.map(p => `${p.type}@${toT(p.time)}(${p.price})`).join(", ") : "无");
       if (marks.length) {
-        console.log("标记:", marks.map(mk => `${mk.label}@${toT(mk.time)}(${mk.price})${mk.color === GREEN ? "(绿)" : ""}`).join(", "));
+        console.log("标记:", marks.map(mk => `${mk.label}@${toT(mk.time)}(${mk.price})`).join(", "));
       }
 
-      // 记录本周期标记，供下一级周期跨周期共振判定使用
+      // 记录本周期标记（落盘状态）
       periodMarks[res] = marks;
 
       // 记录本周期笔，供下一级周期锚定一买使用

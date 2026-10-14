@@ -152,7 +152,7 @@ class CompareMarksTests(unittest.TestCase):
     def test_field_tamper_pinpointed(self):
         exp = [dict(m) for m in self.MK]
         act = [dict(m) for m in self.MK]
-        act[1]["label"] = "真1卖"
+        act[1]["label"] = "3卖"
         act[1]["color"] = "#F23645"
         out = compare_marks(exp, act)
         self.assertFalse(out["ok"])

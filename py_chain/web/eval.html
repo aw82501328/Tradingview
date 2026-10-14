@@ -278,7 +278,7 @@ function marksDetailHtml(mk){
   const pair=rows.length
     ?`<table class="pair-table"><thead><tr><th>点#</th><th>基线（冻结期望）</th><th>当前（本次重算）</th></tr></thead><tbody>${rows.map(r=>{
         const n=(r.idxA!=null?r.idxA:r.idxB)+1;
-        const MF=['label','time','price','rawTime','rawPrice','color'];
+        const MF=['label','time','price','rawTime','rawPrice'];  // color 恒红已无比对意义（规则v3 删共振）
         const diff=r.a&&r.b&&MF.some(f=>r.a[f]!==r.b[f]);
         const single=(r.a?1:0)+(r.b?1:0)===1;
         const mark=diff||single?' style="background:#26180f"':'';
@@ -290,7 +290,7 @@ function marksDetailHtml(mk){
 function markText(m){
   if(!m)return '—';
   const isBuy=String(m.label||'').endsWith('买');
-  return `<span class="arrow-${isBuy?'up':'down'}">${isBuy?'↑':'↓'}</span>${esc(m.label)} <b>${esc(m.rawPrice)}</b> · ${fmtT(m.rawTime)}${m.color==='#089981'?' <span class="badge pass">共振</span>':''}`;
+  return `<span class="arrow-${isBuy?'up':'down'}">${isBuy?'↑':'↓'}</span>${esc(m.label)} <b>${esc(m.rawPrice)}</b> · ${fmtT(m.rawTime)}`;
 }
 function diffDetailHtml(det){
   const struct=[],mark=[];
@@ -611,7 +611,7 @@ async function showBaselineDetail(id){
       const mks=(c.marks||{})[res]||[];
       if(mks.length){
         html+=`<p class="caption" style="margin:8px 0 2px">${res} · 买卖点 ${mks.length} 个</p>
-          <div class="table-wrap"><table class="pair-table"><thead><tr><th>点#</th><th>标记</th><th>原价</th><th>原时间</th><th>标价</th><th>标时间</th><th>共振</th></tr></thead><tbody>${mks.map((m,i)=>`<tr><td>#${i+1}</td><td>${markText(m)}</td><td>${esc(m.rawPrice)}</td><td>${fmtT(m.rawTime)}</td><td>${esc(m.price)}</td><td>${fmtT(m.time)}</td><td>${m.color==='#089981'?'✓':'·'}</td></tr>`).join('')}</tbody></table></div>`;
+          <div class="table-wrap"><table class="pair-table"><thead><tr><th>点#</th><th>标记</th><th>原价</th><th>原时间</th><th>标价</th><th>标时间</th></tr></thead><tbody>${mks.map((m,i)=>`<tr><td>#${i+1}</td><td>${markText(m)}</td><td>${esc(m.rawPrice)}</td><td>${fmtT(m.rawTime)}</td><td>${esc(m.price)}</td><td>${fmtT(m.time)}</td></tr>`).join('')}</tbody></table></div>`;
       }
     }
     if(!resList.length)html+='<p class="muted">无冻结数据</p>';

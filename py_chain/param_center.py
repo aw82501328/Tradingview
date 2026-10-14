@@ -191,10 +191,10 @@ PARAM_MODULES = {
         "category": "base",
         "title": "标记买卖点",
         "params": {
-            "nearAtrRatio": ("邻近合并阈值(×ATR)", "1买与2买价差 ≤ 该值×ATR 时合并为「真1买」", 0.0, 5.0),
             "keep": ("每周期保留标记数", "每周期买卖点标记总数上限（买+卖合并取最近N）", 1, 100),
             "thirdZsTol": ("3类进中枢容差(点)", "3买/类3买/4买/类4买/3卖/类3卖/4卖/类4卖允许进入中枢的绝对点数（0=严格）", 0.0, 1000.0),
             "divergeDurRatio": ("背驰时长可比上限", "两段时长比超过该值时面积项不计入背驰判据（收笔判定用，买卖点判定已不用背驰）", 1, 100),
+            # nearAtrRatio 已随 2026-10-14 规则v3 移除（真1买/真1卖 邻近合并删除）
             # secondDivergeGate 已随 2026-10-14 规则v2 移除（背驰彻底退出买卖点判定）；
             # class2ZsTol 已停用（类2买/类2卖「同一个中枢」改按时间归属）；
             # anchorUndecidedSkip/anchorUndecidedMinBars 已淘汰（2026-10-10 提前入列）
@@ -381,7 +381,6 @@ def defaults_of(module, symbol=None):
         base = _chan_defaults_subset(CHAN_BI_KEYS)
     elif module == "points":
         base = {
-            "nearAtrRatio": mark_buy_sell.NEAR_ATR_RATIO,
             "keep": mark_buy_sell.KEEP,
             "thirdZsTol": mark_buy_sell.THIRD_ZS_TOL,
             **_chan_defaults_subset(POINTS_CHAN_KEYS),
