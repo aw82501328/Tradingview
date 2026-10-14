@@ -14,8 +14,9 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
-from . import live_store
+from . import data_store, live_store
 from .backtest import DEFAULT_PERIODS
 from .live_trader import (LiveTrader, ReplayFeed, deep_merge, in_block_windows,
                           load_config, provisional_sl, reconcile_plan)
@@ -367,6 +368,70 @@ class TestTradingToggle(LiveIntegrationBase):
         hb = live_store.load_state(live_store.state_key("heartbeat", "chan_v1"))
         self.assertIsNotNone(hb)
         self.assertIs(hb.get("trading_enabled"), False)
+
+
+class _GapFeed(ReplayFeed):
+    """MT5Feed 停机缺口形态（bars 库隔离）：库内只有落后末根、feed 内存持全量；
+    current_time=墙钟语义（恒为 to_ts）；fill_gap 把 (from_ts,to_ts] 各周期写回库。"""
+
+    def __init__(self, db_symbol, periods, bars, cursor, to_ts,
+                 step_sec=180, tail_n=60):
+        self.db_symbol = db_symbol
+        self.periods = tuple(periods)
+        self.fine_res = "3"
+        self.cursor = int(cursor)
+        self.to_ts = int(to_ts)
+        self.step = int(step_sec)
+        self.tail_n = int(tail_n)
+        self._bars = bars
+        self._times = {res: [b["time"] for b in bs] for res, bs in bars.items()}
+        self.fill_calls = []
+
+    def current_time(self):
+        return self.to_ts
+
+    def fill_gap(self, from_ts, to_ts, fine_res):
+        n = 0
+        for res in self.periods:
+            fresh = [b for b in self._bars[res]
+                     if int(from_ts) < b["time"] <= int(to_ts)]
+            data_store.upsert_bars(self.db_symbol, res, fresh)
+            if res == fine_res:
+                n = len(fresh)
+        self.fill_calls.append((int(from_ts), int(to_ts)))
+        return n
+
+
+class TestFreshSessionGap(LiveIntegrationBase):
+    """2026-10-14 事故回归：新会话启动时库内末根远落后墙钟（停机缺口），缺口K
+    必须先补库、按历史预热忽略——不得经首拍 tail 进入 execute 重放真实下单
+    （当日实盘：库停 29h，首拍 12 笔实单）。"""
+
+    def test_stale_db_fresh_start_ignores_gap_signals(self):
+        t_mid = _ts("2026-06-02 00:00")     # 库内末根（停机点）
+        full = data_store.load_store("OANDA:XAUUSD", DEFAULT_PERIODS,
+                                     T0 - 40 * 86400, T1)
+        logs = []
+        with mock.patch.object(data_store, "DB_PATH",
+                               os.path.join(self.tmp, "bars_stale.db")):
+            data_store.upsert_bars("OANDA:XAUUSD", "3", [])       # 建表
+            for res, bs in full.items():   # 库只到 t_mid：模拟停机期间无写入
+                data_store.upsert_bars("OANDA:XAUUSD", res,
+                                       [b for b in bs if b["time"] <= t_mid])
+            feed = _GapFeed("OANDA:XAUUSD", DEFAULT_PERIODS, full, t_mid, T1)
+            trader = LiveTrader(self._cfg(), self.broker, feed,
+                                log=lambda *a: logs.append(" ".join(map(str, a))))
+            trader.pre_tick_hook = lambda: self._follow_quote(trader)
+            trader.start(once=True)
+            while not feed.done():
+                trader.tick()
+        # ① 缺口必须被补库（不补则引擎冷在 t_mid，缺口K经首拍 tail 变实时信号）
+        self.assertTrue(feed.fill_calls, "新会话启动未补停机缺口")
+        self.assertIn("行情缺口", "".join(logs))
+        # ② 全窗口信号只允许作为历史被引擎构造/预热消化：无实盘订单/持仓
+        #    （引擎构造即消费已载入K线，预热 init 可为空——断言只看实盘侧零动作）
+        self.assertEqual(live_store.orders_of(trader.session), [])
+        self.assertEqual(self.broker.positions(), [])
 
 
 if __name__ == "__main__":

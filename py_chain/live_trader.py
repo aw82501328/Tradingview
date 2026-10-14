@@ -364,6 +364,10 @@ class LiveTrader:
         else:
             self.session = f"S{int(time.time())}"
             t_start = self.feed.current_time()
+            # 停机缺口先进库再预热：否则库内末根~现在的缺口K由首拍 tail 喂入，
+            # execute=True 重放会当实时信号真实下单（2026-10-14 XAUUSD：库停
+            # 10-13 05:45，29h 缺口首拍 12 笔实单）。补库后缺口归入预热窗忽略。
+            self._fill_bar_gap()
             self._build_engine(t_start, rc["warmup_days"])
             init = self.engine.step_to(t_start)      # 预热：忽略历史信号（LiveMonitor 同款）
             if init:
@@ -666,7 +670,12 @@ class LiveTrader:
             return
         identity = self._identity(s)
         d = s["direction"]
-        entryLots = s.get("lots", self.cfg["lots"])   # fxma structure=半仓
+        # 进场手数与引擎 trade 同源（券商实单=镜像 volume，否则对账量不齐）：
+        # fxma structure=半仓（信号自带 lots）；chan 信号不带 → 引擎当前 lots
+        # （页面手数空仓时写入引擎；2026-10-14 事故：缺省取 cfg lots 致实单
+        # 0.02 vs 镜像 0.04）
+        entryLots = s.get("lots") or int(getattr(self.engine, "lots",
+                                                self.cfg["lots"]))
         # 风控门只挡下单，不记影子仓
         ok, reason = self._entry_gate(d, entryLots)
         if not ok:
