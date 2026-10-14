@@ -531,9 +531,11 @@ class TestBuildZsPassThroughLeave(unittest.TestCase):
 
 
 class TestSecondPointSeries(unittest.TestCase):
-    """2026-10-11 统一二买定义 + 2026-10-12 闸门收窄：二买族 = 1买/1卖后抬低/压低序列
-    + secondDivergeGate 弱档大周期背驰闸（无背驰只拦弱/未定点，强档放行）+ strong
-    强弱二分（强=紧邻前反向笔终点过再前一根反向笔终点）。"""
+    """2026-10-11 统一二买定义；2026-10-14 方向开窗：二类族按已收笔上级笔方向开窗
+    （买侧=上涨笔/卖侧=下跌笔跨度，窗口内首个回踩/反抽=2买/2卖、其后每个=类2买/类2卖，
+    卖侧放宽为镜像）+ secondDivergeGate 弱档大周期背驰闸（按窗口起点取值，无背驰只拦
+    弱/未定点，强档放行）+ strong 强弱二分（强=紧邻前反向笔终点过再前一根反向笔终点）。
+    无上级路径维持旧锚定口径（锚/破锚价作废/卖侧严格压低）。"""
 
     def b(self, t0, t1, typ, p0, p1):
         return {"type": typ, "startTime": t0, "endTime": t1,
@@ -543,26 +545,27 @@ class TestSecondPointSeries(unittest.TestCase):
         return [
             self.b(100, 200, "down", 460.0, 440.0),
             self.b(200, 300, "up",   440.0, 455.0),
-            self.b(300, 400, "down", 455.0, 435.0),   # 创新低 → 1买@400
-            self.b(400, 500, "up",   435.0, 445.0),   # 首笔上涨 445 < 前段末笔起点 455 → 弱
-            self.b(500, 600, "down", 445.0, 441.0),   # 抬低 441>435 → 2买
-            self.b(600, 700, "up",   441.0, 458.0),   # 458 > 前一根 up 终点 445 → 强
-            self.b(700, 800, "down", 458.0, 443.0),   # 更高抬低 → 类2买（强）
-            self.b(800, 900, "up",   443.0, 460.0),
-            self.b(900, 1000, "down", 460.0, 448.0),  # 更高抬低 → 类2买（强）
+            self.b(300, 400, "down", 455.0, 435.0),   # 底 → 1买@400(435)
+            self.b(400, 500, "up",   435.0, 445.0),   # 445 < 455 → 弱
+            self.b(500, 600, "down", 445.0, 441.0),   # 回踩① → 2买@600（弱）
+            self.b(600, 700, "up",   441.0, 458.0),   # 458 > 445 → 强
+            self.b(700, 800, "down", 458.0, 443.0),   # 回踩② → 类2买@800（强）
+            self.b(800, 900, "up",   443.0, 448.0),   # 448 < 458 → 弱
+            self.b(900, 1000, "down", 448.0, 442.0),  # 回踩③ → 类2买@1000（弱）
         ]
 
     def _upper(self):
-        # 末根确认下跌笔 50→1000 覆盖 1买@400；参照 = 前一根下跌笔 -100→0
+        # 已收笔上涨笔 400→1000 = 买侧窗口；闸参照 = 窗口起点 400 前最后两根下跌笔
         return [
             self.b(-300, -100, "up",   500.0, 560.0),
             self.b(-100, 0,   "down", 560.0, 470.0),
             self.b(0, 50,     "up",   470.0, 480.0),
-            self.b(50, 400,   "down", 480.0, 435.0),  # 终点即最新 1买@400/435
+            self.b(50, 400,   "down", 480.0, 435.0),
+            self.b(400, 1000, "up",   435.0, 448.0),
         ]
 
     def _upper_macd(self, diverge):
-        # 参照窗 [-100,0] 绿柱大；末笔窗 [50,1000] 绿柱小（diverge=True）/更大（False）
+        # 参照窗 [-100,0] 绿柱大；窗口起点前末下跌笔窗 [50,400] 绿柱小（diverge=True）/更大（False）
         out = [{"time": t, "dif": -8.0, "dea": 0.0, "macd": -10.0} for t in (-100, -50, 0)]
         for t in range(50, 1001, 50):
             out.append({"time": t, "dif": -2.0 if diverge else -15.0, "dea": 0.0,
@@ -571,34 +574,44 @@ class TestSecondPointSeries(unittest.TestCase):
 
     MACD_LOW = [{"time": t, "dif": 0.0, "dea": 0.0, "macd": 0.0} for t in range(100, 1001, 50)]
 
-    def test_on_diverge_marks_series_with_strong(self):
+    def test_on_diverge_marks_every_pullback_in_window(self):
+        # 方向开窗：已收笔上涨笔窗口 (400,1000] 内每个回踩都标——首个=2买、后续=类2买
         pts = cc.findBuyPoints(self._bis_buy(), self._upper(), self.MACD_LOW, 900,
                                0.0, 0.0, upperMacd=self._upper_macd(True))
-        got = [(p["type"], p["time"], p["price"], p.get("strong")) for p in pts]
+        got = [(p["type"], p["time"], p["price"], p.get("strong")) for p in pts
+               if p["type"] in ("2买", "类2买")]
         self.assertEqual(got, [
-            ("1买", -300, 500.0, None),
-            ("1买", 0, 470.0, None),
-            ("1买", 400, 435.0, None),
-            ("2买", 600, 441.0, False),      # 首笔上涨 445 未过 455 → 弱
-            ("类2买", 800, 443.0, True),     # 458 > 445 → 强
-            ("类2买", 1000, 448.0, True),    # 460 > 458 → 强
+            ("2买", 600, 441.0, False),
+            ("类2买", 800, 443.0, True),
+            ("类2买", 1000, 442.0, False),
         ])
 
+    def test_direction_filter_sells_only_in_down_windows(self):
+        # 方向过滤：up 端点 500/700/900 都落在上涨笔窗口 (400,1000] 内 → 不标卖；
+        # 唯一落在下跌笔窗口 (50,400] 的 up 端点 300 → 2卖
+        umacd = [{"time": t, "dif": 8.0, "dea": 0.0, "macd": 10.0}
+                 for t in (-300, -250, -200, -150, -100, -50)]
+        umacd.append({"time": 0, "dif": 2.0, "dea": 0.0, "macd": 2.0})
+        for t in range(50, 1001, 50):
+            umacd.append({"time": t, "dif": 2.0, "dea": 0.0, "macd": 2.0})
+        pts = cc.findSellPoints(self._bis_buy(), self._upper(), self.MACD_LOW, 900,
+                                0.0, 0.0, upperMacd=umacd)
+        got = [(p["type"], p["time"], p["price"], p.get("strong")) for p in pts
+               if p["type"] in ("2卖", "类2卖")]
+        self.assertEqual(got, [("2卖", 300, 455.0, None)])
+
     def test_on_no_diverge_blocks_weak_only(self):
-        # 2026-10-12 闸门收窄：无大周期背驰只拦弱档——2买@600（弱）不标，
-        # 强档 类2买@800/1000 照标；被闸点不重编号（仍是类2买）
+        # 无大周期背驰只拦弱档——2买@600（弱）与 类2买@1000（弱）不标，
+        # 强档 类2买@800 照标；被闸点不重编号（仍是类2买）
         pts = cc.findBuyPoints(self._bis_buy(), self._upper(), self.MACD_LOW, 900,
                                0.0, 0.0, upperMacd=self._upper_macd(False))
-        self.assertEqual([(p["type"], p["time"], p.get("strong")) for p in pts],
-                         [("1买", -300, None),
-                          ("1买", 0, None),
-                          ("1买", 400, None),
-                          ("类2买", 800, True),
-                          ("类2买", 1000, True)])
+        got = [(p["type"], p["time"], p.get("strong")) for p in pts
+               if p["type"] in ("2买", "类2买")]
+        self.assertEqual(got, [("类2买", 800, True)])
 
     def test_on_no_diverge_undetermined_and_forming_not_marked(self):
-        # 闸拦截期：未定型（前反弹笔 _forming → strong=None）与回调段未成笔
-        # （点笔 _forming，过前高=strong=True）均不标；强档已成型点照标
+        # 闸拦截期：未定型（前反弹笔 _forming → strong=None）与回踩段未成笔
+        # （点笔 _forming，过前高=strong=True）均不标
         bis = self._bis_buy()
         bis[3]["_forming"] = True
         bis[3]["enough"] = 5   # enough 使 _forming 笔仍入列（提前入列口径）
@@ -606,9 +619,8 @@ class TestSecondPointSeries(unittest.TestCase):
         bis[6]["enough"] = 5
         pts = cc.findBuyPoints(bis, self._upper(), self.MACD_LOW, 900,
                                0.0, 0.0, upperMacd=self._upper_macd(False))
-        self.assertEqual([(p["type"], p["time"], p.get("strong")) for p in pts],
-                         [("1买", -300, None), ("1买", 0, None),
-                          ("1买", 400, None), ("类2买", 1000, True)])
+        got = [(p["type"], p["time"]) for p in pts if p["type"] in ("2买", "类2买")]
+        self.assertEqual(got, [])
 
     def test_off_ignores_divergence_gate(self):
         saved = cc.CHAN_CFG.get("secondDivergeGate")
@@ -620,102 +632,26 @@ class TestSecondPointSeries(unittest.TestCase):
         finally:
             cc.CHAN_CFG["secondDivergeGate"] = saved
 
-    def test_series_void_when_low_breaks_anchor(self):
-        # 1000→1100 跌破 1买@435 → 1买滚动到 1100@430，序列作废重找（其后无 down → 无 2买）
-        bis = self._bis_buy() + [self.b(1000, 1100, "down", 448.0, 430.0)]
-        pts = cc.findBuyPoints(bis, self._upper(), self.MACD_LOW, 900,
-                               0.0, 0.0, upperMacd=self._upper_macd(True))
-        self.assertEqual([(p["type"], p["time"]) for p in pts],
-                         [("1买", -300), ("1买", 0), ("1买", 400)])
-
-    def test_buy_break_keeps_points_inside_closed_upper(self):
-        # 2026-10-14 用户口径：破锚价只终止序列，已收笔上级笔内的已发射点保留——
-        # 2买@600/类2买@800 位于已确认上级上涨笔 (400,900) 内（保留）；
-        # 类2买@1000 在确认笔结束(900)之后（丢弃）；1100@430 破锚价终止序列。
-        bis = [
-            self.b(100, 200, "down", 460.0, 440.0),
-            self.b(200, 300, "up",   440.0, 455.0),
-            self.b(300, 400, "down", 455.0, 435.0),   # anchor 1买@400(435)
-            self.b(400, 500, "up",   435.0, 450.0),
-            self.b(500, 600, "down", 450.0, 441.0),   # 抬高 → 2买@600（确认上级笔 400-900 内）
-            self.b(600, 700, "up",   441.0, 448.0),
-            self.b(700, 800, "down", 448.0, 443.0),   # → 类2买@800（确认笔内）
-            self.b(800, 900, "up",   443.0, 452.0),
-            self.b(900, 1000, "down", 452.0, 438.0),  # → 类2买@1000（确认笔结束 900 之后 → 破锚后被清）
-            self.b(1000, 1100, "up", 438.0, 450.0),
-            self.b(1100, 1200, "down", 450.0, 430.0), # 430<435 破锚价 → 序列终止
-        ]
-        upper = [
-            self.b(-300, -100, "up",   320.0, 380.0),
-            self.b(-100, 0,   "down", 380.0, 445.0),
-            self.b(0, 50,     "up",   445.0, 452.0),
-            self.b(50, 400,   "down", 452.0, 435.0),  # → 1买@400(435) anchor
-            self.b(400, 900,  "up",   435.0, 452.0),  # 已确认上级上涨笔（内含 2买@600/类2买@800）
-            {"type": "down", "startTime": 900, "endTime": 1300, "startPrice": 452.0,
-             "endPrice": 430.0, "span": 22.0, "_forming": True, "enough": 5},
-        ]
-        umacd = [{"time": t, "dif": -8.0, "dea": 0.0, "macd": -10.0} for t in (-100, -50, 0)]
-        for t in range(50, 401, 50):
-            umacd.append({"time": t, "dif": -3.0, "dea": 0.0, "macd": -3.0})
-        pts = cc.findBuyPoints(bis, upper, self.MACD_LOW, 900, 0.0, 0.0, upperMacd=umacd)
-        got = [(p["type"], p["time"], p["price"], p.get("strong")) for p in pts
-               if p["type"] in ("2买", "类2买")]
-        self.assertEqual(got, [
-            ("2买", 600, 441.0, False),
-            ("类2买", 800, 443.0, False),
-        ])
-
-    def test_sell_break_keeps_points_inside_closed_upper(self):
-        # 卖侧镜像：2卖@600/类2卖@800 位于已确认上级下跌笔 (400,900) 内保留；
-        # 类2卖@1000（确认笔结束之后）与 1200@470 破锚价一同清除。
+    def test_sell_mirror_relaxed_every_rebound(self):
+        # 卖侧镜像：下跌笔窗口内每个反抽都标；反抽③ 455 未严格低于前点 457——
+        # 旧口径「严格更低压低」不标，2026-10-14 方向开窗口后放宽照标
         bis = [
             self.b(100, 200, "up",   440.0, 460.0),
             self.b(200, 300, "down", 460.0, 445.0),
-            self.b(300, 400, "up",   445.0, 465.0),   # anchor 1卖@400(465)
-            self.b(400, 500, "down", 465.0, 450.0),
-            self.b(500, 600, "up",   450.0, 455.0),   # 压低 → 2卖@600（确认上级笔 400-900 内）
-            self.b(600, 700, "down", 455.0, 440.0),
-            self.b(700, 800, "up",   440.0, 452.0),   # 更低 → 类2卖@800（确认笔内）
-            self.b(800, 900, "down", 452.0, 435.0),
-            self.b(900, 1000, "up",  435.0, 451.0),   # 451<452 → 类2卖@1000（确认笔后 → 破锚后被清）
-            self.b(1000, 1100, "down", 451.0, 440.0),
-            self.b(1100, 1200, "up",  440.0, 470.0),  # 470≥465 破锚价 → 序列终止
-        ]
-        upper = [
-            self.b(-300, -100, "down", 380.0, 320.0),
-            self.b(-100, 0,   "up",   320.0, 410.0),
-            self.b(0, 50,     "down", 410.0, 400.0),
-            self.b(50, 400,   "up",   400.0, 465.0),  # → 1卖@400(465) anchor
-            self.b(400, 900,  "down", 465.0, 435.0),  # 已确认上级下跌笔（内含 2卖@600/类2卖@800）
-            {"type": "up", "startTime": 900, "endTime": 1300, "startPrice": 435.0,
-             "endPrice": 470.0, "span": 35.0, "_forming": True, "enough": 5},
-        ]
-        umacd = [{"time": t, "dif": 8.0, "dea": 0.0, "macd": 10.0} for t in (-100, -50, 0)]
-        for t in range(50, 401, 50):
-            umacd.append({"time": t, "dif": 3.0, "dea": 0.0, "macd": 3.0})
-        pts = cc.findSellPoints(bis, upper, self.MACD_LOW, 900, 0.0, 0.0, upperMacd=umacd)
-        got = [(p["type"], p["time"], p["price"], p.get("strong")) for p in pts
-               if p["type"] in ("2卖", "类2卖")]
-        self.assertEqual(got, [
-            ("2卖", 600, 455.0, False),
-            ("类2卖", 800, 452.0, True),
-        ])
-
-    def test_sell_mirror_series(self):
-        bis = [
-            self.b(100, 200, "up",   440.0, 460.0),
-            self.b(200, 300, "down", 460.0, 445.0),
-            self.b(300, 400, "up",   445.0, 465.0),   # 创新高 → 1卖@400
-            self.b(400, 500, "down", 465.0, 455.0),   # 455 未低于前一根 down 终点 445 → 弱
-            self.b(500, 600, "up",   455.0, 459.0),   # 压低 459<465 → 2卖
+            self.b(300, 400, "up",   445.0, 465.0),   # 顶 → 1卖@400(465)
+            self.b(400, 500, "down", 465.0, 455.0),   # 455 > 445 → 弱
+            self.b(500, 600, "up",   455.0, 459.0),   # 反抽① → 2卖@600（弱）
             self.b(600, 700, "down", 459.0, 442.0),   # 442 < 455 → 强
-            self.b(700, 800, "up",   442.0, 457.0),   # 更低压低 → 类2卖（强）
+            self.b(700, 800, "up",   442.0, 457.0),   # 反抽② → 类2卖@800（强）
+            self.b(800, 900, "down", 457.0, 452.0),   # 452 > 442 → 弱
+            self.b(900, 1000, "up",  452.0, 455.0),   # 反抽③ → 类2卖@1000（弱，放宽照标）
         ]
         upper = [
             self.b(-300, -100, "down", 380.0, 320.0),
             self.b(-100, 0,   "up",   320.0, 410.0),
             self.b(0, 50,     "down", 410.0, 400.0),
-            self.b(50, 400,   "up",   400.0, 465.0),  # 终点即 1卖@400/465
+            self.b(50, 400,   "up",   400.0, 465.0),
+            self.b(400, 1000, "down", 465.0, 442.0),  # 已收笔下跌笔 = 卖侧窗口 (400,1000]
         ]
         umacd = [{"time": t, "dif": 8.0, "dea": 0.0, "macd": 10.0} for t in (-100, -50, 0)]
         for t in range(50, 1001, 50):
@@ -726,93 +662,121 @@ class TestSecondPointSeries(unittest.TestCase):
         self.assertEqual(got, [
             ("2卖", 600, 459.0, False),
             ("类2卖", 800, 457.0, True),
+            ("类2卖", 1000, 455.0, False),
         ])
 
-    def test_sell_each_anchor_keeps_its_series_after_later_first(self):
-        # 2026-10-14 用户规则：每个 1卖 各自成序列（窗口到下一个 1卖），后续新 1卖 出现
-        # 不清除前序列——上级下跌笔已收盘时，其内的 2卖/类2卖 是既成结构事实。
-        # 场景对应 60m XAUUSD 10-7：1卖@400(465) 后 4h 下跌笔内 2卖@600/类2卖@800；
-        # 4h 新上涨笔确认 → 新 1卖@1300(455)（更低），其序列再出 2卖@1500，
-        # 前一序列不被锚滚动清除。
+    def test_gate_per_window_at_window_start(self):
+        # 闸按各窗口起点取值：窗口①（起点 -300）前两根下跌笔动能衰减 → 背驰 → 放行；
+        # 窗口②（起点 100）前两根下跌笔动能仍强 → 无背驰 → 只拦弱档（强档 类2买@700 照标）
         bis = [
-            self.b(100, 200, "up",   440.0, 460.0),
-            self.b(200, 300, "down", 460.0, 445.0),
-            self.b(300, 400, "up",   445.0, 465.0),   # 顶对齐 anchor1 1卖@400(465)
-            self.b(400, 500, "down", 465.0, 450.0),
-            self.b(500, 600, "up",   450.0, 455.0),   # 压低 455<465 → 2卖@600（上级下跌笔内）
-            self.b(600, 700, "down", 455.0, 440.0),
-            self.b(700, 800, "up",   440.0, 452.0),   # 更低压低 452<455 → 类2卖@800（不触发3卖让位）
-            self.b(800, 900, "down", 448.0, 435.0),
-            self.b(900, 1000, "up",  435.0, 452.0),   # 452 未更低 → 介于不标、等待
-            self.b(1000, 1100, "down", 452.0, 435.0),
-            self.b(1100, 1300, "up", 434.0, 455.0),   # 顶对齐 anchor2 1卖@1300(455)
-            self.b(1300, 1400, "down", 455.0, 442.0),
-            self.b(1400, 1500, "up", 440.0, 450.0),   # 压低 450<455 → 2卖@1500（anchor2 序列）
+            self.b(-300, -200, "up",   470.0, 490.0),
+            self.b(-200, -100, "down", 490.0, 441.0),  # 窗口①回踩 → 2买@-100（未定型，闸开照标）
+            self.b(-100, -50,  "up",   441.0, 465.0),
+            self.b(-50, 100,   "down", 465.0, 425.0),
+            self.b(100, 300,   "up",   425.0, 450.0),  # 450 < 465 → 弱
+            self.b(300, 400,   "down", 450.0, 441.0),  # 窗口②回踩①（弱）→ 被闸
+            self.b(400, 600,   "up",   441.0, 455.0),  # 455 > 450 → 强
+            self.b(600, 700,   "down", 455.0, 448.0),  # 窗口②回踩②（强）→ 类2买@700
         ]
         upper = [
-            self.b(-300, -100, "down", 380.0, 320.0),
-            self.b(-100, 0,   "up",   320.0, 410.0),  # → 1卖@0(410)：窗口首 up 端点 460≥410 → 破锚价作废
-            self.b(0, 50,     "down", 410.0, 400.0),
-            self.b(50, 400,   "up",   400.0, 465.0),  # → 1卖@400(465) anchor1
-            self.b(400, 900,  "down", 465.0, 435.0),  # 已收盘上级下跌笔
-            self.b(900, 1300, "up",   435.0, 455.0),  # → 1卖@1300(455) anchor2（更低的新1卖）
-            self.b(1300, 1500, "down", 455.0, 443.0),
+            self.b(-900, -700, "up",   380.0, 460.0),
+            self.b(-700, -500, "down", 460.0, 400.0),  # down1（窗口①闸参照的前一根）
+            self.b(-500, -400, "up",   400.0, 450.0),
+            self.b(-400, -300, "down", 450.0, 410.0),  # down2 动能衰减 → 窗口①闸放行
+            self.b(-300, -50,  "up",   410.0, 470.0),  # 窗口① (-300,-50]
+            self.b(-50, 0,     "down", 470.0, 430.0),  # down3
+            self.b(0, 50,      "up",   430.0, 460.0),
+            self.b(50, 100,    "down", 460.0, 425.0),  # down4 动能仍强 → 窗口②闸拦截
+            self.b(100, 700,   "up",   425.0, 455.0),  # 窗口② (100,700]
         ]
-        umacd = [{"time": t, "dif": 8.0, "dea": 0.0, "macd": 10.0} for t in (-100, -50, 0)]
-        for t in range(50, 401, 50):
-            umacd.append({"time": t, "dif": 3.0, "dea": 0.0, "macd": 3.0})
-        for t in range(900, 1301, 50):
-            umacd.append({"time": t, "dif": 1.0, "dea": 0.0, "macd": 1.0})
-        pts = cc.findSellPoints(bis, upper, self.MACD_LOW, 900, 0.0, 0.0, upperMacd=umacd)
+        umacd = []
+        for t in range(-900, 701, 50):
+            dif, macd = -1.0, -1.0
+            if -700 <= t <= -500:
+                dif, macd = -8.0, -10.0        # down1
+            elif -400 <= t <= -300:
+                dif, macd = -2.0, -2.0         # down2 衰减 → 背驰
+            elif -50 <= t <= 0:
+                dif, macd = -8.0, -10.0        # down3
+            elif 50 <= t <= 100:
+                dif, macd = -15.0, -20.0       # down4 无衰减
+            umacd.append({"time": t, "dif": dif, "dea": 0.0, "macd": macd})
+        macd_low = [{"time": t, "dif": 0.0, "dea": 0.0, "macd": 0.0}
+                    for t in range(-300, 701, 50)]
+        pts = cc.findBuyPoints(bis, upper, macd_low, 900, 0.0, 0.0, upperMacd=umacd)
         got = [(p["type"], p["time"], p["price"], p.get("strong")) for p in pts
-               if p["type"] in ("2卖", "类2卖")]
+               if p["type"] in ("2买", "类2买")]
         self.assertEqual(got, [
-            ("2卖", 600, 455.0, False),
-            ("类2卖", 800, 452.0, True),
-            ("2卖", 1500, 450.0, False),
+            ("2买", -100, 441.0, None),
+            ("类2买", 700, 448.0, True),
         ])
 
-    def test_buy_each_anchor_keeps_its_series_after_later_first(self):
-        # 买侧镜像：1买@400 序列的 2买/类2买 在更低的新 1买@1300 出现后保留；
-        # 新锚序列自己的 2卖…2买 照常发射。
+    def test_window_points_survive_later_break(self):
+        # 已收笔窗口内点不因后续走势作废（取消破锚价概念）：窗口 (400,900] 内
+        # 2买@600/类2买@800 保留；1000@430 破窗起点价发生在窗外（后续下跌笔内）不影响
         bis = [
             self.b(100, 200, "down", 460.0, 440.0),
             self.b(200, 300, "up",   440.0, 455.0),
-            self.b(300, 400, "down", 455.0, 435.0),   # 底对齐 anchor1 1买@400(435)
+            self.b(300, 400, "down", 455.0, 435.0),
             self.b(400, 500, "up",   435.0, 450.0),
-            self.b(500, 600, "down", 450.0, 441.0),   # 抬高 441>435 → 2买@600
+            self.b(500, 600, "down", 450.0, 441.0),   # 2买@600
             self.b(600, 700, "up",   441.0, 448.0),
-            self.b(700, 800, "down", 448.0, 443.0),   # 仍>435 → 类2买@800（买侧不要求更高）
+            self.b(700, 800, "down", 448.0, 443.0),   # 类2买@800
             self.b(800, 900, "up",   443.0, 452.0),
-            self.b(900, 1000, "down", 452.0, 438.0),  # 仍>435 → 类2买@1000
-            self.b(1000, 1100, "up", 438.0, 450.0),
-            self.b(1100, 1300, "down", 450.0, 425.0), # 底对齐 anchor2 1买@1300(425)
-            self.b(1300, 1400, "up",   425.0, 442.0),
-            self.b(1400, 1500, "down", 440.0, 432.0), # 抬高 432>425 → 2买@1500
+            self.b(900, 1000, "down", 452.0, 430.0),  # 430 破窗起点价 435（旧口径=破锚价作废）
+            self.b(1000, 1100, "up", 430.0, 445.0),
         ]
         upper = [
-            self.b(-300, -100, "up",   320.0, 380.0),
-            self.b(-100, 0,   "down", 380.0, 445.0),  # → 1买@0(445)：窗口首 down 端点 440<445 → 破锚价作废
-            self.b(0, 50,     "up",   445.0, 452.0),
-            self.b(50, 400,   "down", 452.0, 435.0),  # → 1买@400(435) anchor1
-            self.b(400, 900,  "up",   435.0, 452.0),
-            self.b(900, 1300, "down", 452.0, 425.0),  # → 1买@1300(425) anchor2（更低的新1买）
-            self.b(1300, 1500, "up",   425.0, 440.0),
+            self.b(-300, -100, "up",   500.0, 560.0),
+            self.b(-100, 0,   "down", 560.0, 470.0),
+            self.b(0, 50,     "up",   470.0, 480.0),
+            self.b(50, 400,   "down", 480.0, 435.0),
+            self.b(400, 900,  "up",   435.0, 452.0),  # 买侧窗口 (400,900]：内含 600/800
+            self.b(900, 1100, "down", 452.0, 430.0),  # 后续已收笔下跌笔（破价发生在窗外）
         ]
         umacd = [{"time": t, "dif": -8.0, "dea": 0.0, "macd": -10.0} for t in (-100, -50, 0)]
         for t in range(50, 401, 50):
             umacd.append({"time": t, "dif": -3.0, "dea": 0.0, "macd": -3.0})
-        for t in range(900, 1301, 50):
-            umacd.append({"time": t, "dif": -1.0, "dea": 0.0, "macd": -1.0})
-        pts = cc.findBuyPoints(bis, upper, self.MACD_LOW, 900, 0.0, 0.0, upperMacd=umacd)
+        macd_long = [{"time": t, "dif": 0.0, "dea": 0.0, "macd": 0.0}
+                     for t in range(100, 1101, 50)]
+        pts = cc.findBuyPoints(bis, upper, macd_long, 900, 0.0, 0.0, upperMacd=umacd)
         got = [(p["type"], p["time"], p["price"], p.get("strong")) for p in pts
                if p["type"] in ("2买", "类2买")]
         self.assertEqual(got, [
             ("2买", 600, 441.0, False),
             ("类2买", 800, 443.0, False),
-            ("类2买", 1000, 438.0, True),
-            ("2买", 1500, 432.0, False),
         ])
+
+    def test_no_upper_path_keeps_legacy_anchor_semantics(self):
+        # 无上级（D级主路径 / 未成笔尾段局部序列）维持旧锚定口径：
+        # 抬低序列照标；破锚价整序列作废（破锚下跌笔跨度远大于此前所有下跌笔 →
+        # 无参照、不成新 1买锚，端点破锚价 → 序列清空）
+        base = lambda: [
+            self.b(100, 200, "down", 460.0, 440.0),
+            self.b(200, 300, "up",   440.0, 455.0),
+            self.b(300, 400, "down", 455.0, 435.0),   # 创新低 → 1买@400(435) = 锚
+            self.b(400, 500, "up",   435.0, 445.0),
+            self.b(500, 600, "down", 445.0, 441.0),   # 抬低 → 2买@600
+            self.b(600, 700, "up",   441.0, 458.0),
+            self.b(700, 800, "down", 458.0, 440.0),   # 类2买@800（440 不创新低、不产生新锚）
+            self.b(800, 900, "up",   440.0, 448.0),
+            self.b(900, 1000, "down", 448.0, 442.0),  # 类2买@1000（442 > 440 不产生新锚）
+        ]
+        pts = cc.findBuyPoints(base(), None, self.MACD_LOW, 900, 0.0, 0.0)
+        got = [(p["type"], p["time"], p["price"], p.get("strong")) for p in pts
+               if p["type"] in ("2买", "类2买")]
+        self.assertEqual(got, [
+            ("2买", 600, 441.0, False),
+            ("类2买", 800, 440.0, True),
+            ("类2买", 1000, 442.0, False),
+        ])
+        broken = base() + [
+            self.b(1000, 1100, "up", 442.0, 530.0),
+            self.b(1100, 1300, "down", 530.0, 430.0),  # 430 破锚价 435 → 整序列作废
+        ]
+        pts2 = cc.findBuyPoints(broken, None, self.MACD_LOW, 900, 0.0, 0.0)
+        got2 = [(p["type"], p["time"]) for p in pts2 if p["type"] in ("2买", "类2买")]
+        self.assertEqual(got2, [])
 
 
 class TestSecondFamilyRouting(unittest.TestCase):

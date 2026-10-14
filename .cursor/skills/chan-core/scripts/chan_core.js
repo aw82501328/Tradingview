@@ -2173,9 +2173,9 @@ function appendThirdPoints(points, thirdList, familyTypes, class2Type) {
 
 /**
  * 买点识别（2026-10-11 统一二买定义）：二买族（2买/类2买）由 secondPointSeries 发射
- * （每个 1买 各自锚定抬低序列（2026-10-14，窗口到下一个 1买）：首个=2买，其后每个仍高于锚价的下跌端点=类2买；
- * + secondDivergeGate 弱档大周期背驰闸 + strong 强弱）；上级上涨笔窗口仍产
- * twoBuyMeta 供 3买/类3买锚定。3/类3/4/类4 依赖中枢；1买不变。
+ * （2026-10-14 方向开窗：买侧窗口=已收笔上级上涨笔跨度，窗口内首个回踩=2买、其后每个=类2买；
+ * + secondDivergeGate 弱档大周期背驰闸（按窗口起点取值） + strong 强弱）；
+ * 上级上涨笔窗口仍产 twoBuyMeta 供 3买/类3买锚定。3/类3/4/类4 依赖中枢；1买不变。
  * 返回按 time 升序（稳定排序；同刻保持识别序 2/类2→1买→3/4类，尾点=时间最新）。
  */
 /**
@@ -2183,7 +2183,7 @@ function appendThirdPoints(points, thirdList, familyTypes, class2Type) {
  * 仅拦弱/未定点，强档不受此闸；与 py_chain/chan_core.py _upper_diverge_at 同步）：
  * 上级末两根确认同向笔（买侧=下跌笔、卖侧=上涨笔）isBiDiverge——优先上级自身
  * MACD（upperMacd）；缺省时区间套兜底。
- * 参照 = 覆盖/先于 tRef（锚点时刻）的最近一根同向笔 vs 其前一根同向笔。
+ * 参照 = 覆盖/先于 tRef（窗口起点时刻）的最近一根同向笔 vs 其前一根同向笔。
  * @returns true/false；不可判定（上级缺失或同向确认笔不足两根）→ null。
  */
 function upperDivergeAt(upperBis, upperMacd, macdArr, tRef, isSell) {
@@ -2204,79 +2204,42 @@ function upperDivergeAt(upperBis, upperMacd, macdArr, tRef, isSell) {
 }
 
 /**
- * 2买/2卖族序列发射（2026-10-11 用户规则：统一二买定义，替代上级窗口/中枢口径；
- * 与 py_chain/chan_core.py _second_point_series 同步）：
- *   2026-10-14 起：每个 1买/1卖 各自成序列——锚 i 的窗口 = (锚_i, 锚_{i+1})，后续新锚
- *   出现不再清除前序列（用户口径：二卖在已收盘的上级反向笔内、1卖确定后自然标记）。
- *   窗口内首个抬低/压低笔端点为 2买/2卖；端点破锚价 → 本锚序列终止，已发射点只保留
- *   位于已收笔上级笔内的（同口径：既成结构不因后续破锚回溯清除；无上级信息维持整序列作废）。
- *   买侧（2026-10-12）：锚后每个仍高于锚价的下跌端点都标，首个为 2买，
- *   其后为类2买，不再要求严格高于上一个已标出的二买点。卖侧：此后每个严格更低压低为
- *   类2卖；介于前一点与锚价之间 → 不标、序列等待。背驰闸（secondDivergeGate 开，2026-10-12 收窄为仅拦弱档）：
- *   上级末两根确认同向笔 isBiDiverge 无背驰时弱/未定点不标（未定型翻强后才出现、
- *   回调段成笔才判断），强档（strong=true）放行；不可判定/无上级（日线）→ 放行；
- *   2026-10-14 起闸按各锚自身时刻取值。
- *   被闸点仍推进序列结构（后续点仍是类2买/类2卖，不重编号）。强弱 strong：紧邻前一根反向笔
- *   终点 vs 再前一根反向笔终点（=该点所在笔起点）——过=强、已完成未过=弱、
- *   未走完/不可比=null（弱先行）。
+ * 2买/2卖族序列发射（2026-10-11 统一二买定义；2026-10-14 改为按已收笔上级笔方向开窗，
+ * 取消 1买/1卖 锚定序列与破锚价作废；与 py_chain/chan_core.py _second_point_series 同步）：
+ *   有上级：买侧窗口 = 已收笔上级上涨笔跨度（卖侧=下跌笔）(startTime, endTime]，窗口内
+ *   小级别只标本侧点——首个回踩/反抽端点 = 2买/2卖，其后每个 = 类2买/类2卖（卖侧放宽为
+ *   与买侧镜像，不再要求严格更低压低）。既成结构：窗口内点不因后续走势作废。
+ *   背驰闸（secondDivergeGate 开，仅拦弱档）：按各窗口起点取值一次——窗口起点时刻上级
+ *   末两根确认同向笔（买侧=下跌笔/卖侧=上涨笔）isBiDiverge 无背驰时弱/未定点不标，
+ *   强档放行；不可判定/无上级 → 放行。被闸点仍推进序列结构（后续点仍是类2买/类2卖，不重编号）。
+ *   无上级（日线主路径 / 未成笔尾段局部序列）：走 secondSeriesNoUpper 旧锚定口径
+ *   （锚=firstPts 或结构底/顶兜底、破锚价作废、卖侧严格压低），维持原行为。
+ *   强弱 strong：紧邻前一根反向笔终点 vs 再前一根反向笔终点（=该点所在笔起点）——
+ *   过=强、已完成未过=弱、未走完/不可比=null（弱先行）。
  */
 function secondPointSeries(bis, firstPts, upperBis, upperMacd, macdArr, isSell) {
-  const want = isSell ? "up" : "down";   // 序列扫描的笔方向（抬低=down 端点 / 压低=up 端点）
+  if (!upperBis || !upperBis.length) return secondSeriesNoUpper(bis, firstPts, isSell);
+  const want = isSell ? "up" : "down";   // 序列扫描的笔方向（回踩=down 端点 / 反抽=up 端点）
   const rev = isSell ? "down" : "up";    // strong 对比的反向笔方向
-  // 2026-10-14 用户规则：每个 1买/1卖 各自成序列（不再只锚最新一个、不再被后续锚滚动清除）——
-  // 二卖在已收盘的上级反向笔内、1卖确定后自然标记，后续新 1卖 出现不清掉前序列。
-  // 序列 i 的扫描窗口 = (锚_i 时刻, 锚_{i+1} 时刻)；窗口内端点破锚价 → 仅本锚序列作废。
-  const anchors = [];
-  if (firstPts && firstPts.length) {
-    for (const fp of firstPts) anchors.push({ time: fp.time, price: fp.price });
-  } else {
-    // 无 1买/1卖 锚（早期数据/无上级）：结构底/顶兜底（与 py_chain 同步），
-    // 保持旧结构底口径——其后首个抬低/压低为 2买/2卖。
-    const cands = bis.filter(b => b.type === want);
-    if (!cands.length) return [];
-    let ab = cands[0];
-    for (const c of cands) {
-      if (isSell ? c.endPrice > ab.endPrice : c.endPrice < ab.endPrice) ab = c;
-    }
-    anchors.push({ time: ab.endTime, price: ab.endPrice });
-  }
+  const winDir = isSell ? "down" : "up"; // 窗口方向：买侧=上级上涨笔 / 卖侧=上级下跌笔
+  const conf = confirmedStructureBis(upperBis);
   const out = [];
-  // 最近已确认上级笔的结束时刻（2026-10-14 用户口径：已收笔上级反向笔内的二类点是既成
-  // 结构——破锚价终止序列时不回溯清除确认笔结束前的已发射点；无上级信息时维持整序列作废）
-  let confEnd = null;
-  if (upperBis && upperBis.length) {
-    const conf = confirmedStructureBis(upperBis);
-    if (conf.length) confEnd = conf[conf.length - 1].endTime;
-  }
-  for (let ai = 0; ai < anchors.length; ai++) {
-    const anchorT = anchors[ai].time, anchorP = anchors[ai].price;
-    const nextT = ai + 1 < anchors.length ? anchors[ai + 1].time : Infinity;
-    // 仅明确的 false 拦截；不可判定（null：上级同向确认笔不足两根）→ 放行，与
-    // 「无上级（日线）豁免」同一降级口径（与 py_chain 同步）。2026-10-12 收窄：
-    // gateBlock 只拦弱/未定点（强档放行），不再整条序列拦截。2026-10-14 起按锚取闸。
+  for (const ub of conf) {
+    if (ub.type !== winDir) continue;
+    // 仅明确的 false 拦截；不可判定（null：上级同向确认笔不足两根）→ 放行。闸按窗口
+    // 起点取值一次（窗口跨度内不会再确认出新的同向上级笔，与逐点取值等价）；
+    // gateBlock 只拦弱/未定点（强档放行）。
     let gateBlock = false;
-    if (CHAN_CFG.secondDivergeGate !== false && upperBis && upperBis.length) {
-      gateBlock = upperDivergeAt(upperBis, upperMacd, macdArr, anchorT, isSell) === false;
+    if (CHAN_CFG.secondDivergeGate !== false) {
+      gateBlock = upperDivergeAt(upperBis, upperMacd, macdArr, ub.startTime, isSell) === false;
     }
     let prevPx = null;
-    const seriesPts = [];
     for (let i = 0; i < bis.length; i++) {
       const b = bis[i];
       if (b.type !== want) continue;
       const t = b.endTime || 0;
-      if (t <= anchorT || t >= nextT) continue;
+      if (t <= ub.startTime || t > ub.endTime) continue;
       const p = b.endPrice;
-      if (!(isSell ? p < anchorP : p > anchorP)) {
-        // 破锚价：本锚序列终止（不再扫后续端点，锚滚动交给下一个锚）。已发射点只保留
-        // 位于已收笔上级笔内的（既成结构）；无上级信息（尾段局部序列）维持整序列作废。
-        if (confEnd == null) seriesPts.length = 0;
-        else for (let k = seriesPts.length - 1; k >= 0; k--) {
-          if ((seriesPts[k].time || 0) > confEnd) seriesPts.splice(k, 1);
-        }
-        break;
-      }
-      // 卖侧仍要求严格更低压低；买侧不再要求高于上一个已标二买点
-      if (isSell && prevPx != null && !(p < prevPx)) continue; // 介于：不标、序列等待
       let strong = null;
       if (i >= 1 && bis[i - 1].type === rev && !bis[i - 1]._forming) {
         let prevRev = null;
@@ -2291,6 +2254,70 @@ function secondPointSeries(bis, firstPts, upperBis, upperMacd, macdArr, isSell) 
       if (gateBlock && (strong !== true || b._forming)) {
         prevPx = p; // 被闸点仍推进序列结构：后续点仍是类2买/类2卖，不重编号
         continue;
+      }
+      out.push({
+        type: prevPx == null ? (isSell ? "2卖" : "2买") : (isSell ? "类2卖" : "类2买"),
+        time: b.endTime, price: p, strong,
+      });
+      prevPx = p;
+    }
+  }
+  out.sort((a, b) => a.time - b.time);
+  return out;
+}
+
+/**
+ * 无上级路径（日线主路径 / 未成笔尾段局部序列）的旧锚定口径，2026-10-14 方向开窗改造后
+ * 原样保留：锚 = firstPts（1买/1卖）或结构底/顶兜底，序列 i 的扫描窗口 =
+ * (锚_i 时刻, 锚_{i+1} 时刻)，首个抬低/压低 = 2买/2卖、其后 = 类2买/类2卖（卖侧要求
+ * 严格更低压低）；端点破锚价 → 本锚序列作废（无上级信息，整序列清除）。无背驰闸。
+ */
+function secondSeriesNoUpper(bis, firstPts, isSell) {
+  const want = isSell ? "up" : "down";
+  const rev = isSell ? "down" : "up";
+  const anchors = [];
+  if (firstPts && firstPts.length) {
+    for (const fp of firstPts) anchors.push({ time: fp.time, price: fp.price });
+  } else {
+    // 无 1买/1卖 锚（早期数据）：结构底/顶兜底（与 py_chain 同步），
+    // 保持旧结构底口径——其后首个抬低/压低为 2买/2卖。
+    const cands = bis.filter(b => b.type === want);
+    if (!cands.length) return [];
+    let ab = cands[0];
+    for (const c of cands) {
+      if (isSell ? c.endPrice > ab.endPrice : c.endPrice < ab.endPrice) ab = c;
+    }
+    anchors.push({ time: ab.endTime, price: ab.endPrice });
+  }
+  const out = [];
+  for (let ai = 0; ai < anchors.length; ai++) {
+    const anchorT = anchors[ai].time, anchorP = anchors[ai].price;
+    const nextT = ai + 1 < anchors.length ? anchors[ai + 1].time : Infinity;
+    let prevPx = null;
+    const seriesPts = [];
+    for (let i = 0; i < bis.length; i++) {
+      const b = bis[i];
+      if (b.type !== want) continue;
+      const t = b.endTime || 0;
+      if (t <= anchorT || t >= nextT) continue;
+      const p = b.endPrice;
+      if (!(isSell ? p < anchorP : p > anchorP)) {
+        // 破锚价：本锚序列终止作废（无上级信息）。
+        seriesPts.length = 0;
+        break;
+      }
+      // 卖侧仍要求严格更低压低；买侧不再要求高于上一个已标二买点
+      if (isSell && prevPx != null && !(p < prevPx)) continue; // 介于：不标、序列等待
+      let strong = null;
+      if (i >= 1 && bis[i - 1].type === rev && !bis[i - 1]._forming) {
+        let prevRev = null;
+        for (let j = i - 2; j >= 0; j--) {
+          if (bis[j].type === rev) { prevRev = bis[j]; break; }
+        }
+        if (prevRev) {
+          strong = !!(isSell ? bis[i - 1].endPrice < prevRev.endPrice
+                             : bis[i - 1].endPrice > prevRev.endPrice);
+        }
       }
       seriesPts.push({
         type: prevPx == null ? (isSell ? "2卖" : "2买") : (isSell ? "类2卖" : "类2买"),
