@@ -728,97 +728,95 @@ describe("isBiDiverge MACD 背驰判定（2026-10-10 恢复旧口径：面积/DI
 // 10. 买卖点（SPEC 2.9）
 // ============================================================
 
-describe("findBuyPoints 买点识别", () => {
-  // 创新低(1买候选) + 背驰；之后抬高低点(2买)
-  const bis = [
-    { type: "down", startTime: 1000, endTime: 1100, startPrice: 120, endPrice: 95, span: 25 },
-    { type: "up", startTime: 1100, endTime: 1200, startPrice: 95, endPrice: 108, span: 13 },
-    { type: "down", startTime: 1200, endTime: 1300, startPrice: 108, endPrice: 90, span: 18 },
-    { type: "up", startTime: 1300, endTime: 1400, startPrice: 90, endPrice: 100, span: 10 },
-    { type: "down", startTime: 1400, endTime: 1500, startPrice: 100, endPrice: 96, span: 4 },
+describe("findBuyPoints 买点识别（2026-10-14 规则v2）", () => {
+  const b = (t0, t1, typ, p0, p1) => ({ type: typ, startTime: t0, endTime: t1, startPrice: p0, endPrice: p1, span: Math.abs(p1 - p0) });
+  // 上级：上涨笔 0→100（100→200），下跌笔 100→200（200→120），均已收笔（与 py 同步）
+  const upper = () => [
+    b(0, 100, "up", 100, 200),
+    b(100, 200, "down", 200, 120),
   ];
-  const macdArr = [
-    { time: 1000, macd: -4, dif: 2 }, { time: 1050, macd: -4, dif: 2 }, { time: 1100, macd: -4, dif: 2 },
-    { time: 1200, macd: -2, dif: 3 }, { time: 1250, macd: -2, dif: 3 }, { time: 1300, macd: -2, dif: 3 },
+  const bis = () => [
+    b(-10, 0, "down", 110, 100),
+    b(0, 10, "up", 100, 130),
+    b(10, 20, "down", 130, 110),    // 2买@20(110)：反弹125不过前高130 → 弱
+    b(20, 30, "up", 110, 125),
+    b(30, 40, "down", 125, 115),    // 类2买@40(115)：反弹140过前高125 → 强（与2买同中枢）
+    b(40, 50, "up", 115, 140),      // 上破中枢 zg=125 → 离开
+    b(50, 60, "down", 140, 128),    // 3买@60(128)：回踩不进中枢
+    b(60, 100, "up", 128, 200),
+    b(100, 120, "down", 200, 150),  // 下跌窗内低点：抬低但不在同中枢 → 不标类2
+    b(120, 140, "up", 150, 170),
+    b(140, 160, "down", 170, 155),
+    b(160, 180, "up", 155, 165),
+    b(180, 200, "down", 165, 140),
   ];
 
-  test("创新低+背驰标记 1买；结构底之后抬高低点标记 2买", () => {
-    const pts = core.findBuyPoints(bis, [], macdArr, 900);
-    const b1 = pts.find(p => p.type === "1买");
-    const b2 = pts.find(p => p.type === "2买");
-    assert.ok(b1, "应存在 1买");
-    assert.deepEqual({ time: b1.time, price: b1.price }, { time: 1300, price: 90 });
-    assert.ok(b2, "应存在 2买");
-    assert.deepEqual({ time: b2.time, price: b2.price }, { time: 1500, price: 96 });
+  test("1买=上涨笔起点投影；2买=首个抬低（反弹未过前高=弱）；类2买=同中枢抬低（过前高=强）；3买=离枢回踩", () => {
+    const pts = core.findBuyPoints(bis(), upper(), [], 3600, 0, 0);
+    assert.deepEqual(pts.map(p => [p.type, p.time, p.price]), [
+      ["1买", 0, 100],
+      ["2买", 20, 110],
+      ["类2买", 40, 115],
+      ["3买", 60, 128],
+      ["1买", 200, 140],   // 下跌笔终点投影（1买）
+    ]);
+    const two = pts.find(p => p.type === "2买");
+    assert.equal(two.strong, false);
+    const cls2 = pts.find(p => p.type === "类2买");
+    assert.equal(cls2.strong, true);
   });
 
-  test("笔数 < 3 返回空", () => {
-    assert.deepEqual(core.findBuyPoints(bis.slice(0, 2), [], macdArr, 900), []);
+  test("方向开窗：已收笔下跌笔窗 (100,200] 内的买点候选被滤除", () => {
+    const pts = core.findBuyPoints(bis(), upper(), [], 3600, 0, 0);
+    assert.ok(pts.every(p => !(p.time > 100 && p.time <= 200 && p.type !== "1买")));
+  });
+
+  test("无上级（日线）返回空（2026-10-14 规则v2：日线不再标买卖点）", () => {
+    assert.deepEqual(core.findBuyPoints(bis(), [], [], 3600, 0, 0), []);
+    assert.deepEqual(core.findBuyPoints(bis().slice(0, 2), null, [], 900), []);
   });
 });
 
-describe("findSellPoints 卖点识别", () => {
-  // 创新高(1卖候选) + 背驰；之后次高点(2卖)
-  const bis = [
-    { type: "up", startTime: 1000, endTime: 1100, startPrice: 90, endPrice: 120, span: 30 },
-    { type: "down", startTime: 1100, endTime: 1200, startPrice: 120, endPrice: 105, span: 15 },
-    { type: "up", startTime: 1200, endTime: 1300, startPrice: 105, endPrice: 125, span: 20 },
-    { type: "down", startTime: 1300, endTime: 1400, startPrice: 125, endPrice: 108, span: 17 },
-    { type: "up", startTime: 1400, endTime: 1500, startPrice: 108, endPrice: 118, span: 10 },
+describe("findSellPoints 卖点识别（2026-10-14 规则v2，与买点镜像）", () => {
+  const b = (t0, t1, typ, p0, p1) => ({ type: typ, startTime: t0, endTime: t1, startPrice: p0, endPrice: p1, span: Math.abs(p1 - p0) });
+  const upper = () => [
+    b(0, 100, "up", 100, 200),
+    b(100, 200, "down", 200, 120),
   ];
-  const macdArr = [
-    { time: 1000, macd: 4, dif: 2 }, { time: 1050, macd: 4, dif: 2 }, { time: 1100, macd: 4, dif: 2 },
-    { time: 1200, macd: 2, dif: 1 }, { time: 1250, macd: 2, dif: 1 }, { time: 1300, macd: 2, dif: 1 },
+  const bis = () => [
+    b(-10, 0, "down", 110, 100),
+    b(0, 10, "up", 100, 130),
+    b(10, 20, "down", 130, 110),
+    b(20, 30, "up", 110, 125),
+    b(30, 40, "down", 125, 115),
+    b(40, 50, "up", 115, 140),
+    b(50, 60, "down", 140, 128),
+    b(60, 100, "up", 128, 200),     // 顶 → 1卖@100(200)
+    b(100, 120, "down", 200, 150),
+    b(120, 140, "up", 150, 170),    // 2卖@140(170)：反弹155不过前低150 → 弱
+    b(140, 160, "down", 170, 155),
+    b(160, 180, "up", 155, 165),    // 类2卖@180(165)：反弹140过前低155 → 强（与2卖同中枢）
+    b(180, 200, "down", 165, 140),
   ];
 
-  test("创新高+背驰标记 1卖；结构顶之后次高点标记 2卖", () => {
-    const pts = core.findSellPoints(bis, [], macdArr, 900);
-    const s1 = pts.find(p => p.type === "1卖");
-    const s2 = pts.find(p => p.type === "2卖");
-    assert.ok(s1, "应存在 1卖");
-    assert.deepEqual({ time: s1.time, price: s1.price }, { time: 1300, price: 125 });
-    assert.ok(s2, "应存在 2卖");
-    assert.deepEqual({ time: s2.time, price: s2.price }, { time: 1500, price: 118 });
+  test("1卖=上涨笔终点投影；2卖=首个压低（弱）；类2卖=同中枢压低（强）", () => {
+    const pts = core.findSellPoints(bis(), upper(), [], 3600, 0, 0);
+    assert.deepEqual(pts.map(p => [p.type, p.time, p.price]), [
+      ["1卖", 100, 200],
+      ["2卖", 140, 170],
+      ["类2卖", 180, 165],
+    ]);
+    assert.equal(pts.find(p => p.type === "2卖").strong, false);
+    assert.equal(pts.find(p => p.type === "类2卖").strong, true);
   });
 
-  test("笔数 < 3 返回空", () => {
-    assert.deepEqual(core.findSellPoints(bis.slice(0, 2), [], macdArr, 900), []);
-  });
-});
-
-describe("anchorFirstBuy 一买锚定（SPEC 2.9）", () => {
-  test("锚定到候选之前最近的底部端点", () => {
-    const cand = { time: 1500, price: 90 };
-    const upper = [
-      { type: "up", startTime: 1000, startPrice: 100, endTime: 1200, endPrice: 110 },
-      { type: "down", startTime: 1200, startPrice: 110, endTime: 1600, endPrice: 90 },
-    ];
-    // 底部端点：1000@100（up起点）、1600@90（down终点，但 1600 > 1500 跳过）
-    assert.deepEqual(core.anchorFirstBuy(cand, upper), { time: 1000, price: 100 });
+  test("方向开窗：已收笔上涨笔窗 (0,100] 内的卖点候选被滤除", () => {
+    const pts = core.findSellPoints(bis(), upper(), [], 3600, 0, 0);
+    assert.ok(pts.every(p => !(p.time > 0 && p.time <= 100 && p.type !== "1卖")));
   });
 
-  test("上级笔为空返回 null", () => {
-    assert.equal(core.anchorFirstBuy({ time: 1500, price: 90 }, []), null);
-  });
-});
-
-describe("anchorFirstSell 一卖锚定（SPEC 2.9）", () => {
-  test("候选位于上级上涨笔内部时上移到该笔结束点", () => {
-    const cand = { time: 1300, price: 125 };
-    const upper = [
-      { type: "up", startTime: 1000, startPrice: 90, endTime: 1400, endPrice: 120 },
-      { type: "down", startTime: 1400, startPrice: 120, endTime: 1700, endPrice: 95 },
-    ];
-    assert.deepEqual(core.anchorFirstSell(cand, upper), { time: 1400, price: 120 });
-  });
-
-  test("不在任何上涨笔内部时取时间最近的顶部端点", () => {
-    const cand = { time: 1800, price: 100 };
-    const upper = [
-      { type: "up", startTime: 1000, startPrice: 90, endTime: 1400, endPrice: 120 },
-      { type: "down", startTime: 1400, startPrice: 120, endTime: 1700, endPrice: 95 },
-    ];
-    assert.deepEqual(core.anchorFirstSell(cand, upper), { time: 1400, price: 120 });
+  test("无上级（日线）返回空", () => {
+    assert.deepEqual(core.findSellPoints(bis(), [], [], 3600, 0, 0), []);
   });
 });
 
@@ -925,7 +923,7 @@ describe("一类买卖点 = 上级笔端点，同笔不标（2026-10-13）", () 
     assert.equal(pts.find(p => p.type === "1卖" && p.time === 4000), undefined);
   });
 
-  test("未成笔尾段内小级别多空一类都标", () => {
+  test("未成笔尾段不再补一类点（2026-10-14 规则v2：一类只认已收笔上级笔端点）", () => {
     const lower = [
       { type: "down", startTime: 1000, endTime: 2000, startPrice: 120, endPrice: 100, span: 20 },
       { type: "up", startTime: 2000, endTime: 3000, startPrice: 100, endPrice: 130, span: 30 },
@@ -941,9 +939,9 @@ describe("一类买卖点 = 上级笔端点，同笔不标（2026-10-13）", () 
     const buys = core.findBuyPoints(lower, upper, [], 900).filter(p => p.type === "1买").map(p => p.time);
     const sells = core.findSellPoints(lower, upper, [], 900).filter(p => p.type === "1卖").map(p => p.time);
     assert.ok(buys.includes(2000), "上涨笔起点是 1买（落在小级别起点 2000）");
-    assert.ok(buys.includes(4000) && buys.includes(6000), "尾段创新低也标 1买");
+    assert.ok(!buys.includes(4000) && !buys.includes(6000), "尾段创新低不再标 1买");
     assert.ok(sells.includes(3000), "上涨笔终点是 1卖");
-    assert.ok(sells.includes(5000), "尾段创新高也标 1卖");
+    assert.ok(!sells.includes(5000), "尾段创新高不再标 1卖");
   });
 
   // 落点阶梯（2026-10-13）：±1根K同价 → 覆盖窗同价 → 笔跨度同价 → 跨度内
@@ -991,23 +989,6 @@ describe("snapToOwnBar 极值映射到本周期K线（SPEC 2.9）", () => {
 
   test("无价格匹配 → 时间最近的K线", () => {
     assert.equal(core.snapToOwnBar(105, 1200, bars), 1200);
-  });
-});
-
-describe("keepRecentEach 每类保留最近一个（SPEC 2.9）", () => {
-  test("每类取时间最新，按时间排序", () => {
-    const points = [
-      { type: "1买", time: 1000 },
-      { type: "2买", time: 1500 },
-      { type: "1买", time: 2000 },
-      { type: "3买", time: 1300 },
-    ];
-    const kept = core.keepRecentEach(points);
-    assert.deepEqual(kept, [
-      { type: "3买", time: 1300 },
-      { type: "2买", time: 1500 },
-      { type: "1买", time: 2000 },
-    ]);
   });
 });
 
@@ -1230,241 +1211,143 @@ describe("buildZS 穿越式离开与零重叠回踩（2026-10-07）", () => {
     assert.equal(mid[0].exitTime, 1700);
   });
 
-  test("买点为离枢回踩序列 3买→类3买→4买，不再误标类2买", () => {
+  test("v2 逐中枢序号：低中枢 3买→类3买（1400 低点未抬低不标类2），第二中枢离开=4买（与 py 同步）", () => {
     const upper = [{ type: "up", startTime: 900, endTime: 1650,
                      startPrice: 4021.82, endPrice: 4138.06,
                      coverageEnd: 2000, span: 116.24 }];
     const macd = [];
     for (let t = 950; t <= 2000; t += 50) macd.push({ time: t, dif: 0, dea: 0, macd: 0 });
     const pts = core.findBuyPoints(bis(), upper, macd, 900, 0, 0);
-    // 2026-10-10 firstNoDiverge：4056.45 对参照 4071.64 创新低即 1买（与离枢回踩序列并存）。
-    // 2026-10-11 统一二买定义：2买族 = 1买后抬低序列——1买滚动到 1400@4056.45 后，
-    // 旧窗口 2买@1200（先于锚，不再标记）；首个抬低 1600@4093.86 与窗口 3买 同刻让位。
-    // 2026-10-13 落点阶梯：上涨笔起点 (900,4021.82) 的同价小级别起点在 (1000,4021.82)
-    // （±1根K内）→ 1买 落小级别 1000，不是上级时刻 900。
+    // 2026-10-14 规则v2：
+    //   1买@1000 = 上涨笔起点 (900,4021.82) 投影到 ±1 根K内同价小级别起点；
+    //   2买@1200(4071.64) = 锚后首个抬低（反弹 4090.02 不过前高 4091.67 → 弱）；
+    //   1400@4056.45 低于前低 4071.64（未抬低）→ 只更新参照不标；
+    //   低中枢（zd 4071.64）被向上离开后：1600/1800 回踩不进 → 3买/类3买；
+    //   第二中枢（zd 4093.86）被向上离开后 2000 回踩不进 → 4买（窗口内第2个被离开的中枢）；
+    //   2000 同刻低中枢口径是类3买，去重保留序号较新的 4买。
     assert.deepEqual(pts.map(p => [p.type, p.time, p.price]), [
       ["1买", 1000, 4021.82],
       ["2买", 1200, 4071.64],
-      ["类2买", 1400, 4056.45],
       ["3买", 1600, 4093.86],
       ["类3买", 1800, 4118.91],
       ["4买", 2000, 4121.06],
     ]);
+    assert.equal(pts.find(p => p.type === "2买").strong, false);
   });
 });
 
-// ============ 2026-10-11 统一二买定义：二买族序列 + 背驰闸 + 强弱（与 py 同步） ============
-describe("统一二买定义 secondPointSeries（2026-10-11；2026-10-14 方向开窗）", () => {
+// ============ 2026-10-14 规则v2：二类族抬低/同中枢类2 + 三类族逐中枢序号（与 py 同步） ============
+describe("买卖点规则v2 二类/三类族（2026-10-14：锚后抬低 + 同中枢类2 + 逐中枢离枢序号）", () => {
   const b = (t0, t1, typ, p0, p1) => ({ type: typ, startTime: t0, endTime: t1, startPrice: p0, endPrice: p1, span: Math.abs(p1 - p0) });
-  const bisBuy = () => [
-    b(100, 200, "down", 460.0, 440.0),
-    b(200, 300, "up",   440.0, 455.0),
-    b(300, 400, "down", 455.0, 435.0),   // 底 → 1买@400(435)
-    b(400, 500, "up",   435.0, 445.0),   // 445 < 455 → 弱
-    b(500, 600, "down", 445.0, 441.0),   // 回踩① → 2买@600（弱）
-    b(600, 700, "up",   441.0, 458.0),   // 458 > 445 → 强
-    b(700, 800, "down", 458.0, 443.0),   // 回踩② → 类2买@800（强）
-    b(800, 900, "up",   443.0, 448.0),   // 448 < 458 → 弱
-    b(900, 1000, "down", 448.0, 442.0),  // 回踩③ → 类2买@1000（弱）
-  ];
-  const upper = () => [
-    b(-300, -100, "up",   500.0, 560.0),
-    b(-100, 0,   "down", 560.0, 470.0),
-    b(0, 50,     "up",   470.0, 480.0),
-    b(50, 400,   "down", 480.0, 435.0),
-    b(400, 1000, "up",   435.0, 448.0), // 已收笔上涨笔 = 买侧窗口 (400,1000]
-  ];
-  const upperMacd = (diverge) => {
-    const out = [-100, -50, 0].map(t => ({ time: t, dif: -8.0, dea: 0.0, macd: -10.0 }));
-    for (let t = 50; t <= 1000; t += 50) {
-      out.push({ time: t, dif: diverge ? -2.0 : -15.0, dea: 0.0, macd: diverge ? -2.0 : -20.0 });
-    }
-    return out;
-  };
   const macdLow = [];
   for (let t = 100; t <= 1000; t += 50) macdLow.push({ time: t, dif: 0, dea: 0, macd: 0 });
 
-  test("ON+背驰成立：上涨笔窗口内每个回踩都标（首=2买、后续=类2买，与 py 同步）", () => {
-    const pts = core.findBuyPoints(bisBuy(), upper(), macdLow, 900, 0, 0, upperMacd(true));
-    assert.deepEqual(pts.filter(p => p.type === "2买" || p.type === "类2买")
-      .map(p => [p.type, p.time, p.price, p.strong ?? null]), [
-      ["2买", 600, 441.0, false],
-      ["类2买", 800, 443.0, true],
-      ["类2买", 1000, 442.0, false],
-    ]);
-  });
-
-  test("方向过滤：卖点只在下跌笔窗口标、上涨笔窗口内不标（与 py 同步）", () => {
-    // up 端点 500/700/900 都落在上涨笔窗口 (400,1000] 内 → 不标卖；
-    // 唯一落在下跌笔窗口 (50,400] 的 up 端点 300 → 2卖。
-    const umacd = [-300, -250, -200, -150, -100, -50].map(t => ({ time: t, dif: 8.0, dea: 0.0, macd: 10.0 }));
-    umacd.push({ time: 0, dif: 2.0, dea: 0.0, macd: 2.0 });
-    for (let t = 50; t <= 1000; t += 50) umacd.push({ time: t, dif: 2.0, dea: 0.0, macd: 2.0 });
-    const pts = core.findSellPoints(bisBuy(), upper(), macdLow, 900, 0, 0, umacd);
-    assert.deepEqual(pts.filter(p => p.type === "2卖" || p.type === "类2卖")
-      .map(p => [p.type, p.time, p.price, p.strong ?? null]), [
-      ["2卖", 300, 455.0, null],
-    ]);
-  });
-
-  test("ON+背驰不成立：仅拦弱档（强档照标，被闸点不重编号，与 py 同步）", () => {
-    const pts = core.findBuyPoints(bisBuy(), upper(), macdLow, 900, 0, 0, upperMacd(false));
-    assert.deepEqual(pts.filter(p => p.type === "2买" || p.type === "类2买")
-      .map(p => [p.type, p.time, p.strong ?? null]), [
-      ["类2买", 800, true],   // 2买@600（弱）与 类2买@1000（弱）被闸；被闸点不重编号（仍是类2买）
-    ]);
-  });
-
-  test("ON+背驰不成立：未定型与回踩段未成笔均不标（与 py 同步）", () => {
-    const bis = bisBuy();
-    bis[3]._forming = true;
-    bis[3].enough = 5;   // enough 使 _forming 笔仍入列（提前入列口径）
-    bis[6]._forming = true;
-    bis[6].enough = 5;
-    const pts = core.findBuyPoints(bis, upper(), macdLow, 900, 0, 0, upperMacd(false));
-    assert.deepEqual(pts.filter(p => p.type === "2买" || p.type === "类2买"), []);
-  });
-
-  test("OFF：忽略背驰闸", () => {
-    const saved = core.CHAN_CFG.secondDivergeGate;
-    core.CHAN_CFG.secondDivergeGate = false;
-    try {
-      const pts = core.findBuyPoints(bisBuy(), upper(), macdLow, 900, 0, 0, upperMacd(false));
-      assert.ok(pts.some(p => p.type === "2买" && p.time === 600));
-    } finally {
-      core.CHAN_CFG.secondDivergeGate = saved;
-    }
-  });
-
-  test("卖侧镜像：下跌笔窗口内每个反抽都标（放宽：不再要求严格更低压低，与 py 同步）", () => {
+  test("抬低序列：首个抬低=2买（反弹未过前高=弱）、同中枢后续=类2买（过前高=强）；未抬高只更新参照不标（与 py 同步）", () => {
+    // 上级：up(0,500] 买侧窗 + down(500,1000] 卖侧窗。锚=1买@0(440)。
+    // 低点 200@441（抬低→2买，反弹450不过前高455→弱）、400@444（抬高且与2买同中枢→类2买，
+    // 反弹470过前高450→强）、600@445（抬高但不在同中枢，且在下跌窗→不标）。
     const bis = [
-      b(100, 200, "up",   440.0, 460.0),
-      b(200, 300, "down", 460.0, 445.0),
-      b(300, 400, "up",   445.0, 465.0),   // 顶 → 1卖@400(465)
-      b(400, 500, "down", 465.0, 455.0),   // 455 > 445 → 弱
-      b(500, 600, "up",   455.0, 459.0),   // 反抽① → 2卖@600（弱）
-      b(600, 700, "down", 459.0, 442.0),   // 442 < 455 → 强
-      b(700, 800, "up",   442.0, 457.0),   // 反抽② → 类2卖@800（强）
-      b(800, 900, "down", 457.0, 452.0),   // 452 > 442 → 弱
-      b(900, 1000, "up",  452.0, 455.0),   // 反抽③ 455 未严格低于前点 457：旧口径不标，新口径照标 → 类2卖@1000（弱）
+      b(-50, 0, "down", 460.0, 440.0),
+      b(0, 100, "up", 440.0, 455.0),
+      b(100, 200, "down", 455.0, 441.0),   // 2买@200（弱）
+      b(200, 300, "up", 441.0, 450.0),
+      b(300, 400, "down", 450.0, 444.0),   // 类2买@400（强）
+      b(400, 500, "up", 444.0, 470.0),
+      b(500, 600, "down", 470.0, 445.0),   // 下跌窗内 → 方向滤除
+      b(600, 700, "up", 445.0, 448.0),
     ];
-    const up = [
-      b(-300, -100, "down", 380.0, 320.0),
-      b(-100, 0,   "up",   320.0, 410.0),
-      b(0, 50,     "down", 410.0, 400.0),
-      b(50, 400,   "up",   400.0, 465.0),
-      b(400, 1000, "down", 465.0, 442.0), // 已收笔下跌笔 = 卖侧窗口 (400,1000]
+    const upper = [
+      b(0, 500, "up", 440.0, 470.0),
+      b(500, 1000, "down", 470.0, 430.0),
     ];
-    const umacd = [-100, -50, 0].map(t => ({ time: t, dif: 8.0, dea: 0.0, macd: 10.0 }));
-    for (let t = 50; t <= 1000; t += 50) umacd.push({ time: t, dif: 2.0, dea: 0.0, macd: 2.0 });
-    const pts = core.findSellPoints(bis, up, macdLow, 900, 0, 0, umacd);
-    assert.deepEqual(pts.filter(p => p.type === "2卖" || p.type === "类2卖")
+    const pts = core.findBuyPoints(bis, upper, macdLow, 900, 0, 0);
+    assert.deepEqual(pts.filter(p => p.type === "2买" || p.type === "类2买")
       .map(p => [p.type, p.time, p.price, p.strong ?? null]), [
-      ["2卖", 600, 459.0, false],
-      ["类2卖", 800, 457.0, true],
-      ["类2卖", 1000, 455.0, false],
+      ["2买", 200, 441.0, false],
+      ["类2买", 400, 444.0, true],
     ]);
   });
 
-  test("闸按窗口起点取值：不同上涨笔窗口各取各的闸（与 py 同步）", () => {
+  test("未抬高的候选不标：低于前一低点只更新参照（与 py 同步）", () => {
+    // 400@435 低于前低 441 → 不标；其后 600@445 抬高但在下跌窗被滤 → 二类族只有 2买@200
     const bis = [
-      b(-300, -200, "up",   470.0, 490.0),
-      b(-200, -100, "down", 490.0, 441.0),  // 窗口①回踩 → 2买@-100（未定型，闸开照标）
-      b(-100, -50,  "up",   441.0, 465.0),
-      b(-50, 100,   "down", 465.0, 425.0),
-      b(100, 300,   "up",   425.0, 450.0),  // 450 < 465 → 弱
-      b(300, 400,   "down", 450.0, 441.0),  // 窗口②回踩①（弱）→ 被闸
-      b(400, 600,   "up",   441.0, 455.0),  // 455 > 450 → 强
-      b(600, 700,   "down", 455.0, 448.0),  // 窗口②回踩②（强）→ 类2买@700
+      b(-50, 0, "down", 460.0, 440.0),
+      b(0, 100, "up", 440.0, 455.0),
+      b(100, 200, "down", 455.0, 441.0),
+      b(200, 300, "up", 441.0, 450.0),
+      b(300, 400, "down", 450.0, 435.0),   // 未抬高
+      b(400, 500, "up", 435.0, 470.0),
+      b(500, 600, "down", 470.0, 445.0),   // 抬高但下跌窗 → 滤除
     ];
-    const up = [
-      b(-900, -700, "up",   380.0, 460.0),
-      b(-700, -500, "down", 460.0, 400.0),  // down1（窗口①闸参照的前一根）
-      b(-500, -400, "up",   400.0, 450.0),
-      b(-400, -300, "down", 450.0, 410.0),  // down2 动能衰减 → 窗口①闸放行
-      b(-300, -50,  "up",   410.0, 470.0),  // 窗口① (-300,-50]
-      b(-50, 0,     "down", 470.0, 430.0),  // down3
-      b(0, 50,      "up",   430.0, 460.0),
-      b(50, 100,    "down", 460.0, 425.0),  // down4 动能仍强 → 窗口②闸拦截
-      b(100, 700,   "up",   425.0, 455.0),  // 窗口② (100,700]
+    const upper = [
+      b(0, 500, "up", 440.0, 470.0),
+      b(500, 1000, "down", 470.0, 430.0),
     ];
-    const umacd = [];
-    for (let t = -900; t <= 700; t += 50) {
-      let dif = -1.0, macd = -1.0;
-      if (t >= -700 && t <= -500) { dif = -8.0; macd = -10.0; }      // down1
-      else if (t >= -400 && t <= -300) { dif = -2.0; macd = -2.0; }  // down2 衰减 → 背驰
-      else if (t >= -50 && t <= 0) { dif = -8.0; macd = -10.0; }     // down3
-      else if (t >= 50 && t <= 100) { dif = -15.0; macd = -20.0; }   // down4 无衰减
-      umacd.push({ time: t, dif, dea: 0.0, macd });
-    }
-    const macdLow2 = [];
-    for (let t = -300; t <= 700; t += 50) macdLow2.push({ time: t, dif: 0, dea: 0, macd: 0 });
-    const pts = core.findBuyPoints(bis, up, macdLow2, 900, 0, 0, umacd);
+    const pts = core.findBuyPoints(bis, upper, macdLow, 900, 0, 0);
     assert.deepEqual(pts.filter(p => p.type === "2买" || p.type === "类2买")
-      .map(p => [p.type, p.time, p.price, p.strong ?? null]), [
-      ["2买", -100, 441.0, null],
-      ["类2买", 700, 448.0, true],
+      .map(p => [p.type, p.time, p.price]), [
+      ["2买", 200, 441.0],
     ]);
   });
 
-  test("已收笔窗口内点不因后续走势作废（取消破锚价概念，与 py 同步）", () => {
+  test("三类族：离枢回踩不进=3买；回踩重进中枢后再离开计数不重置=类3买（与 py 同步）", () => {
+    // 中枢 zd95/zg110（enterEnd 10、exit 50）：b4 上破 zg=110 离开 → b5 回踩 112 不进 → 3买@60；
+    // b7 回踩 98 重进 → 本轮结束；b8 再次上破 → b9 回踩 113 不进 → 类3买@100（计数不重置）。
     const bis = [
-      b(100, 200, "down", 460.0, 440.0),
-      b(200, 300, "up",   440.0, 455.0),
-      b(300, 400, "down", 455.0, 435.0),
-      b(400, 500, "up",   435.0, 450.0),
-      b(500, 600, "down", 450.0, 441.0),   // 2买@600
-      b(600, 700, "up",   441.0, 448.0),
-      b(700, 800, "down", 448.0, 443.0),   // 类2买@800
-      b(800, 900, "up",   443.0, 452.0),
-      b(900, 1000, "down", 452.0, 430.0),  // 430 破窗起点价 435（旧口径=破锚价作废）
-      b(1000, 1100, "up", 430.0, 445.0),
+      b(0, 10, "up", 80.0, 110.0),
+      b(10, 20, "down", 110.0, 90.0),
+      b(20, 30, "up", 90.0, 115.0),
+      b(30, 40, "down", 115.0, 95.0),
+      b(40, 50, "up", 95.0, 130.0),        // 上破 zg=110 → 离开
+      b(50, 60, "down", 130.0, 112.0),     // 回踩不进 → 3买@60
+      b(60, 70, "up", 112.0, 135.0),
+      b(70, 80, "down", 135.0, 98.0),      // 重进中枢 → 本轮离开结束
+      b(80, 90, "up", 98.0, 140.0),        // 再次上破
+      b(90, 100, "down", 140.0, 113.0),    // 回踩不进 → 类3买@100（n=2）
     ];
-    const up = [
-      b(-300, -100, "up",   500.0, 560.0),
-      b(-100, 0,   "down", 560.0, 470.0),
-      b(0, 50,     "up",   470.0, 480.0),
-      b(50, 400,   "down", 480.0, 435.0),
-      b(400, 900,  "up",   435.0, 452.0),  // 买侧窗口 (400,900]：内含 600/800
-      b(900, 1100, "down", 452.0, 430.0),  // 后续已收笔下跌笔（破价发生在窗外）
-    ];
-    const umacd = [-100, -50, 0].map(t => ({ time: t, dif: -8.0, dea: 0.0, macd: -10.0 }));
-    for (let t = 50; t <= 400; t += 50) umacd.push({ time: t, dif: -3.0, dea: 0.0, macd: -3.0 });
-    const macdLong = [];
-    for (let t = 100; t <= 1100; t += 50) macdLong.push({ time: t, dif: 0, dea: 0, macd: 0 });
-    const pts = core.findBuyPoints(bis, up, macdLong, 900, 0, 0, umacd);
-    assert.deepEqual(pts.filter(p => p.type === "2买" || p.type === "类2买")
-      .map(p => [p.type, p.time, p.price, p.strong ?? null]), [
-      ["2买", 600, 441.0, false],
-      ["类2买", 800, 443.0, false],
+    const upper = [b(0, 100, "up", 80.0, 140.0)];
+    const pts = core.findBuyPoints(bis, upper, macdLow, 900, 0, 0);
+    assert.deepEqual(pts.filter(p => /3买/.test(p.type) || /4买/.test(p.type))
+      .map(p => [p.type, p.time, p.price]), [
+      ["3买", 60, 112.0],
+      ["类3买", 100, 113.0],
     ]);
   });
 
-  test("无上级路径维持旧锚定口径：抬低序列照标、破锚价整序列作废（D级/尾段局部，与 py 同步）", () => {
-    const base = () => [
-      b(100, 200, "down", 460.0, 440.0),
-      b(200, 300, "up",   440.0, 455.0),
-      b(300, 400, "down", 455.0, 435.0),   // 创新低 → 1买@400(435) = 锚
-      b(400, 500, "up",   435.0, 445.0),
-      b(500, 600, "down", 445.0, 441.0),   // 抬低 → 2买@600
-      b(600, 700, "up",   441.0, 458.0),
-      b(700, 800, "down", 458.0, 440.0),   // 类2买@800（440 不创新低、不产生新锚）
-      b(800, 900, "up",   440.0, 448.0),
-      b(900, 1000, "down", 448.0, 442.0),  // 类2买@1000（442 > 440 不产生新锚）
+  test("未收笔尾段双向放行：上级仅一根已收笔上涨笔时，其后卖点照标（与 py 同步）", () => {
+    const bis = [
+      b(-50, 0, "down", 460.0, 440.0),
+      b(0, 100, "up", 440.0, 455.0),
+      b(100, 200, "down", 455.0, 441.0),
+      b(200, 300, "up", 441.0, 450.0),
+      b(300, 400, "down", 450.0, 444.0),
+      b(400, 500, "up", 444.0, 470.0),     // 顶 (500,470) = 1卖
+      b(500, 600, "down", 470.0, 445.0),   // 尾段（tailStart=500 之后）
+      b(600, 700, "up", 445.0, 460.0),     // 460 < 470 压低 → 2卖@700
+      b(700, 800, "down", 460.0, 450.0),   // 反弹450不过前低445 → 弱
     ];
-    const pts = core.findBuyPoints(base(), null, macdLow, 900, 0, 0, null);
-    assert.deepEqual(pts.filter(p => p.type === "2买" || p.type === "类2买")
-      .map(p => [p.type, p.time, p.price, p.strong ?? null]), [
-      ["2买", 600, 441.0, false],
-      ["类2买", 800, 440.0, true],
-      ["类2买", 1000, 442.0, false],
+    const upper = [b(0, 500, "up", 440.0, 470.0)];  // 仅一根已收笔上涨笔，其后为未收笔尾段
+    const pts = core.findSellPoints(bis, upper, macdLow, 900, 0, 0);
+    assert.deepEqual(pts.map(p => [p.type, p.time, p.price]), [
+      ["1卖", 500, 470.0],
+      ["2卖", 700, 460.0],
     ]);
-    // 破锚下跌笔跨度远大于此前所有下跌笔 → 无参照、不成新 1买锚；端点破锚价 → 整序列作废
-    const broken = base().concat([
-      b(1000, 1100, "up", 442.0, 530.0),
-      b(1100, 1300, "down", 530.0, 430.0), // 430 破锚价 435
-    ]);
-    const pts2 = core.findBuyPoints(broken, null, macdLow, 900, 0, 0, null);
-    assert.deepEqual(pts2.filter(p => p.type === "2买" || p.type === "类2买"), []);
+    assert.equal(pts.find(p => p.type === "2卖").strong, false);
+  });
+
+  test("未定型：候选之后反弹笔尚未出现 → strong=null（弱先行，与 py 同步）", () => {
+    const bis = [
+      b(-50, 0, "down", 460.0, 440.0),
+      b(0, 100, "up", 440.0, 455.0),
+      b(100, 200, "down", 455.0, 441.0),   // 2买@200 是末笔 → 反弹未开始
+    ];
+    const upper = [b(0, 500, "up", 440.0, 470.0)];
+    const pts = core.findBuyPoints(bis, upper, macdLow, 900, 0, 0);
+    const two = pts.find(p => p.type === "2买");
+    assert.ok(two, "应存在 2买");
+    assert.equal(two.strong, null);
   });
 });
+
+// （旧口径用例：背驰闸/每锚序列/破锚价作废/无上级旧锚定 已随 2026-10-14 规则v2 移除，
+//  备份见 git 历史 6971db6）

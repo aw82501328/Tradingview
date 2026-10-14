@@ -27,7 +27,7 @@ const {
   extendLastBi, lowerResOf, calibrateBiTimes, intervalSecOf,
   fmtT, biMacdMetrics, isBiDiverge,
   findBuyPoints, findSellPoints,
-  isSameAsUpperBi, snapToOwnBar, keepRecentAll,
+  isSameAsUpperBi, snapToOwnBar,
 } = core;
 
 // 笔数据缓存目录：由 chan-bi 画笔 SKILL 落盘，本脚本强制读取（画笔 → 标记 数据依赖）
@@ -498,8 +498,9 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
         lowerStroke).bis;
     }
 
-    // 大级别笔变化时，从该周期起按区间套重算更小周期；未变的大级别沿用上次标记
-    const LOGIC_V = "20261014-second-upper-bi-window";
+    // 大级别笔变化时，从该周期起按区间套重算更小周期（2026-10-14 规则v2 起为笔区间粒度：
+    // 脏区间 t0 之前沿用上次标记、之后取新算，见下方 marks 合并）；未变的大级别整体沿用
+    const LOGIC_V = "20261014-point-rules-v2";
     const statePath = path.join(CACHE_DIR, `buysell_${String(SYMBOL).replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
     const fpOf = (bis) => (bis || []).map(b => [b.type, b.startTime, b.endTime, b.startPrice, b.endPrice]);
     let prevState = null;
@@ -579,31 +580,41 @@ function mergeNearFirstSecond(points, firstType, secondType, mergedType, nearPri
       anchoredBuyPts = mergeNearFirstSecond(anchoredBuyPts, "1买", "2买", "真1买", nearPrice);
       sellPts = mergeNearFirstSecond(sellPts, "1卖", "2卖", "真1卖", nearPrice);
 
-      // 每周期不分类：买卖点合并后只保留时间上最近 KEEP 个（--keep=N，默认 10），避免图上标记过多
-      const keptPts = keepRecentAll([...anchoredBuyPts, ...sellPts], KEEP);
-      anchoredBuyPts = keptPts.filter(p => p.type.endsWith("买"));
-      sellPts = keptPts.filter(p => p.type.endsWith("卖"));
-
-      // 汇总标记：把时间吸附到本周期bar边界
-      // rawTime/rawPrice 保存未吸附的原始点位，用于跨周期共振判定
-      // 二买族标签（2026-10-11 统一二买定义）：type 不变，图表显示 强二买/弱二买/强类2买…
-      // （strong=null 未定型 → 弱先行）；与 py_chain/mark_buy_sell.py _family_label 同步。
+      // 汇总标记：把时间吸附到本周期bar边界；rawTime/rawPrice 保存未吸附的原始点位，用于跨周期共振判定
+      // 二买族标签（2026-10-14 规则v2）：type 不变，图表显示 强二买/弱二买/强类2买…
+      // （strong=null 未定型 → 弱先行，反弹完成后重算改判）；与 py_chain/mark_buy_sell.py _family_label 同步。
       const FAMILY_LABEL = { "2买": "二买", "类2买": "类2买", "2卖": "二卖", "类2卖": "类2卖" };
       const familyLabel = p => ("strong" in p && FAMILY_LABEL[p.type])
         ? (p.strong ? "强" : "弱") + FAMILY_LABEL[p.type] : p.type;
       const marks = [];
       const offset = Math.max(atr * 0.5, 0.05);
+      // 区间套动态更新（2026-10-14 规则v2·笔区间粒度）：大级别笔变化经 nestedDirtyPeriods
+      // 级联到全部更小周期（dirtyMap[res] 为并集 span）——脏区间 t0 之前的旧标记沿用上次
+      // 结果、之后取本次新算；每周期保留截断（--keep=N，默认 10）在合并后的完整列表上做，
+      // 避免跨边界截断丢点。全量（span.t0=-Infinity）时 prevKept 为空、行为与整表重算一致。
+      const dirtySpan = dirtyMap[res];
+      const spanMerge = !!(stateOk && savedMarks[res] && dirtySpan && dirtySpan.t0 > -Infinity);
+      const prevKept = spanMerge
+        ? savedMarks[res].filter(m => (m.rawTime ?? m.time) < dirtySpan.t0) : [];
       for (const p of anchoredBuyPts) {
+        if (spanMerge && p.time < dirtySpan.t0) continue;
         const t = snapToOwnBar(p.price, p.time, rawBars);
         // 真1买 与 2买 同点位，文字偏移双倍（更靠下）避免重叠
         const mul = p.type === "真1买" ? 2 : 1;
         marks.push({ label: familyLabel(p), time: t, price: p.price - offset * mul, rawTime: p.time, rawPrice: p.price });
       }
       for (const p of sellPts) {
+        if (spanMerge && p.time < dirtySpan.t0) continue;
         const t = snapToOwnBar(p.price, p.time, rawBars);
         // 真1卖 与 2卖 同点位，文字偏移双倍（更靠上）避免重叠
         const mul = p.type === "真1卖" ? 2 : 1;
         marks.push({ label: familyLabel(p), time: t, price: p.price + offset * mul, rawTime: p.time, rawPrice: p.price });
+      }
+      {
+        const merged = [...prevKept, ...marks]
+          .sort((a, b) => b.time - a.time).slice(0, KEEP).sort((a, b) => a.time - b.time);
+        marks.length = 0;
+        marks.push(...merged);
       }
 
       // 跨周期共振：本级别的 1买/1卖 若与紧邻上一级别的 1/2/3 类买卖点落在同一点位

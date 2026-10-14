@@ -81,11 +81,12 @@ class TestStructureContext(unittest.TestCase):
         self.assertFalse(confirmed["current"].get("_forming"))
 
     def test_forming_endpoint_cannot_anchor_first_class(self):
+        # 2026-10-14 规则v2：anchorFirst* 遗留锚定已删，等价断言改为
+        # project_first_points（一类投影只吃已收笔笔）在 ctx 视图与原始笔上一致
         bis, bars = sample()
         ctx = core.buildStructureContext(bis, bars, SEC, 9*SEC)
-        cand = dict(time=7*SEC, price=18)
-        self.assertEqual(core.anchorFirstSell(cand, ctx["bis"]), core.anchorFirstSell(cand, bis))
-        self.assertEqual(core.anchorFirstBuy(cand, ctx["bis"]), core.anchorFirstBuy(cand, bis))
+        self.assertEqual(core.project_first_points(ctx["bis"], ctx["bis"], SEC),
+                         core.project_first_points(bis, bis, SEC))
 
     def test_future_prefix_and_js_parity(self):
         bis, bars = sample()

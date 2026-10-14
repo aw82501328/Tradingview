@@ -92,18 +92,12 @@ class TestSameBiFirstBuy(unittest.TestCase):
         self.assertTrue([p for p in pts if p["type"] == "1买" and p["time"] == 0])
 
     def test_non_same_down_end_is_first_buy(self):
-        """非同笔下跌笔终点是 1买（落点=跨度内同价小级别顶点 4000@4324.68），不看本级背驰开关。"""
+        """非同笔下跌笔终点是 1买（落点=跨度内同价小级别顶点 4000@4324.68）；
+        2026-10-14 规则v2 起买卖点判定不再使用背驰（firstNoDiverge 开关已移除）。"""
         pts = cc.findBuyPoints(BI_BUY, UPPER_MISS, MACD_NO_DIVERGE, 900)
         times = [p["time"] for p in pts if p["type"] == "1买"]
         self.assertIn(4000, times)
         self.assertNotIn(5000, times)
-        saved = cc.CHAN_CFG.get("firstNoDiverge")
-        cc.CHAN_CFG["firstNoDiverge"] = False
-        try:
-            pts_old = cc.findBuyPoints(BI_BUY, UPPER_MISS, MACD_NO_DIVERGE, 900)
-            self.assertIn(4000, [p["time"] for p in pts_old if p["type"] == "1买"])
-        finally:
-            cc.CHAN_CFG["firstNoDiverge"] = saved
 
     def test_isSameAsUpperBi_returns_matched_object(self):
         """新契约：命中返回 upperBis 内同一 dict 引用；未命中/空表返回 None。"""
@@ -125,10 +119,11 @@ class TestSameBiFirstSell(unittest.TestCase):
         self.assertFalse([p for p in pts if p["type"] == "1卖" and p["time"] == 4000])
 
     def test_unformed_tail_marks_both_sides(self):
-        """大级别未成笔尾段内，小级别多空一类都标。
+        """大级别未成笔尾段不再补一类点（2026-10-14 规则v2：一类只认已收笔上级笔端点）。
 
         上涨笔起点 (1000,100)：±1根K无同价顶点（小级别底 (2000,100) 差 1.1 根K），
-        覆盖窗内同价命中 → 1买 落在小级别起点 (2000,100)，不是上级时刻 1000。
+        覆盖窗内同价命中 → 1买 落在小级别起点 (2000,100)，不是上级时刻 1000；
+        尾段创新低/新高（4000/5000/6000）不再标一类。
         """
         lower = [
             b("down", 1000, 2000, 120, 100, 20),
@@ -142,10 +137,10 @@ class TestSameBiFirstSell(unittest.TestCase):
         buys = [p["time"] for p in cc.findBuyPoints(lower, upper, [], 900) if p["type"] == "1买"]
         sells = [p["time"] for p in cc.findSellPoints(lower, upper, [], 900) if p["type"] == "1卖"]
         self.assertIn(2000, buys)
-        self.assertIn(4000, buys)
-        self.assertIn(6000, buys)
+        self.assertNotIn(4000, buys)
+        self.assertNotIn(6000, buys)
         self.assertIn(3000, sells)
-        self.assertIn(5000, sells)
+        self.assertNotIn(5000, sells)
 
 
 class TestFirstPointFallbackLanding(unittest.TestCase):

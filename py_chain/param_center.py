@@ -71,7 +71,9 @@ CHAN_BI_KEYS = (
     "synthIntrabarBars", "pointEnoughForming",
     "windowDays3", "windowDays15", "windowDays30S",
 )
-POINTS_CHAN_KEYS = ("divergeDurRatio", "secondDivergeGate")  # anchorUndecided* 已淘汰（2026-10-10 提前入列）
+# secondDivergeGate 已随 2026-10-14 规则v2 移除（背驰不再参与买卖点判定，仅收笔用）；
+# class2ZsTol 已停用（类2买/类2卖「同一个中枢」改按时间归属，find* 签名保留兼容）
+POINTS_CHAN_KEYS = ("divergeDurRatio",)
 ENTRY_CHAN_KEYS = (
     "sinkFallback", "sinkFallbackRearm",
     "macdDivergeBodyOn", "macdDivergeTol",
@@ -191,15 +193,11 @@ PARAM_MODULES = {
         "params": {
             "nearAtrRatio": ("邻近合并阈值(×ATR)", "1买与2买价差 ≤ 该值×ATR 时合并为「真1买」", 0.0, 5.0),
             "keep": ("每周期保留标记数", "每周期买卖点标记总数上限（买+卖合并取最近N）", 1, 100),
-            "class2ZsTol": ("类2破中枢容差(点)", "类2买/类2卖允许越过中枢边界的绝对点数（0=严格）", 0.0, 1000.0),
             "thirdZsTol": ("3类进中枢容差(点)", "3买/类3买/4买/类4买/3卖/类3卖/4卖/类4卖允许进入中枢的绝对点数（0=严格）", 0.0, 1000.0),
-            "divergeDurRatio": ("背驰时长可比上限", "两段时长比超过该值时面积项不计入背驰判据", 1, 100),
-            "secondDivergeGate": ("弱2类买卖点-大周期背驰闸",
-                                  "开=无大周期背驰（按窗口起点取上级末两根确认同向笔）"
-                                  "时不标弱2买/弱类2买（2卖镜像），仅强档可标；"
-                                  "关=不检查背驰", None, None),
-            # anchorUndecidedSkip/anchorUndecidedMinBars 已淘汰（2026-10-10 提前入列：
-            # 未定型点接管锚点并弱档先行，定型阈值固定 2 合并块）
+            "divergeDurRatio": ("背驰时长可比上限", "两段时长比超过该值时面积项不计入背驰判据（收笔判定用，买卖点判定已不用背驰）", 1, 100),
+            # secondDivergeGate 已随 2026-10-14 规则v2 移除（背驰彻底退出买卖点判定）；
+            # class2ZsTol 已停用（类2买/类2卖「同一个中枢」改按时间归属）；
+            # anchorUndecidedSkip/anchorUndecidedMinBars 已淘汰（2026-10-10 提前入列）
         },
     },
     "entry": {
@@ -385,7 +383,6 @@ def defaults_of(module, symbol=None):
         base = {
             "nearAtrRatio": mark_buy_sell.NEAR_ATR_RATIO,
             "keep": mark_buy_sell.KEEP,
-            "class2ZsTol": mark_buy_sell.CLASS2_ZS_TOL,
             "thirdZsTol": mark_buy_sell.THIRD_ZS_TOL,
             **_chan_defaults_subset(POINTS_CHAN_KEYS),
         }

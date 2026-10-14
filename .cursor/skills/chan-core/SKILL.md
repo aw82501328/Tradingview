@@ -74,19 +74,19 @@ let bis = core.buildBi(fractals, merged, atr, macdArr); // ③ 笔构建
 | `biMacdMetrics(bi, macdArr)` | 一笔区间内的 `{redArea, greenArea, difHigh, difLow, redMax, greenMax}` |
 | `isBiDiverge(bi, refer, macdArr)` | 背驰判定：柱面积变小 **或** 黄白线动能减弱 **或** 柱最大高度变小（OR） |
 
-### 买卖点识别
+### 买卖点识别（2026-10-14 规则v2：背驰彻底退出买卖点判定，仅收笔判定用）
 
 | 函数 | 说明 |
 |------|------|
-| `findBuyPoints(bis, upperBis, macdArr, barSec)` | 买点识别。有上级时 1买=上级已确认笔端点（上涨起点/下跌终点）经 `projectFirstPoints` 落到笔内部的小级别顶点，同笔不标；无上级时 1买=创新低（`firstNoDiverge`）。二买族按已收笔上级上涨笔方向开窗（2026-10-14：窗口内每个回踩都标，首=2买、后续=类2买）。未成笔尾段追加本级多空一类 |
-| `findSellPoints(bis, upperBis, macdArr, barSec)` | 卖点识别。有上级时 1卖=上级已确认笔端点（上涨终点/下跌起点）同样落小级别顶点，同笔不标；无上级时 1卖=创新高。对称于买点 |
-| `projectFirstPoints(lowerBis, upperBis, barSec)` | 一类点投影（2026-10-13）：上级已确认笔端点 → 大级别笔**内部的小级别起点/终点**。落点阶梯（`lowerVertexOf`）：±1根本级K同价（最近）→ 上级一根K覆盖窗同价（最晚）→ 笔跨度内同价（最近）→ 跨度内同角色极值（底=上涨笔起点/下跌笔终点取最低，顶对称；「笔内部小级别起点/终点」的结构表达）→ 跨度内无同角色顶点才保持大级别时刻。搜索上界不越过下一个上级顶点（短笔几何防越界）。同笔（`isSameAsUpperBi`）两端都不标且抑制优先 |
-| `anchorFirstBuy(cand, upperBis)` | 一买锚定：取候选之前最近的上级底部端点（历史 API 保留；2026-10-13 起标记主流程不再二次锚定） |
-| `anchorFirstSell(cand, upperBis)` | 一卖锚定：候选在上级上涨笔内则上移到其结束点，否则取最近上级顶部端点（历史 API 保留；主流程已不调用） |
+| `findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, upperMacd)` | 买点识别（规则v2）。**无上级（日线）返回空**。1买=已收笔上级上涨笔内部的小级别起点（`projectFirstPoints` 投影，同笔不标）；2买族=`secondFamilyV2`（1买锚后低点逐一抬高：首个=2买、与主点同一个中枢的后续=类2买）；3类族=`thirdFamilyV2`（同向离开中枢后回踩不进，逐中枢序号 3/类3/4/类4）。二三类按 `directionWindows` 方向开窗过滤：已收笔上涨笔窗只留买点、未收笔尾段双向放行（一类天然合规不滤）。macdArr/upperMacd/class2ZsTol 仅兼容保留不再参与判定 |
+| `findSellPoints(...)` | 卖点识别，与买点镜像（1卖=上涨笔终点/下跌笔起点投影；2卖族=1卖锚后压低；3类族=向下离开中枢反抽不进） |
+| `projectFirstPoints(lowerBis, upperBis, barSec)` | 一类点投影（2026-10-13）：上级已确认笔端点 → 大级别笔**内部的小级别起点/终点**。落点阶梯（`lowerVertexOf`）：±1根本级K同价（最近）→ 上级一根K覆盖窗同价（最晚）→ 笔跨度内同价（最近）→ 跨度内同角色极值（底=上涨笔起点/下跌笔终点取最低，顶对称）→ 跨度内无同角色顶点才保持大级别时刻。搜索上界不越过下一个上级顶点。同笔（`isSameAsUpperBi`）两端都不标且抑制优先 |
+| `directionWindows(upperBis)` | 方向开窗（规则v2）：已收笔上涨笔窗=只买、下跌笔窗=只卖、最后已收笔终点之后（未收笔尾段）双向 |
+| `secondFamilyV2(bis, firstPts, zss, c2tol, isSell)` | 二类族（规则v2）：锚后低点/高点逐一抬高/压低（未抬高只更新参照不标）；主点后与主点**同一个中枢**（按时间归属）的抬低=类2。每点带 strong=候选后反弹笔端点 vs 前高/前低（过=强、已完成未过=弱、未走完=null 弱先行） |
+| `thirdFamilyV2(bis, upperBis, zss, t3tol, isSell)` | 三类及以上族（规则v2，逐中枢序号制）：同向离开中枢边沿后回踩/反抽不再进该中枢（容差 thirdZsTol）→ 合格点。序号窗口=每个已收笔同向上级笔：第1个被离开中枢出 3类/类3、第2个出 4类/类4、≥3 封顶类4；回踩重进则本轮结束、每枢计数不重置；同刻去重保留序号较新中枢的类型 |
 | `isSameAsUpperBi(bi, upperBis, barSec)` | 本笔与上级某笔完全重合判断（时间容差=本周期1个bar；返回命中笔对象或 null） |
 | `snapToOwnBar(price, refTime, bars)` | 极值价格/时间映射到本周期bar边界 |
-| `keepRecentEach(points)` | 低级别每类买卖点只保留最近一个（历史策略保留，当前主流程已不调用） |
-| `keepRecentAll(points, keep=10)` | 买卖点不分类（买+卖合并）只保留时间上最近 keep 个（现行主流程保留策略，mark-buy-sell 每周期邻近合并后调用） |
+| `keepRecentAll(points, keep=10)` | 买卖点不分类（买+卖合并）只保留时间上最近 keep 个（现行主流程保留策略；2026-10-14 起在标记层区间套合并后的完整列表上截断） |
 
 ### 缠论中枢
 
@@ -107,7 +107,7 @@ let bis = core.buildBi(fractals, merged, atr, macdArr); // ③ 笔构建
 - 本模块为纯函数库，**不产生任何外部副作用**（不连 CDP、不写文件、不绘图）；
 - 修改算法规则时（如笔构建、中枢、背驰判定、买卖点定义），**只改本模块**，`chan-bi`、`chan-zs` 与 `mark-buy-sell` 会自动生效；
 - 修改后建议用各 SKILL 的 `--dry` 模式回归验证输出与预期一致；
-- `keepRecentEach` 为历史保留函数，主流程已不再调用；现行保留策略为 `keepRecentAll`（每周期不分类只保留最近 10 个标记，`--keep=N` 可调）。
+- 2026-10-14 规则v2 起：买卖点判定**不再使用背驰**（`isBiDiverge`/`biMacdMetrics`/`divergeDurRatio` 仅保留给收笔判定 `buildStructureContext`）；无上级（日线）`findBuyPoints/findSellPoints` 返回空；旧 API（`anchorFirstBuy/Sell`、`keepRecentEach`、`unformedTailSpan` 等）已随旧逻辑删除，备份见 git 历史 6971db6。
 
 
 ## 一小时近等端点补充确认（2026-09-10）
@@ -151,8 +151,16 @@ JS/Python的`buildBi`增加可选末参`lowerContext`；用`makeBiLowerContext(r
 回归：15m 全历史 294→342 笔、60m 74→82、240 22→24、D 不变；`_cmp_merge.py`/`_cmp_merge_js.cjs` 生产口径对拍；test_chan_core_rules / test_near_double(.py/.cjs) 断言已按新口径更新。详见 chan-core SPEC §2.1、§2.4.4 与速查表 #6r。
 
 
-## 二买/二卖族按已收笔上级笔方向开窗（2026-10-14）
+## 买卖点规则v2（2026-10-14，旧逻辑整体作废）
 
-`secondPointSeries` / `_second_point_series` 取消 1买/1卖 锚定序列与破锚价作废，改为按已收笔上级笔方向开窗：买侧窗口=已收笔上级上涨笔跨度 (startTime, endTime]（卖侧=下跌笔），窗口内小级别只标本侧点——首个回踩/反抽端点 = 2买/2卖，其后每个 = 类2买/类2卖（卖侧放宽为与买侧镜像，不再要求严格更低压低）。既成结构：窗口内点不因后续走势作废。背驰闸（secondDivergeGate 仅拦弱档）按各窗口起点取值一次——窗口起点时刻上级末两根确认同向笔 isBiDiverge（窗口跨度内不会再确认出新的同向上级笔，与逐点取值等价；上级自身 MACD 优先/缺省区间套兜底），被闸点仍推进序列不重编号；强弱 strong 不变。无上级路径（日线主路径/未成笔尾段局部序列）抽为 `secondSeriesNoUpper` / `_second_series_no_upper` 旧锚定口径原样保留（锚=firstPts 或结构底/顶兜底、破锚价作废、卖侧严格压低）。
+旧买卖点逻辑（每锚序列/背驰闸/破锚价作废/无上级创新极值一类/尾段补点等）整体作废，备份=git 提交 6971db6。新规则（买侧表述，卖侧镜像）：
 
-用户口径：已收笔的大级别为上涨，内部小级别只标买点（卖点镜像）；取消锚定、保留背驰闸（含闸豁免补丁一并移除——方向开窗下豁免会使闸全失效）。JS/Python 镜像同步（方向开窗用例两侧：每回踩都标/方向过滤/闸按窗口起点/窗外破价不作废/无上级旧口径）；标记层 LOGIC_V → `20261014-second-upper-bi-window`；全部回测基线不可比。
+1. **方向开窗（管全部点类）**：上级已收笔上涨笔窗 (startTime, endTime] 内小级别只保留买点、下跌笔窗只保留卖点、未收笔尾段（最后已收笔终点之后，含 enough 形成段）双向放行。一类点由生成笔方向天然合规，不参与窗口过滤。
+2. **一类**：= 已收笔上级笔端点投影（`projectFirstPoints`，2026-10-13 实现）：上涨笔起点=1买、终点=1卖；下跌笔镜像。同笔不标。**尾段不再补一类**（一类只认已收笔）。
+3. **二类**：锚=1买。锚后低点逐一抬高（首个与锚价比、其后与前一候选比；未抬高只更新参照不标）→ 首个抬低=**2买**；其后与 2买**同一个中枢**内（按时间归属，`zsCoveringTime`——价格区间会把常在枢外的主点漏掉）的抬低=**类2买**，不在同中枢的不标（交给三类）。强弱 strong=该低点后完成的反弹笔端点 vs 前高（过=强、已完成未过=弱、未走完=null 弱先行，完成后重算改判）。
+4. **三类及以上**：逐中枢序号制（`thirdFamilyV2`）：价格同向离开中枢边沿（买=上破 zg、卖=下破 zd）后，回踩不再进该中枢（容差 thirdZsTol）→ 合格点。序号窗口=每个已收笔同向上级笔：第 1 个被离开的中枢出 **3买/类3买**、第 2 个出 **4买/类4买**（用户定义与三类同构）、≥3 封顶类4买；回踩重进中枢则本轮结束等待下一次离开（每枢计数不重置）；同一回踩可同时不回进多个中枢——同刻去重保留序号较新中枢的类型。
+5. **背驰彻底移除**：secondDivergeGate/firstNoDiverge 随旧逻辑删除（`strong2BuyMacdOn` 属 mark-entry 进场闸保留）；`isBiDiverge` 只给收笔判定用。
+6. **无上级（日线）不标**：`findBuyPoints/findSellPoints` 无 upperBis 返回 []；旧无上级路径（创新极值一类/结构底锚定）删除。
+7. **动态更新（区间套笔区间粒度）**：`changedBiSpan`+`nestedDirtyPeriods` 级联脏传播到标记层后，脏区间 t0 之前沿用上次标记、之后取新算（mark-buy-sell JS/PY 同步；LOGIC_V → `20261014-point-rules-v2`）。
+
+JS/Python 镜像逐位一致（TestPointRulesV2 ↔ JS「买卖点规则v2 二类/三类族」同名组）；全部回测基线不可比。

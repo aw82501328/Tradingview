@@ -281,26 +281,30 @@
 - **面积判据受时长可比门约束**（`areaDurComparable`）：面积 Σ = 柱高×K线根数、与区间时长线性相关——两段时长比 > `CHAN_CFG.divergeDurRatio`（默认 3，某段时长为 0/负视为不可比）时面积项不计入（DIF/柱高两项无条件 OR）。
 - （2026-10-01 曾废除柱高项并收紧为 双判据 AND；**2026-10-10 用户规则改回旧口径：三项 OR 任一命中**——绿柱/红柱面积变小（时长可比时）**或** DIF 低点抬高/高点变低 **或** 单根最大柱高变小。面积项仍受时长门约束，DIF/柱高两项无条件 OR。）
 
-### 2.9 买卖点
+### 2.9 买卖点（2026-10-14 规则v2：旧逻辑整体作废，备份=git 6971db6）
 
-**`findBuyPoints(bis, upperBis, macdArr, barSec) → points[]`**
+**总规则（买侧表述，卖侧镜像；背驰不参与判定，`isBiDiverge` 仅收笔判定用）**
 
-- **有上级笔时 1买 全部来自 `projectFirstPoints`**（见下：上级已确认笔端点 → 笔内部的小级别起点顶点，同笔不标）；下面「创新低/背驰/同笔例外」路径仅在**无上级笔**（日线）时使用。
-- **1买**：下跌笔创新低（`cur.endPrice < refer.endPrice`，参照为之前最近的幅度 ≥ 当前 50% 的下跌笔）；**创新低即 1买**（2026-10-10 用户规则，`firstNoDiverge` 默认开）——本级 MACD 背驰不再是硬门槛（多空两侧各自标记、由实际走势修正：更新的点接管计划锚点，前顶/前底与够笔作废规则照旧）；关=回退旧口径（创新低 + 背驰 AND，2026-10-01 双判据）；**forming 提前入列**（2026-10-10）：形成中段（enough ≥5 合并块）不再跳过，直接走参照/创新低路径——新低的 1买 当下可见、端点随行情漂移（同笔例外仍仅确认笔）；**同笔例外**（2026-09-15）：与上级笔完全重合且命中的上级笔已结束（非末笔）→ 纯结构标记 1买（不选参照、不比创新低/背驰——本级无内部结构，跨上级笔边界的比较无意义）；命中上级末笔（延伸中、反向笔未确认）仍跳过；全部保留；
-- **2买**（区间套，不依赖中枢）：上级上涨笔内首个 `price > up.startPrice`；无上级用「结构底」；
-- **类2买**（依赖中枢）：2买之后、同一中枢内每一个更高抬低；低点可低于收敛后的 `zd`，但该下跌笔须与 `[zd - class2ZsTol, zg]` 重叠；无中枢不标；
-- **3买 / 类3买 / 4买 / 类4买**（依赖中枢）：上涨破 `zg` 后回踩 `price > zg - thirdZsTol`；同段按时间顺序全部标出：第1个=3买、第2个=类3买、第3个=4买、第4个及以后=类4买；无中枢不标；
-- 输出类型：`{ type: "1买"|"2买"|"类2买"|"3买"|"类3买"|"4买"|"类4买", time, price }`。
-- 返回序（2026-10-01 起）：按 `time` 升序**稳定排序**（识别仍按 2/类2→1买→3/4类 三段写入，return 前统一排序）；同刻多笔保持识别序（2/类2 前、1买 后、3/4类 最后），**尾点=时间最新**。
+1. **方向开窗（管全部二三类点）**：上级已收笔上涨笔窗 `(startTime, endTime]` 内小级别只保留买点、下跌笔窗只保留卖点、未收笔尾段（最后已收笔终点之后，含 enough 形成段）双向放行；一类点由生成笔方向天然合规不参与过滤。
+2. **无上级（日线）不标**：`findBuyPoints/findSellPoints` 无 upperBis 返回 `[]`（旧「创新低/创新高一类/结构底顶锚定/无上级二类」路径已删）。
 
-**`findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol) → points[]`**（与买点对称）
-- 返回序（2026-10-01 起）：同 findBuyPoints——`time` 升序稳定排序，同刻保识别序（2/类2→1卖→3/4类），尾点=时间最新。
-- **1卖**：上涨笔创新高；**创新高即 1卖**（2026-10-10，`firstNoDiverge` 默认开，与 1买 对称——背驰不计；关=回退 创新高+背驰 AND 旧口径）；有上级时 1卖 来自 `projectFirstPoints`（上级上涨笔内部的小级别终点顶点），不再走 `anchorFirstSell` 二次锚定（遗留 API）；同笔例外与 1买 对称；
-- **2卖**（不依赖中枢）：上级下跌笔内首个 `price < dn.startPrice`；无上级用「结构顶」；
-- **类2卖 / 3卖 / 类3卖 / 4卖 / 类4卖**：依赖中枢。类2卖 = 2卖之后、同一中枢内每一个更低次高（高点可高于收敛后的 `zg`，但该上涨笔须与 `[zd, zg + class2ZsTol]` 重叠）。离枢反弹同段按顺序全部标出：第1个=3卖、第2个=类3卖、第3个=4卖、第4个及以后=类4卖（反弹 `< zd + thirdZsTol`）。
+**`findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, upperMacd) → points[]`**
+- **1买** = 已收笔上级上涨笔内部的小级别起点 / 下跌笔终点（`projectFirstPoints` 投影，同笔不标；尾段不补一类）。
+- **2买 / 类2买**（`secondFamilyV2`）：锚=1买。锚后低点逐一抬高（首个与锚价比、其后与前一候选比；未抬高只更新参照不标）——首个抬低=**2买**；其后与 2买**同一个中枢**内（按时间归属 `zsCoveringTime`，价格区间会把常在枢外的主点漏掉）的抬低=**类2买**；不在同中枢的不标（交给三类）。每点带 `strong`=候选后完成的反弹笔端点 vs 前高（过=强、已完成未过=弱、未走完=null 弱先行）。`class2ZsTol` 兼容保留不再使用。
+- **3买 / 类3买 / 4买 / 类4买**（`thirdFamilyV2`，逐中枢序号制）：价格上破 `zg` 离开中枢后，回踩低点 `> zg - thirdZsTol`（不回进）→ 合格点。序号窗口=每个已收笔同向上级笔：第 1 个被同向离开的中枢 → 首个合格点=**3买**、其后=**类3买**；第 2 个 → **4买/类4买**；≥3 封顶**类4买**（与三类同构的用户定义）。回踩重进中枢则本轮离开结束、等待下一次离开（每枢计数不重置）；同一回踩可同时不回进多个中枢——同刻去重保留序号较新中枢的类型。
+- 输出类型：`{ type: "1买"|"2买"|"类2买"|"3买"|"类3买"|"4买"|"类4买", time, price, strong? }`；同刻一类优先占刻、三类族让位二类族（`appendThirdPoints`）；返回按 `time` 升序稳定排序。
+- `macdArr/upperMacd` 兼容保留，不再参与判定。
 
-**`projectFirstPoints(lowerBis, upperBis, barSec) → {buys[], sells[]}|null`**（2026-10-13，有上级笔时一类点的唯一来源）
-- 以上涨为例（下跌对称）：**大级别上涨笔内部的小级别起点 = 1买，内部的小级别终点 = 1卖**；下跌笔内部的小级别起点 = 1卖、终点 = 1买。仅取上级**已确认笔**端点（延伸中末笔不取）；无上级笔（日线）返回 null（仍走上面「创新低/创新高」路径）。
+**`findSellPoints(...) → points[]`**：与买点镜像（1卖=上涨笔终点/下跌笔起点投影；2卖族=1卖锚后高点逐一压低+同中枢类2卖；3类族=向下离开中枢反抽不进）。
+
+**`directionWindows(upperBis) → {windows, tailStart}`**
+- 已收笔上涨笔窗=buy、下跌笔窗=sell、`tailStart`（最后已收笔终点）之后双向。
+
+**`secondFamilyV2(bis, firstPts, zss, c2tol, isSell) → points[]`** / **`thirdFamilyV2(bis, upperBis, zss, t3tol, isSell) → points[]`**
+- 见上（规则v2 二类/三类族实现；`reboundStrong` 为强弱取值器）。
+
+**`projectFirstPoints(lowerBis, upperBis, barSec) → {buys[], sells[]}|null`**（2026-10-13，有上级笔时一类点的唯一来源，规则v2 沿用不变）
+- 以上涨为例（下跌对称）：**大级别上涨笔内部的小级别起点 = 1买，内部的小级别终点 = 1卖**；下跌笔内部的小级别起点 = 1卖、终点 = 1买。仅取上级**已确认笔**端点（延伸中末笔不取）；无上级笔（日线）返回 null（上层直接返回空）。
 - **同笔不标**（`isSameAsUpperBi` 命中）：该上级笔两端点都不标；相邻笔共用端点时同笔抑制优先，不能被另一笔补回来。
 - **落点阶梯**（`lowerVertexOf`，一类点必须落在小级别；上级端点时刻=上级K开盘，真实极值在小级别K上）：
   1. ±1 根本级K内**同价**顶点（校准对齐常态），取离端点最近；
@@ -309,13 +313,7 @@
   4. 跨度内**同角色极值**顶点：底=上涨笔起点/下跌笔终点取最低、顶对称，同价取最晚——「笔内部的小级别起点/终点」的结构表达（上级笔端点是本笔区间极值，同角色极值不会越过端点价）；
   5. 跨度内无任何同角色顶点（小级别在该笔内无结构）→ 保持大级别时刻（唯一允许不落小级别的情形）。
   搜索上界不越过**下一个上级顶点**（起点侧 `min(笔末, t+parent)`，终点侧 `min(笔末+parent, 下一上级顶点)`）——正常几何下不生效，短笔/合成几何下防止把后面别笔区域的小级别顶点搜进来。
-- mark 层（mark-buy-sell）消费后不再二次锚定：旧 `anchorFirstBuy` 回上级端点的二次锚定已移除（会把投影落点拉回上级K开盘，个别情形跳到上一笔的底）；展示时刻统一由 `snapToOwnBar` 吸附。
-
-**`anchorFirstBuy(cand, upperBis) → {time, price}|null`**（遗留 API，2026-10-13 起标记主流程不再调用）
-- 低级别一买锚定到「上一级别某笔的起点」（时间上最近的一个底部端点）；找不到返回 null。
-
-**`anchorFirstSell(cand, upperBis) → {time, price}|null`**（遗留 API，主流程已不调用）
-- 一卖锚定到「上一级别上涨笔的结束点」：若候选位于某上级上涨笔内部 → 上移到该上涨笔结束点；否则取时间最近的顶部端点；找不到返回 null。
+- mark 层（mark-buy-sell）消费后不再二次锚定；展示时刻统一由 `snapToOwnBar` 吸附。
 
 **`isSameAsUpperBi(bi, upperBis, barSec) → 命中笔对象|null`**（2026-09-15 起返回命中笔，旧 bool 契约兼容）
 - 本周期某笔是否与上一级别某笔完全重合（起终点时间与价格一致，时间容差 = 本周期 1 个 bar、价格容差 0.01）；重合（同笔）说明内部无更细结构——上级笔已结束时由本周期做纯结构标记，上级末笔（延伸中）不标记；返回命中的上级笔对象（与 upperBis 元素同引用，供调用方判末笔）或 null。
@@ -323,14 +321,9 @@
 **`snapToOwnBar(price, refTime, bars) → time`**
 - 把极值价格/时间映射到本周期K线的 bar 边界（找高低价匹配且时间最近的K线；找不到取时间最近K线）。
 
-**`keepRecentEach(points, keep = 1) → points[]`**
-- 每类买卖点只保留时间上最近 `keep` 个（默认 1，即每类只保留最近一个）；返回按时间升序排列。
-- `keep === 1` 时每类只保留最近一个；`keep > 1` 时每类按时间倒序取最近 `keep` 个再升序返回。
-- 历史保留函数，现行主流程不调用（由 `keepRecentAll` 取代）。
-
 **`keepRecentAll(points, keep = 10) → points[]`**
 - 买卖点**不分类**（买+卖合并）只保留时间上最近 `keep` 个（默认 10）；返回按时间升序排列。
-- 现行主流程保留策略：`mark-buy-sell` 每周期在邻近合并后调用，控制图上标记数量。
+- 现行主流程保留策略：2026-10-14 起标记层在区间套合并（脏区间前沿沿用旧标记）后的完整列表上截断（`keepRecentEach` 已随旧逻辑删除）。
 
 ## 3. 配置项
 
@@ -353,7 +346,7 @@
 | 上层模块 | 复用关系 |
 |----------|----------|
 | `chan-bi`（画笔） | `markWickBars`/`mergeBars`/`findFractals`/`countRaw`/`hasGapBetween`/`buildBi`/`fixBiExtremes`/`lockedPivotsOf`/`alignBiToUpper`/`calcATR`/`calcMACD`/`hasMacdCrossBetween`/`extendLastBi`/`lowerResOf`/`calibrateBiTimes`/`intervalSecOf` |
-| `mark-buy-sell`（买卖点） | `mergeBars`/`findFractals`/`countRaw`/`hasGapBetween`/`buildBi`/`calcATR`/`calcMACD`/`hasMacdCrossBetween`/`extendLastBi`/`lowerResOf`/`calibrateBiTimes`/`intervalSecOf`/`fmtT`/`biMacdMetrics`/`isBiDiverge`/`findBuyPoints`/`findSellPoints`/`anchorFirstBuy`/`anchorFirstSell`/`isSameAsUpperBi`/`snapToOwnBar`/`keepRecentAll` |
+| `mark-buy-sell`（买卖点） | `mergeBars`/`findFractals`/`countRaw`/`hasGapBetween`/`buildBi`/`calcATR`/`calcMACD`/`hasMacdCrossBetween`/`extendLastBi`/`lowerResOf`/`calibrateBiTimes`/`intervalSecOf`/`fmtT`/`findBuyPoints`/`findSellPoints`/`isSameAsUpperBi`/`snapToOwnBar`/`keepRecentAll`/`changedBiSpan`/`nestedDirtyPeriods`/`buildStructureContext` |
 | `mark-sr-flip`（支阻位） | `calcATR`/`fmtT` |
 | `mark-entry`（进出场） | `calcATR`/`calcMACD`/`isBiDiverge`/`fmtT`/`lowerResOf` |
 
@@ -364,7 +357,7 @@
 | 笔数 < 3 | `buildZS`/`findBuyPoints`/`findSellPoints` 返回空数组 |
 | `atr` 为 0 或无数据 | `buildBi` gapThreshold=0（跳空判定关闭） |
 | `macdArr` 为空 | `hasMacdCrossBetween` 返回 false；`isBiDiverge`/`biMacdMetrics` 返回 false/null |
-| 上级笔为空 | `findBuyPoints`/`findSellPoints` 走「结构底/结构顶」分支（无区间套）；`anchorFirstBuy/Sell` 返回 null；`alignBiToUpper`/`buildZSByUpper` 退化为本级直接构建 |
+| 上级笔为空 | `findBuyPoints`/`findSellPoints` 返回空（2026-10-14 规则v2：无上级=日线不标）；`alignBiToUpper`/`buildZSByUpper` 退化为本级直接构建 |
 | 三笔重叠不成立 | `buildZS` 滑窗继续扫描 |
 | 中枢全部笔重叠后 `zg <= zd` | 防御性跳过该段 |
 | 长影 bar 位于窗口首/末（无左右相邻原始K线） | 无法判定 low 条件 → 无 `_topCand`，按纯压平处理（见 §2.0） |

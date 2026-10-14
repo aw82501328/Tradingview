@@ -8,7 +8,8 @@
     内部的小级别起点/终点顶点 + snapToOwnBar 吸附到本周期 bar 边界，2026-10-13
     起不再二次锚定回上级端点）
   - 邻近合并（mergeNearFirstSecond：1买与2买价格很近 → 合并为「真1买」，1卖/2卖对称）
-  - 每类保留最近 keep 个（keepRecentAll：每周期不分类，买+卖合并后只保留时间最近 keep 个）
+  - 保留截断（每周期不分类，买+卖合并在区间套合并后的完整列表上只保留时间最近 keep 个；
+    2026-10-14 规则v2 起脏区间 t0 之前沿用旧标记、之后取新算）
   - 跨周期共振（本级别 1买/1卖 与紧邻上级 1/2/3 类买卖点同点位 → 标绿）
 
 不连接 CDP、不绘图；回测链路只调用纯函数，绘图由 tv_draw 统一完成。
@@ -19,7 +20,7 @@ import re
 from .chan_core import (
     calcATR, calcMACD, intervalSecOf, fmtT,
     findBuyPoints, findSellPoints,
-    snapToOwnBar, keepRecentAll,
+    snapToOwnBar,
 )
 
 # 买卖点标记颜色（与 JS 一致）
@@ -117,10 +118,8 @@ def compute_period_marks(res, bis, upperBis, rawBars, atr, macdArr, pi, periodMa
     anchoredBuyPts = mergeNearFirstSecond(anchoredBuyPts, "1买", "2买", "真1买", nearPrice)
     sellPts = mergeNearFirstSecond(sellPts, "1卖", "2卖", "真1卖", nearPrice)
 
-    # 每周期不分类：买卖点合并后只保留时间上最近 keep 个，再按 type 末字拆回买/卖
-    keptPts = keepRecentAll(anchoredBuyPts + sellPts, keep)
-    anchoredBuyPts = [p for p in keptPts if p["type"].endswith("买")]
-    sellPts = [p for p in keptPts if p["type"].endswith("卖")]
+    # （2026-10-14 规则v2）保留截断（keep）移至 compute_all_marks：区间套笔区间粒度合并
+    # （脏区间 t0 之前沿用旧标记）之后再截，避免跨边界截断丢点。本函数输出全部新鲜标记。
 
     # 汇总标记：时间吸附到本周期 bar 边界；rawTime/rawPrice 保存原始点位（共振判定用）
     marks = []
@@ -167,9 +166,10 @@ def compute_all_marks(bisByPeriod, barsByPeriod, periods, fromTs=None,
     @param fromTs        起始日期时间戳（过滤该时间之后的笔；None 不过滤）
     @param periodMacd    可选：各周期预计算 MACD { 周期: [macdArr] }
     @param periodAtr     可选：各周期预计算 ATR { 周期: atr }
-    @param changed_spans 可选：各周期笔变化时间段。None=全量重算；
-                         有值时从第一个变化周期起，该周期及更小周期整表重算，更大周期沿用 prev_marks
-    @param prev_marks    上次各周期标记，供未变化的大级别沿用
+    @param changed_spans 可选：各周期笔变化时间段。None=全量重算；有值时从第一个变化
+                         周期起，该周期及更小周期重算——脏区间 t0 之前沿用 prev_marks、
+                         之后取新算结果（2026-10-14 规则v2 笔区间粒度），更大周期整体沿用
+    @param prev_marks    上次各周期标记，供未变化的大级别/脏区间前沿沿用
     @returns { 周期: [marks] }，marks 含 { label, time, price, rawTime, rawPrice, color }
     """
     from .chan_core import structurePeriods, nested_dirty_periods
@@ -209,8 +209,22 @@ def compute_all_marks(bisByPeriod, barsByPeriod, periods, fromTs=None,
         marks = compute_period_marks(res, curBis, upperBis, rawBars, atr, macdArr,
                                      pi, periodMarks, periods, nearAtrRatio, keep,
                                      class2ZsTol, thirdZsTol, upperMacdArr=upperMacdArr)
-        if marks:
-            periodMarks[res] = marks
+        # 区间套动态更新（2026-10-14 规则v2·笔区间粒度）：大级别笔变化经 nested_dirty_periods
+        # 级联到全部更小周期（span=并集）——脏区间 t0 之前的旧标记沿用上次结果、之后取本次
+        # 新算；保留截断（keep）在合并后的完整列表上做。
+        span = dirty.get(res)
+        prev_list = prev_marks.get(res) or []
+        if span is not None and span["t0"] != float("-inf") and prev_list:
+            keep_before = [m for m in prev_list if m.get("rawTime", m["time"]) < span["t0"]]
+            fresh = [m for m in marks if m.get("rawTime", m["time"]) >= span["t0"]]
+            merged = keep_before + fresh
+        else:
+            merged = marks
+        merged.sort(key=lambda m: m["time"], reverse=True)
+        merged = merged[:keep]
+        merged.sort(key=lambda m: m["time"])
+        if merged:
+            periodMarks[res] = merged
     return periodMarks
 
 
