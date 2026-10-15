@@ -296,30 +296,68 @@ function unionIntervalVisibility(resList) {
 (async () => {
   let client;
   try {
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    // chrome-remote-interface 的命令没有客户端超时：调试端口被占满时
+    // Page.enable / Runtime.enable 会一直等回包，整段画笔空等十几分钟。
+    // 单步限时，超时关掉这条连接再重开。
+    const step = async (promise, ms, label) => {
+      let timer;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(label)), ms);
+      });
+      promise.catch(() => {});
+      try {
+        return await Promise.race([promise, timeout]);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    const dropClient = (c) => {
+      if (!c) return;
+      try { if (c._ws) c._ws.terminate(); } catch (e) {}
+      try { c.close(); } catch (e) {}
+    };
+
     // 多标签场景：可用 --page=<url片段> 指定操作的图表页面（如 --page=urA9iDWS 按 /chart/urA9iDWS 匹配），
     // 未指定时取列表第一个 tradingview.com 页面（与历史行为一致）
     const PAGE_MATCH = getStrArg("page", "");
-    const targets = await CDP.List({ port: 9222 });
-    const tvs = targets.filter(t => t.type === "page" && t.url.includes("tradingview.com"));
-    let pg = tvs.find(t => PAGE_MATCH && t.url.includes(PAGE_MATCH)) || null;
-    if (!pg && !PAGE_MATCH) pg = tvs[0] || null;
-    if (!pg) { console.log("ERROR: 未找到 TradingView 页面" + (PAGE_MATCH ? `（匹配 ${PAGE_MATCH}）` : "")); process.exit(1); }
-    if (PAGE_MATCH) console.log("目标页面:", pg.url.split("/chart/")[1] || pg.url);
-    client = await CDP({ target: pg.id, port: 9222 });
-    await client.Page.enable();
-    await client.Runtime.enable();
-
-    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-    // 读取当前品种与周期
-    const curRes = await client.Runtime.evaluate({
-      expression: `(function() {
-        const chart = TradingViewApi.activeChart();
-        return { symbol: chart.symbol(), resolution: String(chart.resolution()) };
-      })()`,
-      returnByValue: true, awaitPromise: true, timeout: 10000,
-    });
-    const curVal = curRes.result.value;
+    const CDP_STEP_MS = 8000;
+    let curVal = null;
+    let lastConnErr = null;
+    for (let attempt = 1; attempt <= 3 && !curVal; attempt++) {
+      let c = null;
+      try {
+        const targets = await step(CDP.List({ port: 9222 }), CDP_STEP_MS, "列出图表页面超时");
+        const tvs = targets.filter(t => t.type === "page" && t.url.includes("tradingview.com"));
+        let pg = tvs.find(t => PAGE_MATCH && t.url.includes(PAGE_MATCH)) || null;
+        if (!pg && !PAGE_MATCH) pg = tvs[0] || null;
+        if (!pg) { console.log("ERROR: 未找到 TradingView 页面" + (PAGE_MATCH ? `（匹配 ${PAGE_MATCH}）` : "")); process.exit(1); }
+        if (PAGE_MATCH && attempt === 1) console.log("目标页面:", pg.url.split("/chart/")[1] || pg.url);
+        c = await step(CDP({ target: pg.id, port: 9222 }), CDP_STEP_MS, "连接图表超时");
+        await step(c.Page.enable(), CDP_STEP_MS, "Page.enable 超时");
+        await step(c.Runtime.enable(), CDP_STEP_MS, "Runtime.enable 超时");
+        const curRes = await step(c.Runtime.evaluate({
+          expression: `(function() {
+            const chart = TradingViewApi.activeChart();
+            return { symbol: chart.symbol(), resolution: String(chart.resolution()) };
+          })()`,
+          returnByValue: true, awaitPromise: true, timeout: 10000,
+        }), CDP_STEP_MS, "读取品种超时");
+        if (!curRes.result || !curRes.result.value) throw new Error("读取品种无返回");
+        client = c;
+        curVal = curRes.result.value;
+      } catch (e) {
+        lastConnErr = e;
+        dropClient(c);
+        if (client === c) client = null;
+        console.log(`连接图表第 ${attempt} 次未成功（${e.message}）` + (attempt < 3 ? "，重新连接..." : ""));
+        if (attempt < 3) await sleep(600);
+      }
+    }
+    if (!curVal) {
+      console.log("ERROR: 连接图表失败，" + (lastConnErr ? lastConnErr.message : ""));
+      process.exit(1);
+    }
     const SYMBOL = curVal.symbol;
     const originalRes = curVal.resolution;
     console.log("品种:", SYMBOL, "当前周期:", originalRes);
@@ -361,71 +399,137 @@ function unionIntervalVisibility(resList) {
       // 若按严格 bars[0] <= fromTs 判断，会永远触发 notCovered 导致加载超时。
       // 容忍度取 max(24根K线间隔, 6小时)。
       const tolerance = Math.max(expectedIntervalSec * 24, 6 * 3600);
+      // 最新一根早于现在 3 天：内存里只剩滚到最老后的历史页（第一根虽已早于起始日，
+      // 但不能当成历史已齐——上次因此把 60 分钟算成停在 6 月的 216 根）。
+      const nowSec = Math.floor(Date.now() / 1000);
+      const TAIL_MAX_LAG = 3 * 86400;
+      const fmt = (ts) => {
+        const dt = new Date(ts * 1000);
+        const p = (n) => String(n).padStart(2, '0');
+        return `${dt.getMonth() + 1}-${dt.getDate()} ${p(dt.getHours())}:${p(dt.getMinutes())}`;
+      };
+      const readSeries = (acceptShort) => client.Runtime.evaluate({
+        expression: `(function() {
+          const chart = TradingViewApi.activeChart();
+          const ms = chart.chartModel().mainSeries();
+          const items = ms.data().m_bars._items;
+          if (!items || items.length === 0) return { error: 'no_items' };
+          const bars = items.map(i => {
+            const v = i.value;
+            return { time: v[0], open: v[1], high: v[2], low: v[3], close: v[4], volume: v[5] };
+          });
+          // 用最后 20 个相邻间隔的中位数判断真实周期，
+          // 避免首尾K线间停牌缺口（如 1D 首两根 gap=3天）导致误判
+          const gaps = [];
+          for (let i = bars.length - 1; i >= Math.max(1, bars.length - 20); i--) {
+            gaps.push(bars[i].time - bars[i - 1].time);
+          }
+          gaps.sort((a, b) => a - b);
+          const gap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 0;
+          const fromTs = ${JSON.stringify(fromTs)};
+          const windowDays = ${JSON.stringify(windowDays || null)};
+          const tolerance = ${JSON.stringify(tolerance)};
+          const acceptShort = ${acceptShort ? "true" : "false"};
+          // 小周期窗口：覆盖目标从 fromTs 改为 max(fromTs, 最新K线时间 - windowDays*86400)，
+          // 只要求加载最近 N 天数据即可通过覆盖检查，避免为覆盖起始日期加载数月完整历史而超时
+          const latestTs = bars.length ? bars[bars.length - 1].time : 0;
+          const firstTs = bars[0].time;
+          const effFrom = (fromTs && windowDays) ? Math.max(fromTs, latestTs - windowDays * 86400) : fromTs;
+          const head = { resolution: String(chart.resolution()), gap, len: bars.length, first: firstTs, last: latestTs };
+          if (effFrom) {
+            // 数据起点仍晚于目标日期较多（尚未覆盖）→ 返回 notCovered，触发历史加载
+            if (!acceptShort && bars[0].time > effFrom + tolerance) {
+              return Object.assign(head, { bars: [], notCovered: true });
+            }
+            const fromIdx = bars.findIndex(k => k.time >= effFrom);
+            const buf = ${buffer || 0};
+            const start = Math.max(0, fromIdx < 0 ? 0 : fromIdx - buf);
+            return Object.assign(head, { bars: bars.slice(start) });
+          }
+          return Object.assign(head, { bars });
+        })()`,
+        returnByValue: true, awaitPromise: true, timeout: 15000,
+      });
+      const scrollFirst = () => client.Runtime.evaluate({
+        expression: `(function() {
+          const chart = TradingViewApi.activeChart();
+          const widget = chart._chartWidget || (chart.chartModel && chart.chartModel()._chartWidget);
+          const ts = widget && widget.model ? widget.model().timeScale() : chart.chartModel().timeScale();
+          ts.scrollToFirstBar();
+          return 'ok';
+        })()`,
+        returnByValue: true, awaitPromise: true, timeout: 10000,
+      });
+      const scrollRealtime = () => client.Runtime.evaluate({
+        expression: `(function() {
+          const chart = TradingViewApi.activeChart();
+          const ts = chart.chartModel().timeScale();
+          if (ts.scrollToRealtime) ts.scrollToRealtime();
+          else ts.scrollToBar(chart.chartModel().mainSeries().data().m_bars._items.length - 1);
+          return 'ok';
+        })()`,
+        returnByValue: true, awaitPromise: true, timeout: 10000,
+      });
+      // 深拉停住或只换到历史页时，用当前已加载、尾部仍是最新的那段继续，避免空转到跳过整段周期
+      const takeLive = async (reason) => {
+        console.log(reason);
+        for (let i = 0; i < 8; i++) {
+          let full;
+          try { full = (await readSeries(true)).result.value; } catch (e) { full = null; }
+          if (full && !full.error && full.bars && full.bars.length
+              && full.last >= nowSec - TAIL_MAX_LAG
+              && (!expectedIntervalSec || full.gap === expectedIntervalSec)) {
+            return full;
+          }
+          try { await scrollRealtime(); } catch (e) {}
+          await sleep(800);
+        }
+        return null;
+      };
       let scrolled = false; // 是否已触发过历史数据加载
+      let stall = 0;
+      let prevLen = -1;
+      let prevFirst = null;
+      let swapCount = 0; // scrollToFirstBar 把序列换成纯历史页的次数
       for (let attempt = 0; attempt < 90; attempt++) {
-        const dataRes = await client.Runtime.evaluate({
-          expression: `(function() {
-            const chart = TradingViewApi.activeChart();
-            const ms = chart.chartModel().mainSeries();
-            const items = ms.data().m_bars._items;
-            if (!items || items.length === 0) return { error: 'no_items' };
-            const bars = items.map(i => {
-              const v = i.value;
-              return { time: v[0], open: v[1], high: v[2], low: v[3], close: v[4], volume: v[5] };
-            });
-            // 用最后 20 个相邻间隔的中位数判断真实周期，
-            // 避免首尾K线间停牌缺口（如 1D 首两根 gap=3天）导致误判
-            const gaps = [];
-            for (let i = bars.length - 1; i >= Math.max(1, bars.length - 20); i--) {
-              gaps.push(bars[i].time - bars[i - 1].time);
-            }
-            gaps.sort((a, b) => a - b);
-            const gap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 0;
-            const fromTs = ${JSON.stringify(fromTs)};
-            const windowDays = ${JSON.stringify(windowDays || null)};
-            const tolerance = ${JSON.stringify(tolerance)};
-            // 小周期窗口：覆盖目标从 fromTs 改为 max(fromTs, 最新K线时间 - windowDays*86400)，
-            // 只要求加载最近 N 天数据即可通过覆盖检查，避免为覆盖起始日期加载数月完整历史而超时
-            const latestTs = bars.length ? bars[bars.length - 1].time : 0;
-            const effFrom = (fromTs && windowDays) ? Math.max(fromTs, latestTs - windowDays * 86400) : fromTs;
-            if (effFrom) {
-              // 数据起点仍晚于目标日期较多（尚未覆盖）→ 返回 notCovered，触发历史加载
-              if (bars[0].time > effFrom + tolerance) {
-                return { bars: [], resolution: String(chart.resolution()), gap, len: bars.length, notCovered: true };
-              }
-              const fromIdx = bars.findIndex(k => k.time >= effFrom);
-              const buf = ${buffer || 0};
-              const start = Math.max(0, fromIdx - buf);
-              return { bars: bars.slice(start), resolution: String(chart.resolution()), gap, len: bars.length };
-            }
-            return { bars, resolution: String(chart.resolution()), gap, len: bars.length };
-          })()`,
-          returnByValue: true, awaitPromise: true, timeout: 15000,
-        });
-        const d = dataRes.result.value;
+        let dataRes;
+        try { dataRes = await readSeries(false); } catch (e) { await sleep(1200); continue; }
+        const d = dataRes.result && dataRes.result.value;
         if (!d || d.error || !d.bars) {
           await sleep(1200);
           continue;
         }
-        if (DEBUG) console.log(`[fetchBars ${d.resolution}] len=${d.len} slice=${d.bars.length} gap=${d.gap} expect=${expectedIntervalSec}`);
+        if (DEBUG) console.log(`[fetchBars ${d.resolution}] len=${d.len} slice=${d.bars.length} gap=${d.gap} expect=${expectedIntervalSec} last=${d.last}`);
         if (expectedIntervalSec && d.gap !== expectedIntervalSec) {
           await sleep(1500);
           continue;
         }
+        const tailFresh = typeof d.last === "number" && d.last >= nowSec - TAIL_MAX_LAG;
+        if (!tailFresh) {
+          // 可视数据停在历史页。滚回最新；若深拉反复把序列换成旧页，就停手用实时段。
+          try { await scrollRealtime(); } catch (e) {}
+          if (scrolled) {
+            swapCount++;
+            if (swapCount >= 2) {
+              return await takeLive(`[周期 ${d.resolution}] 深拉只换到历史页（最新停在 ${fmt(d.last)}），改用当前已加载数据`);
+            }
+          }
+          await sleep(800);
+          continue;
+        }
         if (needCover && d.notCovered) {
+          if (d.len === prevLen && d.first === prevFirst) stall++;
+          else stall = 0;
+          prevLen = d.len;
+          prevFirst = d.first;
+          // 长度和起点连续不动：图表不再往前加载。不必空等满 90 次（约 4 分钟）再跳过。
+          if (stall >= 8) {
+            return await takeLive(`[周期 ${d.resolution}] 历史加载停在 ${fmt(d.first)}（${d.len} 根），不再等待，用已加载数据继续`);
+          }
           if (!scrolled) {
             scrolled = true;
             // 强制加载完整历史数据（scrollToFirstBar 会触发数据流持续加载到第一根K线）
-            await client.Runtime.evaluate({
-              expression: `(function() {
-                const chart = TradingViewApi.activeChart();
-                const widget = chart._chartWidget || (chart.chartModel && chart.chartModel()._chartWidget);
-                const ts = widget && widget.model ? widget.model().timeScale() : chart.chartModel().timeScale();
-                ts.scrollToFirstBar();
-                return 'ok';
-              })()`,
-              returnByValue: true, awaitPromise: true, timeout: 10000,
-            });
+            try { await scrollFirst(); } catch (e) {}
             console.log(`[周期 ${d.resolution}] 数据未覆盖起始日期，正在加载完整历史...`);
             await sleep(800);
           } else {
@@ -435,18 +539,7 @@ function unionIntervalVisibility(resList) {
         }
         if (needCover && scrolled) {
           // 历史已加载完，把可视范围滚回最新K线，避免图表停在最老的数据上
-          try {
-            await client.Runtime.evaluate({
-              expression: `(function() {
-                const chart = TradingViewApi.activeChart();
-                const ts = chart.chartModel().timeScale();
-                if (ts.scrollToRealtime) ts.scrollToRealtime();
-                else ts.scrollToBar(chart.chartModel().mainSeries().data().m_bars._items.length - 1);
-                return 'ok';
-              })()`,
-              returnByValue: true, awaitPromise: true, timeout: 10000,
-            });
-          } catch(e) {}
+          try { await scrollRealtime(); } catch (e) {}
         }
         return d;
       }
@@ -1023,7 +1116,9 @@ function unionIntervalVisibility(resList) {
         currentRes = res;
       }
 
-      const d = await fetchBars(intervalSecOf(res), FROM_TS, ANCHOR_BUFFER, res === '15' ? undefined : DRAW_WINDOW_DAYS[res]);
+      // 15 分钟同样走绘制窗口（windowDays15）。原先传 undefined 会为覆盖 --from 深拉全部历史，
+      // 图表深度不够时每个周期空等约 4 分钟后跳过。
+      const d = await fetchBars(intervalSecOf(res), FROM_TS, ANCHOR_BUFFER, DRAW_WINDOW_DAYS[res]);
       if (!d || d.error || !d.bars || d.bars.length === 0) {
         console.log(`\n[周期 ${res}] 无K线数据或切换失败，跳过`);
         continue;
@@ -1090,6 +1185,7 @@ function unionIntervalVisibility(resList) {
       // 保证本级别笔端点与上级笔的极值端点严格重合（优先级最高）。
       const lockedPivots = lockedPivotsOf(prevBis);
       // 60m 端点时间校准需要完整 15m 基准（refCache['15'] 预热；显示窗口不限制计算输入）。
+      // 图表 15m 没覆盖到 60m 起点时不写入缓存，后面的校准会用 bars.db 补前段。
       if (res === '60') {
         await ensureResolution('15');
         const lower = await fetchBars(900, FROM_TS || rawBars[0].time, ANCHOR_BUFFER);
@@ -1097,8 +1193,11 @@ function unionIntervalVisibility(resList) {
           const lowerBars = CLOSED_ONLY
             ? lower.bars.filter(k => k.time + 900 <= nowSec)
             : lower.bars;
-          refCache['15'] = markWickBars(lowerBars);
-          refCoverFrom['15'] = refCache['15'][0].time;
+          const need = FROM_TS || rawBars[0].time;
+          if (lowerBars.length && lowerBars[0].time <= need + 86400) {
+            refCache['15'] = markWickBars(lowerBars);
+            refCoverFrom['15'] = refCache['15'][0].time;
+          }
         }
         await ensureResolution(res);
         currentRes = res;

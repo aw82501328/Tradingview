@@ -1347,7 +1347,7 @@ function buildZS(bis, barSec) {
         exitTime,               // 离开中枢的笔的起点时间（记录，供排查）
         enterEndTime,           // 进入笔终点（外扩前原始时间）
         exitStartTime,          // 离开笔起点（外扩前原始时间）
-        trioEndTime: b3.endTime, // 三笔重叠完成时刻（2026-10-14 规则v2：下一个中枢从此接管，本枢 3类族序列到此为止）
+        trioEndTime: b3.endTime, // 三笔重叠完成时刻（下一中枢尚未离开时，本枢 3类族序列在此截断）
       });
       i = j; // 从离开中枢的笔开始重新扫描
     } else {
@@ -1735,10 +1735,11 @@ function isSameAsUpperBi(bi, upperBis, barSec) {
  *   1. ±1 根本级K内同价顶点（校准已对齐的常态），取离 t 最近；
  *   2. 上级一根K覆盖窗 [t, t+parent) 内同价顶点，取最晚（双底/双顶取后）；
  *   3. 整根大级别笔跨度内同价顶点（近等后移/合并造成时差），取离 t 最近；
- *   4. 跨度内该方向同角色顶点的极值——底=上涨笔起点/下跌笔终点取最低、顶对称，
- *      同价取最晚；这是「笔内部的小级别起点/终点」的结构表达（上级笔端点是
- *      本笔区间极值，跨度内同角色极值不会越过 p）；
- *   5. 跨度内没有任何同角色顶点 → 保持大级别时刻（小级别在该笔内无结构）。
+ *   4. 端点附近（±parent，约上级一根K）同角色顶点的极值——底取最低、顶取最高，
+ *      同价取最晚。只搜端点附近，不扫整段：已收笔笔的中段拐点不是终点
+ *      （1小时 7-7 13:30 被收成 4小时下跌笔终点、1卖被收到上涨笔中段），
+ *      中段在方向开窗里只应留下与笔方向一致的二三类点；
+ *   5. 端点附近没有同角色顶点 → 保持大级别时刻（小级别在该端点附近无结构）。
  * lo/hi 为跨度搜索界（起点侧 [t-1bar, min(笔末,t+parent)]，终点侧
  * [笔首, min(笔末+parent, 下一个上级顶点)]）：上界不越过下一个上级顶点，
  * 防止短笔几何下把后面别笔区域的小级别顶点搜进来。
@@ -1782,8 +1783,11 @@ function lowerVertexOf(lowerBis, t, p, barSec, isTop, lo, hi) {
     span.sort((a, b) => Math.abs(a[0] - t) - Math.abs(b[0] - t));
     return [span[0][0], span[0][1]];
   }
-  // 4. 跨度内该方向同角色极值（底=最低 / 顶=最高，同价取最晚）
-  const pool = verts.filter(([vt, , bottom]) => vt >= lo && vt <= hi && bottom === !isTop);
+  // 4. 端点附近同角色极值（底=最低 / 顶=最高，同价取最晚）。
+  // 第 3 步同价才扫整段；极值只取 ±parent，避免中段拐点被当成笔终点。
+  const nearLo = Math.max(lo, t - parent);
+  const nearHi = Math.min(hi, t + parent);
+  const pool = verts.filter(([vt, , bottom]) => vt >= nearLo && vt <= nearHi && bottom === !isTop);
   if (pool.length) {
     let best = pool[0];
     for (const v of pool) {
@@ -1806,8 +1810,8 @@ function lowerVertexOf(lowerBis, t, p, barSec, isTop, lo, hi) {
  * 同笔（本级某笔与该上级笔起终点重合）不标记该笔的两个端点；
  * 相邻笔共用端点时，同笔抑制优先，不能被另一笔补回来。
  * 起终点都落到大级别笔内部的小级别顶点（lowerVertexOf 阶梯：±1根K同价 →
- * 覆盖窗同价 → 笔跨度同价 → 跨度内同角色极值；仅跨度内无同角色顶点才保持
- * 大级别时刻）。
+ * 覆盖窗同价 → 笔跨度同价 → 端点附近同角色极值；仅端点附近无同角色顶点才保持
+ * 大级别时刻）。中段拐点不参与极值落点。
  * 无上级笔返回 null（最高级别仍走本级创新低/创新高）。仅已确认笔，延伸中的末笔不取端点。
  * @returns {{buys: Array<{type,time,price}>, sells: Array<{type,time,price}>}|null}
  */
@@ -2011,9 +2015,11 @@ function pointAllowedByDirection(windows, tailStart, t, side) {
 
 /**
  * 二类族（2026-10-14 规则v2）：锚=1买/1卖（一类投影点）。锚后低点/高点逐一抬高/压低
- * （首个与锚价比、其后与前一候选比；未抬高的候选只更新参照不标）。首个抬低=2买/2卖；
- * 其后与主点属于同一个中枢（zsCoveringTime 按时间归属，同一段盘整）的抬低=类2买/类2卖
- * （不在同中枢的不标，交给三类规则；主点不在任何中枢内则无类点）。
+ * （首个与锚价比、其后与前一候选比）。首个抬低=2买/2卖；其后与主点属于同一个中枢
+ * （zsCoveringTime 按时间归属，同一段盘整）的回踩=类2买/类2卖：抬高的标，没抬高但还没
+ * 破锚（买侧低点仍高于 1买、卖侧高点仍低于 1卖）的也标——已收笔上级上涨笔里的第二次
+ * 回踩可以略低于前低。跌破锚价的只更新参照不标；不在同中枢的不标（交给三类；主点不在
+ * 任何中枢内则无类点）。
  * 扫描窗=(锚_i, 锚_{i+1})，方向开窗在 find*Points 统一过滤。
  * 强弱（用户口径 2026-10-14 定稿）：反弹 = 锚之后到该候选为止的反向极值（买=锚后最高点、
  * 卖=锚后最低点，滚动累计）；前高/前低 = 锚之前最近的反向端点（即结束于锚的笔的起点）——
@@ -2058,18 +2064,26 @@ function secondFamilyV2(bis, firstPts, zss, c2tol, isSell) {
       if (t <= anchorT || t >= nextT) continue;
       const p = b.endPrice;
       const raised = isSell ? p < refP : p > refP;
-      if (!raised) { refP = p; continue; }
       const strong = (prevExtreme == null || !Number.isFinite(reboundExtreme)) ? null
         : (isSell ? reboundExtreme < prevExtreme : reboundExtreme > prevExtreme);
       if (!marked) {
+        // 主点仍要求相对参照抬高/压低；没抬高只下移参照
+        if (!raised) { refP = p; continue; }
         out.push({ type: isSell ? "2卖" : "2买", time: t, price: p, strong });
         zs2 = zsCoveringTime(zss, t);
         marked = true;
-      } else {
-        const [t0, t1] = zs2 ? zsTimeRange(zs2) : [Infinity, -Infinity];
-        if (zs2 && t >= t0 && t <= t1) {
-          out.push({ type: isSell ? "类2卖" : "类2买", time: t, price: p, strong });
-        }
+        refP = p;
+        continue;
+      }
+      const [t0, t1] = zs2 ? zsTimeRange(zs2) : [Infinity, -Infinity];
+      const inSame = !!(zs2 && t >= t0 && t <= t1);
+      const anchorP = anchors[ai].price;
+      // 买侧不破 1买锚（低点仍更高）；卖侧不破 1卖锚（高点仍更低）
+      const holdsAnchor = isSell ? p < anchorP : p > anchorP;
+      // 同中枢：抬高的后续点是类2；没抬高但未破锚的回踩也是类2（上级已收同向笔内的
+      // 第二次回踩可以略破前低/前高）。破锚或不在同中枢：只更新参照，不标。
+      if (inSame && (raised || holdsAnchor)) {
+        out.push({ type: isSell ? "类2卖" : "类2买", time: t, price: p, strong });
       }
       refP = p;
     }
@@ -2082,9 +2096,10 @@ function secondFamilyV2(bis, firstPts, zss, c2tol, isSell) {
  * 三类及以上族（2026-10-14 规则v2，逐中枢序号制）：价格同向离开中枢边沿（买=上破 zg、
  * 卖=下破 zd）后，回踩/反抽不再进该中枢（容差 t3tol）→ 合格点。序号窗口=每个已收笔同向
  * 上级笔，**窗口内重新起算**：第 1 个被同向离开的中枢 → 首个合格点=3类、其后=类3；第 2 个 →
- * 4类/类4；≥3 封顶类4。回踩重新进入中枢则本轮离开结束、等待下一次离开（每枢计数不重置）；
- * **下一个中枢的三笔重叠完成（trioEndTime）后本枢序列永久结束**——「前一个中枢」指最近的
- * 中枢，远古中枢不能认领新中枢形成之后的回踩（无界前瞻会让 7 月的中枢认领 10 月的回踩）。
+ * 4类/类4；≥3 封顶类4。回踩重新进入中枢则本轮离开结束、等待下一次离开（每枢计数不重置）。
+ * 认领边界看紧邻的下一个中枢：它已经离开时，本枢序列收到离开笔起点（含该时刻这根回抽
+ * ——下一中枢三笔重叠完成到真正离开之间，不回进本枢的回抽仍是本枢的类点）；它还没离开时，
+ * 仍在它的三笔重叠完成（trioEndTime）处截断，避免没离开的新中枢让本枢无界认领后续回踩。
  * 不归属任何已收笔同向窗口的中枢（反向窗/未收笔尾段内）按时间序独立编号参与，
  * 产出的点交由方向开窗统一过滤。同一回踩可同时不回进多个中枢——同刻去重保留
  * 序号较新（后离开）中枢的类型。
@@ -2098,7 +2113,9 @@ function thirdFamilyV2(bis, upperBis, zss, t3tol, isSell) {
   const winDir = isSell ? "down" : "up";   // 序号窗口的同向上级笔
   const eps = 1e-9;
   let j = 0;
-  const processZs = (zs, boundT) => {
+  // strict：下一中枢还没离开，t >= trioEnd 即停。
+  // 非 strict：下一中枢已离开，收到离开笔起点（t > exitTime 才停）。
+  const processZs = (zs, boundT, strict) => {
     const edge = isSell ? zs.zd : zs.zg;
     const rawEnd = zsTimeRange(zs)[1];
     let collect = false, n = 0, left = false;
@@ -2106,7 +2123,7 @@ function thirdFamilyV2(bis, upperBis, zss, t3tol, isSell) {
       const b = bis[i];
       const t = b.endTime || 0;
       if (t < rawEnd) continue;   // 结束于 rawEnd 的笔参与离开判定（上破笔常被 buildZS 吸收为末段延伸笔）
-      if (boundT != null && t >= boundT) break; // 下一中枢已形成：本枢序列到此为止
+      if (boundT != null && (strict ? t >= boundT : t > boundT)) break;
       if (b.type === breakDir) {
         if (isSell ? b.endPrice < edge - eps : b.endPrice > edge + eps) { collect = true; left = true; }
       } else if (b.type === pullDir && collect) {
@@ -2121,7 +2138,14 @@ function thirdFamilyV2(bis, upperBis, zss, t3tol, isSell) {
     }
     if (left) j++;
   };
-  // 逐中枢处理：边界 = 时间上紧邻的下一个中枢的 trioEndTime（下一个中枢从此接管）
+  // 紧邻下一中枢：已离开则收到离开笔起点；未离开则仍在 trioEndTime 截断
+  const nextBound = (k) => {
+    if (k + 1 >= zss.length) return [null, false];
+    const nxt = zss[k + 1];
+    if (nxt.exitTime != null) return [nxt.exitTime, false];
+    return [nxt.trioEndTime, true];
+  };
+  // 逐中枢处理：边界见 nextBound（已离开的下一中枢收到离开笔起点）
   const matched = new Set();
   for (const ub of conf) {
     if (ub.type !== winDir) continue;
@@ -2130,12 +2154,16 @@ function thirdFamilyV2(bis, upperBis, zss, t3tol, isSell) {
       const zs = zss[k];
       if (zs.upperStart !== ub.startTime || zs.upperEnd !== ub.endTime) continue;
       matched.add(zs);
-      processZs(zs, k + 1 < zss.length ? zss[k + 1].trioEndTime : null);
+      const [boundT, strict] = nextBound(k);
+      processZs(zs, boundT, strict);
     }
   }
   j = 0; // 反向窗/尾段内的中枢不属任何同向窗口，独立起算
   for (let k = 0; k < zss.length; k++) {
-    if (!matched.has(zss[k])) processZs(zss[k], k + 1 < zss.length ? zss[k + 1].trioEndTime : null);
+    if (!matched.has(zss[k])) {
+      const [boundT, strict] = nextBound(k);
+      processZs(zss[k], boundT, strict);
+    }
   }
   // 同刻去重：保留序号较新中枢的类型
   const byTime = new Map();

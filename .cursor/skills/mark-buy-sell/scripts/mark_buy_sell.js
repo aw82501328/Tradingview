@@ -368,8 +368,10 @@ function onlyThisInterval(res) {
     };
 
     // 清除某周期的旧买卖点标记（title = CHAN_BUYSELL_<周期>）。
-    // 2026-10-14 加固：删除后复核剩余，未删净重试（最多3轮）——单轮枚举删除在形状
-    // 过多/图表忙时会漏（10-14 实测清 10 漏 65），返回 left 供调用方告警。
+    // 先收集 id 再删（边枚举边删会漏），删后复核，未净则重试。
+    // 2026-10-14 实测单轮清 10 漏 65；形状多时多轮才删得干净。
+    // 调用前必须先 ensureBarsCover：吸在旧数据边缘的标记（如 9-28 21:00 那一堆）
+    // 只有对应 K 线已经加载进图表，getAllShapes 才枚举得到。
     const clearBuySell = async (res) => {
       const TITLE = "CHAN_BUYSELL_" + res;
       const r = await client.Runtime.evaluate({
@@ -384,24 +386,27 @@ function onlyThisInterval(res) {
               return props && props.title ? String(props.title._value) : '';
             } catch(e) { return ''; }
           };
-          for (let pass = 0; pass < 3; pass++) {
+          const grab = () => {
+            const ids = [];
+            for (const s of chart.getAllShapes()) {
+              if (readTitle(s.id) === TITLE) ids.push(s.id);
+            }
+            return ids;
+          };
+          for (let pass = 0; pass < 12; pass++) {
             out.passes = pass + 1;
-            for (const s of chart.getAllShapes()) {
-              if (readTitle(s.id) === TITLE) {
-                try { chart.removeEntity(s.id); out.cleared++; } catch(e) {}
-              }
+            const ids = grab();
+            for (const id of ids) {
+              try { chart.removeEntity(id); out.cleared++; } catch(e) {}
             }
-            let left = 0;
-            for (const s of chart.getAllShapes()) {
-              if (readTitle(s.id) === TITLE) left++;
-            }
-            out.left = left;
-            if (left === 0) break;
+            const left = grab();
+            out.left = left.length;
+            if (left.length === 0) break;
             await new Promise(r2 => setTimeout(r2, 800));
           }
           return out;
         })()`,
-        returnByValue: true, awaitPromise: true, timeout: 60000,
+        returnByValue: true, awaitPromise: true, timeout: 120000,
       });
       return r.result.value;
     };
@@ -488,16 +493,20 @@ function onlyThisInterval(res) {
       barsHeld[res] = d.bars;
       const rawBis = (bisCache.periods[res] || []).filter(b => b.endTime >= FROM_TS);
       const lower = core.lowerResOf(res);
+      const barSecPrep = intervalSecOf(res);
+      // 只把已收盘K线交给收笔判断。未收盘K线会让 buildStructureContext 丢掉画笔落盘、
+      // 整段重算（不带区间套），图上的笔和买卖点会对不上。
+      const closedBars = d.bars.filter(b => b.time + barSecPrep <= nowCut);
       const lowerStroke = (lower && structuredBis[lower] && barsHeld[lower] && barsHeld[lower].length)
         ? { bis: structuredBis[lower], bars: barsHeld[lower], barSec: intervalSecOf(lower) }
         : null;
-      structuredBis[res] = core.buildStructureContext(rawBis, d.bars, intervalSecOf(res), nowCut, null, null,
+      structuredBis[res] = core.buildStructureContext(rawBis, closedBars, barSecPrep, nowCut, null, null,
         lowerStroke).bis;
     }
 
     // 大级别笔变化时，从该周期起按区间套重算更小周期（2026-10-14 规则v2 起为笔区间粒度：
     // 脏区间 t0 之前沿用上次标记、之后取新算，见下方 marks 合并）；未变的大级别整体沿用
-    const LOGIC_V = "20261014-point-rules-v3"; // 规则v3：删真1合并与共振变绿（逻辑变更必须升版使状态作废全量重算）
+    const LOGIC_V = "20261015-third-until-next-leave"; // 类3/类4：下一中枢离开前的不回进回抽仍归本枢（逻辑变更必须升版使状态作废全量重算）
     const statePath = path.join(CACHE_DIR, `buysell_${String(SYMBOL).replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
     const fpOf = (bis) => (bis || []).map(b => [b.type, b.startTime, b.endTime, b.startPrice, b.endPrice]);
     let prevState = null;
@@ -637,6 +646,13 @@ function onlyThisInterval(res) {
 
       if (DRY) continue;
 
+      // 切周期后图表只留最近一段 K 线。先加载到本次计算起点（小周期用绘制窗口），
+      // 吸在旧左边缘的买卖点才会进入枚举，清除才删得掉；同时新标记也不会再被吸到边缘。
+      const windowDays = DRAW_WINDOW_DAYS[res];
+      const coverTs = windowDays
+        ? Math.max(FROM_TS, Math.floor(Date.now() / 1000) - windowDays * 86400)
+        : FROM_TS;
+      await ensureBarsCover(res, coverTs);
       const cl = await clearBuySell(res);
       console.log(`[周期 ${res}] 清除旧买卖点:`, cl.cleared, cl.left > 0 ? `（告警：仍有 ${cl.left} 个未删净，${cl.passes} 轮尝试）` : "");
 

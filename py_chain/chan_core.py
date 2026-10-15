@@ -2192,7 +2192,7 @@ def buildZS(bis, barSec=0):
                 "exitTime": exitTime,                  # 离开中枢的笔的起点时间（记录，供排查）
                 "enterEndTime": enterEndTime,          # 进入笔终点（外扩前原始时间）
                 "exitStartTime": exitStartTime,        # 离开笔起点（外扩前原始时间）
-                "trioEndTime": b3["endTime"],          # 三笔重叠完成时刻（2026-10-14 规则v2：下一个中枢从此接管）
+                "trioEndTime": b3["endTime"],          # 三笔重叠完成时刻（下一中枢尚未离开时，本枢 3类族序列在此截断）
             })
             i = j  # 从离开中枢的笔开始重新扫描
         else:
@@ -2932,9 +2932,11 @@ def _point_allowed_by_direction(windows, tail_start, t, side):
 
 def _second_family_v2(bis, firstPts, zss, c2tol, is_sell):
     """二类族（2026-10-14 规则v2）：锚=1买/1卖（一类投影点）。锚后低点/高点逐一抬高/
-    压低（首个与锚价比、其后与前一候选比；未抬高的候选只更新参照不标）。首个抬低=
-    2买/2卖；其后与主点属于同一个中枢（_zs_covering_time 按时间归属，同一段盘整）
-    的抬低=类2买/类2卖（不在同中枢的不标，交给三类规则；主点不在任何中枢内则无类点）。
+    压低（首个与锚价比、其后与前一候选比）。首个抬低=2买/2卖；其后与主点属于同一个
+    中枢（_zs_covering_time 按时间归属，同一段盘整）的回踩=类2买/类2卖：抬高的标，
+    没抬高但还没破锚（买侧低点仍高于 1买、卖侧高点仍低于 1卖）的也标——已收笔上级
+    上涨笔里的第二次回踩可以略低于前低。跌破锚价的只更新参照不标；不在同中枢的不标
+    （交给三类规则；主点不在任何中枢内则无类点）。
     扫描窗=(锚_i, 锚_{i+1})，方向开窗在 findBuy/findSellPoints 统一过滤。
     强弱（用户口径 2026-10-14 定稿）：反弹 = 锚之后到该候选为止的反向极值（买=锚后
     最高点、卖=锚后最低点，滚动累计）；前高/前低 = 锚之前最近的反向端点（即结束于锚
@@ -2980,24 +2982,32 @@ def _second_family_v2(bis, firstPts, zss, c2tol, is_sell):
                 continue
             p = b["endPrice"]
             raised = p < ref_p if is_sell else p > ref_p
-            if not raised:
-                ref_p = p
-                continue
             if prev_extreme is None or not math.isfinite(rebound_extreme):
                 strong = None
             else:
                 strong = (rebound_extreme < prev_extreme if is_sell
                           else rebound_extreme > prev_extreme)
             if not marked:
+                # 主点仍要求相对参照抬高/压低；没抬高只下移参照
+                if not raised:
+                    ref_p = p
+                    continue
                 out.append({"type": "2卖" if is_sell else "2买",
                             "time": t, "price": p, "strong": strong})
                 zs2 = _zs_covering_time(zss, t)
                 marked = True
-            elif zs2 is not None:
-                t0, t1 = _zs_time_range(zs2)
-                if t0 <= t <= t1:
-                    out.append({"type": "类2卖" if is_sell else "类2买",
-                                "time": t, "price": p, "strong": strong})
+                ref_p = p
+                continue
+            t0, t1 = _zs_time_range(zs2) if zs2 is not None else (float("inf"), -float("inf"))
+            in_same = zs2 is not None and t0 <= t <= t1
+            anchor_p = anchor["price"]
+            # 买侧不破 1买锚（低点仍更高）；卖侧不破 1卖锚（高点仍更低）
+            holds_anchor = p < anchor_p if is_sell else p > anchor_p
+            # 同中枢：抬高的后续点是类2；没抬高但未破锚的回踩也是类2（上级已收同向笔内的
+            # 第二次回踩可以略破前低/前高）。破锚或不在同中枢：只更新参照，不标。
+            if in_same and (raised or holds_anchor):
+                out.append({"type": "类2卖" if is_sell else "类2买",
+                            "time": t, "price": p, "strong": strong})
             ref_p = p
     out.sort(key=lambda q: q["time"])
     return out
@@ -3008,9 +3018,10 @@ def _third_family_v2(bis, upper_bis, zss, t3tol, is_sell):
     zg、卖=下破 zd）后，回踩/反抽不再进该中枢（容差 t3tol）→ 合格点。序号窗口=每个已收笔
     同向上级笔，**窗口内重新起算**：第 1 个被同向离开的中枢 → 首个合格点=3类、其后=类3；
     第 2 个 → 4类/类4；≥3 封顶类4。回踩重新进入中枢则本轮离开结束、等待下一次离开（每枢
-    计数不重置）；**下一个中枢的三笔重叠完成（trioEndTime）后本枢序列永久结束**——「前一个
-    中枢」指最近的中枢，远古中枢不能认领新中枢形成之后的回踩（无界前瞻会让 7 月的中枢
-    认领 10 月的回踩）。不归属任何已收笔同向窗口的中枢（反向窗/未收笔尾段内）按时间序
+    计数不重置）。认领边界看紧邻的下一个中枢：它已经离开时，本枢序列收到离开笔起点
+    （含该时刻这根回抽——下一中枢三笔重叠完成到真正离开之间，不回进本枢的回抽仍是本枢
+    的类点）；它还没离开时，仍在它的三笔重叠完成（trioEndTime）处截断，避免没离开的
+    新中枢让本枢无界认领后续回踩。不归属任何已收笔同向窗口的中枢（反向窗/未收笔尾段内）按时间序
     独立编号参与，产出的点交由方向开窗统一过滤。同一回踩可同时不回进多个中枢——同刻
     去重保留序号较新（后离开）中枢的类型。"""
     out = []
@@ -3023,7 +3034,7 @@ def _third_family_v2(bis, upper_bis, zss, t3tol, is_sell):
     eps = 1e-9
     j = 0
 
-    def process_zs(zs, bound_t):
+    def process_zs(zs, bound_t, strict):
         nonlocal j
         edge = zs["zd"] if is_sell else zs["zg"]
         raw_end = _zs_time_range(zs)[1]
@@ -3035,8 +3046,10 @@ def _third_family_v2(bis, upper_bis, zss, t3tol, is_sell):
             if t < raw_end:
                 # 结束于 raw_end 的笔参与离开判定（上破笔常被 buildZS 吸收为末段延伸笔）
                 continue
-            if bound_t is not None and t >= bound_t:
-                break  # 下一中枢已形成：本枢序列到此为止
+            # strict：下一中枢还没离开，t >= trioEnd 即停。
+            # 非 strict：下一中枢已离开，收到离开笔起点（t > exitTime 才停）。
+            if bound_t is not None and (t >= bound_t if strict else t > bound_t):
+                break
             if b["type"] == break_dir:
                 if (b["endPrice"] < edge - eps) if is_sell else (b["endPrice"] > edge + eps):
                     collect = True
@@ -3053,7 +3066,16 @@ def _third_family_v2(bis, upper_bis, zss, t3tol, is_sell):
         if left:
             j += 1
 
-    # 逐中枢处理：边界 = 时间上紧邻的下一个中枢的 trioEndTime（下一个中枢从此接管）
+    def next_bound(k):
+        """紧邻下一中枢：已离开则收到离开笔起点；未离开则仍在 trioEndTime 截断。"""
+        if k + 1 >= len(zss):
+            return None, False
+        nxt = zss[k + 1]
+        if nxt.get("exitTime") is not None:
+            return nxt["exitTime"], False
+        return nxt.get("trioEndTime"), True
+
+    # 逐中枢处理：边界见 next_bound（已离开的下一中枢收到离开笔起点）
     matched = set()
     for ub in conf:
         if ub["type"] != win_dir:
@@ -3063,13 +3085,13 @@ def _third_family_v2(bis, upper_bis, zss, t3tol, is_sell):
             if zs.get("upperStart") != ub["startTime"] or zs.get("upperEnd") != ub["endTime"]:
                 continue
             matched.add(id(zs))
-            nxt = zss[k + 1].get("trioEndTime") if k + 1 < len(zss) else None
-            process_zs(zs, nxt)
+            bound_t, strict = next_bound(k)
+            process_zs(zs, bound_t, strict)
     j = 0  # 反向窗/尾段内的中枢不属任何同向窗口，独立起算
     for k, zs in enumerate(zss):
         if id(zs) not in matched:
-            nxt = zss[k + 1].get("trioEndTime") if k + 1 < len(zss) else None
-            process_zs(zs, nxt)
+            bound_t, strict = next_bound(k)
+            process_zs(zs, bound_t, strict)
     # 同刻去重：保留序号较新中枢的类型
     by_time = {}
     for p in out:
@@ -3088,10 +3110,10 @@ def _lower_vertex_of(lower_bis, t, p, bar_sec, is_top, lo=None, hi=None):
       1. ±1 根本级K内同价顶点（校准已对齐的常态），取离 t 最近；
       2. 上级一根K覆盖窗 [t, t+parent) 内同价顶点，取最晚（双底/双顶取后）；
       3. 笔跨度内同价顶点（近等后移/合并造成时差），取离 t 最近；
-      4. 跨度内该方向同角色顶点的极值——底=上涨笔起点/下跌笔终点取最低、顶对称，
-         同价取最晚；这是「笔内部的小级别起点/终点」的结构表达（上级笔端点是
-         本笔区间极值，跨度内同角色极值不会越过 p）；
-      5. 跨度内没有任何同角色顶点 → 保持大级别时刻（小级别在该笔内无结构）。
+      4. 端点附近（±parent，约上级一根K）同角色顶点的极值——底取最低、顶取最高，
+         同价取最晚。只搜端点附近，不扫整段：已收笔笔的中段拐点不是终点，
+         中段在方向开窗里只应留下与笔方向一致的二三类点；
+      5. 端点附近没有同角色顶点 → 保持大级别时刻（小级别在该端点附近无结构）。
     lo/hi 为跨度搜索界（起点侧 [t-1bar, min(笔末,t+parent)]，终点侧
     [笔首, min(笔末+parent, 下一个上级顶点)]）：上界不越过下一个上级顶点，
     防止短笔几何下把后面别笔区域的小级别顶点搜进来。
@@ -3138,9 +3160,12 @@ def _lower_vertex_of(lower_bis, t, p, bar_sec, is_top, lo=None, hi=None):
     if span:
         span.sort(key=lambda x: abs(x[0] - t))
         return span[0]
-    # 4. 跨度内该方向同角色极值（底=最低 / 顶=最高，同价取最晚）
+    # 4. 端点附近同角色极值（底=最低 / 顶=最高，同价取最晚）。
+    # 第 3 步同价才扫整段；极值只取 ±parent，避免中段拐点被当成笔终点。
+    near_lo = max(lo, t - parent)
+    near_hi = min(hi, t + parent)
     pool = [(vt, vp) for vt, vp, bottom in verts
-            if lo <= vt <= hi and bottom == (not is_top)]
+            if near_lo <= vt <= near_hi and bottom == (not is_top)]
     if pool:
         if is_top:
             vt, vp = max(pool, key=lambda x: (x[1], x[0]))

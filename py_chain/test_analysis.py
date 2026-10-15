@@ -32,10 +32,12 @@ class AnalysisTests(unittest.TestCase):
         def release(name):
             self.holder = None
             self.release_count += 1
+        self.cleared_symbols = []
         self.m = AnalysisManager(lambda *x: self.events.append(x), acquire, release, self.chart,
                                  webapp.ControlApp.normalize_sr_cfg, lambda *x: None,
                                  storage=self.tmp.name, stage_runner=self.stage,
-                                 target_reader=lambda cfg, restore=None: "15")
+                                 target_reader=lambda cfg, restore=None: "15",
+                                 marks_clearer=lambda cfg, log=None: self.cleared_symbols.append(cfg["symbol"]))
         self.m.configure({"targetId": "test", "symbol": "OANDA:XAUUSD", "from": "2026-06-30",
                           "sr": {"srTypes": ["cluster", "boll"]}})
         self.m._promote = lambda *args: None
@@ -58,6 +60,7 @@ class AnalysisTests(unittest.TestCase):
     def test_full_order_and_release(self):
         self.assertTrue(self.m.start()["ok"])
         self.finish()
+        self.assertEqual(self.cleared_symbols, ["OANDA:XAUUSD"])
         self.assertEqual([x[0] for x in self.calls], ORDER)
         self.assertEqual(self.m.job["state"], "success")
         self.assertIsNotNone(self.m.last_success)
@@ -68,6 +71,7 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(dependency_order("entry"), ["bi", "sr", "plan", "entry"])
         self.m.start("entry")
         self.finish()
+        self.assertEqual(self.cleared_symbols, [])
         self.assertEqual(self.m.job["stages"]["points"]["state"], "stale")
         self.assertIsNone(self.m.last_success)
 

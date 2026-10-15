@@ -186,6 +186,19 @@ class TestFirstPointFallbackLanding(unittest.TestCase):
         self.assertEqual(proj2["buys"], [{"type": "1买", "time": 5000, "price": 90.0}])
         self.assertEqual(proj2["sells"], [{"type": "1卖", "time": 8000, "price": 150.0}])
 
+    def test_endpoint_extreme_does_not_walk_back_into_down_bi(self):
+        """中段底离终点超过 parent 时，1买留在上级终点，不标中段低点。"""
+        bar = 3600
+        end = 100000
+        mid = end - bar * 7
+        lower = [
+            b("down", mid - bar, mid, 120.0, 110.0, 10.0),
+            b("up", mid, end - bar, 110.0, 115.0, 5.0),
+        ]
+        upper = [b("down", mid - bar * 2, end, 130.0, 100.0, 30.0)]
+        proj = cc.project_first_points(lower, upper, bar)
+        self.assertEqual(proj["buys"], [{"type": "1买", "time": end, "price": 100.0}])
+
 
 if __name__ == "__main__":
     unittest.main()

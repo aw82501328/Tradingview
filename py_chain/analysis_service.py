@@ -82,12 +82,13 @@ def list_targets(port=9222):
 
 class AnalysisManager:
     def __init__(self, emit, acquire, release, marks_lock, normalize_sr, publish_sr,
-                 storage=None, stage_runner=None, target_reader=None):
+                 storage=None, stage_runner=None, target_reader=None, marks_clearer=None):
         self.emit, self.acquire, self.release = emit, acquire, release
         self.marks_lock, self.normalize_sr, self.publish_sr = marks_lock, normalize_sr, publish_sr
         self.storage = Path(storage or ROOT / ".cache" / "analysis")
         self.stage_runner = stage_runner or self._execute_stage
         self.target_reader = target_reader or self._target
+        self.marks_clearer = marks_clearer or self._clear_unlocked_marks
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
         self.shutdown = threading.Event()
@@ -276,6 +277,65 @@ class AnalysisManager:
                 raise RuntimeError("目标图表处于历史回放，请先退出TradingView回放，再更新当前行情")
             return c.evaluate("String(TradingViewApi.activeChart().resolution())")
 
+    def _clear_unlocked_marks(self, cfg, log=None):
+        """清掉目标图表上该品种的未锁定标记。锁定（isLocked）的保留。
+
+        getAllShapes 会枚举到当前品种各周期的图形（含当前周期不可见的），
+        因此不必逐周期切换。先收集 id 再删，删不净则间隔重试，与买卖点清除同口径。
+        """
+        log = log or (lambda *_: None)
+        config = CDPConfig(port=cfg["port"], target_id=cfg["targetId"], expected_symbol=cfg["symbol"])
+        expr = (
+            "(async function() {"
+            "  const chart = TradingViewApi.activeChart();"
+            "  const out = { cleared: 0, kept: 0, left: 0, passes: 0 };"
+            "  const lockedOf = (id) => {"
+            "    try {"
+            "      const sh = chart.getShapeById(id);"
+            "      const src = sh && sh._source;"
+            "      return !!(src && typeof src.isLocked === 'function' && src.isLocked());"
+            "    } catch (e) { return true; }"
+            "  };"
+            "  const grab = () => {"
+            "    const ids = [];"
+            "    let kept = 0;"
+            "    for (const s of chart.getAllShapes()) {"
+            "      if (lockedOf(s.id)) { kept++; continue; }"
+            "      ids.push(s.id);"
+            "    }"
+            "    return { ids: ids, kept: kept };"
+            "  };"
+            "  for (let pass = 0; pass < 12; pass++) {"
+            "    out.passes = pass + 1;"
+            "    const batch = grab();"
+            "    out.kept = batch.kept;"
+            "    if (!batch.ids.length) { out.left = 0; break; }"
+            "    for (const id of batch.ids) {"
+            "      try { chart.removeEntity(id); out.cleared++; } catch (e) {}"
+            "    }"
+            "    const left = grab();"
+            "    out.left = left.ids.length;"
+            "    out.kept = left.kept;"
+            "    if (!left.ids.length) break;"
+            "    await new Promise(r => setTimeout(r, 400));"
+            "  }"
+            "  return out;"
+            "})()"
+        )
+        with CDPClient(config, log=lambda *_: None) as c:
+            if replay_started(c):
+                raise RuntimeError("目标图表处于历史回放，请先退出TradingView回放，再更新当前行情")
+            result = c.evaluate(expr, timeout=120000)
+        if not isinstance(result, dict):
+            raise RuntimeError("清除标记没有返回结果")
+        cleared = int(result.get("cleared") or 0)
+        kept = int(result.get("kept") or 0)
+        left = int(result.get("left") or 0)
+        log(f"已清除该品种未锁定标记 {cleared} 个，保留锁定 {kept} 个")
+        if left:
+            raise RuntimeError(f"仍有 {left} 个未锁定标记未删净，已停止后续更新")
+        return result
+
     def _run(self, job, stages):
         original = None
         folder = self.storage / "runs" / job["id"]
@@ -283,6 +343,9 @@ class AnalysisManager:
         try:
             folder.mkdir(parents=True, exist_ok=True)
             original = self.target_reader(job["cfg"])
+            # 更新全部：先清掉该品种上未锁定的全部标记，再画 01/02/03。锁定的保留。
+            if job.get("step") == "all" and not self.stop_event.is_set():
+                self.marks_clearer(job["cfg"], self._log)
             for current in stages:
                 if self.stop_event.is_set():
                     break
