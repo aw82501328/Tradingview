@@ -1707,7 +1707,7 @@ function nearDoubleOn(res) {
 
 /**
  * 判断本周期某笔是否与上一级别某笔完全重合（起点、终点时间与价格一致）。
- * 完全重合（同笔）说明本周期该笔内部无更细结构。一类买卖点：同笔的两个端点不标记。
+ * 完全重合（同笔）说明本周期该笔内部无更细结构。一类买卖点 2026-10-16 起同笔也标记。
  * 时间容差 = 本周期 1 个 bar（低级别笔用更低一级校准，与上级笔端点可能有最多一个bar的偏差）。
  * 比较对称：把上级笔当作第一参、本级笔列表当作第二参，可判断「该上级笔是否同笔」。
  * @returns 命中的列表内笔对象（同引用）| null（未命中/空表），
@@ -1807,8 +1807,9 @@ function lowerVertexOf(lowerBis, t, p, barSec, isTop, lo, hi) {
  * 以上涨为例，下跌对称：
  *   上涨笔内部的小级别起点 = 1买，内部的小级别终点 = 1卖；
  *   下跌笔内部的小级别起点 = 1卖，内部的小级别终点 = 1买。
- * 同笔（本级某笔与该上级笔起终点重合）不标记该笔的两个端点；
- * 相邻笔共用端点时，同笔抑制优先，不能被另一笔补回来。
+ * 同笔（本级某笔与该上级笔起终点重合）也照常标记两个端点（2026-10-16 起；
+ * 此前同笔抑制不标，8-13 08:30 顶因 240m 下跌笔与 60m 同笔被删标）；
+ * 相邻笔共用端点（上涨笔终点=下跌笔起点）按先到先得去重，只标一次。
  * 起终点都落到大级别笔内部的小级别顶点（lowerVertexOf 阶梯：±1根K同价 →
  * 覆盖窗同价 → 笔跨度同价 → 端点附近同角色极值；仅端点附近无同角色顶点才保持
  * 大级别时刻）。中段拐点不参与极值落点。
@@ -1819,19 +1820,9 @@ function projectFirstPoints(lowerBis, upperBis, barSec) {
   if (!upperBis || !upperBis.length) return null;
   const upper = confirmedStructureBis(upperBis);
   if (!upper.length) return { buys: [], sells: [] };
-  const suppressed = new Set();
   const buys = new Map();
   const sells = new Map();
-  const put = (type, time, price, same) => {
-    if (same || suppressed.has(time)) {
-      suppressed.add(time);
-      buys.delete(time);
-      sells.delete(time);
-      if (CHAN_CFG.debug && same) {
-        console.log(`[一类跳过-同笔] ${type}@${fmtT(time)}(${price})`);
-      }
-      return;
-    }
+  const put = (type, time, price) => {
     if (buys.has(time) || sells.has(time)) return;
     const bucket = type === "1买" ? buys : sells;
     bucket.set(time, { type, time, price });
@@ -1847,7 +1838,6 @@ function projectFirstPoints(lowerBis, upperBis, barSec) {
     return null;
   };
   for (const ub of upper) {
-    const same = !!isSameAsUpperBi(ub, lowerBis, barSec);
     const up = ub.type === "up";
     const stT = ub.startTime, etT = ub.endTime;
     // 端点方向与跨度搜索界（上界不越过下一个上级顶点，短笔几何下防越界）：
@@ -1860,11 +1850,11 @@ function projectFirstPoints(lowerBis, upperBis, barSec) {
     const [et, ep] = lowerVertexOf(lowerBis, etT, ub.endPrice, barSec,
       up, stT, hiE);
     if (up) {
-      put("1买", st, sp, same);
-      put("1卖", et, ep, same);
+      put("1买", st, sp);
+      put("1卖", et, ep);
     } else {
-      put("1卖", st, sp, same);
-      put("1买", et, ep, same);
+      put("1卖", st, sp);
+      put("1买", et, ep);
     }
   }
   const list = (m) => [...m.values()].sort((a, b) => a.time - b.time);
@@ -1980,7 +1970,7 @@ function leaveTypeByOrdinal(zsOrdinal, pullOrdinal, isSell) {
 
 /**
  * 买/卖点识别（2026-10-14 规则v2）总装：
- *   1类 = 已收笔上级笔端点投影（projectFirstPoints，同笔不标）；
+ *   1类 = 已收笔上级笔端点投影（projectFirstPoints，同笔也标记，2026-10-16 起）；
  *   2类族 = 一类锚后抬低/压低序列 + 同中枢类2（secondFamilyV2）；
  *   3类族 = 同向离开中枢后回踩不进，逐中枢序号 3/类3/4/类4（thirdFamilyV2）；
  *   方向开窗管二三类：已收笔上涨笔窗内只留买点、下跌笔窗内只留卖点、未收笔尾段双向放行；
@@ -2181,7 +2171,7 @@ function thirdFamilyV2(bis, upperBis, zss, t3tol, isSell) {
 }
 
 /**
- * 买点识别（2026-10-14 规则v2）：1买=已收笔上级上涨笔内部的小级别起点（投影，同笔不标）；
+ * 买点识别（2026-10-14 规则v2）：1买=已收笔上级上涨笔内部的小级别起点（投影，同笔也标记，2026-10-16 起）；
  * 2买族=1买锚后抬低序列（secondFamilyV2）；3类族=离开中枢回踩不进（thirdFamilyV2）；
  * 方向开窗：已收笔上涨笔窗内只留买点、尾段双向放行。无上级（日线）返回空。
  * macdArr/upperMacd 参数仅为下游调用兼容保留，不再参与判定。
@@ -2221,7 +2211,7 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, 
 
 /**
  * 卖点识别（2026-10-14 规则v2，与买点镜像）：1卖=已收笔上级上涨笔内部的小级别终点/
- * 下跌笔起点（投影，同笔不标）；2卖族=1卖锚后压低序列；3类族=向下离开中枢反抽不进；
+ * 下跌笔起点（投影，同笔也标记，2026-10-16 起）；2卖族=1卖锚后压低序列；3类族=向下离开中枢反抽不进；
  * 方向开窗：已收笔下跌笔窗内只留卖点、尾段双向放行。无上级（日线）返回空。
  * 返回按 time 升序（稳定排序；同刻优先级 一类 > 二类族 > 三类族）。
  */

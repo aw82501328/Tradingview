@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""同笔端点不标、未成笔尾段多空都标（2026-10-13，与 JS chan_core.test.js 对拍）。
+"""同笔端点也标、共用端点只标一次（2026-10-16，与 JS chan_core.test.js 对拍）。
 
-  - 同笔：该上级笔两个端点在本级别都不标 1买/1卖；
+  - 同笔：该上级笔两个端点在本级别也照常标 1买/1卖（2026-10-16 起；
+    此前同笔抑制不标，60m 8-13 08:30 顶因 240m 下跌笔与 60m 同笔被删标）；
+  - 相邻笔共用端点（上涨笔终点=下跌笔起点）按先到先得去重，只标一次；
   - 非同笔下跌笔终点仍是 1买，不看本级背驰开关；
-  - 大级别未成笔尾段内，小级别创新低/创新高的一类多空都标；
   - isSameAsUpperBi 返回值契约：命中笔对象（同引用）/ None；
   - 落点兜底：上级端点价在本级无同价顶点时，一类点落到窗口内该方向
     最极端的本级顶点（必须落在小级别），仅窗口内无任何顶点才保持大级别时刻。
@@ -78,18 +79,33 @@ MACD_NO_DIVERGE_SELL = [
 
 class TestSameBiFirstBuy(unittest.TestCase):
 
-    def test_same_bi_endpoint_not_marked(self):
-        """同笔端点不标；非同笔上涨笔起点仍是 1买。"""
+    def test_same_bi_endpoint_also_marked(self):
+        """同笔端点也标 1买；非同笔上涨笔起点仍是 1买。"""
         pts = cc.findBuyPoints(BI_BUY, UPPER_ENDED, MACD_NO_DIVERGE, 900)
         buys = [p for p in pts if p["type"] == "1买"]
-        self.assertEqual(buys, [{"type": "1买", "time": 0, "price": 4300.0}])
-        self.assertFalse([p for p in pts if p["type"] == "1买" and p["time"] == 4000])
+        self.assertEqual(buys, [{"type": "1买", "time": 0, "price": 4300.0},
+                                {"type": "1买", "time": 4000, "price": 4324.68}])
 
-    def test_same_bi_upper_last_still_skipped(self):
-        """同笔即使是上级末笔也不标该端点。"""
+    def test_same_bi_upper_last_also_marked(self):
+        """同笔即使是上级末笔也标该端点。"""
         pts = cc.findBuyPoints(BI_BUY, UPPER_LAST, MACD_NO_DIVERGE, 900)
-        self.assertFalse([p for p in pts if p["type"] == "1买" and p["time"] == 4000])
+        self.assertTrue([p for p in pts if p["type"] == "1买" and p["time"] == 4000])
         self.assertTrue([p for p in pts if p["type"] == "1买" and p["time"] == 0])
+
+    def test_shared_endpoint_marked_once(self):
+        """共用端点（上涨笔终点=下跌笔起点）只标一次 1卖（60m 8-13 08:30 场景）。"""
+        lower = [
+            b("up", 0, 1000, 100, 120, 20),
+            b("down", 1000, 2000, 120, 110, 10),
+        ]
+        upper = [
+            b("up", 0, 1000, 100, 120, 20),
+            b("down", 1000, 2000, 120, 110, 10),
+        ]
+        proj = cc.project_first_points(lower, upper, 900)
+        self.assertEqual(proj["sells"], [{"type": "1卖", "time": 1000, "price": 120}])
+        self.assertEqual(proj["buys"], [{"type": "1买", "time": 0, "price": 100},
+                                        {"type": "1买", "time": 2000, "price": 110}])
 
     def test_non_same_down_end_is_first_buy(self):
         """非同笔下跌笔终点是 1买（落点=跨度内同价小级别顶点 4000@4324.68）；
@@ -108,15 +124,15 @@ class TestSameBiFirstBuy(unittest.TestCase):
 
 class TestSameBiFirstSell(unittest.TestCase):
 
-    def test_same_up_end_not_marked(self):
-        """同笔上涨笔终点不标 1卖。"""
+    def test_same_up_end_also_marked(self):
+        """同笔上涨笔终点也标 1卖。"""
         pts = cc.findSellPoints(BI_SELL, UPPER_SELL_ENDED, MACD_NO_DIVERGE_SELL, 900)
-        self.assertFalse([p for p in pts if p["type"] == "1卖" and p["time"] == 4000])
+        self.assertTrue([p for p in pts if p["type"] == "1卖" and p["time"] == 4000])
 
-    def test_same_bi_upper_last_sell_skipped(self):
-        """同笔上涨笔是上级末笔时终点也不标 1卖。"""
+    def test_same_bi_upper_last_sell_also_marked(self):
+        """同笔上涨笔是上级末笔时终点也标 1卖。"""
         pts = cc.findSellPoints(BI_SELL, UPPER_SELL_LAST, MACD_NO_DIVERGE_SELL, 900)
-        self.assertFalse([p for p in pts if p["type"] == "1卖" and p["time"] == 4000])
+        self.assertTrue([p for p in pts if p["type"] == "1卖" and p["time"] == 4000])
 
     def test_unformed_tail_marks_both_sides(self):
         """大级别未成笔尾段不再补一类点（2026-10-14 规则v2：一类只认已收笔上级笔端点）。

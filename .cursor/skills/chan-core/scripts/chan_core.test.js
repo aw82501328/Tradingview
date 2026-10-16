@@ -842,10 +842,10 @@ describe("isSameAsUpperBi 笔与上级笔完全重合（SPEC 2.9）", () => {
   });
 });
 
-describe("一类买卖点 = 上级笔端点，同笔不标（2026-10-13）", () => {
+describe("一类买卖点 = 上级笔端点，同笔也标记（2026-10-16）", () => {
   // 镜像 8-17~8-20 XAUUSD 60m 实例：同笔下跌段 4436.23→4324.68，
-  // macdArr 故意造成「无背驰」（后段绿柱面积更大、DIF 更低），
-  // 锁定同笔分支不依赖背驰/创新低——普通路径（test 3）在此数据下不产 1买
+  // macdArr 故意造成「无背驰」（后段绿柱面积更大、DIF 更低）——
+  // 一类点判定不看背驰，同笔端点照常投影标记（2026-10-16 起同笔不再抑制）
   const BI_BUY = [
     { type: "down", startTime: 1000, endTime: 2000, startPrice: 4440.0, endPrice: 4390.0, span: 60.0 },
     { type: "up", startTime: 2000, endTime: 3000, startPrice: 4390.0, endPrice: 4436.0, span: 46.0 },
@@ -868,17 +868,30 @@ describe("一类买卖点 = 上级笔端点，同笔不标（2026-10-13）", () 
     { time: 5000, macd: 8, dif: 3 }, { time: 6000, macd: 4, dif: 1 },
   ];
 
-  test("同笔端点不标；非同笔上涨笔起点仍是 1买", () => {
+  test("同笔端点也标 1买；非同笔上涨笔起点仍是 1买", () => {
     const pts = core.findBuyPoints(BI_BUY, UPPER_ENDED, MACD_NO_DIVERGE, 900);
     const buys = pts.filter(p => p.type === "1买");
-    assert.deepEqual(buys, [{ type: "1买", time: 0, price: 4300 }]);
-    assert.equal(pts.find(p => p.time === 4000 && p.type === "1买"), undefined);
+    assert.deepEqual(buys, [{ type: "1买", time: 0, price: 4300 }, { type: "1买", time: 4000, price: 4324.68 }]);
   });
 
-  test("同笔即使是上级末笔也不标该端点", () => {
+  test("同笔即使是上级末笔也标该端点", () => {
     const pts = core.findBuyPoints(BI_BUY, UPPER_LAST, MACD_NO_DIVERGE, 900);
-    assert.equal(pts.find(p => p.type === "1买" && p.time === 4000), undefined);
+    assert.ok(pts.find(p => p.type === "1买" && p.time === 4000));
     assert.ok(pts.find(p => p.type === "1买" && p.time === 0));
+  });
+
+  test("共用端点（上涨笔终点=下跌笔起点）只标一次 1卖（60m 8-13 08:30 场景）", () => {
+    const lower = [
+      { type: "up", startTime: 0, endTime: 1000, startPrice: 100, endPrice: 120, span: 20 },
+      { type: "down", startTime: 1000, endTime: 2000, startPrice: 120, endPrice: 110, span: 10 },
+    ];
+    const upper = [
+      { type: "up", startTime: 0, endTime: 1000, startPrice: 100, endPrice: 120, span: 20 },
+      { type: "down", startTime: 1000, endTime: 2000, startPrice: 120, endPrice: 110, span: 10 },
+    ];
+    const proj = core.projectFirstPoints(lower, upper, 900);
+    assert.deepEqual(proj.sells, [{ type: "1卖", time: 1000, price: 120 }]);
+    assert.deepEqual(proj.buys, [{ type: "1买", time: 0, price: 100 }, { type: "1买", time: 2000, price: 110 }]);
   });
 
   test("非同笔下跌笔终点是 1买（落点=跨度内同价小级别顶点），不看本级背驰开关", () => {
@@ -896,7 +909,7 @@ describe("一类买卖点 = 上级笔端点，同笔不标（2026-10-13）", () 
     }
   });
 
-  // 卖侧镜像：同笔上涨段 4324.68→4436.23，锚定管线应锚回同一端点（无漂移）
+  // 卖侧镜像：同笔上涨段 4324.68→4436.23，端点照常投影标记
   const BI_SELL = [
     { type: "up", startTime: 1000, endTime: 2000, startPrice: 4320.0, endPrice: 4370.0, span: 60.0 },
     { type: "down", startTime: 2000, endTime: 3000, startPrice: 4370.0, endPrice: 4324.68, span: 45.32 },
@@ -916,14 +929,14 @@ describe("一类买卖点 = 上级笔端点，同笔不标（2026-10-13）", () 
     { time: 5000, macd: -8, dif: -3 }, { time: 6000, macd: -4, dif: -1 },
   ];
 
-  test("同笔上涨笔终点不标 1卖", () => {
+  test("同笔上涨笔终点也标 1卖", () => {
     const pts = core.findSellPoints(BI_SELL, UPPER_SELL_ENDED, MACD_NO_DIVERGE_SELL, 900);
-    assert.equal(pts.find(p => p.type === "1卖" && p.time === 4000), undefined);
+    assert.ok(pts.find(p => p.type === "1卖" && p.time === 4000));
   });
 
-  test("同笔上涨笔是上级末笔时终点也不标 1卖", () => {
+  test("同笔上涨笔是上级末笔时终点也标 1卖", () => {
     const pts = core.findSellPoints(BI_SELL, UPPER_SELL_LAST, MACD_NO_DIVERGE_SELL, 900);
-    assert.equal(pts.find(p => p.type === "1卖" && p.time === 4000), undefined);
+    assert.ok(pts.find(p => p.type === "1卖" && p.time === 4000));
   });
 
   test("未成笔尾段不再补一类点（2026-10-14 规则v2：一类只认已收笔上级笔端点）", () => {

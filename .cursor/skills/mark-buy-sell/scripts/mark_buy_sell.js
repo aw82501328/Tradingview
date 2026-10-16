@@ -506,7 +506,7 @@ function onlyThisInterval(res) {
 
     // 大级别笔变化时，从该周期起按区间套重算更小周期（2026-10-14 规则v2 起为笔区间粒度：
     // 脏区间 t0 之前沿用上次标记、之后取新算，见下方 marks 合并）；未变的大级别整体沿用
-    const LOGIC_V = "20261015-third-until-next-leave"; // 类3/类4：下一中枢离开前的不回进回抽仍归本枢（逻辑变更必须升版使状态作废全量重算）
+    const LOGIC_V = "20261016-tongbi-also-mark"; // 一类点同笔也照常标记（原同笔抑制删除，8-13 08:30 顶补回 1卖）（逻辑变更必须升版使状态作废全量重算）
     const statePath = path.join(CACHE_DIR, `buysell_${String(SYMBOL).replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
     const fpOf = (bis) => (bis || []).map(b => [b.type, b.startTime, b.endTime, b.startPrice, b.endPrice]);
     let prevState = null;
@@ -568,7 +568,7 @@ function onlyThisInterval(res) {
       const atr = calcATR(rawBars, 14);
       const macdArr = calcMACD(rawBars);
 
-      // 有上级时一类=上级已确认笔端点（同笔不标）；无上级仍创新低/新高。
+      // 有上级时一类=上级已确认笔端点（同笔也标记，2026-10-16 起）；无上级仍创新低/新高。
       // 二买族仍是一类之后的抬低/压低序列；三类仍用上级方向窗口。
       let buyPts = findBuyPoints(curBis, upperBis, macdArr, intervalSecOf(res), CLASS2_ZS_TOL, THIRD_ZS_TOL, upperMacdArr);
       let sellPts = findSellPoints(curBis, upperBis, macdArr, intervalSecOf(res), CLASS2_ZS_TOL, THIRD_ZS_TOL, upperMacdArr);

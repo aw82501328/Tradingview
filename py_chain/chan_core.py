@@ -2799,9 +2799,8 @@ def _findIndex(arr, pred):
 def isSameAsUpperBi(bi, upperBis, barSec):
     """判断本周期某笔是否与上一级别某笔完全重合（时间容差 = 本周期 1 个 bar）。
 
-    完全重合（同笔）说明本周期该笔内部无更细结构，本级别无从选有效参照（跨上级笔
-    边界的比较无意义）→ 上级笔已结束时由本周期做「同笔」纯结构标记（不选参照笔、
-    不比创新低/背驰）；上级笔仍为末笔（延伸中、反向笔未确认）时不标记。
+    完全重合（同笔）说明本周期该笔内部无更细结构。一类买卖点 2026-10-16 起同笔也标记。
+    比较对称：把上级笔当作第一参、本级笔列表当作第二参，可判断「该上级笔是否同笔」。
     @returns 命中的上级笔对象（与 upperBis 内元素同引用）| None（未命中/空表），
              调用方可按真值使用（旧 bool 契约兼容）。"""
     if not upperBis or len(upperBis) == 0:
@@ -3179,7 +3178,9 @@ def _lower_vertex_of(lower_bis, t, p, bar_sec, is_top, lo=None, hi=None):
 def project_first_points(lower_bis, upper_bis, bar_sec):
     """一类买卖点（2026-10-13）：有上级笔时，小级别一类点就是大级别已确认笔的端点。
 
-    上涨笔起点=1买、终点=1卖；下跌笔起点=1卖、终点=1买。同笔不标，共用端点时抑制优先。
+    上涨笔起点=1买、终点=1卖；下跌笔起点=1卖、终点=1买。同笔也照常标记两个端点
+    （2026-10-16 起；此前同笔抑制不标）；相邻笔共用端点（上涨笔终点=下跌笔起点）
+    按先到先得去重，只标一次。
     起终点都落到大级别笔内部的小级别顶点（_lower_vertex_of 阶梯：±1根K同价 →
     覆盖窗同价 → 笔跨度同价 → 跨度内同角色极值；仅跨度内无同角色顶点才保持
     大级别时刻）。无上级笔返回 None（最高级别仍走本级创新低/创新高）。
@@ -3189,15 +3190,9 @@ def project_first_points(lower_bis, upper_bis, bar_sec):
     upper = confirmedStructureBis(upper_bis)
     if not upper:
         return {"buys": [], "sells": []}
-    suppressed = set()
     buys, sells = {}, {}
 
-    def put(typ, time, price, same):
-        if same or time in suppressed:
-            suppressed.add(time)
-            buys.pop(time, None)
-            sells.pop(time, None)
-            return
+    def put(typ, time, price):
         if time in buys or time in sells:
             return
         (buys if typ == "1买" else sells)[time] = {"type": typ, "time": time, "price": price}
@@ -3214,7 +3209,6 @@ def project_first_points(lower_bis, upper_bis, bar_sec):
         return None
 
     for ub in upper:
-        same = isSameAsUpperBi(ub, lower_bis, bar_sec) is not None
         up = ub["type"] == "up"
         st_t, et_t = ub["startTime"], ub["endTime"]
         # 端点方向与跨度搜索界（上界不越过下一个上级顶点，短笔几何下防越界）：
@@ -3227,11 +3221,11 @@ def project_first_points(lower_bis, upper_bis, bar_sec):
         et, ep = _lower_vertex_of(lower_bis, et_t, ub["endPrice"], bar_sec,
                                   is_top=up, lo=st_t, hi=hi_e)
         if up:
-            put("1买", st, sp, same)
-            put("1卖", et, ep, same)
+            put("1买", st, sp)
+            put("1卖", et, ep)
         else:
-            put("1卖", st, sp, same)
-            put("1买", et, ep, same)
+            put("1卖", st, sp)
+            put("1买", et, ep)
     return {"buys": [buys[t] for t in sorted(buys)],
             "sells": [sells[t] for t in sorted(sells)]}
 
@@ -3305,7 +3299,7 @@ def nested_dirty_periods(periods, changed_spans):
 def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.0, cache=None,
                   upperMacd=None):
     """买点识别（2026-10-14 规则v2，与 JS chan_core.js 同步）：
-    1买 = 已收笔上级上涨笔内部的小级别起点（project_first_points 投影，同笔不标）；
+    1买 = 已收笔上级上涨笔内部的小级别起点（project_first_points 投影，同笔也标记，2026-10-16 起）；
     2买族 = 1买锚后低点逐一抬高（_second_family_v2：首个抬低=2买、同中枢后续=类2买）；
     3类族 = 同向离开中枢后回踩不进，逐中枢序号 3/类3/4/类4（_third_family_v2）；
     方向开窗：已收笔上涨笔窗只留买点、未收笔尾段双向放行（一类不参与过滤）。
@@ -3350,7 +3344,7 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
 def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.0, cache=None,
                    upperMacd=None):
     """卖点识别（2026-10-14 规则v2，与买点镜像、与 JS chan_core.js 同步）：
-    1卖 = 已收笔上级上涨笔内部的小级别终点 / 下跌笔内部的小级别起点（投影，同笔不标）；
+    1卖 = 已收笔上级上涨笔内部的小级别终点 / 下跌笔内部的小级别起点（投影，同笔也标记，2026-10-16 起）；
     2卖族 = 1卖锚后高点逐一压低；3类族 = 向下离开中枢反抽不进；方向开窗：已收笔下跌笔窗
     只留卖点、尾段双向放行。无上级（日线）返回空。返回按 time 升序稳定排序。
     """
