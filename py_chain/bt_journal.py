@@ -48,8 +48,10 @@ FILL_MODE_LABELS = {
 # 闸门代码 → 中文（拒绝行渲染；code 可为「no_diverge 细分原因」）
 GATE_LABELS = {
     "res_ge_trend": "检测周期≥趋势参考周期（结构性剔除）",
-    "plan_watch": "计划观望（无进场策略）",
-    "no_strategy_map": "计划策略无进场映射",
+    "res_ge_range": "检测周期≥震荡参考周期（结构性剔除）",
+    "range_watch": "震荡观望（参考周期 regime 震荡/笔不足）",
+    "no_point": "最近笔端点无买卖点锚",
+    "no_strategy_map": "买卖点类型无进场映射",
     "trend_filter": "逆顺势参考周期方向（顺势过滤）",
     "no_bis": "该周期无笔",
     "forming_wrong_type": "形成段方向不匹配（回调/反弹方向不符）",
@@ -322,7 +324,8 @@ class BtJournal:
                      "strategyLabel": sig.get("strategyLabel"),
                      "price": sig.get("price"), "nearSr": sig.get("nearSr"),
                      "segStart": sig.get("segStart"),
-                     "planDirection": sig.get("planDirection"),
+                     "pointType": sig.get("pointType"),
+                     "pointStrong": sig.get("pointStrong"),
                      "trendDirection": sig.get("trendDirection"),
                      "trendReason": sig.get("trendReason"),
                      "note": sig.get("signalNote") or sig.get("reason"),

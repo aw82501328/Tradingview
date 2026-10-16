@@ -1,10 +1,13 @@
 /**
  * 进出场标记脚本（独立 SKILL：mark-entry）
- * 依赖「交易计划」（trading-plan）落盘的 plan_<品种>.json 判定各周期当前进场状态，
- * 映射到 10 种进场策略（2026-09-25 起计划文案 1:1 拆分，见 entryStrategyOf），
- * 校验该策略的进场条件后，在「背驰级别」（更低周期）标记进场箭头：
+ * 2026-10-16 起直接消费 chan-core 买卖点（与图上 mark-buy-sell 标记同源，
+ * computePeriodPoints）判定各周期当前进场状态——原「交易计划」文案中转已取消：
+ * 买卖双侧各自取最近笔端点锚（sideCandidates，原 trading_plan.predictPlan.matchSide
+ * 平移）→ pointStrategyOf 直映射到 12 种进场策略键，校验该策略的进场条件后在
+ * 「背驰级别」（更低周期）标记进场箭头：
  *   - 买点（多头）= 向上红色箭头（arrow_up）
  *   - 卖点（空头）= 向下绿色箭头（arrow_down）
+ * 交易计划只剩震荡（--range-res，默认关闭）/顺势（--trend-res，默认关闭）两项判定。
  *
  * 「以下级别背驰」采用区间套下沉判定（SPEC_divergence_chanset.md 规则 1/2/3，
  * 与 py_chain/mark_entry.py 对齐）：候选点先走下沉链（sinkChainConfirm），
@@ -18,10 +21,9 @@
  *     extreme=进场K线极值±保本滑点（short: high+ / long: low−）；entry=进场价（0亏损）；
  *     bi=背驰周期首笔有利方向笔起点±保本滑点（成笔前无值，止损暂留支阻位）
  *   - 止盈1 保本：背驰周期够笔（有利方向笔完成）→ 止损位上移至 beStop（仅状态迁移）
- *   - 止盈2 平一半（仅顺势：计划 direction ∈ 多头多/空头空）：检测周期首个有利方向、
- *     合并后 ≥5 根K且有成笔预期的形成段 → 平一半，剩余半仓止损移至 beStop
- *   - 止盈3 全平：顺势 = 检测周期有利方向笔破前高/前低；逆势（多头空/空头多）=
- *     检测周期首个有利方向形成段（合并后 ≥5 根K成笔预期）→ 全平
+ *   - 止盈2 平一半：检测周期首个有利方向、合并后 ≥5 根K且有成笔预期的形成段
+ *     → 平一半，剩余半仓止损移至 beStop
+ *   - 止盈3 全平：检测周期有利方向笔破前高/前低（预期口径看当根收盘K极值）
  *   - stopSr/stopBe：盘中破坏止损位 / 保本位 beStop
  *   出场标记统一黄色箭头（EXIT_COLOR #FFEB3B）：方向=平仓方向（多头出场 ↓ / 空头出场 ↑），title = EXIT_<背驰级别>
  *
@@ -30,7 +32,7 @@
  *   node mark_entry.js --dry --from=2026-06-30      只计算打印，不绘图
  *
  * 参数：
- *   --from=YYYY-MM-DD   起始日期（应与画笔/支阻位/交易计划一致）
+ *   --from=YYYY-MM-DD   起始日期（应与画笔/支阻位一致）
  *   --periods=...       检测周期（逗号分隔，默认 240,60,15,3）
  *   --near=K            靠近支阻位阈值（绝对价差，默认 10；2026-09-13 起不乘 ATR）
  *   --lots=N            每笔进场手数（仅落盘记录，默认 4；盈亏口径 = 价格差×方向×手数）
@@ -41,10 +43,13 @@
  *   --slip-fallback-atr-k=K 最大止损ATR系数（同上口径，默认 0）
  *   --slip-be-atr-k=K      保本滑点ATR系数（同上口径，默认 0）
  *   --exit-stop-be-mode=M 保本位模式（extreme|entry|bi；默认 entry=0亏损，py EXIT_STOP_BE_MODE 同名同默认）
+ *   --range-res=R       震荡判定参考周期（240/D/off，默认 trading_plan.RANGE_RES=off）
+ *   --trend-res=R       顺势参考周期（240/D/off，默认 trading_plan.TREND_RES=off）
  *   --dry               只计算不绘图
  *   --debug             打印调试信息
  *
- * 数据依赖（运行顺序）：画笔(chan-bi) → 标记买卖点(mark-buy-sell) → 支阻位(mark-sr-flip) → 交易计划(trading-plan) → 本脚本
+ * 数据依赖（运行顺序）：画笔(chan-bi) → 支阻位(mark-sr-flip) → 本脚本
+ * （2026-10-16 起不再读取 plan_<品种>.json，买卖点由本脚本用 chan-core 现算）
  */
 const fs = require("fs");
 const path = require("path");
@@ -127,7 +132,8 @@ if (CHAN_CFG_JSON) {
   try { Object.assign(core.CHAN_CFG, JSON.parse(CHAN_CFG_JSON)); }
   catch (e) { console.log("警告: --chan-cfg JSON 解析失败，忽略该参数"); }
 }
-// 顺势（计划方向=多头多/空头空）判定集合；planDirection 缺失时按 strategyKey 兜底
+// 顺势判定键集合（2026-10-16 起唯一口径：计划方向已取消，按 strategyKey 判定；
+// waitLike2Buy/waitLike2Sell 已无映射入口，保留仅为集合完整性）
 const TREND_PLAN_DIRS = new Set(["多头多", "空头空"]);
 const TREND_STRATEGY_KEYS = new Set(["wait2Buy", "waitBuy", "wait3Buy", "waitLike2Buy",
   "wait2Sell", "waitSell", "wait3Sell", "waitLike2Sell"]);
@@ -151,6 +157,11 @@ const PERIODS = getStrArg("periods", "240,60,15,3")
 // （方向判定规则见 trading-plan 模块 trendDirection，与 WEB 参数页「交易计划」页签说明一致）
 const TREND_RES_ARG = getStrArg("trend-res", planCore.TREND_RES);
 const TREND_RES = (TREND_RES_ARG === "off" || TREND_RES_ARG === "") ? "" : TREND_RES_ARG;
+// 震荡判定参考周期（--range-res=240/D/off，默认 trading_plan.RANGE_RES；off/空=关闭）：
+// 参考周期及以上不作检测周期（只作锚）；参考周期 regime 震荡/笔不足 → 更低周期观望
+// （regime 由 trading-plan 模块 computeRegime 计算，与 py_chain mark_entry 震荡闸同口径）
+const RANGE_RES_ARG = getStrArg("range-res", planCore.RANGE_RES);
+const RANGE_RES = (RANGE_RES_ARG === "off" || RANGE_RES_ARG === "") ? "" : RANGE_RES_ARG;
 
 // 箭头颜色：买点（多头）红色、卖点（空头）绿色
 const BUY_COLOR = "#F23645";
@@ -429,49 +440,133 @@ function sinkChainConfirm(periodData, X, pTime, pDir) {
 }
 
 // ============================================================
-// 进场状态 → 策略映射（依赖交易计划 plan 落盘结果）
+// 买卖点 → 进场策略直映射（2026-10-16 取消交易计划文案中转；对齐 py_chain
+// mark_entry.pointStrategyOf / sideCandidates / computePeriodPoints）
 // ============================================================
 
+// 买/卖点族（与原 trading_plan.predictPlan 双侧锚同族划分）
+const BUY_FAMILY = ["1买", "2买", "类2买", "3买", "类3买", "4买", "类4买"];
+const SELL_FAMILY = ["1卖", "2卖", "类2卖", "3卖", "类3卖", "4卖", "类4卖"];
+const FAMILY_CLS = { "2买": "二买", "类2买": "类2买", "2卖": "二卖", "类2卖": "类2卖" };
+
 /**
- * 交易计划策略 → 进场策略映射（用户规则，2026-09-25 起 10 文案 1:1 拆分为独立键，
- * 便于记录溯源是哪一档触发；此前 3买点/3卖点/类2买点/类2卖点 并入 waitBuy/waitSell）。
- * plan.strategy 来自 trading-plan 的 strategyOf 输出；震荡/数据不足/趋势中无匹配
- * （方向=观望）等不产生进场策略，返回 null。
- * waitBuy/waitSell 仅指「新买点/新卖点」（3类点强档，thirdStrongTrend 开）；
- * 4 个新键与 waitBuy/waitSell 同校验（够笔+以下级别背驰+支阻位附近，无专属条件）。
- * 2026-10-09 弱档原始点分流新增 2 键：wait2BuyBear/wait2SellBear（专属条件=抬低/压低），共 12 键。
- * @param {string} planStrategy 交易计划 strategy 文本
- * @returns {null|{key:string, direction:string, label:string}} key 策略标识、direction long/short
+ * 2族强弱档（原 trading_plan cls_of 的 strong 二分）：强二买/弱二买/强类2买…；
+ * strong=null（首段未走完）按弱先行；非2族（1类/3类族）返回 null。
  */
-function entryStrategyOf(planStrategy) {
-  switch (planStrategy) {
-    case "等待反弹后做2卖": // 状态=1卖
-      return { key: "wait2Sell", direction: "short", label: "等待反弹后做2卖" };
-    case "等待回调后做2买": // 状态=1买
-      return { key: "wait2Buy", direction: "long", label: "等待回调后做2买" };
-    case "等待高点附近的一卖": // 状态=2/3买+其他
-      return { key: "wait1Sell", direction: "short", label: "等待一卖" };
-    case "等待低点附近的一买": // 状态=2/3卖+其他
-      return { key: "wait1Buy", direction: "long", label: "等待一买" };
-    case "等待回调后的新买点": // 状态=3买/类3买+过左高不背驰（thirdStrongTrend 开）
-      return { key: "waitBuy", direction: "long", label: "等待回调后买点" };
-    case "等待反弹后的新卖点": // 状态=3卖/类3卖+过左低不背驰（thirdStrongTrend 开）
-      return { key: "waitSell", direction: "short", label: "等待反弹后卖点" };
-    case "等待回调后的3买点": // 状态=2买/类2买+过左高不背驰（强档）
-      return { key: "wait3Buy", direction: "long", label: "等待回调后3买点" };
-    case "等待回调后的类2买点": // 状态=2买+前高附近/回到2买点（中间档）
-      return { key: "waitLike2Buy", direction: "long", label: "等待回调后类2买点" };
-    case "等待反弹后的3卖点": // 状态=2卖/类2卖+过左低不背驰（强档）
-      return { key: "wait3Sell", direction: "short", label: "等待反弹后3卖点" };
-    case "等待反弹后的类2卖点": // 状态=2卖+前低附近/回到2卖点（中间档）
-      return { key: "waitLike2Sell", direction: "short", label: "等待反弹后类2卖点" };
-    case "等待低点附近的2买": // 状态=2买/类2买+未过原始点（弱档分流，2026-10-09）
-      return { key: "wait2BuyBear", direction: "long", label: "等待低点附近的2买" };
-    case "等待高点附近的2卖": // 状态=2卖/类2卖+未过原始底（弱档分流，2026-10-09）
-      return { key: "wait2SellBear", direction: "short", label: "等待高点附近的2卖" };
-    default:
-      return null;
+function pointClsOf(point) {
+  if ("strong" in point && FAMILY_CLS[point.type]) {
+    return (point.strong ? "强" : "弱") + FAMILY_CLS[point.type];
   }
+  return null;
+}
+
+/**
+ * 买卖点 type+strong → 进场策略键直映射（用户规则，2026-10-16；替代原
+ * entryStrategyOf(计划文案)——计划层 strategyOf 三档路由/未定型滚动翻档/
+ * 跨侧 fallback/形成中1类特殊分支均已取消）：
+ *   1买→wait1Buy、1卖→wait1Sell（直接档：形成中与已确认统一，点本身即信号）；
+ *   2买/类2买 strong→wait2Buy、弱/未定型→wait2BuyBear（卖侧镜像）；
+ *   3买→wait3Buy、3卖→wait3Sell；类3买/4买/类4买→waitBuy、卖侧→waitSell。
+ * waitLike2Buy/waitLike2Sell 无映射入口（键定义与校验保留，eval 比对兼容）。
+ * @param {object} point chan_core 买卖点 { type, time, price, strong? }
+ * @returns {null|{key:string, direction:string, label:string, pointCls:string|null}}
+ */
+function pointStrategyOf(point) {
+  const t = point.type;
+  let row;
+  if (t === "1买") row = { key: "wait1Buy", direction: "long", label: "等待一买" };
+  else if (t === "1卖") row = { key: "wait1Sell", direction: "short", label: "等待一卖" };
+  else if (t === "2买" || t === "类2买") {
+    row = point.strong
+      ? { key: "wait2Buy", direction: "long", label: "等待回调后做2买" }
+      : { key: "wait2BuyBear", direction: "long", label: "等待低点附近的2买" };
+  } else if (t === "2卖" || t === "类2卖") {
+    row = point.strong
+      ? { key: "wait2Sell", direction: "short", label: "等待反弹后做2卖" }
+      : { key: "wait2SellBear", direction: "short", label: "等待高点附近的2卖" };
+  } else if (t === "3买") row = { key: "wait3Buy", direction: "long", label: "等待回调后3买点" };
+  else if (t === "3卖") row = { key: "wait3Sell", direction: "short", label: "等待反弹后3卖点" };
+  else if (t === "类3买" || t === "4买" || t === "类4买") {
+    row = { key: "waitBuy", direction: "long", label: "等待回调后买点" };
+  } else if (t === "类3卖" || t === "4卖" || t === "类4卖") {
+    row = { key: "waitSell", direction: "short", label: "等待反弹后卖点" };
+  } else {
+    return null;
+  }
+  row.pointCls = pointClsOf(point);
+  return row;
+}
+
+/**
+ * 买卖单侧最新锚（原 trading_plan.predictPlan.matchSide 平移，2026-10-16）：
+ * 从最后一笔终点逐笔向前扫描，返回第一个落在笔端点上的 family 族买卖点。
+ * 容差与原口径一致：时间 ≤ tolSec（本周期 1 bar）、价格 ≤ max(ATR×0.2, 0.05)。
+ * @returns {object|null} 匹配的买卖点（无匹配返回 null）
+ */
+function sideAnchor(bis, points, family, tolSec, tolPrice) {
+  const all = (points.buy || []).concat(points.sell || []);
+  for (let j = bis.length - 1; j >= 0; j--) {
+    const bi = bis[j];
+    if (!bi) continue;
+    for (const p of all) {
+      if (!family.includes(p.type)) continue;
+      if (Math.abs(p.time - bi.endTime) <= tolSec && Math.abs(p.price - bi.endPrice) <= tolPrice) {
+        return p;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * 买卖双侧锚点（2026-10-10 双侧独立口径保留）：买侧与卖侧各自取最近笔端点锚，
+ * 并行评估、互不影响（多空可同时持仓）。@returns {Array} 0~2 个买卖点
+ */
+function sideCandidates(bis, points, atr, barSec) {
+  const tolSec = barSec;
+  const tolPrice = Math.max((atr || 0) * 0.2, 0.05);
+  const cands = [];
+  for (const family of [BUY_FAMILY, SELL_FAMILY]) {
+    const p = sideAnchor(bis, points, family, tolSec, tolPrice);
+    if (p) cands.push(p);
+  }
+  return cands;
+}
+
+/**
+ * 逐周期计算买卖点原始输出（chan_core.findBuyPoints/findSellPoints，与图上
+ * mark-buy-sell 标记同源；2026-10-16 起作为进场候选的直接来源，替代交易计划锚）。
+ * 上级周期取法与 trendStateOf 同口径：比本周期大一级的最小周期。
+ * @param {object} periodData { res: { bis, bars, macdArr, atr } }
+ * @param {Array}  periods    参与计算的周期列表
+ * @returns {object} { res: { buy: [...], sell: [...] } }（无数据周期缺省）
+ */
+function computePeriodPoints(periodData, periods) {
+  const out = {};
+  for (const res of periods) {
+    const pd = periodData[res];
+    if (!pd || !pd.bis || pd.bis.length < 3) continue;
+    // 取最近 60 笔即可（原 trading_plan predictPlan 同窗口：锚点只看最新结构）
+    const bis = pd.bis.length > 60 ? pd.bis.slice(-60) : pd.bis;
+    const barSec = intervalSecOf(res) || 60;
+    let best = null;
+    for (const r of Object.keys(periodData)) {
+      const s = intervalSecOf(r) || 0;
+      if (s > barSec && (best === null || s < (intervalSecOf(best) || 0))) best = r;
+    }
+    const upperBis = best !== null ? (periodData[best].bis || null) : null;
+    const upperMacd = best !== null ? (periodData[best].macdArr || null) : null;
+    try {
+      out[res] = {
+        buy: core.findBuyPoints(bis, upperBis || [], pd.macdArr || [], barSec, undefined, undefined, upperMacd),
+        sell: core.findSellPoints(bis, upperBis || [], pd.macdArr || [], barSec, undefined, undefined, upperMacd),
+      };
+    } catch (e) {
+      if (DEBUG) console.log(`[买卖点] ${res} 计算失败: ${e.message}`);
+      out[res] = { buy: [], sell: [] };
+    }
+  }
+  return out;
 }
 
 // ============================================================
@@ -659,7 +754,7 @@ function nearSr(price, srLevels, nearTol) {
  * 校验某个进场策略的全部条件（在检测周期 X 上）。
  * 公共条件：够笔 + 以下级别背驰 + 在支阻位附近；按策略附加专属条件。
  * @param {object} ctx {res, bis, upperBis, macdArr, atr, barSec, near, srLevels, periodData}
- * @param {object} strategy entryStrategyOf 返回值
+ * @param {object} strategy pointStrategyOf 返回值
  * @returns {{ok:boolean, reason?:string, markRes?:string, point?:object, nearSr?:number}}
  *   ok=true 时 markRes=背驰所在更低周期、point=背驰点、nearSr=命中支阻位价格
  */
@@ -816,13 +911,13 @@ function findBiEvent(bis, fromT, type, requirePostStart, breakPrev) {
 }
 
 /**
- * 顺势/逆势判定（TP2 平一半 / TP3 分支门槛）：计划 direction ∈ {多头多, 空头空} 为顺势
- * （计划结构方向=操作方向）；{多头空, 空头多} 为逆势。planDirection 缺失时按 strategyKey
- * 兜底（wait2Buy/waitBuy/wait3Buy/waitLike2Buy 及卖侧对称 → 顺势；wait1Buy/wait1Sell → 逆势）。
- * 与 py_chain.mark_entry.trend_following_of 对齐。
+ * 顺势/逆势判定（TP2 平一半 / TP3 分支门槛）：2026-10-16 起交易计划 direction 已取消，
+ * 恒按 strategyKey 判定（wait2Buy/waitBuy/wait3Buy/waitLike2Buy 及卖侧对称 → 顺势；
+ * wait1Buy/wait1Sell/wait2BuyBear/wait2SellBear → 逆势）。planDirection 形参保留仅为
+ * 兼容旧调用方，传入即忽略。与 py_chain.mark_entry.trend_following_of 对齐。
  */
 function trendFollowingOf(planDirection, strategyKey) {
-  if (planDirection) return TREND_PLAN_DIRS.has(planDirection);
+  if (strategyKey === undefined && planDirection) return TREND_PLAN_DIRS.has(planDirection);
   return TREND_STRATEGY_KEYS.has(strategyKey);
 }
 
@@ -895,7 +990,7 @@ function favSeg5Time(pd, isShort, entryT) {
  *           与 py 引擎「触发 bar 无下一根 → 未成交」语义一致）
  *   止损：markRes K线逐根盘中检查（short high>止损位 / long low<止损位），跳空按开盘价成交
  * 已知口径：bis 最后一笔为延伸中的形成笔（chan-bi 落盘口径），其完成事件按延伸端点时间计。
- * @param {object} sig 进场信号（含 planDirection / strategyKey）
+ * @param {object} sig 进场信号（含 pointType / strategyKey）
  * @param {number} stopRef stopRefOf 的输出（永不为 null）
  * @param {object} markResData 背驰级别周期数据 {bis, bars}
  * @param {object} periodXData 检测周期数据 {bis, bars}
@@ -927,7 +1022,7 @@ function simulatePosition(sig, stopRef, markResData, periodXData, opts) {
   // 有效保本滑点 = 固定值 + ATR系数 × 背驰周期 ATR(14)（markResData.atr，0=关闭）
   const slipBeEff = slipBe + kBe * ((markResData && markResData.atr) || 0);
   const fav = isShort ? "down" : "up"; // 有利方向笔（short 持仓盼下跌笔）
-  const trend = trendFollowingOf(sig.planDirection, sig.strategyKey);
+  const trend = trendFollowingOf(null, sig.strategyKey);
   const mbars = (markResData && markResData.bars) || [];
   const tp1 = findBiEvent(markResData && markResData.bis, entryT, fav);
   // 保本位三口径（py 引擎 exitStopBeMode 同步，2026-10-12）：entry=进场价（0亏损）；
@@ -1189,26 +1284,9 @@ async function main() {
     console.log(`已读取笔数据: ${bisFile}（${Object.keys(periodBis).length} 个周期）`);
     console.log(`已读取支阻位: ${srFile}（${srLevels.length} 个支阻位）`);
 
-    // 读取 trading-plan 落盘的交易计划数据（强制依赖：判定各周期当前进场状态）
-    const planFile = cacheFile("plan", SYMBOL);
-    if (!fs.existsSync(planFile)) {
-      console.log(`ERROR: 未找到交易计划数据文件 ${planFile}`);
-      console.log("请先对当前品种运行「交易计划」SKILL（trading-plan）生成计划数据，再运行本脚本。");
-      process.exit(1);
-    }
-    const planData = JSON.parse(fs.readFileSync(planFile, "utf8"));
-    if (planData && planData.analysisInvalidReason) throw new Error(planData.analysisInvalidReason);
-    if (planData.symbol !== SYMBOL) {
-      console.log(`ERROR: 交易计划数据文件属于 ${planData.symbol}，与当前品种 ${SYMBOL} 不一致`);
-      console.log("请先对当前品种运行「交易计划」SKILL（trading-plan）生成计划数据，再运行本脚本。");
-      process.exit(1);
-    }
-    const planPeriods = planData.periods || {};
-    if (Object.keys(planPeriods).length === 0) {
-      console.log("ERROR: 交易计划数据为空（periods 无数据），请先运行「交易计划」SKILL。");
-      process.exit(1);
-    }
-    console.log(`已读取交易计划: ${planFile}（${Object.keys(planPeriods).length} 个周期）`);
+    // 2026-10-16 起不再读取 plan_<品种>.json：买卖点候选由本脚本用 chan-core 现算
+    // （computePeriodPoints，与图上 mark-buy-sell 标记同源）；震荡 regime / 顺势方向
+    // 由 trading-plan 模块函数直接计算（默认均关闭）。
 
     // 切换到指定周期并等待K线加载完成
     const ensureResolution = async (targetRes) => {
@@ -1445,7 +1523,7 @@ async function main() {
     };
 
     // ============================================================
-    // 逐周期判定进场状态（依赖交易计划 plan 结果）→ 生成进场信号
+    // 逐周期判定进场状态（直接消费买卖点，2026-10-16 起替代计划锚）→ 生成进场信号
     // ============================================================
     // allEntries 按「背驰级别（标记级别）」聚合：periods[markRes] = [信号...]
     // 顺势参考周期方向状态（trading-plan 模块 trendStateOf，一次性全量重放到最新）：
@@ -1460,6 +1538,19 @@ async function main() {
       console.log(`[顺势过滤] 参考周期 ${TREND_RES}：${dirName}${trendReason ? `（${trendReason}）` : ""}`);
     }
     const trendSec = TREND_RES ? (intervalSecOf(TREND_RES) || 0) : 0;
+    // 震荡 regime（trading-plan 模块 computeRegime；rangeRes 关闭时为 null——无震荡闸）
+    const regime = RANGE_RES
+      ? planCore.computeRegime(Object.fromEntries(Object.entries(periodData).map(([r,p])=>[r,p.bis])),
+        Object.fromEntries(Object.keys(periodData).map(r => [r, periodData[r].bars])),
+        ALL_RES, RANGE_RES)
+      : null;
+    if (RANGE_RES) {
+      const state = regime && regime.range ? (regime.insufficient ? "笔不足·观望" : "震荡·观望") : "非震荡";
+      console.log(`[震荡闸] 参考周期 ${RANGE_RES}：${state}${regime && regime.reason ? `（${regime.reason}）` : ""}`);
+    }
+    const rangeSec = RANGE_RES ? (intervalSecOf(RANGE_RES) || 0) : 0;
+    // 买卖点原始输出（进场候选直接来源；与图上 mark-buy-sell 标记同源）
+    const periodPoints = computePeriodPoints(periodData, ALL_RES);
     let allEntries = {};
     for (const res of PERIODS) {
       const pd = periodData[res];
@@ -1475,19 +1566,20 @@ async function main() {
         console.log(`\n[周期 ${res}] 为顺势参考周期（${TREND_RES}）及以上，不作检测周期，跳过`);
         continue;
       }
-      // 从交易计划结果取该周期状态（2026-10-10 买卖双侧独立：主侧 + alt 侧并行评估，
-      // 每侧各自过闸，多空互不影响——与 py_chain compute_entries 对齐）
-      const plan = planPeriods[res];
-      const candidates = [];
-      if (plan && plan.strategy && plan.direction !== "观望") candidates.push(plan);
-      const altRow = { strategy: plan ? plan.altStrategy : null,
-                       direction: plan ? plan.altDirection : null,
-                       reason: plan ? plan.altReason : null,
-                       pointCls: plan ? plan.altPointCls : null };
-      if (altRow.strategy && altRow.direction !== "观望") candidates.push(altRow);
-      if (!candidates.length) {
+      if (rangeSec && (intervalSecOf(res) || 0) >= rangeSec) {
+        console.log(`\n[周期 ${res}] 为震荡参考周期（${RANGE_RES}）及以上，只作锚，不作检测周期，跳过`);
+        continue;
+      }
+      if (regime && regime.range) {
+        console.log(`\n[周期 ${res}] 震荡观望（${regime.resName || RANGE_RES}${regime.insufficient ? "笔不足" : "regime 震荡"}），跳过`);
+        continue;
+      }
+      // 买卖双侧锚（2026-10-10 双侧独立口径保留）：买侧 + 卖侧各自取最近笔端点锚，
+      // 每侧各自过闸，多空互不影响——与 py_chain compute_entries 对齐
+      const cands = sideCandidates(pd.bis, periodPoints[res] || {}, pd.atr, intervalSecOf(res) || 60);
+      if (!cands.length) {
         console.log(`
-[周期 ${res}] 交易计划无进场状态（${plan ? plan.strategy || "无策略" : "无计划"}），跳过`);
+[周期 ${res}] 最近笔端点无买卖点锚，跳过`);
         continue;
       }
       const ctx = {
@@ -1501,11 +1593,11 @@ async function main() {
         srLevels,
         periodData,
       };
-      for (const prow of candidates) {
-        const strategy = entryStrategyOf(prow.strategy);
+      for (const point of cands) {
+        const strategy = pointStrategyOf(point);
         if (!strategy) {
           console.log(`
-[周期 ${res}] 交易计划策略「${prow.strategy}」无对应进场策略，跳过`);
+[周期 ${res}] 买卖点「${point.type}」无对应进场策略，跳过`);
           continue;
         }
         if (trendDir && trendDir !== strategy.direction) {
@@ -1513,7 +1605,7 @@ async function main() {
 [周期 ${res}] 策略「${strategy.label}」与参考周期方向（${trendReason}）相反，顺势过滤跳过`);
           continue;
         }
-        ctx.pointCls = prow.pointCls;
+        ctx.pointCls = strategy.pointCls;
         const evalRes = evaluateEntry(ctx, strategy);
         if (!evalRes.ok) {
           console.log(`
@@ -1528,7 +1620,8 @@ async function main() {
           direction: strategy.direction,
           strategyKey: strategy.key,
           nearSr: evalRes.nearSr,
-          planDirection: prow.direction,
+          pointType: point.type,
+          pointStrong: "strong" in point ? point.strong : undefined,
           color: strategy.direction === "long" ? BUY_COLOR : SELL_COLOR,
         };
         if (trendDir || trendReason) {
@@ -1539,7 +1632,7 @@ async function main() {
         const dirName = sig.direction === "long" ? "买点(向上)" : "卖点(向下)";
         const colorName = sig.direction === "long" ? "红" : "绿";
         console.log(`
-[周期 ${res}] 策略「${strategy.label}」命中：背驰级别 ${evalRes.markRes}，${toT(sig.time)} @ ${sig.price.toFixed(2)} [${dirName} ${colorName}] 靠近支阻位 ${sig.nearSr.toFixed(2)}`);
+[周期 ${res}] 策略「${strategy.label}」命中（锚点 ${point.type}@${toT(point.time)} ${point.price.toFixed(2)}）：背驰级别 ${evalRes.markRes}，${toT(sig.time)} @ ${sig.price.toFixed(2)} [${dirName} ${colorName}] 靠近支阻位 ${sig.nearSr.toFixed(2)}`);
       }
     }
     // ============================================================
@@ -1588,7 +1681,7 @@ async function main() {
         (e) => e.final || e.type === "close" || e.type === "stopSr" || e.type === "stopBe");
       openPos[s.direction] = { sig: s, endTime: terminal ? terminal.time : Infinity };
       const evDesc = sim.events.map(e => `${EXIT_NAMES[e.type] || e.type} ${toT(e.time)}${e.price != null ? " @" + e.price.toFixed(2) : ""}${e.lots != null ? ` (${e.lots}手${e.final ? "终局" : ""})` : ""}`).join(" → ");
-      console.log(`[持仓] ${toT(s.time)} ${s.direction === "long" ? "做多" : "做空"}（检测周期 ${s.periodX}，${trendFollowingOf(s.planDirection, s.strategyKey) ? "顺势" : "逆势"}，${LOTS} 手，止损参考 ${s.stopRef.toFixed(2)}，保本位 ${sim.beStop != null ? sim.beStop.toFixed(2) : "待定(bi成笔前)"}）: ${evDesc || "无出场事件"}`);
+      console.log(`[持仓] ${toT(s.time)} ${s.direction === "long" ? "做多" : "做空"}（检测周期 ${s.periodX}，${trendFollowingOf(null, s.strategyKey) ? "顺势" : "逆势"}，${LOTS} 手，止损参考 ${s.stopRef.toFixed(2)}，保本位 ${sim.beStop != null ? sim.beStop.toFixed(2) : "待定(bi成笔前)"}）: ${evDesc || "无出场事件"}`);
     }
     // 重新按背驰级别聚合（flatSigs 为带互斥/出场信息的信号副本，落盘与绘制都用它）
     allEntries = {};
@@ -1910,8 +2003,12 @@ module.exports = {
   virtualBiOf,
   sinkChainConfirm,
   lowerDiverge,
-  // 策略映射与条件判定
-  entryStrategyOf,
+  // 买卖点直映射与条件判定（2026-10-16 起替代 entryStrategyOf 计划文案映射）
+  pointStrategyOf,
+  pointClsOf,
+  sideAnchor,
+  sideCandidates,
+  computePeriodPoints,
   lastBiOk,
   brokePrevLow,
   brokePrevHigh,

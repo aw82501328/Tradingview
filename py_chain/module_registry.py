@@ -3,7 +3,8 @@
 
 两大类（2026-09-29 梳理，见 SPEC.md「模块分层架构」）：
   基础公用组件  BASE_STAGES    画笔/画中枢/标记买卖点/支阻位——所有策略共用的结构计算
-  交易策略      STRATEGIES     交易计划+标记进出场为同一策略的两步；当前唯一策略「缠论V1」
+  交易策略      STRATEGIES     标记进出场（2026-10-16 起直接消费买卖点，交易计划策略行
+                               取消、plan 步骤移出策略链——只剩震荡/顺势判定默认关闭）
 
 本模块为纯常量 + 纯函数，不导入包内其他模块（避免 param_center ↔ analysis_service
 循环依赖）；analysis_service / webapp / live_trader / 前端 catalog 均以此为归属口径。
@@ -21,18 +22,20 @@ BASE_DEPENDENCIES = {"bi": [], "zs": ["bi"], "points": ["bi", "zs"]}
 
 # 交易策略注册表：id → 策略定义
 #   title         界面显示名（工作台流程组标题 / 策略下拉选项）
-#   stages        工作台流程步骤（按执行顺序；含策略内部依赖，如 entry 依赖 plan）
+#   stages        工作台流程步骤（按执行顺序；含策略内部依赖，如 entry 依赖 sr）
 #   dependencies  策略步骤的依赖（可引用 BASE_STAGES 与策略内前序步骤）
 #   param_modules 参数中心归属本策略的模块页签（param_center.PARAM_MODULES 键 + sr）
 #   engine        回测/实盘引擎链路标识（当前唯一实现 "chan"=BacktestEngine 现链路；
 #                 第二策略到来时在 webapp/live_trader 入口层按此标识分发）
 # 注：支阻位(sr)自 2026-09-29 第二轮调整起归属策略（用户口径：支阻参数按策略选方案生效），
-# 与 plan/entry 同组；基础组件只留结构计算（笔/中枢/买卖点）。
+# 与 entry 同组；基础组件只留结构计算（笔/中枢/买卖点）。
+# 2026-10-16：plan 步骤移出缠论V1 策略链（进出场直接消费买卖点标记；plan 模块只剩
+# 震荡/顺势判定，参数页签保留，工作台仍可手动单跑 regime-only 的 trading-plan 脚本）。
 STRATEGIES = {
     "chan_v1": {
         "title": "缠论V1",
-        "stages": ["sr", "plan", "entry"],
-        "dependencies": {"sr": ["bi"], "plan": ["bi"], "entry": ["bi", "sr", "plan"]},
+        "stages": ["sr", "entry"],
+        "dependencies": {"sr": ["bi"], "entry": ["bi", "sr"]},
         "param_modules": ["sr", "plan", "entry"],
         "engine": "chan",
     },

@@ -4,7 +4,9 @@
 
 在最小周期（默认 3 分钟）上逐根 K 线推进，每根收盘后以「截至该时刻的切片」
 重放整条链路：画笔(buildBi) → 买卖点(compute_all_marks) → 支阻位(compute_srflip)
-→ 交易计划(compute_plan) → 进出场(compute_entries)，避免未来函数。
+→ 买卖点原始输出(compute_period_points) + 震荡regime(compute_regime)/顺势(trend_state_of)
+→ 进出场(compute_entries 直消费买卖点，2026-10-16 起取消交易计划文案中转)，
+避免未来函数。
 
 成交规则（fill_mode，BacktestEngine.__init__）：
   - "anchor"（默认）：信号在「背驰锚点时间之后的第 1 根 fine 周期K线」开盘成交——
@@ -103,14 +105,14 @@ from .chan_core import (
 from .mark_buy_sell import compute_all_marks
 from .bi_inc import BiIncBuilder
 from .sr_flip import compute_srflip, prepare_bar_arrays
-from .trading_plan import (compute_plan, trend_state_of,
+from .trading_plan import (compute_regime, trend_state_of,
                            TREND_RES as DEFAULT_TREND_RES, RANGE_RES as DEFAULT_RANGE_RES,
                            TREND_REBOUND, REBOUND_NEAR_PTS, REBOUND_ANGLE_REF)
 from .mark_entry import (
-    compute_entries, stop_ref_of, sr_of_detect, sr_drop_fib_for_class1,
+    compute_entries, compute_period_points, stop_ref_of, sr_of_detect, sr_drop_fib_for_class1,
     find_bi_event, filterDetectPeriods,
     trend_following_of, forming_break_ref, lastBiOk,
-    enough_fav_bars,
+    enough_fav_bars, point_cls_of, _side_anchor, BUY_FAMILY, SELL_FAMILY,
     DEFAULT_LOTS, DEFAULT_SLIP_STOP, DEFAULT_SLIP_FALLBACK, DEFAULT_SLIP_BE,
     DEFAULT_SLIP_STOP_ATR_K, DEFAULT_SLIP_FALLBACK_ATR_K, DEFAULT_SLIP_BE_ATR_K,
     NEAR as DEFAULT_NEAR, EXIT_MIN_MERGED, REALTIME_MIN_BARS, ZS_EXIT_WEAK_RATIO,
@@ -356,7 +358,7 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
     ec = pos.get("exitCfg") or EXIT_MODE_DEFAULTS
     lots_left = pos.get("lotsLeft", pos.get("lots", 0))
     lots_total = pos.get("lots", lots_left)  # 百分比基数=初始开仓手数（总仓位）
-    trend = trend_following_of(pos.get("planDirection"), pos.get("strategyKey"))
+    trend = trend_following_of(None, pos.get("strategyKey"))
     phase = "顺势" if trend else "逆势"
     tp1 = find_bi_event(mark_bis, pos["signalTime"], fav)
     tp3a = find_bi_event(px_bis, pos["signalTime"], fav, break_prev=True)
@@ -460,7 +462,7 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
         if half_conf:
             last = px_bis[-1]
             pos["pendingWhy"] = (
-                f"够笔止盈触发（{phase}，计划方向 {pos.get('planDirection')}）：检测周期 "
+                f"够笔止盈触发（{phase}，策略 {pos.get('strategyKey')}）：检测周期 "
                 f"{pos.get('periodX')} 有利方向（{fav_cn}）笔 {fmtT(last.get('endTime'))} @ "
                 f"{float(last.get('endPrice') or 0):.2f} 在进场 {fmtT(entry_ref)} 之后完成"
                 f"（末笔方向满足 lastBiOk），"
@@ -468,7 +470,7 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
                 f"剩余止损移至保本位 beStop {_be_stop_txt(pos)}")
         else:
             pos["pendingWhy"] = (
-                f"够笔止盈触发（{phase}·预期口径，计划方向 {pos.get('planDirection')}）：检测周期 "
+                f"够笔止盈触发（{phase}·预期口径，策略 {pos.get('strategyKey')}）：检测周期 "
                 f"{pos.get('periodX')} 自进场 {fmtT(entry_ref)} 所在合并块起向有利方向"
                 f"（{fav_cn}）已走 {min_merged} 块合并K（不等确认笔），"
                 f"平 {pct:.0f}%（{pos['pendingLots']} 手）挂起；"
@@ -495,13 +497,13 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
             ref_txt = (f"破前一同向笔端点 {ref:.2f}（{fmtT(tp3a_hit['refTime'])}）"
                        if ref is not None else "破前一同向笔端点")
             pos["pendingWhy"] = (
-                f"过高低点止盈触发（{phase}，计划方向 {pos.get('planDirection')}）：检测周期 "
+                f"过高低点止盈触发（{phase}，策略 {pos.get('strategyKey')}）：检测周期 "
                 f"{pos.get('periodX')} 有利方向（{fav_cn}）笔 {fmtT(tp3a_hit['time'])} @ "
                 f"{tp3a_hit['price']:.2f} {ref_txt}，平 {pct:.0f}%（{pos['pendingLots']} 手）挂起")
         else:
             ext = bar["low"] if is_short else bar["high"]
             pos["pendingWhy"] = (
-                f"过高低点止盈触发（{phase}·预期口径，计划方向 {pos.get('planDirection')}）："
+                f"过高低点止盈触发（{phase}·预期口径，策略 {pos.get('strategyKey')}）："
                 f"检测周期 {pos.get('periodX')} 有利方向（{fav_cn}）当根收盘K极值 "
                 f"{ext:.2f}（{fmtT(bar['time'])}）破前一同向笔端点 "
                 f"{exp_break['price']:.2f}（{fmtT(exp_break['time'])}），不等确认笔，"
@@ -841,13 +843,13 @@ class BacktestEngine:
         self.expect_bi = (bool(CHAN_CFG.get("expectBiEnough"))
                           if expect_bi is None else bool(expect_bi))
         # 参数中心模块参数（param_center.effective_all 的子集；缺省回退各模块常量）：
-        #   plan  → compute_plan cfg（交易计划震荡阈值 rangeBarN 等）
+        #   plan  → compute_regime cfg（震荡判定阈值 rangeBarN 等；2026-10-16 起交易
+        #           计划只保留震荡/顺势两项判定，均默认关闭）
         #   marks → compute_all_marks（买卖点 nearAtrRatio/keep）
         #   exit_min_merged / realtime_min_bars / zs_exit_weak_ratio → 出场/够笔/出中枢衰减
         mp = module_params or {}
         # plan 模块的 trendRes（顺势参考周期）/ rangeRes（震荡判定参考周期）单独取出：
-        # 不混入震荡阈值 plan_cfg；trendRes "" = 关闭顺势过滤；rangeRes "" = 关闭
-        # 震荡闸门（关闭后任何周期的计划行都不自判震荡，无「只作锚」固定观望）
+        # 不混入震荡阈值 plan_cfg；trendRes "" = 关闭顺势过滤；rangeRes "" = 关闭震荡闸门
         plan_mp = dict(mp.get("plan") or {})
         tr = plan_mp.pop("trendRes", mp.get("trendRes"))
         self.trend_res = DEFAULT_TREND_RES if tr is None else tr
@@ -861,7 +863,10 @@ class BacktestEngine:
             "reboundAngleRef": plan_mp.pop("reboundAngleRef", REBOUND_ANGLE_REF),
         }
         self.plan_cfg = plan_mp or None
-        self.marks_params = dict(mp["marks"]) if mp.get("marks") else {}
+        # points 桶的 divergeDurRatio 是 CHAN_CFG 键（经 chan_cfg 注入），非
+        # compute_all_marks 形参——滤掉防 with_marks=True 时 TypeError
+        self.marks_params = ({k: v for k, v in mp["marks"].items() if k != "divergeDurRatio"}
+                             if mp.get("marks") else {})
         self.exit_min_merged = mp.get("exit_min_merged", EXIT_MIN_MERGED)
         self.realtime_min_bars = mp.get("realtime_min_bars", REALTIME_MIN_BARS)
         self.zs_exit_weak_ratio = mp.get("zs_exit_weak_ratio", ZS_EXIT_WEAK_RATIO)
@@ -907,7 +912,10 @@ class BacktestEngine:
         # 上次结构化笔端点指纹：with_marks 时用来判断哪些周期要按区间套重算买卖点
         self._bis_fp = None
         self._sr = None
-        self._plan = {}
+        # 进场候选买卖点（compute_period_points；2026-10-16 起替代 self._plan 计划锚）
+        self._points = {}
+        # 震荡 regime（compute_regime；range_res 关闭时恒 None）
+        self._range_gate = None
         self._entries = {}
         # 当下背驰去重：(periodX, strategyKey, markRes, 形成段起点时间)，每个形成段只发一次
         self._rt_fired = set()
@@ -1600,14 +1608,14 @@ class BacktestEngine:
         price_arrays = {res: prepare_bar_arrays(self.bars[res]["_list"])
                         for res in self.periods}
 
-        def rebuild_chain(plan_periods=None):
+        def rebuild_chain(points_periods=None):
             self._rebuild_chain(include_entries=self.signal_mode != "realtime",
                                 price_arrays=price_arrays, bar_times=self._times,
-                                plan_periods=plan_periods)
+                                points_periods=points_periods)
 
-        # 计划周期子集（realtime 非采样预备步跳过 fine 行用；保持 periods 原序）
-        core_plan_full = [p for p in self.periods if str(p).upper() != "30S"]
-        core_plan_no_fine = [p for p in core_plan_full if str(p) != str(self.fine_res)]
+        # 买卖点周期子集（realtime 非采样预备步跳过 fine 行用；保持 periods 原序）
+        core_points_full = [p for p in self.periods if str(p).upper() != "30S"]
+        core_points_no_fine = [p for p in core_points_full if str(p) != str(self.fine_res)]
 
         # 预热阶段（warmup 之前），先把切片推进到位（仅计算，不判定进场）。
         # 预热也报进度与日志（刻度统一用 end_i，进度条单调爬升不回退）——长预热
@@ -1690,15 +1698,15 @@ class BacktestEngine:
                                       trail_sigs=allSignals.get(pos.get("markRes")))
                 _jr_exits(pos)  # breakeven 当拍落事件；half/close/stop 挂起待下一拍成交
             if self.signal_mode == "realtime":
-                # 当下背驰：笔结构变化时重算链路（刷新①③所需的计划/支阻位缓存），
+                # 当下背驰：笔结构变化时重算链路（刷新①③所需的买卖点/支阻位缓存），
                 # 之后每根 fine 收盘都用当前增量状态（bis 已延伸到当下极值、MACD 增量）评估②
                 if changed:
-                    # fine 行计划只被 journal 采样（下一拍 i+1 且 i+1%3==0 时）消费：
+                    # fine 行买卖点只被 journal 采样（下一拍 i+1 且 i+1%3==0 时）消费：
                     # 只在采样预备步算 fine 行，其余步跳过（检测周期行不受影响）。
-                    # 采样步读的是上一步 rebuild 的计划——与本步是否计算 fine 行的
-                    # 旧口径取值完全一致（A/B 逐字节对拍锁定）。
-                    rebuild_chain(plan_periods=core_plan_full if (i + 1) % 3 == 0
-                                  else core_plan_no_fine)
+                    # 采样步读的是上一步 rebuild 的买卖点——与本步是否计算 fine 行的
+                    # 旧口径取值完全一致（与原计划采样 A/B 对拍同机制）。
+                    rebuild_chain(points_periods=core_points_full if (i + 1) % 3 == 0
+                                  else core_points_no_fine)
                 pending = self._collect_realtime(allSignals, stats, t)
                 for s in pending:
                     _emit_signal(s)
@@ -1759,22 +1767,35 @@ class BacktestEngine:
     # ---------------- 交易日志（bt_journal 落盘钩子） ----------------
 
     def _journal_states(self, jr, t):
-        """各周期紧凑状态行（仅变化落盘）：计划/趋势方向 + 末笔（形成段）快照。
-        「为什么某时间没开单」→ T 前最后一条 state 行给出当时各层门控状态。"""
+        """各周期紧凑状态行（仅变化落盘）：震荡regime/趋势方向 + 双侧买卖点锚 +
+        末笔（形成段）快照。「为什么某时间没开单」→ T 前最后一条 state 行给出当时
+        各层门控状态。"""
         try:
-            plan = self._plan or {}
             trend = self._trend_state or {}
+            gate = self._range_gate or {}
             tdir = trend.get("dir") if trend else None
             treason = (trend.get("reason") or "")[:40] if trend else ""
+
+            def _pt_label(p):
+                if p is None:
+                    return None
+                cls = point_cls_of(p)
+                return cls or p.get("type")
+
             for P in self.periods:
                 bis = self._bis.get(P) or []
                 last = bis[-1] if bis else None
-                pl = plan.get(P) or {}
+                pts = (self._points or {}).get(P) or {}
+                atr = self._atr[P].value if self._atr.get(P) is not None else 0
+                bar_sec = intervalSecOf(P) or 60
+                tol_price = max((atr or 0) * 0.2, 0.05)
+                buyPt, _ = _side_anchor(bis, pts, BUY_FAMILY, bar_sec, tol_price) if bis else (None, None)
+                sellPt, _ = _side_anchor(bis, pts, SELL_FAMILY, bar_sec, tol_price) if bis else (None, None)
                 jr.state(t, P, {
-                    "planDir": pl.get("direction"),
-                    "planStrategy": pl.get("strategy"),
-                    "planReason": (pl.get("reason") or "")[:80],
                     "trendDir": tdir, "trendReason": treason,
+                    "rangeGate": (gate.get("range") if gate else None),
+                    "rangeReason": (gate.get("reason") or "")[:40] if gate else "",
+                    "buyPt": _pt_label(buyPt), "sellPt": _pt_label(sellPt),
                     "segStart": last.get("startTime") if last else None,
                     "segType": last.get("type") if last else None,
                     "segForming": bool(last.get("_forming")) if last else False,
@@ -1851,19 +1872,20 @@ class BacktestEngine:
         return changed
 
     def _rebuild_chain(self, *, include_entries=True, price_arrays=None, bar_times=None,
-                       plan_periods=None):
-        """链路重算：买卖点 → 支阻位 → 交易计划 → 进出场（使用增量缓存指标）。
+                       points_periods=None):
+        """链路重算：买卖点 → 支阻位 → 震荡regime + 买卖点原始输出 → 进出场
+        （使用增量缓存指标；2026-10-16 起进出场直接消费买卖点，交易计划策略行取消）。
 
-        30S（periods 含时）只进 bis 与进出场，不进买卖点/支阻位/交易计划——
-        与 JS 端语义一致（mark-buy-sell/mark-sr-flip/trading-plan 周期不含 30S，
-        sr_flip 的 LEVEL_ORDER 未收录 30S）。
-        @param plan_periods 交易计划的周期子集（None=全部 core）。realtime 回测
-        fine 行计划只被 journal 状态采样（每 3 拍）消费——非采样预备步跳过 fine 行，
-        检测周期（15/60/240）行照常每步计算（evaluateRealtimeEntries 的计划闸门依赖）。
+        30S（periods 含时）只进 bis 与进出场，不进买卖点/支阻位/regime——
+        与 JS 端语义一致（mark-buy-sell/mark-sr-flip 周期不含 30S，
+        sr_flip 的 LEVEL_ORDER 也未收录 30S）。
+        @param points_periods 买卖点候选的周期子集（None=全部 core）。realtime 回测
+        fine 行买卖点只被 journal 状态采样（每 3 拍）消费——非采样预备步跳过 fine 行，
+        检测周期（15/60/240）行照常每步计算（evaluateRealtimeEntries 的候选锚依赖）。
         """
         periodBis = self._bis
         core = [p for p in self.periods if str(p).upper() != "30S"]
-        # barsByPeriod 切片只为消费方构造：compute_srflip/compute_plan 只遍历 core 键，
+        # barsByPeriod 切片只为消费方构造：compute_srflip/compute_period_points 只遍历 core 键，
         # evaluateRealtimeEntries 不读 bars——realtime 全量回测（include_entries=False）
         # 跳过 30S 的 O(n_30S) 前缀切片；确认式 compute_entries(with_30s) 需要 30S bars，
         # 由 include_entries=True 的路径（step_to/实时监控）补上。
@@ -1966,15 +1988,24 @@ class BacktestEngine:
                                           work_cache=self._chain_work_cache, **srKw)
             except Exception:
                 self._sr = None
-            # 3. 交易计划（cfg = 参数中心交易计划模块参数）
+            # 3. 震荡 regime（交易计划保留职能之一；cfg = 参数中心 plan 模块震荡阈值；
+            #    range_res 关闭时恒 None，mark_entry 无震荡闸）
             try:
-                self._plan = compute_plan(periodBis, barsByPeriod,
-                                          plan_periods if plan_periods is not None else core,
-                                          periodMacd=periodMacd, periodAtr=periodAtr,
-                                          cfg=self.plan_cfg, work_cache=self._chain_work_cache,
-                                          range_res=self.range_res)
+                self._range_gate = compute_regime(periodBis, barsByPeriod, core,
+                                                  periodMacd=periodMacd, periodAtr=periodAtr,
+                                                  cfg=self.plan_cfg, work_cache=self._chain_work_cache,
+                                                  range_res=self.range_res)
             except Exception:
-                self._plan = {}
+                self._range_gate = None
+            # 3.2 买卖点原始输出（进场候选直接来源，2026-10-16 起替代计划锚；
+            #     fine 行与旧计划同口径只在采样预备步计算——检测周期行照常）
+            try:
+                self._points = compute_period_points(periodBis,
+                                                     points_periods if points_periods is not None else core,
+                                                     periodMacd=periodMacd,
+                                                     work_cache=self._chain_work_cache)
+            except Exception:
+                self._points = {}
             # 3.5 顺势参考周期方向状态（mark_entry 顺势过滤；与计划同拍重算——
             #     每根 fine 链路重算时顺带更新，参考周期收盘/笔结构变化即刻生效；
             #     挂链路 work_cache：参考周期输入未变时直接复用，重同步后已清空）
@@ -1997,13 +2028,15 @@ class BacktestEngine:
             # 确认制拒绝原因（交易日志）：run() 期间挂 self._entry_reject_hook；
             # step_to 实时路径无日志（getattr 缺省 None，行为不变）
             try:
-                self._entries = compute_entries(periodBis, barsByPeriod, self._plan, srLevels,
+                self._entries = compute_entries(periodBis, barsByPeriod, self._points, srLevels,
                                                 detectPeriods=detectPeriods, near=self.near,
                                                 periodMacd=periodMacd, periodAtr=periodAtr,
                                                 with_30s=any(str(p).upper() == "30S" for p in self.periods),
                                                 zs_exit_weak_ratio=self.zs_exit_weak_ratio,
                                                 trend_res=self.trend_res,
                                                 trend_state=self._trend_state,
+                                                range_res=self.range_res,
+                                                range_gate=self._range_gate,
                                                 on_reject=getattr(self, "_entry_reject_hook", None))
             except Exception:
                 self._entries = {}
@@ -2105,7 +2138,7 @@ class BacktestEngine:
                 getattr(self, "_structure_bis", self._bis),
                 macdViews,
                 atrViews,
-                self._plan, srLevels, detectPeriods,
+                self._points, srLevels, detectPeriods,
                 near=self.near, tCut=t, fired=self._rt_fired, firedIndex=self._rt_fired_idx,
                 periodTimes=self._times, periodMacdTimes=macdTViews,
                 periodMerged=mergedViews, periodBars=barViews,
@@ -2116,6 +2149,8 @@ class BacktestEngine:
                 zsExitWeakRatio=self.zs_exit_weak_ratio,
                 trend_res=self.trend_res,
                 trend_state=self._trend_state,
+                range_res=self.range_res,
+                range_gate=self._range_gate,
                 on_reject=on_reject,
             )
         finally:
@@ -2301,7 +2336,8 @@ class BacktestEngine:
                 "entryPrice": entryPrice,
                 "fillMode": fillMode,
                 "nearSr": s.get("nearSr"),
-                "planDirection": s.get("planDirection"),
+                "pointType": s.get("pointType"),        # 进场锚买卖点类型（2026-10-16 直连）
+                "pointStrong": s.get("pointStrong"),    # 2族强弱（None=未定型/非2族）
                 "trendDirection": s.get("trendDirection"),  # 顺势参考周期方向（2026-09-15）
                 "trendReason": s.get("trendReason"),        # 成因注记，如「4小时2买」
                 "fallback": s.get("fallback", False),   # M1 回退候选标记（透传自信号）

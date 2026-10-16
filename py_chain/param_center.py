@@ -261,19 +261,20 @@ PARAM_MODULES = {
     "plan": {
         "category": "strategy",
         "title": "交易计划",
-        # 键序 = 参数页 3 类分组（震荡 / 顺势 / 其他；params.html PLAN_GROUPS 同步维护）
+        # 2026-10-16 起只剩震荡/顺势两组（开单链路直连买卖点，策略路由参数下架；
+        # 键序 = 参数页 2 类分组（震荡 / 顺势；params.html PLAN_GROUPS 同步维护））
         "params": {
             # ---- 震荡 ----
-            "rangeRes": ("震荡判定参考周期", "4小时/日线=参考周期判震荡→更低周期观望，参考周期及以上只作锚不交易；关闭=日线、4小时及更低周期都不自判震荡，直接走买卖点",
+            "rangeRes": ("震荡判定参考周期", "4小时/日线=参考周期判震荡→更低周期观望，参考周期及以上只作锚不交易；关闭=无震荡闸，直接走买卖点",
                          ("", "240", "D"), None),
-            "rangeBoundOn": ("横盘判定", "A 类震荡判定（K线窄带+笔端点+涨跌交替）；参考周期开=只判参考周期、更低周期听门；参考周期关=计划行不自判；本开关关闭=跳过此类",
+            "rangeBoundOn": ("横盘判定", "A 类震荡判定（K线窄带+笔端点+涨跌交替）；参考周期开=只判参考周期、更低周期听门；本开关关闭=跳过此类",
                              None, None),
             "rangeBarN": ("震荡窗口K线数", "最近N根K线的区间判定窗口", 5, 500),
             "rangeBiN": ("震荡最近笔数", "最近N笔端点极差与涨跌交替判定", 2, 50),
             "rangeKMult": ("K线区间阈值(×ATR)", "窗口高低差 ≤ 该值×ATR 判震荡", 0.5, 50.0),
             "rangeBiMult": ("笔端点阈值(×ATR)", "笔端点极差 ≤ 该值×ATR 判震荡", 0.5, 50.0),
             "rangeBreakMult": ("突破跳过阈值(×ATR)", "末笔端点越过窗口另一端 >该值×ATR 视为突破（跳过震荡判定）", 0.0, 10.0),
-            "rangeZsOn": ("中枢内判定", "B 类震荡判定（未离开中枢且现价在箱内）；参考周期开=只判参考周期、更低周期听门；参考周期关=计划行不自判；本开关关闭=跳过此类",
+            "rangeZsOn": ("中枢内判定", "B 类震荡判定（未离开中枢且现价在箱内）；参考周期开=只判参考周期、更低周期听门；本开关关闭=跳过此类",
                           None, None),
             # ---- 顺势 ----
             "trendRes": ("顺势参考周期", "参考周期方向过滤更低周期进场（关闭/4小时/日线；规则见本页下方说明）",
@@ -284,15 +285,6 @@ PARAM_MODULES = {
                          0.0, 1000.0),
             "reboundAngleRef": ("相位角度45°基准(点/根)", "当前笔平均每根幅度 > 该值 = 角度>45°（强），≤ 为弱；下跌角度与反弹/回调力度同口径",
                          0.1, 100.0),
-            # ---- 其他 ----
-            "prevHighNearPts": ("前高/前低附近容差(点)", "现行二买族按点上的强弱二分，不读这个容差。只在买卖点没有强弱字段时：2买/2卖后首段终点距前高/前低 ≤ 该值 → 等类2买点/类2卖点",
-                         0.0, 1000.0),
-            "secondNearPts": ("回踩2买/2卖点容差(点)", "现行二买族按点上的强弱二分，不读这个容差。只在买卖点没有强弱字段时：未过前高/前低且回调（反弹）回到点价 ≤ 该值 → 等类2买点/类2卖点",
-                         0.0, 1000.0),
-            "thirdStrongTrend": ("3类点强档顺势", "开=3买/类3买/4买/类4买（3卖/类3卖/4卖/类4卖）过左高（左低）且不背驰时顺势「等待回调后的新买点/新卖点」；关=这些点一律弱档（等一卖/一买）。二买族不看本开关",
-                         None, None),
-            "weakTierByOrigin": ("弱档按原始点分流", "现行二买族弱档直接等低点附近的2买 / 高点附近的2卖，不看本开关。只在买卖点没有强弱字段时：开=未过原始点走抬低/压低；关或已过原始点=回等一卖/一买",
-                         None, None),
         },
     },
     "fxma": {
@@ -413,15 +405,14 @@ def defaults_of(module, symbol=None):
                 if slip is not None:
                     base["slip_fallback"] = slip
     elif module == "plan":
+        # 2026-10-16 起交易计划只剩震荡（rangeRes+震荡阈值）/顺势（trendRes+相位）两组
+        # 参数——策略路由参数（prevHighNearPts/secondNearPts/thirdStrongTrend/
+        # weakTierByOrigin）随 strategyOf/classifySecond 删除而下架
         base = {**trading_plan.RANGE_DEFAULTS, "trendRes": trading_plan.TREND_RES,
                 "rangeRes": trading_plan.RANGE_RES,
                 "trendRebound": trading_plan.TREND_REBOUND,
                 "reboundNearPts": trading_plan.REBOUND_NEAR_PTS,
-                "reboundAngleRef": trading_plan.REBOUND_ANGLE_REF,
-                "prevHighNearPts": trading_plan.PREV_HIGH_NEAR_PTS,
-                "secondNearPts": trading_plan.SECOND_NEAR_PTS,
-                "thirdStrongTrend": trading_plan.THIRD_STRONG_TREND,
-                "weakTierByOrigin": trading_plan.WEAK_TIER_BY_ORIGIN}
+                "reboundAngleRef": trading_plan.REBOUND_ANGLE_REF}
     elif module == "fxma":
         base = dict(FXMA_DEFAULTS)
     else:

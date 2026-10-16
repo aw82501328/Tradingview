@@ -132,9 +132,14 @@ def fmt_reject(r):
         "min_bars": lambda c: f"形成段合并 {c.get('count')} 根 < 够笔门槛 {c.get('need')} 根",
         "expect_min_bars": lambda c: f"预期够笔段合并 {c.get('count')} 根 < 门槛 {c.get('need')} 根",
         "strategy_extra": lambda c: str(c.get("reason") or ""),
-        "plan_watch": lambda c: (f"计划 {c.get('planDir')}（{c.get('planStrategy')}）："
-                                 f"{c.get('reason') or ''}"),
-        "no_strategy_map": lambda c: f"计划策略「{c.get('planStrategy')}」无进场映射",
+        "range_watch": lambda c: (f"震荡观望（{c.get('rangeRes')}）："
+                                  f"{c.get('reason') or ''}"),
+        "res_ge_range": lambda c: (f"检测周期 {c.get('res')} ≥ 震荡参考周期 "
+                                   f"{c.get('rangeRes')}（只作锚，结构性剔除）"),
+        "no_point": lambda c: "最近笔端点无买卖点锚（买卖双侧均未匹配）",
+        "no_strategy_map": lambda c: f"买卖点「{c.get('pointType')}」无进场映射",
+        "res_ge_trend": lambda c: (f"检测周期 {c.get('res')} ≥ 趋势参考周期 "
+                                   f"{c.get('trendRes')}（只作锚，结构性剔除）"),
         "trend_filter": lambda c: (f"顺势参考周期方向 {c.get('trendDir')}，本策略需 "
                                    f"{c.get('need')}（{c.get('trendReason') or ''}）"),
         "forming_wrong_type": lambda c: (f"形成段为 {c.get('lastType')}，需 {c.get('want')}"
@@ -190,15 +195,19 @@ def fmt_reject(r):
 
 def fmt_state(r):
     p = r.get("period")
-    if "planDir" in r or "planStrategy" in r:   # 缠论引擎
+    if "buyPt" in r or "sellPt" in r or "rangeGate" in r:   # 缠论引擎（2026-10-16 直连买卖点）
         seg = (f"形成段 {r.get('segType')}{'(延伸中)' if r.get('segForming') else ''}"
                f" 自 {fmtT(r.get('segStart'))} → {_f2(r.get('segEndPrice'))}"
                if r.get("segStart") else "无笔")
         tr = f"，趋势参考 {r.get('trendDir')}" if r.get("trendDir") else ""
-        pl = (f"计划 {r.get('planDir')}/{r.get('planStrategy')}"
-              if r.get("planStrategy") else f"计划 {r.get('planDir') or '无'}")
-        reason = f"（{r.get('planReason')}）" if r.get("planReason") else ""
-        return f"[{p}] {pl}{reason}{tr}；{seg}"
+        rg = f"，震荡regime={'震荡' if r.get('rangeGate') else '非震荡'}" if r.get("rangeGate") is not None else ""
+        pts = []
+        if r.get("buyPt"):
+            pts.append(f"买锚 {r['buyPt']}")
+        if r.get("sellPt"):
+            pts.append(f"卖锚 {r['sellPt']}")
+        anchor = "；".join(pts) if pts else "无买卖点锚"
+        return f"[{p}] {anchor}{rg}{tr}；{seg}"
     # fx_ma 引擎
     pts = []
     if r.get("buyPtType"):

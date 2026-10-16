@@ -1,15 +1,21 @@
 # 交易计划 trading-plan 规格（SPEC）
 
-> 文档用途：描述「trading-plan」SKILL 的功能规格——逐周期区分当前品种是**震荡**还是**趋势**，趋势时依据「最近笔端点的买卖点类型」生成对应交易策略，输出各周期交易计划表（品种、周期、方向、策略），并把策略以蓝色文字标记显示在各周期图上。
-> 对应脚本：`.cursor/skills/trading-plan/scripts/trading_plan.js`。
-> 算法来源：缠论算法复用 `chan-core`（唯一算法源）；震荡判定 `isRangeBound` 复制自 `chan-status`（不迁移、不修改）；策略映射为本脚本 `predictPlan` 纯函数（可单测）。
+> 文档用途：描述「trading-plan」SKILL 的功能规格——**2026-10-16 起 regime-only**：
+> 只保留①震荡 regime（`--range-res`，默认关闭）与②顺势方向状态（`--trend-res`，默认关闭）
+> 两项判定。开单链路改为 mark-entry 直接消费 chan-core 买卖点（点类型+强弱 → 进场键），
+> 原「逐周期方向+策略」计划行（predictPlan/strategyOf/classifySecond）、计划表与图上
+> 蓝色策略文字已删除；脚本仅输出摘要、落盘 regime-only 结果，并清除图上遗留旧标记。
+> 对应脚本：`.cursor/skills/trading-plan/scripts/trading_plan.js`；Python 同构：
+> `py_chain/trading_plan.py`（`compute_regime` / `trend_state_of`）。
+> 算法来源：缠论算法复用 `chan-core`（唯一算法源）；震荡判定 `isRangeBound` 复制自
+> `chan-status`（不迁移、不修改）。
 
 ## 1. 输入
 
 | 项 | 来源 | 说明 |
 |----|------|------|
 | 笔数据 | `chan-bi` 画笔落盘 `.cursor/cache/bis_<品种>.json`（**强制依赖**） | 各周期已 ATR 过滤、未完成笔延伸、跨周期端点校准的最终笔，与图上所画笔一致 |
-| 最新K线 | TradingView 图表实时读取（逐周期切换） | 计算 ATR / MACD / 最新收盘价（判断是否在中枢内、供给 isRangeBound 震荡判定） |
+| 最新K线 | TradingView 图表实时读取（逐周期切换） | 计算 ATR / MACD / 最新收盘价（震荡判定与顺势方向用） |
 | 品种/当前周期 | 图表自动读取 | `chart.symbol()` / `chart.resolution()` |
 | 参数 | 命令行 | 见下表 |
 
@@ -17,12 +23,14 @@
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--periods=...` | `D,240,60,15,3` | 要生成计划的周期列表（从大到小） |
-| `--prev-high-near-pts` | `5.0` | 2买/2卖 中间档A容差（绝对点数）：after 终点距前高/前低 ≤ 该值 → 等类2买/类2卖点 |
-| `--second-near-pts` | `5.0` | 2买/2卖 中间档B容差（绝对点数）：未过前高/前低时最近一笔回调/反弹终点距点价 ≤ 该值 |
-| `--third-strong-trend` | 开 | 3类点强档开关：开=3类点过前高不背驰顺势「等待回调后的新买点/新卖点」（现状）；关=3类点一律弱档 |
-| `--dry` | 关闭 | 只输出文本计划表，不绘图 |
-| `--debug` | 关闭 | 打印买卖点列表、匹配过程等调试信息 |
+| `--range-res=240\|D\|off` | `off` | 震荡判定参考周期；开启=参考周期 regime 震荡 → 更低检测周期观望（mark-entry 震荡闸消费）；关闭=无震荡闸直接走买卖点 |
+| `--trend-res=240\|D\|off` | `off` | 顺势参考周期（§5 方向状态供 mark-entry 顺势过滤） |
+| `--periods=...` | `D,240,60,15,3` | 参与的周期列表（从大到小） |
+| `--range-bar-n/--range-bi-n/--range-k-mult/--range-bi-mult/--range-break-mult` | `40/4/5/7/1` | 震荡判定阈值（窗口K线数/最近笔数/两 ×ATR 阈值/突破跳过阈值） |
+| `--range-bound-on/--range-zs-on` | 开/开 | A 横盘支 / B 中枢内支开关 |
+| `--trend-rebound/--rebound-near-pts/--rebound-angle-ref` | 开/5/5 | 相位判定开关与参数（§5） |
+| `--dry` | 关闭 | 不动图（不清除旧标记） |
+| `--debug` | 关闭 | 打印调试信息 |
 
 ## 2. 处理流程
 
@@ -30,122 +38,44 @@
 
 - 逐周期 `ensureResolution(res)` 切换周期并等待K线加载稳定；
 - `fetchBars(expectedIntervalSec)` 读取K线（用最后 20 个相邻间隔中位数判断真实周期，与期望不符重试）；
-- 强制读取笔数据缓存：文件不存在 / 品种不匹配 → 报错退出（必须先运行「画笔」）。
+- 强制读取笔数据缓存：文件不存在 / 品种不匹配 → 报错退出（必须先运行「画笔」）；
+- 收笔要下一级笔：按周期从小到大取K线并 `buildStructureContext` 建结构。
 
-**数据来源时效性**：
-- **价格实时**：`lastPrice`/`lastBarTime`/`macdArr`/`atr` 均来自 `fetchBars` 实时读取的页面K线（含最新未成笔K线）。
-- **笔结构为快照**：`bis`/`upperBis` 来自 chan-bi 最近一次运行的缓存文件，本脚本不会用实时K线重算、延伸或补画新笔。在关键行情节点判断前建议先运行 chan-bi 刷新缓存。
+**数据来源时效性**：价格/K线实时；`bis` 为 chan-bi 快照（关键行情节点前建议先刷新画笔缓存）。
 
-### 2.2 每周期计划计算（predictPlan）
+### 2.2 震荡 regime（computeRegime；对齐 py_chain compute_regime）
 
-输入：`{ res, bis, upperBis, macdArr, atr, lastPrice, bars, barSec, rangeGate }`（`bis` 取最近 60 笔，`bars` 为本周期实时K线；`rangeGate` 为主循环传入的参考周期 regime，见 §2.2.1）。
-输出：`{ res, direction, strategy, reason, label }`。
+- `--range-res` 关闭（默认）→ 返回 `null`：无震荡闸，各周期直接走买卖点；
+- 开启时对**参考周期**（4小时/日线）判震荡（`rangeGateRow`）：
+  - 参考周期笔 <2（含整行无数据）→ `{range:true, insufficient:true}`（更低周期观望·笔数据不足）；
+  - **A：横盘整理**（`isRangeBound`，复制自 chan-status）：最近 `rangeBarN=40` 根K线 `maxHigh-minLow ≤ 5×ATR`；笔端点区间（≤ 7×ATR）与涨跌交替只取「最近 40 根K线时间范围内」的笔判断（窗口内无笔则跳过这两条）；**突破跳过**：最后一笔终点相对窗口区间另一端明显偏移（> `rangeBreakMult`×ATR）→ 视为突破盘整跳过 A；
+  - **B：中枢内**：中枢构建在**上一级别同一笔**内（`buildZSByUpper(bis, upperBis, barSec)`；无上级笔退化 `buildZS`）；取上一级别最后一笔对应段内最后一个**未离开**（`exitTime === null`）的中枢，`lastPrice` 位于 `[zd, zg]` 内；
+  - A/B 任一命中 → `{range:true, resName:"4小时", reason:"4小时：…判定为震荡整理"}`；否则 `{range:false}`。
+- 消费方（mark-entry 两侧）：regime 震荡/笔不足 → 更低检测周期全部观望（`range_watch`）；
+  参考周期及以上不作检测周期（`res_ge_range`，只作锚）。
 
-判定顺序：
+### 2.3 顺势方向状态（trendStateOf）
 
-0. **数据不足**：`bis` 长度 < 2 → 方向「观望」，策略「数据不足」。
-1. **震荡优先——判定源二选一（2026-10-08 与 py_chain 对齐）**：
-   - `rangeGate` 给定（参考周期闸门开启，替换语义）：regime 震荡 → 方向「观望」，策略「震荡整理（4小时）…」（文案注明来源周期）；regime 带 `insufficient`（参考周期笔 <2）→ 观望「4小时笔数据不足，观望」；regime 非震荡 → **跳过本周期 A/B 自判**，直接走第 2 步趋势分支；
-   - `rangeGate` 为空（`--range-res=""` 关闭）→ 本周期自身判定（A 或 B 任一命中即震荡）：
-   - A：`isRangeBound(bis, bars, atr)`（复制自 chan-status）：最近 `rangeBarN=40` 根K线 `maxHigh-minLow ≤ 5×ATR`；笔端点区间（≤ 7×ATR）与涨跌交替只取「最近 40 根K线时间范围内」的笔判断（窗口内无笔则跳过这两条）→ `range === true`；
-   - A-突破跳过：最后一笔终点相对窗口区间 `[minL, maxH]` 的另一端明显偏移（up 笔 `endPrice - minL > rangeBreakMult×ATR`，down 笔 `maxH - endPrice > rangeBreakMult×ATR`，`rangeBreakMult` 默认 1.0）→ 视为突破盘整，跳过 A 判定（`range:false, breakOut:true`）；
-   - B：中枢必须构建在**上一级别同一笔**内：`buildZSByUpper(bis, upperBis, barSec)`（分解原则：用上级笔时间区间把本级别笔切段，每段内独立 `buildZS`，中枢不跨上级笔端点；无上级笔时退化为 `buildZS(bis, barSec)`）。取**上一级别最后一笔**对应段（`z.upperStart ≥ 上级最后一笔.startTime - barSec`）内最后一个中枢，`exitTime === null`（未离开）且 `lastPrice` 位于中枢 `[zd, zg]` 内；
-   - 命中 → 方向「观望」，策略「震荡整理，观望等待方向选择」（B 命中时文案为「震荡整理（中枢内）…」）。
-2. **趋势 → 获取本周期买卖点**：`findBuyPoints(bis, upperBis, macdArr, barSec)` + `findSellPoints(...)`（chan-core，带上级笔区间套 + 实时 MACD 背驰），可能抛错 → try/catch 忽略（同 chan-status）。
-3. **匹配最近笔端点的买卖点**：匹配容差 `tolSec = barSec`（本周期 1 个 bar）、`tolPrice = max(atr×0.2, 0.05)`：
-   - 先匹配最后一笔终点 → 命中按类型映射精确策略（`strategyOf`）；2/3 类买卖点先经 `classifySecond` 分类（过左高/过左低不背驰 vs 其他）再映射；
-   - 最后一笔终点为空 → 从倒数第二笔起**逐笔向前扫描**，取最近的有买卖点的笔端点 → **同样按类型精确映射**（`strategyOf` + `classifySecond`，不降级为只判断买卖方向）；
-   - 仍无 → 方向「观望」，策略「趋势中无匹配买卖点」。
+`--trend-res` 开启时计算参考周期方向状态（规则全文见 §5）；关闭时为 `null`（不过滤）。
 
-### 2.2.1 参考周期震荡闸门（--range-res，2026-10-08 与 py_chain compute_plan 强一致）
+### 2.4 摘要输出与旧标记清理
 
-> 背景：py_chain 2026-09-16（725059f）把引擎震荡判定源改为参考周期（rangeRes 必填）但 JS 未迁移，
-> 图表与回测/实盘口径不一致；2026-10-08 起 JS 实现同款闸门并支持关闭，两侧强一致。
+- 控制台输出两行摘要：`[震荡regime] 参考周期 …：震荡·观望/非震荡/已关闭`、`[顺势] 参考周期 …：多/空/无方向`；
+- 非 `--dry` 时逐周期清除遗留的旧 `CHAN_PLAN_<周期>` 策略文字（**不再绘制新文字**）。
 
-- **参数**：`--range-res=240|D|off`（默认 `RANGE_RES="240"`；`off`/空 = 关闭）。WEB 参数中心
-  plan 模块 `rangeRes`（含「关闭」选项）经 `analysis_service` 透传。
-- **开启时**（主循环从大到小逐周期）：
-  - **≥ 参考周期的行**（240 自身与日线）→ 固定「观望 · 参考周期，观望（只作锚不交易）」，不做任何判定；
-  - **参考周期行上顺带计算 regime**（`planGateRow`）：笔 <2 → `insufficient`；否则用参考周期自身数据走 predictPlan 的 A/B 自判，`label=震荡观望` 即 regime 震荡（结果随循环传给更低周期）；
-  - **严格更低的周期**（60/15/3）→ 不自判 A/B，只听 regime（predictPlan `rangeGate` 替换语义）：震荡 → 观望「震荡整理（4小时）…」；非震荡 → 直接走趋势分支；insufficient → 观望「4小时笔数据不足，观望」（不回退自身判定）。
-  - 参考周期笔不足的**预置闸**：主循环开始前参考周期笔 <2（含整行无数据）→ 更低周期全部观望·笔数据不足。
-- **关闭时**（`--range-res=""`）：无参考周期——每个周期各自走 predictPlan 自判 A/B（§2.2 的旧行为），
-  无「只作锚」固定观望、无 regime 传递；与 py_chain `compute_plan(range_res="")` 口径一致。
+### 2.5 结果落盘（regime-only）
 
-
-### 2.3 策略映射（strategyOf + classifySecond，2026-09-24 三档；2026-10-09 弱档原始点分流）
-
-> direction 命名「X头Y」：X = 结构方向、Y = 操作方向（多头空 = 结构多头、等待做空；空头多 = 结构空头、等待做多）。
-> 三档按序判定：强档（过左高/左低不背驰）→ 中间档（仅 2买/2卖）→ 弱档；弱档再按「原始点」分流（2026-10-09，`weakTierByOrigin` 默认开）。
-
-| 买卖点类型 + 分类 | direction | strategy |
-|------|------|------|
-| `1卖` | 空头空 | 等待反弹后做2卖 |
-| `1买` | 多头多 | 等待回调后做2买 |
-| `2买` / `类2买` + `过左高不背驰`（强档） | 多头多 | 等待回调后的3买点 |
-| `2卖` / `类2卖` + `过左低不背驰`（强档） | 空头空 | 等待反弹后的3卖点 |
-| `2买` + `前高附近` / `回到2买点`（中间档，仅 2买） | 多头多 | 等待回调后的类2买点 |
-| `2卖` + `前低附近` / `回到2卖点`（中间档，仅 2卖） | 空头空 | 等待反弹后的类2卖点 |
-| `2买` / `类2买` + `未过原始点`（弱档分流） | 空头多 | 等待低点附近的2买 |
-| `2卖` / `类2卖` + `未过原始底够笔`（弱档分流·卖点作废） | 空头多 | 等待低点附近的2买 |
-| `2卖` / `类2卖` + `未过原始底`（弱档分流，下跌未够笔） | 多头空 | 等待高点附近的2卖 |
-| `3买` / `类3买` + `过左高不背驰` 且 `thirdStrongTrend` 开（默认开） | 多头多 | 等待回调后的新买点 |
-| `3卖` / `类3卖` + `过左低不背驰` 且 `thirdStrongTrend` 开 | 空头空 | 等待反弹后的新卖点 |
-| 其余非一类买点情形（含 3类点在开关**关**时、类2买的中间档分类、2买弱档过了原始点） | 多头空 | 等待高点附近的一卖 |
-| 其余非一类卖点情形（含 2卖弱档过了原始底） | 空头多 | 等待低点附近的一买 |
-
-> **说明**：最后一笔终点无买卖点时向前扫描到的最近买卖点**同样按上表精确映射**（不再有「向前一笔为买点/卖点」的兜底行）。
-> 弱档分流动因（2026-10-09）：2买 反弹未过原始点时结构仍是空头，旧映射 多头空/等一卖 方向反了；且弱档买点要等结构确认（类2买入列滞后可达数小时）进场过晚——新档 空头多/等待低点附近的2买 直接买抬低回调（wait2BuyBear：末下跌笔不破前一根下跌笔终点 + 下级背驰 + 支阻），**不买破前低的回调**（1买语义）。
-
-**classifySecond（2/3类买卖点分类，4 态 + 弱档分流 2 哨兵）**：
-- 左高/左低 = 买卖点之前**时间最近**的前顶/前底端点（买点取顶：上涨笔终点/下跌笔起点；卖点取底：下跌笔终点/上涨笔起点；同一时刻多端点取价格更极端者）——不取全史价格极值（全史极值可追溯到久远顶底，使 2卖 后须跌破数周前低点才算过左低，与「前高/前低」语义不符）；
-- 取买卖点后第一笔同向笔 after（买点后上涨 / 卖点后下跌），其终点**突破左高**（买点）或**跌破左低**（卖点）→ 过左高/过左低；
-- 该笔相对**紧邻的前一同向参照笔**（中间隔一次级反向运动即反弹/回调段，不按幅度过滤）`isBiDiverge` 为 false（MACD 动能未减弱）→ **不背驰**（背驰的面积判据受时长可比门约束，见 chan-core SPEC §2.8 `divergeDurRatio`）；
-- 过左高/过左低且不背驰 → 「过左高不背驰 / 过左低不背驰」（强档）；
-- **前高/前低附近**（中间档A）：`|after 终点 − 左高/左低| ≤ prevHighNearPts`（绝对点数，默认 5；含刚越过一点但背驰的情形——强档未达时回落到此档）；
-- **回到2买/2卖点**（中间档B）：未过左高/左低，且 after 之后**最近一笔**反向笔（买侧回调 down / 卖侧反弹 up，含形成中）终点价距点价 `≤ secondNearPts`（绝对点数，默认 5）；
-- 中间档分类仅对 `2买`/`2卖` 在 strategyOf 消费（类2买/类2卖、3类点不走中间档，直接落强/弱两档）；
-- **未过原始点/未过原始底**（弱档分流，2026-10-09，仅 `2买/类2买/2卖/类2卖`、`weakTierByOrigin` 开）：原始点 = 从点锚定向前回溯反弹高（低）点，第一个比其后所有端点更高（买侧）/更低（卖侧）的更早端点（= 产生该点的下跌/上涨段起点；无支配者取回溯窗口极值）；点后**所有**反弹高（低）点均未超过（跌破）原始点 → 返回该哨兵（后续某顶一旦越过原始点即翻回「其他」）；
-- **未过原始底够笔**（卖侧作废，2026-10-09 用户规则）：`2卖/类2卖` 未过原始底且其后下跌**已够笔**（after 笔已确认，或形成中合并块数 ≥ `expectBiMinBars` 默认 5）→ 该卖点作废（不能再算 2卖），转弱二买（`空头多/等待低点附近的2买`，wait2BuyBear）。买侧不镜像：2买 的「等2买」计划以下一回调为目标，不受反弹够笔影响；
-- 均不满足 → 「其他」（弱档）。
-
-### 2.4 表格汇总输出
-
-逐周期计算后统一输出一张汇总表（列：品种 | 周期 | 方向 | 策略 | 理由），每周期一行：
-
-- `symbol`：品种名；`res`：周期；`direction`：方向（做多/做空/观望）；`strategy`：策略文案；
-- `reason`：判定理由，趋势时**标注找到的最近买卖点**（`找到最近买卖点 1卖 @ 8-17 18:00 30262.95（最后一笔端点/向前扫描最近笔端点）`），震荡时描述 A/B 判定依据；
-- `pointDesc`：找到的最近买卖点简写（`1卖@8-17 18:00(30262.95)`），供图上标注第二行使用；
-- 表格边框用 `printPlanTable(rows)` 输出（中文按全角宽度对齐，列宽自适应，复用 chan-status 的 `dispWidth`/`padCell` 逻辑）。
-
-```
-┌──────────────┬──────┬────────────────┬────────────────────────────┬──────────────────────────────────────────────┐
-│ 品种         │ 周期 │ 方向           │ 策略                       │ 理由                                         │
-├──────────────┼──────┼────────────────┼────────────────────────────┼──────────────────────────────────────────────┤
-│ OANDA:XAUUSD │ 60   │ 空头空         │ 等待反弹后做2卖            │ 找到最近买卖点 1卖 @ 8-28 22:00 29759.05（最后一笔端点）│
-└──────────────┴──────┴────────────────┴────────────────────────────┴──────────────────────────────────────────────┘
-```
-
-### 2.5 图上蓝色策略标记
-
-- **清除**：切到各周期，按 title `CHAN_PLAN_<周期>` 清除该周期旧策略标记；
-- **位置**：`最近 40 根K线最高点 + max(1.5×ATR, 0.5)`（顶部空白），时间 = `最新bar时间 + 2×本周期间隔`（最新bar右侧 2 根）；
-- **内容**：`方向:${direction} | 策略:${strategy}`；若 `pointDesc` 存在，**换行追加** `最近买卖点:${pointDesc}`（震荡/无匹配时不追加）；
-- **样式**：`text` 蓝色 `#2962FF`、粗体、title `CHAN_PLAN_<周期>`、`intervalsVisibilities` 仅本周期显示、`lock:false`。
-
-### 2.6 结果落盘（供 mark-entry 进出场读取）
-
-- 每次运行（含 `--dry`）把逐周期计划结果写入 `.cursor/cache/plan_<品种>.json`；
-- 结构：`{ symbol, generatedAt, periods: { <res>: { direction, strategy, reason, pointDesc } } }`；
-- **`mark-entry`（进出场）SKILL 强制依赖该文件**：读取各周期 `direction/strategy` 判定进场状态，不再自行实现状态判定。
+- 每次运行（含 `--dry`）把结果写入 `.cursor/cache/plan_<品种>.json`：
+  `{ symbol, generatedAt, rangeRes, regime, trendRes, trend }`；
+- **`mark-entry` 不再读取该文件**（2026-10-16 起自算买卖点与 regime）；仅供工作台查询/审计。
 
 ## 3. 输出
 
 | 项 | 说明 |
 |----|------|
-| 文本计划表 | 各周期「方向 + 策略 + 理由（含最近买卖点）」输出到控制台 |
-| 图上蓝色策略标记 | `CHAN_PLAN_<周期>` 蓝色文字，仅本周期可见，位于该周期图顶部空白处；趋势时第二行标注最近买卖点 |
-| 计划结果落盘 | `.cursor/cache/plan_<品种>.json`（各周期 `direction/strategy/pointDesc`，供 `mark-entry` 读取） |
+| 控制台摘要 | 震荡 regime 与顺势方向各一行（开启时） |
+| regime-only 落盘 | `.cursor/cache/plan_<品种>.json`（regime/trend 两字段） |
+| 旧标记清理 | 清除图上遗留的 `CHAN_PLAN_*` 蓝色策略文字（不再绘制新文字） |
 
 ## 4. 边界情况
 
@@ -153,51 +83,31 @@
 |------|------|
 | 未找到 TradingView 页面 | 报错退出 |
 | 笔数据文件缺失 / 品种不匹配 | 报错退出，提示先运行「画笔」 |
-| 某周期无K线或切换失败 | 跳过该周期 |
-| 某周期笔数据为空（画笔未覆盖） | 跳过该周期并提示 |
-| 笔数量不足 2 笔 | 方向「观望」，策略「数据不足」 |
-| `findBuyPoints/findSellPoints` 抛错（数据不足） | try/catch 忽略，按「无买卖点」处理 |
-| `buildZS/buildZSByUpper` 抛错 | try/catch 忽略，跳过中枢震荡判定 |
-| 趋势但最近笔端点均无买卖点 | 方向「观望」，策略「趋势中无匹配买卖点」 |
-| 2/3类买卖点后无同向笔 / 无前一同向参照笔 / MACD 背驰 | classifySecond 返回「其他」（弱档：多头空/空头多 + 等待高点附近的一卖/等待低点附近的一买） |
-| 2买/2卖 after 之后无反向笔（回调/反弹未走出） | 中间档B（回到点附近）不成立，按 A/其他 判定 |
-| 3类点 + 强档 + `thirdStrongTrend` 关 | 一律弱档（多头空/空头多），文案不产「新买点/新卖点」 |
+| 某周期无K线或切换失败 | 跳过该周期数据 |
+| 参考周期笔数据为空 / <2 笔 | regime 预置 `{range:true, insufficient:true}` |
+| `buildZS/buildZSByUpper` 抛错 | try/catch 忽略，跳过中枢震荡判定（B 支） |
+| `--range-res` 与 `--trend-res` 同时开启 | 两个闸门独立叠加（震荡观望 + 顺势方向过滤） |
 
-## 5. 参考周期方向判定（顺势过滤，2026-09-15 口径 + 2026-09-17 相位树）
+## 5. 参考周期方向判定（顺势过滤，2026-09-15 口径 + 2026-09-17 相位树；规则不变）
 
-归属本模块（`trading_plan.js` 导出 / `py_chain/trading_plan.py` 同构实现），供
-`mark-entry` 进出场过滤消费：**参考周期**（默认 4 小时，`TREND_RES="240"`；可配
-`"D"` 日线 / `""` 关闭，WEB 参数中心 plan 模块 `trendRes` / mark-entry CLI
-`--trend-res`）判上涨时，更低检测周期（1小时/15分钟/3分钟）只出多单不出空单，
-判下跌反之。
+归属本模块（`trading_plan.js` 导出 `trendDirection/trendStateOf/strongFractalAfter/phaseDirection`；
+`py_chain/trading_plan.py` 同构实现），供 `mark-entry` 进出场过滤消费：**参考周期**
+（默认关闭 `TREND_RES=""`；可配 `"240"` / `"D"`，WEB 参数中心 plan 模块 `trendRes` /
+mark-entry CLI `--trend-res`）判上涨时更低检测周期只出多单，判下跌反之。
 
 > **2026-09-17 统一更新**：Python与JS均实现相位树及预期结构上下文。相位默认开启，关闭保留确立方向至破坏／新点的行为。够笔按合并K线计数，活动端点不确认一类点；详见 [统一规范](../../../spec/plans/SPEC_structure_context.md)。
 
 ### 5.1 判定规则（`trendDirection`，逐条与代码核实）
 
-1. **取点**：参考周期最近一个买卖点（`findBuyPoints`/`findSellPoints`，最近 60 笔
-   窗口与 §2.2 计划同口径，按时间取最新）；
+1. **取点**：参考周期最近一个买卖点（`findBuyPoints`/`findSellPoints`，最近 60 笔窗口，按时间取最新）；
 2. **1买/1卖**：端点后出现**强分型**才确立方向（强分型未出现 → 回退规则 5）；
-3. **非1类点**（2买/类2买/3买、2卖/类2卖/3卖）：出现即确立方向——点锚定的笔本身
-   已够笔成笔（chan-core isValid ≥5 根合并K）；
-4. **破坏闩锁**：确立后参考周期任一**收盘价**跌破买点端点价 / 涨破卖点端点价 →
-   反向（`4小时下跌延续` / `4小时上涨延续`），**闩锁**到下一个买卖点事件——实现口径
-   为从点时间起扫描全部收盘价、命中即反向，价格收回也不翻回，直到更新的买卖点出现
-   （**Python 端闩锁优先于规则 7 相位树**）；
-5. **回退**：无任何买卖点、或 1类点强分型未出现 → 参考周期最近一笔方向
-   （末笔 up→多 / down→空，`4小时末笔向上/向下`）；
+3. **非1类点**（2买/类2买/3买、2卖/类2卖/3卖）：出现即确立方向——点锚定的笔本身已够笔成笔（chan-core isValid ≥5 根合并K）；
+4. **破坏闩锁**：确立后参考周期任一**收盘价**跌破买点端点价 / 涨破卖点端点价 → 反向（`4小时下跌延续` / `4小时上涨延续`），**闩锁**到下一个买卖点事件——实现口径为从点时间起扫描全部收盘价、命中即反向，价格收回也不翻回，直到更新的买卖点出现（**Python 端闩锁优先于规则 7 相位树**）；
+5. **回退**：无任何买卖点、或 1类点强分型未出现 → 参考周期最近一笔方向（末笔 up→多 / down→空，`4小时末笔向上/向下`）；
 6. **数据不足**：参考周期笔 <2 → 方向 `None`，消费方不过滤（多空照常）；
-7. **相位树**（仅 Python，2026-09-17；闩锁 4 未触发时）：锚点确立后按
-   「形成段（延伸中的末笔）方向 → 够笔（段起点以来 ≥5 根本K 或锚点后已有确认
-   同向笔）→ 位置（形成段极值距锚点前最近中枢 ZG/ZD 或前低/前高 ≤
-   `reboundNearPts` 绝对点数）→ 角度强弱（当前笔平均每根点数 > `reboundAngleRef`
-   即 >45° 为强；反弹/回调力度同口径）」分相位，可返回**观望**（dir=None 带
-   reason，双向放行带注记）；1卖后 9 叶、2\3卖后 5 行、买侧完全镜像；典型 reason：
-   `1卖进行中/1卖转多预期/1卖近中枢观望/1卖后方向不明/1卖反弹/1卖强反/2卖预期/
-   2/3卖前低附近/2/3卖反弹中`。
+7. **相位树**（闩锁 4 未触发时）：锚点确立后按「形成段（延伸中的末笔）方向 → 够笔（段起点以来 ≥5 根本K 或锚点后已有确认同向笔）→ 位置（形成段极值距锚点前最近中枢 ZG/ZD 或前低/前高 ≤ `reboundNearPts` 绝对点数）→ 角度强弱（当前笔平均每根点数 > `reboundAngleRef` 即 >45° 为强；反弹/回调力度同口径）」分相位，可返回**观望**（dir=None 带 reason，双向放行带注记）；1卖后 9 叶、2\3卖后 5 行、买侧完全镜像；典型 reason：`1卖进行中/1卖转多预期/1卖近中枢观望/1卖后方向不明/1卖反弹/1卖强反/2卖预期/2/3卖前低附近/2/3卖反弹中`。
 
-**强分型定义**（`strongFractalAfter`，2026-09-15 与用户确认；合并K/分型与 buildBi
-同源：`markWickBars → mergeBars → findFractals`）：
+**强分型定义**（`strongFractalAfter`，2026-09-15 与用户确认；合并K/分型与 buildBi 同源：`markWickBars → mergeBars → findFractals`）：
 
 - 只比实体、不含影线：右肩收盘价与左肩开盘价比较；
 - 底分型：右肩收盘价 > 左肩开盘价；顶分型：右肩收盘价 < 左肩开盘价；
@@ -205,20 +115,10 @@
 
 ### 5.2 消费方式（mark-entry 侧）
 
-- **结构性剔除**：参考周期及以上不作检测周期（只作方向锚；`trendRes="D"` 时 240
-  恢复检测）。剔除只看 `trend_res` 字符串，与方向状态无关；
-- **方向过滤**：状态方向非 `None` 且与策略方向相反 → 跳过该周期信号（确认制与
-  当下制同口径）；`trendRes=""`（关闭）时完全不过滤；**观望态（dir=None 带
-  reason，仅 Python 相位树）双向放行**；
-- **成因展示**：命中信号附 `trendDirection`/`trendReason`（Python 端观望态
-  dir=None 也附注记），回测信号列表方向列显示 `多（4小时1卖转多预期）` 式注记；
-  成因格式 =「{参考周期名}{点类型/相位}」/「…下跌·上涨延续」/「…末笔向上·向下」，
-  周期名映射 240→4小时、D→日线；
-- **统一入口**：`trendStateOf(periodBis, barsByPeriod, trendRes, periodMacd?)`——
-  上级周期取 `periodBis` 中比参考周期大一级的最小周期（240→D）供区间套使用；
-  Python 端 evaluateRealtimeEntries 无 bars 入参，`trend_state` 由回测引擎在链路
-  重算拍（每根 fine）算好复用传入（Python 端额外形参 `cfg`：参数中心
-  trendRebound/reboundNearPts/reboundAngleRef）。
+- **结构性剔除**：参考周期及以上不作检测周期（只作方向锚；`trendRes="D"` 时 240 恢复检测）。剔除只看 `trend_res` 字符串，与方向状态无关；
+- **方向过滤**：状态方向非 `None` 且与策略方向相反 → 跳过该周期信号（确认制与当下制同口径）；`trendRes=""`（关闭）时完全不过滤；**观望态（dir=None 带 reason）双向放行**；
+- **成因展示**：命中信号附 `trendDirection`/`trendReason`（观望态 dir=None 也附注记），回测信号列表方向列显示 `多（4小时1卖转多预期）` 式注记；成因格式 =「{参考周期名}{点类型/相位}」/「…下跌·上涨延续」/「…末笔向上·向下」，周期名映射 240→4小时、D→日线；
+- **统一入口**：`trendStateOf(periodBis, barsByPeriod, trendRes, periodMacd?)`——上级周期取 `periodBis` 中比参考周期大一级的最小周期（240→D）供区间套使用；Python 端 evaluateRealtimeEntries 无 bars 入参，`trend_state` 由回测引擎在链路重算拍算好复用传入（Python 端额外形参 `cfg`：参数中心 trendRebound/reboundNearPts/reboundAngleRef）。
 
 ### 5.3 边界情况
 
@@ -228,26 +128,24 @@
 | 参考周期不在已加载周期中 | `trendStateOf` 返回 `dir=None` → 不过滤 |
 | 点确立后价格收回（破坏后反弹回端点价上方） | 保持破坏方向（闩锁），直到新买卖点 |
 | 同时刻出现买卖点（时间并列） | 按时间排序稳定取末位（确定性） |
-| 相位观望态（仅 Python，dir=None + reason） | 双向放行，信号仍带 trendReason 注记 |
-| 1卖后形成段向上但下跌未开始（段起点≤锚点）（仅 Python） | 视同「1卖进行中」（空）；2\3卖反弹中默认观望，收盘涨破卖点价仍走闩锁 |
-| 锚点前无中枢 / 无前低前高端点（仅 Python） | 位置按「其他位置」处理 |
+| 相位观望态（dir=None + reason） | 双向放行，信号仍带 trendReason 注记 |
+| 1卖后形成段向上但下跌未开始（段起点≤锚点） | 视同「1卖进行中」（空）；2\3卖反弹中默认观望，收盘涨破卖点价仍走闩锁 |
+| 锚点前无中枢 / 无前低前高端点 | 位置按「其他位置」处理 |
 
 ## 6. 与其他模块的依赖
 
 | 模块 | 关系 |
 |------|------|
-| `chan-core` | 复用 `calcATR/calcMACD/buildZS/buildZSByUpper/isBiDiverge/findBuyPoints/findSellPoints/intervalSecOf/fmtT` 及 §5 强分型的 `markWickBars/mergeBars/findFractals` |
+| `chan-core` | 复用 `calcATR/calcMACD/buildZS/buildZSByUpper/findBuyPoints/findSellPoints/intervalSecOf` 及 §5 强分型的 `markWickBars/mergeBars/findFractals` |
 | `chan-bi`（画笔） | **强制读取**本脚本落盘笔数据 |
 | `chan-status`（状态） | **复制**其内部 `isRangeBound`（不 require、不修改，保持 chan-status 独立） |
-| `mark-buy-sell`（买卖点） | 独立（本 SKILL 只生成计划，不重复标记历史买卖点） |
+| `mark-buy-sell`（买卖点） | 独立；买卖点 → 进场键的直映射（pointStrategyOf）在 mark-entry 实现 |
 | `mark-sr-flip`（支阻位） | 独立（本 SKILL 不读取支阻位） |
-| `mark-entry`（进出场） | **下游依赖**：本脚本落盘 `plan_<品种>.json`，`mark-entry` 读取其判定进场状态；另 require 本模块 `trendStateOf`（§5 顺势过滤） |
+| `mark-entry`（进出场） | **上游依赖反转**（2026-10-16）：mark-entry 不再读取 `plan_<品种>.json`，改为 require 本模块 `trendStateOf`（§5 顺势过滤）与 `computeRegime`（§2.2 震荡闸），买卖点候选自算 |
 
-**运行依赖链**（完整执行顺序，各技能依序运行）：
+**运行依赖链**（2026-10-16 起简化；trading-plan 为可选独立工具，不在进出场前置链中）：
 
 ```
-画笔（chan-bi）→ 标记买卖点（mark-buy-sell）→ 支阻互换位（mark-sr-flip）→ 交易计划（trading-plan）→ 进出场（mark-entry）
+画笔（chan-bi）→ 支阻互换位（mark-sr-flip）→ 进出场（mark-entry）
+（可选：交易计划 trading-plan —— 震荡/顺势判定查询与旧标记清理）
 ```
-
-- 本 SKILL（交易计划）在链中位于支阻位之后、进出场之前，只**强制依赖画笔**的笔数据；
-- 落盘的 `plan_<品种>.json` 供下游 `mark-entry` 判定进场状态。

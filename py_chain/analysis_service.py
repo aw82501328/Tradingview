@@ -475,8 +475,8 @@ class AnalysisManager:
             command.append("--zs-periods=" + (",".join(zs_periods) if zs_periods else ""))
             command.append("--zs-keep=" + ",".join(f"{r}:{n}" for r, n in zs_keep.items()))
         if stage == "plan":
-            # 震荡判定参考周期（对齐引擎 compute_plan 闸门；"" = 关闭 → 计划行不自判震荡）
-            command.append("--range-res=" + str(pm["plan"].get("rangeRes", "240")))
+            # 震荡判定参考周期（对齐引擎 compute_regime 闸门；"" = 关闭 → 无震荡闸）
+            command.append("--range-res=" + str(pm["plan"].get("rangeRes", "")))
             command.append("--range-bar-n=" + str(pm["plan"]["rangeBarN"]))
             command.append("--range-bi-n=" + str(pm["plan"]["rangeBiN"]))
             command.append("--range-k-mult=" + str(pm["plan"]["rangeKMult"]))
@@ -485,11 +485,8 @@ class AnalysisManager:
             # 两类震荡开关：True→1 / False→0（JS 侧 "0" 为关，缺省开）
             command.append("--range-bound-on=" + ("1" if pm["plan"].get("rangeBoundOn", True) else "0"))
             command.append("--range-zs-on=" + ("1" if pm["plan"].get("rangeZsOn", True) else "0"))
-            # 2买/2卖 中间档容差 + 3类点强档开关 + 弱档原始点分流（trading_plan.js RANGE_CFG 同名解析）
-            command.append("--prev-high-near-pts=" + str(pm["plan"].get("prevHighNearPts", 5.0)))
-            command.append("--second-near-pts=" + str(pm["plan"].get("secondNearPts", 5.0)))
-            command.append("--third-strong-trend=" + ("1" if pm["plan"].get("thirdStrongTrend", False) else "0"))
-            command.append("--weak-tier-by-origin=" + ("1" if pm["plan"].get("weakTierByOrigin", True) else "0"))
+            # 顺势参考周期（regime-only；2026-10-16 计划脚本不再产出策略行）
+            command.append("--trend-res=" + str(pm["plan"].get("trendRes", "")))
         if stage == "entry":
             command.append("--near=" + str(cfg["near"]))
             command.append("--slip-stop=" + str(cfg.get("slip_stop", 3.0)))

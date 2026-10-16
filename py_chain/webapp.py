@@ -329,10 +329,12 @@ class SignalLog:
                 "price": s.get("price"),
                 "nearSr": s.get("nearSr"),
                 # 方向口径（2026-09-15 顺势过滤）：trendReason 非空时前端方向列显示
-                # 「多（4小时2买）」式注记；planDirection 供关闭态/旧记录的检测周期计划方向
+                # 「多（4小时2买）」式注记；pointType/pointStrong=进场锚买卖点（2026-10-16
+                # 直连买卖点后取代 planDirection）
                 "trendDirection": s.get("trendDirection"),
                 "trendReason": s.get("trendReason"),
-                "planDirection": s.get("planDirection"),
+                "pointType": s.get("pointType"),
+                "pointStrong": s.get("pointStrong"),
                 # M1/M2/M4 候选标记（SPEC_divergence_fallback）：fallback=下沉链回退候选、
                 # nearEqual=创新低近等容差候选、expectBi=检测周期预期够笔口径；
                 # 前端据此在策略列加角标
@@ -380,7 +382,8 @@ class SignalLog:
                     "nearSr": tr.get("nearSr"),
                     "trendDirection": tr.get("trendDirection"),
                     "trendReason": tr.get("trendReason"),
-                    "planDirection": tr.get("planDirection"),
+                    "pointType": tr.get("pointType"),
+                    "pointStrong": tr.get("pointStrong"),
                     "fallback": bool(tr.get("fallback", False)),
                     "nearEqual": bool(tr.get("nearEqual", False)),
                     "expectBi": bool(tr.get("expectBi", False)),

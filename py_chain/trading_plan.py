@@ -2,18 +2,23 @@
 """
 交易计划逻辑（Python 移植版，与 .cursor/skills/trading-plan/scripts/trading_plan.js 对齐）
 
-纯函数模块：区分各周期当前是「震荡」还是「趋势」，
-趋势时依据「最近笔端点的买卖点类型」生成对应交易策略。
+纯函数模块。2026-10-16 起只保留两项判定（开单链路改为 mark_entry 直接消费
+chan_core 买卖点，本模块不再产出方向/策略行——原 strategyOf 三档路由、
+classifySecond 四态、双侧锚 predictPlan/compute_plan 已删除）：
+  1. 震荡判定：isRangeBound/_rangeVerdict → 参考周期 regime（compute_regime），
+     供 mark_entry 震荡闸（默认关闭 range_res=""）；
+  2. 顺势方向判定：trend_direction/trend_state_of（mark_entry 顺势过滤消费，
+     默认关闭 trend_res=""）。
 
 说明：震荡判定 isRangeBound 复制自 chan-status SKILL（.cursor/skills/chan-status/scripts/chan_status.js），
 与 JS 版一致保持原逻辑不变。
 
-不连接 CDP、不绘图；回测链路通过 compute_plan 直接调用。
+不连接 CDP、不绘图；回测链路通过 compute_regime/trend_state_of 直接调用。
 """
 
 from .chan_core import (
-    calcATR, calcMACD, intervalSecOf, fmtT, CHAN_CFG,
-    findBuyPoints, findSellPoints, buildZS, buildZSByUpper, isBiDiverge,
+    calcATR, calcMACD, intervalSecOf, CHAN_CFG,
+    findBuyPoints, findSellPoints, buildZS, buildZSByUpper,
     markWickBars, mergeBars, findFractals,
 )
 
@@ -33,16 +38,6 @@ RANGE_DEFAULTS = {
     "rangeBreakMult": 1.0, # 突破跳过：末笔端点越过窗口另一端 >1×ATR 视为突破
     "rangeZsOn": True,     # ②中枢内判定开关（关闭后跳过未离开中枢+现价在箱内）
 }
-
-# 2买/2卖 中间档「附近」容差默认值（绝对点数；参数中心 plan 模块同名透传，cfg 逐键覆盖）
-PREV_HIGH_NEAR_PTS = 5.0  # 前高/前低附近：2买（2卖）后首段上涨（下跌）终点距前高（前低）≤ 该值 → 等回调后的类2买点（类2卖点）
-SECOND_NEAR_PTS = 5.0     # 回到2买/2卖点：未过前高（前低）时最近一笔回调（反弹）终点距点价 ≤ 该值 → 等回调后的类2买点（类2卖点）
-# ③3类点强档开关：开=3买/类3买（3卖/类3卖）过前高不背驰时顺势「等待回调后的新买点/新卖点」；关=3类点一律弱档。默认开（2026-10-10 黄金参数页生效值收成全局默认）
-THIRD_STRONG_TREND = True
-# ④弱档原始点分流（2026-10-09）：2买/类2买（2卖/类2卖）弱档且点后反弹高（低）点
-# 均未超过（跌破）原始点 → 空头多/等待低点附近的2买（多头空/等待高点附近的2卖），
-# 进场键 wait2BuyBear/wait2SellBear（抬低/压低回调，非破前低的1买式抄底）。默认开。
-WEAK_TIER_BY_ORIGIN = True
 
 
 def isRangeBound(bis, bars, atr, cfg=None):
@@ -117,221 +112,9 @@ def isRangeBound(bis, bars, atr, cfg=None):
             "winBiCount": len(inWin)}
 
 
-# ============================================================
-# 纯函数：交易计划生成
-# ============================================================
-
-
-def strategyOf(res, type_, reason, label, cls, cfg=None):
-    """依据买卖点类型生成交易策略（用户规则，2026-09-24 三档映射）。与 JS 版 strategyOf 对齐。
-    方向命名「X头Y」：X = 结构方向，Y = 操作方向。
-    三档（按序判定）：强档（过左高/左低不背驰）→ 中间档（仅 2买/2卖：前高/前低附近、
-    或未过前高/前低且回调回到点附近）→ 弱档（多头空/空头多）。
-    弱档再分流（2026-10-09，weakTierByOrigin 默认开）：2买/类2买 反弹未过下跌原始点 →
-    空头多/等待低点附近的2买（wait2BuyBear，抬低回调）；2卖/类2卖 对称 →
-    多头空/等待高点附近的2卖（wait2SellBear，压低反弹）；过原始点维持旧弱档。
-    卖侧够笔作废（同日）：2卖/类2卖 后下跌已够笔（after 确认或 ≥expectBiMinBars）
-    → 卖点作废转弱二买（空头多/等待低点附近的2买，wait2BuyBear）。
-    3类点强档受 thirdStrongTrend 开关控制（默认开；关=3类点一律弱档「等一卖/一买」）。"""
-    cfg = cfg or {}
-    third_strong = cfg.get("thirdStrongTrend", THIRD_STRONG_TREND)
-    base = {"res": res, "reason": reason, "label": label}
-    if type_ == "1卖":
-        return dict(base, direction="空头空", strategy="等待反弹后做2卖")
-    if type_ == "1买":
-        return dict(base, direction="多头多", strategy="等待回调后做2买")
-    if type_ in ("2买", "类2买"):
-        # 2026-10-11 统一二买定义：强弱二分路由——强二买（首笔上涨过前段末笔起点，
-        # 与 wait2Buy 进场闸 brokePrevHigh 同口径）→ 等2买；弱/未定型 → 等2买Bear
-        # （抬低回调）。旧三档（强→等3买/中间→等类2买/弱分流/默认等一卖）不再用于
-        # 二买族（无 strong 字段的旧点防御路径仍走下方分支）；3买族不动（对比同周期
-        # 上涨段，逻辑顺序 1买→二买族→3买）。
-        if cls in ("强二买", "强类2买"):
-            return dict(base, direction="多头多", strategy="等待回调后做2买")
-        if cls in ("弱二买", "弱类2买"):
-            return dict(base, direction="空头多", strategy="等待低点附近的2买")
-        if cls == "过左高不背驰":
-            return dict(base, direction="多头多", strategy="等待回调后的3买点")
-        # 未定型（点后首段还没走够）：弱档先行（2026-10-10 提前入列）——先武装弱2买，
-        # 点后反弹过左高/原始点时滚动翻档（强→3买/中间→类2买），不再回退前锚。
-        if cls == "未定型":
-            return dict(base, direction="空头多", strategy="等待低点附近的2买")
-        if type_ == "2买" and cls in ("前高附近", "回到2买点"):
-            return dict(base, direction="多头多", strategy="等待回调后的类2买点")
-        if cls == "未过原始点":
-            return dict(base, direction="空头多", strategy="等待低点附近的2买")
-        return dict(base, direction="多头空", strategy="等待高点附近的一卖")
-    if type_ in ("2卖", "类2卖"):
-        # 2026-10-11 统一二卖定义：强弱二分路由（镜像）——强二卖 → 等2卖；
-        # 弱/未定型 → 等2卖Bear（压低反弹）。
-        if cls in ("强二卖", "强类2卖"):
-            return dict(base, direction="空头空", strategy="等待反弹后做2卖")
-        if cls in ("弱二卖", "弱类2卖"):
-            return dict(base, direction="多头空", strategy="等待高点附近的2卖")
-        if cls == "过左低不背驰":
-            return dict(base, direction="空头空", strategy="等待反弹后的3卖点")
-        # 未定型：弱档先行（对称）——先武装弱2卖，定型后滚动翻档。
-        if cls == "未定型":
-            return dict(base, direction="多头空", strategy="等待高点附近的2卖")
-        if type_ == "2卖" and cls in ("前低附近", "回到2卖点"):
-            return dict(base, direction="空头空", strategy="等待反弹后的类2卖点")
-        if cls == "未过原始底够笔":
-            # 类2卖 后下跌已够笔：卖点作废，转弱二买（2026-10-09 用户规则）
-            return dict(base, direction="空头多", strategy="等待低点附近的2买")
-        if cls == "未过原始底":
-            return dict(base, direction="多头空", strategy="等待高点附近的2卖")
-        return dict(base, direction="空头多", strategy="等待低点附近的一买")
-    if type_ in ("3买", "类3买", "4买", "类4买"):
-        if third_strong and cls == "过左高不背驰":
-            return dict(base, direction="多头多", strategy="等待回调后的新买点")
-        return dict(base, direction="多头空", strategy="等待高点附近的一卖")
-    if type_ in ("3卖", "类3卖", "4卖", "类4卖"):
-        if third_strong and cls == "过左低不背驰":
-            return dict(base, direction="空头空", strategy="等待反弹后的新卖点")
-        return dict(base, direction="空头多", strategy="等待低点附近的一买")
-    return dict(base, direction="观望", strategy="趋势中")
-
-
-def _weak_origin_split(bis, p, wantUp):
-    """弱档原始点分流判定（2026-10-09 用户规则，仅 2买/类2买/2卖/类2卖 调用）：
-      原始点 = 从点锚定向前回溯反弹高（低）点，遇到第一个比其后所有端点更高（买侧）/
-    更低（卖侧）的更早端点即停止——即产生该 2买/2卖 的下跌/上涨段起点；
-    回溯到底无支配者则取回溯窗口极值端点。
-      分流成立 = 点之后所有反弹高（低）点均未超过（跌破）原始点（结构未扭转）。
-    顶/底端点口径与 classifySecond 左高扫描一致：up笔终点 / down笔起点（买侧）。
-    @returns True=未过原始点（应转空头多·等2买 / 多头空·等2卖 档）"""
-    before, after = [], []
-    for b in bis:
-        cands = []
-        if wantUp:
-            if b["type"] == "up":
-                cands.append((b["endTime"], b["endPrice"]))
-            else:
-                cands.append((b["startTime"], b["startPrice"]))
-        else:
-            if b["type"] == "down":
-                cands.append((b["endTime"], b["endPrice"]))
-            else:
-                cands.append((b["startTime"], b["startPrice"]))
-        for t, price in cands:
-            (before if t < p["time"] else after).append((t, price))
-    if not before or not after:
-        return False
-    before.sort(key=lambda c: c[0])
-    origin = running = before[-1][1]
-    for _t, price in reversed(before[:-1]):
-        if (price > running) if wantUp else (price < running):
-            origin = price
-            break
-    afterExt = max(c[1] for c in after) if wantUp else min(c[1] for c in after)
-    return (afterExt < origin) if wantUp else (afterExt > origin)
-
-
-def classifySecond(bis, macdArr, p, cfg=None):
-    """2/3 类买卖点的后续分类判定（用户规则，2026-09-24 三档，与 JS 版对齐）：
-      强档——买点（2买/类2买/3买）：买点后第一笔上涨「过左高」且「不背驰」。
-        左高 = 买点之前时间最近的前顶（同一时刻多端点取最高）；
-        过左高 = after（买点后第一笔上涨）终点价 > 左高价；
-        不背驰 = after 相对紧邻的前一同向上涨参照笔 isBiDiverge=false。
-      中间档（仅 2买/2卖 在 strategyOf 消费，这里一并返回）：
-        前高附近 = after 终点距左高 ≤ prevHighNearPts（绝对点数，含刚越过但背驰的情形）；
-        回到2买点 = 未过左高，且 after 之后最近一笔反向笔（回调/反弹，含形成中）
-                    终点价距点价 ≤ secondNearPts。
-      卖点（2卖/类2卖/3卖）：对称判定（左低取时间最近前底、参照取紧邻前一同向笔）。
-      注：左高/左低取「时间最近」而非全史价格极值；参照笔不按幅度过滤。
-    @returns "过左高不背驰" | "过左低不背驰" | "前高附近" | "前低附近" | "回到2买点" | "回到2卖点"
-             | "未过原始点" | "未过原始底" | "未过原始底够笔"（弱档分流，仅2/类2点、weakTierByOrigin开） | "其他"
-    """
-    cfg = cfg or {}
-    prev_high_near = cfg.get("prevHighNearPts", PREV_HIGH_NEAR_PTS)
-    second_near = cfg.get("secondNearPts", SECOND_NEAR_PTS)
-    wantUp = p["type"].endswith("买")
-    # 买卖点之前时间最近的顶/底端点（同一时刻多端点取价格更极端者）
-    extreme = {"time": -1, "price": float("-inf") if wantUp else float("inf")}
-    for b in bis:
-        cands = []
-        if wantUp:
-            if b["type"] == "up":
-                cands.append({"time": b["endTime"], "price": b["endPrice"]})       # 顶：上涨笔终点
-            if b["type"] == "down":
-                cands.append({"time": b["startTime"], "price": b["startPrice"]})   # 顶：下跌笔起点
-        else:
-            if b["type"] == "down":
-                cands.append({"time": b["endTime"], "price": b["endPrice"]})       # 底：下跌笔终点
-            if b["type"] == "up":
-                cands.append({"time": b["startTime"], "price": b["startPrice"]})   # 底：上涨笔起点
-        for c in cands:
-            if c["time"] >= p["time"]:
-                continue
-            if c["time"] > extreme["time"]:
-                extreme["time"] = c["time"]
-                extreme["price"] = c["price"]
-            elif c["time"] == extreme["time"]:
-                if wantUp:
-                    extreme["price"] = max(extreme["price"], c["price"])
-                else:
-                    extreme["price"] = min(extreme["price"], c["price"])
-    if extreme["time"] == -1:
-        return "其他"
-    # 买卖点后第一笔同向笔（买点后上涨 / 卖点后下跌），起点在买卖点之后
-    after = next((b for b in bis if b["startTime"] >= p["time"] and b["type"] == ("up" if wantUp else "down")), None)
-    # 未定型哨兵（2026-09-26 A 开关；2026-10-10 提前入列后开关淘汰、哨兵保留）：
-    # 「还没跌/涨」≠「走弱」——after 不存在，或 after 为形成中段且点后反向段合并块数
-    # < 2（右肩+1根确认）时返回「未定型」。消费方（strategyOf/predictPlan）2026-10-10
-    # 起不再跳过：未定型点接管锚点并按弱档先行路由，定型后滚动修正。
-    if after is None:
-        return "未定型"
-    if after.get("_forming"):
-        mc = after.get("mergedCount")
-        if mc is not None and mc < 2:
-            return "未定型"
-    if after is None:
-        return "其他"
-    # 过左高 / 过左低
-    passed = after["endPrice"] > extreme["price"] if wantUp else after["endPrice"] < extreme["price"]
-    diverge = False
-    if passed:
-        # 不背驰：after 相对紧邻的前一同向参照笔 isBiDiverge=false
-        refer = None
-        for i in range(bis.index(after) - 1, -1, -1):
-            if bis[i]["type"] != after["type"]:
-                continue
-            refer = bis[i]  # 紧邻前一同向笔（中间隔一次级反向运动，即同级别对照段）
-            break
-        diverge = isBiDiverge(after, refer, macdArr) if refer is not None else False
-    if passed and not diverge:
-        return "过左高不背驰" if wantUp else "过左低不背驰"
-    # 中间档A：前高/前低附近（after 终点距左高/左低 ≤ prevHighNearPts，含刚越过但背驰的情形）
-    if abs(after["endPrice"] - extreme["price"]) <= prev_high_near:
-        return "前高附近" if wantUp else "前低附近"
-    # 中间档B：未过左高/左低，且之后最近一笔反向笔（回调/反弹，含形成中）终点回到点价附近
-    if not passed:
-        pullback = None
-        for b in bis[bis.index(after) + 1:]:
-            if b["type"] == ("down" if wantUp else "up"):
-                pullback = b  # 取最近一笔回调/反弹
-        if pullback is not None and abs(pullback["endPrice"] - p["price"]) <= second_near:
-            return "回到2买点" if wantUp else "回到2卖点"
-    # ④弱档原始点分流（weakTierByOrigin，2026-10-09，默认开；仅 2买/类2买/2卖/类2卖）：
-    # 弱档且点后反弹高（低）点均未过原始点 → 结构未扭转，交由 strategyOf 转
-    # 空头多/等待低点附近的2买（多头空/等待高点附近的2卖）；开关关或过了原始点维持"其他"。
-    # 卖侧补充（同日用户规则）：类2卖 后的下跌一旦够笔（after 笔已确认或合并块数
-    # ≥ expectBiMinBars），该卖点作废——不能再算 2卖，转前面规则定义的弱二买。
-    if (cfg.get("weakTierByOrigin", WEAK_TIER_BY_ORIGIN)
-            and p["type"] in ("2买", "类2买", "2卖", "类2卖")
-            and _weak_origin_split(bis, p, wantUp)):
-        if not wantUp:
-            _enough = (not after.get("_forming")) or \
-                (after.get("mergedCount") or 0) >= int(CHAN_CFG.get("expectBiMinBars", 5) or 5)
-            if _enough:
-                return "未过原始底够笔"
-        return "未过原始点" if wantUp else "未过原始底"
-    return "其他"
-
-
 def _rangeVerdict(bis, bars, atr, upperBis, lastPrice, barSec, range_cfg):
-    """A/B 两支震荡判定（原 predictPlan 1/1b 抽取；本周期自身判定与参考周期 regime 复用）。
-    @returns 震荡观望行 dict（direction/strategy/reason/label）或 None（非震荡）。"""
+    """A/B 两支震荡判定（本周期自身判定与参考周期 regime 复用）。
+    @returns 震荡判定 dict（{"reason": …}）或 None（非震荡）。"""
     cfg = range_cfg or RANGE_DEFAULTS
     # A 支：isRangeBound 横盘判定（range_cfg 来自参数中心逐键覆盖；rangeBoundOn 关闭则跳过）
     if cfg.get("rangeBoundOn", RANGE_DEFAULTS["rangeBoundOn"]):
@@ -341,8 +124,7 @@ def _rangeVerdict(bis, bars, atr, upperBis, lastPrice, barSec, range_cfg):
                       + (f"，笔端点区间 {rb['biSpan']:.2f}（{rb['biAtr']:.1f}×ATR），涨跌交替无明确方向"
                          if rb["winBiCount"] > 0 else "，窗口内无笔")
                       + "，判定为震荡整理")
-            return {"direction": "观望", "strategy": "震荡整理，观望等待方向选择",
-                    "reason": reason, "label": "震荡观望"}
+            return {"reason": reason}
 
     # B 支：存在未离开的中枢且当前价在中枢区间内（rangeZsOn 关闭则跳过）
     if not cfg.get("rangeZsOn", RANGE_DEFAULTS["rangeZsOn"]):
@@ -363,14 +145,12 @@ def _rangeVerdict(bis, bars, atr, upperBis, lastPrice, barSec, range_cfg):
        and lastZS["zd"] <= lastPrice <= lastZS["zg"]:
         reason = (f"存在未离开中枢 [{lastZS['zd']:.2f}, {lastZS['zg']:.2f}]（归属上一级别同一笔内），"
                   f"当前价 {lastPrice:.2f} 位于中枢内，判定为震荡整理")
-        return {"direction": "观望", "strategy": "震荡整理（中枢内），观望等待方向选择",
-                "reason": reason, "label": "震荡观望"}
+        return {"reason": reason}
     return None
 
 
-def _plan_gate_row(res, bis, bars, atr, upperBis, lastPrice, barSec, range_cfg, lower_stroke=None):
-    """参考周期震荡 regime（compute_plan 在参考周期行上顺带计算，供更低周期 range_gate；
-    2026-09-16 替换语义——更低周期不再看自身 A/B 震荡，参考周期笔不足也观望）。
+def _range_gate_row(res, bis, bars, atr, upperBis, lastPrice, barSec, range_cfg, lower_stroke=None):
+    """参考周期震荡 regime（原 _plan_gate_row；供更低周期震荡闸）。
     @returns {"range": True, "resName": "4小时", "reason": "4小时：…"} /
              {"range": False, ...} /
              {"range": True, "insufficient": True, ...}——笔数 <2：更低周期直接观望（数据不足）。"""
@@ -387,268 +167,68 @@ def _plan_gate_row(res, bis, bars, atr, upperBis, lastPrice, barSec, range_cfg, 
     return {"range": True, "resName": name, "reason": f"{name}：{v['reason']}"}
 
 
-def predictPlan(res, bis, upperBis, macdArr, lastPrice, bars, atr=0, barSec=None,
-                range_cfg=None, range_gate=None, upperMacd=None):
-    """核心：对单个周期生成「方向 + 策略」。
-
-    判定顺序：
-      1. 震荡优先——判定源（2026-09-16 闸门；2026-10-12 关闭后不再自判）：
-         range_gate 给定时用参考周期 regime
-         （替换语义：regime 震荡 → 观望；regime 非震荡 → 跳过本周期 A/B 支直接走趋势分支；
-         regime 带 insufficient 标记（参考周期笔 <2）→ 直接观望「笔数据不足」）；
-         range_gate 为空时，各周期（含 4 小时与日线）不自判 A/B，直接走趋势与买卖点。
-      2. 趋势：获取本周期买卖点（findBuyPoints/findSellPoints）：
-         - 先匹配最后一笔终点上的买卖点 → 按类型映射策略；
-         - 若最后一笔终点无买卖点 → 再向前获取一笔（逐笔向前扫描最近笔端点）；
-         - 仍无 → 「趋势中无匹配买卖点」。
-    @returns { res, direction, strategy, reason, label, pointDesc }
-    """
-    if barSec is None:
-        barSec = intervalSecOf(res) or 60
-    empty = {"res": res, "direction": "观望", "strategy": "数据不足",
-             "reason": "笔数量不足，无法判断", "label": "数据不足"}
-    if not bis or len(bis) < 2:
-        return empty
-
-    # 1. 震荡优先（判定源见 docstring；range_gate 由 compute_plan 按周期层级传入）
-    if range_gate is not None:
-        if range_gate.get("range"):
-            if range_gate.get("insufficient"):
-                return {"res": res, "direction": "观望",
-                        "strategy": (f"{range_gate.get('resName', '参考周期')}"
-                                     "笔数据不足，观望"),
-                        "reason": range_gate.get("reason", ""), "label": "数据不足"}
-            return {"res": res, "direction": "观望",
-                    "strategy": (f"震荡整理（{range_gate.get('resName', '参考周期')}），"
-                                 "观望等待方向选择"),
-                    "reason": range_gate.get("reason", ""), "label": "震荡观望"}
-        # regime 非震荡 → 跳过本周期 A/B 支，直接走趋势分支
-    # range_gate 为空（参考周期关闭）：日线、4 小时及更低周期都不自判 A/B
-    # （2026-10-12）。A/B 只留在 _plan_gate_row，供参考周期开启时算 regime。
-
-    # 2. 趋势 → 获取本周期买卖点
-    buyPts = []
-    sellPts = []
-    try:
-        if len(bis) >= 3:
-            buyPts = findBuyPoints(bis, upperBis or [], macdArr or [], barSec, upperMacd=upperMacd)
-            sellPts = findSellPoints(bis, upperBis or [], macdArr or [], barSec, upperMacd=upperMacd)
-    except Exception:
-        pass
-
-    # 匹配某笔终点上的买卖点（时间容差 = 本周期 1 个 bar，价格容差 = max(ATR×0.2, 0.05)）
-    tolSec = barSec
-    tolPrice = max(atr * 0.2, 0.05)
-
-    def matchAt(biIdx):
-        bi = bis[biIdx]
-        if bi is None:
-            return None
-        all_ = buyPts + sellPts
-        for p in all_:
-            if abs(p["time"] - bi["endTime"]) <= tolSec and abs(p["price"] - bi["endPrice"]) <= tolPrice:
-                return {"point": p, "bi": bi}
-        return None
-
-    # 3. 先取最后一笔终点的买卖点；4. 无 → 逐笔向前扫描最近笔端点。
-    #    2026-10-10 提前入列（原 anchorUndecidedSkip「未定型回退前锚」淘汰）：
-    #    未定型点（after 未走够）直接接管，strategyOf 按弱档先行路由、定型后滚动翻档。
-    _FAMILY_CLS = {"2买": "二买", "类2买": "类2买", "2卖": "二卖", "类2卖": "类2卖"}
-
-    def cls_of(p):
-        # 2026-10-11 统一二买定义：二买族（2买/类2买/2卖/类2卖）按 strong 二分
-        # （None=首笔上涨/下跌未走完 → 弱先行，过前高后滚动翻强）；
-        # 无 strong 字段的点（旧数据/异常路径）回退 classifySecond 三档。
-        if "strong" in p and p["type"] in _FAMILY_CLS:
-            return ("强" if p.get("strong") else "弱") + _FAMILY_CLS[p["type"]]
-        if p["type"] in ("2买", "类2买", "3买", "类3买", "4买", "类4买", "2卖", "类2卖", "3卖", "类3卖", "4卖", "类4卖"):
-            return classifySecond(bis, macdArr, p, range_cfg)
-        return "其他"
-
-    def out_of(m, origin):
-        p = m["point"]
-        cls = cls_of(p)
-        shown = cls if p["type"] in _FAMILY_CLS and "strong" in p else p["type"]
-        reason = f"找到最近买卖点 {shown} @ {fmtT(p['time'])} {p['price']:.2f}（{origin}）"
-        out = strategyOf(res, p["type"], reason, f"趋势|{p['type']}", cls, range_cfg)
-        # 形成中 1买/1卖（末笔仍在新低/新高中、尚未收笔）→ 直接买卖档（wait1Buy/
-        # wait1Sell）：其入场闸门（创新低+出中枢变弱+低级别背驰链）当下正可判；
-        # 确认收笔后才切回调档（wait2Buy/wait2Sell）——避免形成中 1买 接管锚点
-        # 反而提前关掉「直接买一买」窗口（2026-10-10 提前入列配套）。
-        bi = m.get("bi")
-        if bi is not None and bi.get("_forming") and p["type"] in ("1买", "1卖"):
-            if p["type"] == "1买":
-                out = dict(out, direction="空头多", strategy="等待低点附近的一买")
-            else:
-                out = dict(out, direction="多头空", strategy="等待高点附近的一卖")
-            reason += "（形成中·直接档）"
-            out["reason"] = reason
-        out["strategyLabel"] = out["strategy"]
-        out["pointDesc"] = f"{p['type']}@{fmtT(p['time'])}({p['price']:.2f})"
-        # 档位标签（强二买/强类2买/…）供进场闸区分：强二买与 1买同文案「等待回调后做2买」，
-        # 开单条件不同（强二买取消过前高，0 轴改配置）
-        out["pointCls"] = cls
-        return out
-
-    # 3/4. 买卖双侧各自扫锚（2026-10-10 用户规则：两侧独立、互不影响）：
-    #      买侧 = 最新买点族（1买/2买/类2买/3/类3/4/类4买），卖侧对称；
-    #      主侧 = 两锚中点时间更新者（与旧单锚口径一致，兼容图表/单键消费方），
-    #      另一侧附 alt* 字段——评估器两侧并行评估，多空可同时持仓。
-    buy_family = ("1买", "2买", "类2买", "3买", "类3买", "4买", "类4买")
-    sell_family = ("1卖", "2卖", "类2卖", "3卖", "类3卖", "4卖", "类4卖")
-
-    def matchSide(family):
-        for j in range(len(bis) - 1, -1, -1):
-            m = matchAt(j)
-            if m is not None and m["point"]["type"] in family:
-                return m, ("最后一笔端点" if j == len(bis) - 1 else "向前扫描最近笔端点")
-        return None, None
-
-    buyM, buyOrigin = matchSide(buy_family)
-    sellM, sellOrigin = matchSide(sell_family)
-    sides = []
-    for m, origin in ((buyM, buyOrigin), (sellM, sellOrigin)):
-        if m is not None:
-            row = out_of(m, origin)
-            sides.append((m["point"]["time"], row))
-    if not sides:
-        # 5. 趋势但未匹配到买卖点
-        reason = "趋势（非震荡），但最近笔端点均无已确认买卖点"
-        return {"res": res, "direction": "观望", "strategy": "趋势中无匹配买卖点",
-                "reason": reason, "label": "观察"}
-    sides.sort(key=lambda x: x[0], reverse=True)
-    out = sides[0][1]
-    if len(sides) > 1:
-        alt = sides[1][1]
-        out["altDirection"] = alt["direction"]
-        out["altStrategy"] = alt["strategy"]
-        out["altReason"] = alt["reason"]
-        out["altPointDesc"] = alt.get("pointDesc")
-        out["altPointCls"] = alt.get("pointCls")
-    return out
-
-
 # ============================================================
 # 汇总计算（供回测链路调用）
 # ============================================================
 
 
-def compute_plan(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=None, cfg=None,
-                 work_cache=None, range_res=None):
-    """逐周期（从大到小）计算交易计划。
+def compute_regime(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=None, cfg=None,
+                   work_cache=None, range_res=None):
+    """震荡 regime 判定（交易计划保留的「震荡」职能；原 compute_plan 的闸门部分抽出）。
 
-    @param work_cache 可选：跨次调用复用。本周期笔指纹/cut/ATR/上级笔未变时直接复用该行计划。
-    @param range_res  震荡判定参考周期（None → RANGE_RES；"" = 关闭；"240"/"D" = 开启）。
-                      - 开启（2026-09-16 闸门口径）：
-                        不低于该周期的行（参考周期自身与更高周期）固定观望，只作锚——
-                        regime（震荡门）与 trend_direction（顺势过滤）照常在内部计算，
-                        但不再做计划行判定（无自身 A/B、无买卖点匹配）；
-                        严格更低的周期只看该周期 regime（_plan_gate_row）：震荡 → 观望；
-                        非震荡 → 直接走趋势分支；笔 <2 → 观望「笔数据不足」
-                        （不回退自身判定——A/B 只在 _plan_gate_row 里给参考周期算 regime）。
-                      - 关闭（2026-10-12）：无参考周期、无「只作锚」、无 regime 传递。
-                        日线、4 小时及更低周期的计划行都不自判震荡，直接走趋势/买卖点。
-                        与图表 JS 同口径。
+    @param range_res  震荡判定参考周期（None → RANGE_RES；"" = 关闭 → 返回 None；
+                      "240"/"D" = 开启）。
+                      开启时：严格更低的检测周期 regime 震荡/笔不足 → mark_entry 观望
+                      （range_watch 闸）；参考周期自身与更高周期由 mark_entry 按
+                      range_res 结构性剔除（res_ge_range），与原计划行为一致。
+    @returns None（关闭）或参考周期 regime 行：
+             {"range": bool, "insufficient": bool, "resName": str, "reason": str}
     """
     from .sr_flip import _bis_fingerprint
     if range_res is None:
         range_res = RANGE_RES
-    periodBis = structurePeriods(periodBis, barsByPeriod, work_cache=work_cache)
-    periodMacd = periodMacd or {}
-    periodAtr = periodAtr or {}
-    planRows = {}
+    if not range_res:
+        return None
+    periodBis = structurePeriods(periodBis or {}, barsByPeriod or {}, work_cache=work_cache)
+    ref = next((r for r in periods if str(r).upper() == str(range_res).upper()), None)
+    curBis = (periodBis.get(ref) or []) if ref is not None else []
+    name = trend_res_name(range_res)
+    if not curBis:
+        # 参考周期整行无数据——预置不足闸（原 compute_plan 预置口径）
+        return {"range": True, "insufficient": True, "resName": name,
+                "reason": f"{name}笔数据不足（少于2笔），无法判定震荡/趋势，观望"}
+    # 上级周期取法与 trend_state_of 同口径：比参考周期大一级的最小周期
+    sec = intervalSecOf(ref) or 0
+    upper = None
+    best = None
+    for r in periodBis:
+        s = intervalSecOf(r) or 0
+        if s > sec and (best is None or s < (intervalSecOf(best) or 0)):
+            best = r
+    if best is not None:
+        upper = periodBis.get(best)
+    rawBars = barsByPeriod.get(ref) or []
+    atr = (periodAtr or {}).get(ref)
+    if atr is None:
+        atr = calcATR(rawBars, 14)
+    lastBar = rawBars[-1] if rawBars else None
+    lastPrice = lastBar["close"] if lastBar else None
+    # 震荡判定只看最近 rangeBarN 根；截尾与全量在该窗口内逐位一致
+    range_n = (cfg or RANGE_DEFAULTS).get("rangeBarN", RANGE_DEFAULTS["rangeBarN"])
+    range_bars = rawBars[-range_n:] if rawBars and len(rawBars) > range_n else rawBars
     cfg_fp = tuple(sorted((cfg or {}).items())) if cfg else ()
-    gate_on = bool(range_res)  # "" = 关闭：无参考周期锚/regime；计划行不自判震荡
-    ref_sec = (intervalSecOf(range_res) or 0) if gate_on else 0
-    ref_name = trend_res_name(range_res) if gate_on else ""
-    upperBis = None
-    upperMacdRow = None  # 与 upperBis 同步级联：上一（更大）周期的 MACD（二买族背驰闸）
-    range_gate = None  # 参考周期震荡 regime（见 _plan_gate_row；随循环向更低周期传递）
-    ref_row = (next((r for r in periods if str(r).upper() == str(range_res).upper()), None)
-               if gate_on else None)
-    if ref_row is not None and len(periodBis.get(ref_row) or []) < 2:
-        # 参考周期笔不足（含整行无数据被 continue 跳过的情况）——预置不足闸；
-        # 行内 ≥2 笔时会被真闸覆盖
-        range_gate = _plan_gate_row(ref_row, periodBis.get(ref_row) or [],
-                                    None, None, None, None, None, None,
-                                    lower_stroke=lowerStrokePack(ref_row, periodBis, barsByPeriod))
-    for res in periods:
-        curBis = periodBis.get(res, []) or []
-        if not curBis:
-            continue
-        rawBars = barsByPeriod.get(res, []) or []
-        atr = periodAtr.get(res)
-        if atr is None:
-            atr = calcATR(rawBars, 14)
-        macdArr = periodMacd.get(res)
-        if macdArr is None:
-            macdArr = calcMACD(rawBars)
-        lastBar = rawBars[-1] if rawBars else None
-        lastPrice = lastBar["close"] if lastBar else None
-        # 取最近 60 笔即可（计划只看最新结构）
-        if len(curBis) > 60:
-            curBis = curBis[-60:]
-        # 震荡判定只看最近 rangeBarN 根；截尾与全量在该窗口内逐位一致
-        range_n = (cfg or RANGE_DEFAULTS).get("rangeBarN", RANGE_DEFAULTS["rangeBarN"])
-        plan_bars = rawBars[-range_n:] if rawBars and len(rawBars) > range_n else rawBars
-
-        # 震荡判定源 regime：在参考周期自身的行上顺带计算（其 upperBis 此刻 = 更高一级笔），
-        # 挂 work_cache（输入指纹未变时复用，与 plan 行同口径；重同步后由调用方清空）
-        is_range_src = gate_on and str(res).upper() == str(range_res).upper()
-        if is_range_src:
-            gate_key = ("planGate", res, _bis_fingerprint(curBis), len(rawBars),
-                        lastPrice, atr, _bis_fingerprint(upperBis), cfg_fp)
-            gate_ent = work_cache.get(("planGate", res)) if work_cache is not None else None
-            if gate_ent is not None and gate_ent[0] == gate_key:
-                range_gate = gate_ent[1]
-            else:
-                range_gate = _plan_gate_row(res, curBis, plan_bars, atr, upperBis,
-                                            lastPrice, intervalSecOf(res), cfg,
-                                            lower_stroke=lowerStrokePack(res, periodBis, barsByPeriod))
-                if work_cache is not None:
-                    work_cache[("planGate", res)] = (gate_key, range_gate)
-
-        cache_key = (
-            "plan", range_res, _bis_fingerprint(curBis), len(rawBars), lastPrice, atr,
-            _bis_fingerprint(upperBis), cfg_fp,
-        )
-        if work_cache is not None:
-            ent = work_cache.get(("plan", range_res, res))
-            if ent is not None and ent[0] == cache_key:
-                planRows[res] = ent[1]
-                upperBis = ent[2]
-                upperMacdRow = macdArr
-                continue
-
-        if gate_on and (intervalSecOf(res) or 0) >= ref_sec:
-            # 不低于参考周期：只作锚，固定观望（不做自身 A/B 与买卖点判定）
-            p = {"res": res, "direction": "观望",
-                 "strategy": "参考周期，观望（只作锚不交易）",
-                 "reason": f"不低于震荡参考周期{ref_name}，不参与交易计划判定",
-                 "label": "参考周期", "pointDesc": ""}
-        else:
-            p = predictPlan(res=res, bis=curBis, upperBis=upperBis, macdArr=macdArr,
-                            lastPrice=lastPrice, bars=plan_bars, atr=atr,
-                            barSec=intervalSecOf(res), range_cfg=cfg,
-                            range_gate=range_gate, upperMacd=upperMacdRow)
-        row = {
-            "direction": p["direction"],
-            "strategy": p["strategy"],
-            "reason": p.get("reason", ""),
-            "pointDesc": p.get("pointDesc", ""),
-        }
-        if p.get("pointCls"):
-            row["pointCls"] = p["pointCls"]
-        # 2026-10-10 买卖双侧独立：另一侧锚字段透传（评估器主侧+alt 侧并行评估）
-        for _k in ("altDirection", "altStrategy", "altReason", "altPointDesc", "altPointCls"):
-            if p.get(_k) is not None:
-                row[_k] = p[_k]
-        planRows[res] = row
-        if work_cache is not None:
-            work_cache[("plan", range_res, res)] = (cache_key, row, curBis)
-        upperBis = curBis
-        upperMacdRow = macdArr
-    return planRows
+    gate_key = ("rangeGate", ref, _bis_fingerprint(curBis), len(rawBars),
+                lastPrice, atr, _bis_fingerprint(upper), cfg_fp)
+    if work_cache is not None:
+        gate_ent = work_cache.get(("rangeGate", ref))
+        if gate_ent is not None and gate_ent[0] == gate_key:
+            return gate_ent[1]
+    gate = _range_gate_row(ref, curBis, range_bars, atr, upper, lastPrice,
+                           intervalSecOf(ref), cfg,
+                           lower_stroke=lowerStrokePack(ref, periodBis, barsByPeriod))
+    if work_cache is not None:
+        work_cache[("rangeGate", ref)] = (gate_key, gate)
+    return gate
 
 
 # ============================================================
@@ -664,10 +244,8 @@ TREND_RES = ""
 # rangeRes 可配）："" = 关闭（默认，2026-10-10）→ 无参考周期闸门。
 # 2026-10-12：关闭后任何周期（含 4 小时、日线）的计划行都不自判震荡，直接走买卖点
 # （与图表 JS trading_plan.js 同口径）；A/B 仅在参考周期开启时用作 regime 门。
+# 2026-10-16：交易计划策略行取消，本开关只控制 mark_entry 的震荡观望闸（compute_regime）。
 # "240" = 4小时；"D" = 日线。
-# 开启时：更低周期只看该周期 regime（compute_plan → _plan_gate_row →
-# predictPlan(range_gate=…)，参考周期笔不足 → 观望）；参考周期自身与更高周期
-# 固定观望只作锚。
 RANGE_RES = ""
 
 # 方向相位判定（2026-09-17 与用户确认，图片决策树；参数中心 plan 模块可配）：
@@ -837,8 +415,7 @@ def trend_direction(res, bis, bars, upperBis, macdArr, tCut=None, rebound=None, 
     """参考周期方向判定（顺势过滤的唯一口径；mark_entry 进场方向过滤消费）。
 
     规则（2026-09-15 与用户逐条确认；7 为 2026-09-17 相位树更新）：
-      1. 取参考周期最近一个买卖点（findBuyPoints/findSellPoints，最近 60 笔窗口
-         与 compute_plan 同口径）；
+      1. 取参考周期最近一个买卖点（findBuyPoints/findSellPoints，最近 60 笔窗口）；
       2. 1买/1卖：端点后出现强分型（strong_fractal_after）才确立方向，
          强分型出现前回退末笔方向；
       3. 非1类点（2买/类2买/3买、2卖/类2卖/3卖）：出现即确立方向（点锚定的笔
@@ -867,7 +444,7 @@ def trend_direction(res, bis, bars, upperBis, macdArr, tCut=None, rebound=None, 
             bars = [b for b in (bars or []) if b["time"] + intervalSecOf(res) <= tCut]
     if not bis or len(bis) < 2:
         return None, ""
-    win = bis[-60:]  # 与 compute_plan 同窗口：计划只看最新结构
+    win = bis[-60:]  # 只看最新结构
     barSec = intervalSecOf(res)
     try:
         pts = findBuyPoints(win, upperBis, macdArr, barSec, upperMacd=upperMacd) \
@@ -926,7 +503,7 @@ def trend_state_of(periodBis, barsByPeriod, trend_res, periodMacd=None, work_cac
     最小周期（240→D），供 findBuyPoints 区间套使用。
 
     @param trend_res 参考周期（"240"/"D"；""/None = 关闭 → 返回 None）
-    @param work_cache 可选：跨次调用复用的 dict（与 compute_plan 同一引擎级缓存；
+    @param work_cache 可选：跨次调用复用的 dict（与 compute_regime 同一引擎级缓存；
              参考周期/上级笔指纹、bars/MACD 长度、相位参数未变时直接复用——参考周期
              输入只在其收盘或笔结构变化时才变，两次收盘间（约 80 根 fine）全命中）。
              重同步后由调用方清空（中段笔修正可能指纹漏判）。

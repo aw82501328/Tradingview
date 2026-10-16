@@ -12,7 +12,7 @@ const assert = require("node:assert/strict");
 const {
   findDivergePoints, lowerDiverge, levelsBelow, sinkChainConfirm,
   stopRefOf, findBiEvent, trendFollowingOf, favSeg5Time, simulatePosition,
-  entryStrategyOf,
+  pointStrategyOf, sideCandidates,
 } = require("./mark_entry.js");
 
 const bi = (type, startTime, endTime, startPrice, endPrice) => ({
@@ -174,38 +174,60 @@ describe("出场规则：stopRefOf（支阻位±滑点/最大止损）", () => {
   });
 });
 
-describe("entryStrategyOf：策略文案 → 进场 key（2026-09-25 起 1:1 拆分）", () => {
-  test("12 条文案 1:1 映射到 12 个进场 key（含 2026-10-09 弱档分流 2 键）", () => {
-    const cases = {
-      "等待反弹后做2卖": ["wait2Sell", "short"],
-      "等待回调后做2买": ["wait2Buy", "long"],
-      "等待高点附近的一卖": ["wait1Sell", "short"],
-      "等待低点附近的一买": ["wait1Buy", "long"],
-      "等待回调后的新买点": ["waitBuy", "long"],        // 3类点强档（thirdStrongTrend 开）
-      "等待反弹后的新卖点": ["waitSell", "short"],
-      "等待回调后的3买点": ["wait3Buy", "long"],        // 2买/类2买 强档
-      "等待回调后的类2买点": ["waitLike2Buy", "long"],  // 2买 中间档（前高附近/回到2买点）
-      "等待反弹后的3卖点": ["wait3Sell", "short"],      // 2卖/类2卖 强档
-      "等待反弹后的类2卖点": ["waitLike2Sell", "short"], // 2卖 中间档（前低附近/回到2卖点）
-      "等待低点附近的2买": ["wait2BuyBear", "long"],    // 2买/类2买 弱档·未过原始点（2026-10-09）
-      "等待高点附近的2卖": ["wait2SellBear", "short"],  // 2卖/类2卖 弱档·未过原始底（2026-10-09）
-    };
-    for (const [text, [key, direction]] of Object.entries(cases)) {
-      const s = entryStrategyOf(text);
-      assert.ok(s, text);
-      assert.equal(s.key, key, text);
-      assert.equal(s.direction, direction, text);
+describe("pointStrategyOf：买卖点 type+strong → 进场 key 直映射（2026-10-16 直连）", () => {
+  test("1类直接档统一（形成中与已确认同档）+ 二买族强弱二分 + 3/类3类4族分流", () => {
+    const cases = [
+      [{ type: "1买", time: 1, price: 1 }, "wait1Buy", "long"],
+      [{ type: "1卖", time: 1, price: 1 }, "wait1Sell", "short"],
+      [{ type: "2买", time: 1, price: 1, strong: true }, "wait2Buy", "long"],
+      [{ type: "类2买", time: 1, price: 1, strong: true }, "wait2Buy", "long"],
+      [{ type: "2买", time: 1, price: 1, strong: false }, "wait2BuyBear", "long"],
+      [{ type: "类2买", time: 1, price: 1, strong: null }, "wait2BuyBear", "long"],   // 未定型弱先行
+      [{ type: "2卖", time: 1, price: 1, strong: true }, "wait2Sell", "short"],
+      [{ type: "类2卖", time: 1, price: 1, strong: false }, "wait2SellBear", "short"],
+      [{ type: "3买", time: 1, price: 1 }, "wait3Buy", "long"],
+      [{ type: "3卖", time: 1, price: 1 }, "wait3Sell", "short"],
+      [{ type: "类3买", time: 1, price: 1 }, "waitBuy", "long"],
+      [{ type: "4买", time: 1, price: 1 }, "waitBuy", "long"],
+      [{ type: "类4买", time: 1, price: 1 }, "waitBuy", "long"],
+      [{ type: "类3卖", time: 1, price: 1 }, "waitSell", "short"],
+      [{ type: "4卖", time: 1, price: 1 }, "waitSell", "short"],
+      [{ type: "类4卖", time: 1, price: 1 }, "waitSell", "short"],
+    ];
+    for (const [point, key, direction] of cases) {
+      const s = pointStrategyOf(point);
+      assert.ok(s, point.type);
+      assert.equal(s.key, key, point.type);
+      assert.equal(s.direction, direction, point.type);
     }
   });
 
-  test("观望类文案不产生进场策略", () => {
-    assert.equal(entryStrategyOf("震荡整理，观望等待方向选择"), null);
-    assert.equal(entryStrategyOf("趋势中无匹配买卖点"), null);
+  test("pointCls：2族由 strong 派生（强二买/弱类2买…），非2族为 null", () => {
+    assert.equal(pointStrategyOf({ type: "2买", time: 1, price: 1, strong: true }).pointCls, "强二买");
+    assert.equal(pointStrategyOf({ type: "类2买", time: 1, price: 1, strong: false }).pointCls, "弱类2买");
+    assert.equal(pointStrategyOf({ type: "1买", time: 1, price: 1 }).pointCls, null);
+  });
+
+  test("未知类型 → null（waitLike2Buy/waitLike2Sell 无映射入口）", () => {
+    assert.equal(pointStrategyOf({ type: "观望", time: 1, price: 1 }), null);
+    assert.equal(pointStrategyOf({ type: "", time: 1, price: 1 }), null);
+  });
+
+  test("sideCandidates：买卖双侧各自取最近笔端点锚", () => {
+    const bis = [
+      { type: "up", startTime: 0, endTime: 60, startPrice: 100, endPrice: 110 },
+      { type: "down", startTime: 60, endTime: 120, startPrice: 110, endPrice: 95 },
+    ];
+    const points = { buy: [{ type: "1买", time: 120, price: 95 }],
+                     sell: [{ type: "1卖", time: 60, price: 110 }] };
+    const cands = sideCandidates(bis, points, 0, 180);
+    assert.deepEqual(cands.map(c => c.type).sort(), ["1买", "1卖"]);
+    assert.deepEqual(sideCandidates(bis, { buy: [], sell: [] }, 0, 180), []);
   });
 });
 
 describe("出场规则：trendFollowingOf / favSeg5Time", () => {
-  test("顺势判定：计划方向 + strategyKey 兜底", () => {
+  test("顺势判定：按 strategyKey（2026-10-16 起唯一口径）；planDirection 仅 strategyKey 缺省时兼容", () => {
     assert.equal(trendFollowingOf("多头多"), true);
     assert.equal(trendFollowingOf("空头空"), true);
     assert.equal(trendFollowingOf("多头空"), false);
@@ -375,7 +397,8 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
     const px = { bars: altBars([0, 100, 200, 300, 400, 500, 600, 700, 800]),
                  bis: [bi("down", 0, 50, 4460, 4440), bi("up", 50, 150, 4440, 4450),
                        bi("down", 150, 700, 4450, 4430)] };
-    const sim = simulatePosition(SIG({ planDirection: "多头空" }), 4463, mr, px,
+    // 2026-10-16 起按 strategyKey 判定（wait1Sell=逆势；旧 planDirection 口径已取消）
+    const sim = simulatePosition(SIG({ planDirection: "多头空", strategyKey: "wait1Sell" }), 4463, mr, px,
                                  { exitCfg: { closePct: 100 } });
     assert.deepEqual(sim.events.map(e => e.type), ["close"]); // tp3a=700 → 下一开盘 800 全平
     assert.equal(sim.events[0].time, 800);

@@ -7,7 +7,8 @@
     python -m py_chain.main --use-cache --no-draw          # 读缓存、只回测不画图
 
 链路顺序（与 JS 实时画图一致）：画笔(buildBi) → 买卖点(compute_all_marks)
-→ 支阻位(compute_srflip) → 交易计划(compute_plan) → 进出场(compute_entries)。
+→ 支阻位(compute_srflip) → 买卖点原始输出(compute_period_points)+
+震荡regime(compute_regime) → 进出场(compute_entries 直接消费买卖点)。
 回测完成后只回画「实际成交」的进场箭头：做多=红向上、做空=绿向下（见 tv_draw）。
 """
 
@@ -20,8 +21,8 @@ from .data_loader import CDPConfig, load_bars
 from .backtest import build_bis, run_backtest, summarize
 from .mark_buy_sell import compute_all_marks
 from .sr_flip import compute_srflip
-from .trading_plan import compute_plan
-from .mark_entry import (compute_entries, filterDetectPeriods,
+from .trading_plan import compute_regime
+from .mark_entry import (compute_entries, compute_period_points, filterDetectPeriods,
                          NEAR, ZS_EXIT_WEAK_RATIO)
 from . import mark_entry
 from .tv_draw import draw_trades
@@ -77,19 +78,23 @@ def build_full_chain(bars_by_period, periods, with_marks=True, sr_types=None, fi
     """全链路（对整段数据一次性计算），返回各阶段结果。
 
     30S（--with-30s 追加）只参与 bis 计算与进出场（compute_entries），
-    不进 marks/sr/plan——与 JS 端语义一致（mark-buy-sell/mark-sr-flip/trading-plan
-    的周期不含 30S，sr_flip 的 LEVEL_ORDER 也未收录 30S）。
+    不进 marks/sr/regime——与 JS 端语义一致（mark-buy-sell/mark-sr-flip 的
+    周期不含 30S，sr_flip 的 LEVEL_ORDER 也未收录 30S）。
     sr_types/fib_levels 透传给 compute_srflip（None 用其默认 cluster+boll / 0.382,0.5,0.618）；
     boll_length/boll_mult 透传 BOLL 周期与标准差倍数（None 用默认 26/2）。
     module_params 为参数中心模块参数（marks/plan/entry；None 用各模块默认）。
     """
+    from .chan_core import calcMACD
     mp = module_params or {}
     core = [p for p in periods if str(p).upper() != "30S"]
     bis = build_bis(bars_by_period, periods)
     marks = {}
     if with_marks:
-        marks = compute_all_marks(bis, bars_by_period, core, fromTs=None,
-                                  **(mp.get("marks") or {}))
+        # points 桶的 divergeDurRatio 是 CHAN_CFG 键（经 chan_cfg_effective 注入），
+        # 不是 compute_all_marks 形参——滤掉防 TypeError（2026-10-13 加入该键后
+        # main.py 默认参数路径即会炸，属既有透传问题，此处最小修复）
+        marks_mp = {k: v for k, v in (mp.get("marks") or {}).items() if k != "divergeDurRatio"}
+        marks = compute_all_marks(bis, bars_by_period, core, fromTs=None, **marks_mp)
     srKw = {}
     if sr_types is not None:
         srKw["srTypes"] = tuple(sr_types)
@@ -102,43 +107,54 @@ def build_full_chain(bars_by_period, periods, with_marks=True, sr_types=None, fi
     sr = compute_srflip(bis, bars_by_period, core, **srKw)
     # plan 模块的 trendRes（顺势参考周期）/ rangeRes（震荡判定参考周期）单独取出：
     # 不混入震荡阈值 cfg；trendRes "" = 关闭顺势过滤，rangeRes "" = 关闭震荡闸门
-    # （关闭后任何周期的计划行都不自判震荡，2026-10-12）
+    # （2026-10-16 起交易计划只剩震荡/顺势两项判定，均默认关闭）
     plan_mp = dict(mp.get("plan") or {})
     trend_res = plan_mp.pop("trendRes", None)
     range_res = plan_mp.pop("rangeRes", None)
     # 方向相位判定参数（2026-09-17；缺省 → trading_plan 常量默认，相位判定默认开启）
     trend_cfg = {k: plan_mp.pop(k) for k in
                  ("trendRebound", "reboundNearPts", "reboundAngleRef") if k in plan_mp}
-    plan = compute_plan(bis, bars_by_period, core, cfg=plan_mp or None,
-                        range_res=range_res)
+    regime = compute_regime(bis, bars_by_period, core, cfg=plan_mp or None,
+                            range_res=range_res)
+    period_macd = {res: calcMACD(bars_by_period.get(res) or []) for res in core}
+    points = compute_period_points(bis, core, periodMacd=period_macd)
     srLevels = (sr or {}).get("merged") or []
     ep = mp.get("entry") or {}
-    entries = compute_entries(bis, bars_by_period, plan, srLevels,
+    entries = compute_entries(bis, bars_by_period, points, srLevels,
                               detectPeriods=filterDetectPeriods(periods),
                               near=ep.get("near", NEAR),
                               with_30s=any(str(p).upper() == "30S" for p in periods),
                               zs_exit_weak_ratio=ep.get("zs_exit_weak_ratio", ZS_EXIT_WEAK_RATIO),
                               trend_res=trend_res,
+                              range_res=range_res, range_gate=regime,
                               trend_cfg=trend_cfg or None)
-    return {"bis": bis, "marks": marks, "sr": sr, "plan": plan, "entries": entries}
+    return {"bis": bis, "marks": marks, "sr": sr, "regime": regime,
+            "points": points, "entries": entries}
 
 
 def print_chain(chain, periods):
     """打印全链路各周期摘要。"""
-    plan = chain["plan"]
+    regime = chain.get("regime")
+    points = chain.get("points") or {}
     print("\n===== 全链路摘要（整段数据实时态）=====")
+    if regime:
+        state = "震荡观望" if regime.get("range") else "非震荡"
+        print(f"震荡regime（{regime.get('resName', '')}）：{state} {regime.get('reason', '')}")
     for res in periods:
-        p = plan.get(res)
-        if not p:
+        pts = points.get(res)
+        if pts is None:
             continue
         bis = chain["bis"].get(res, [])
         marks = chain["marks"].get(res, [])
         nMark = len(marks)
         nBuy = sum(1 for m in marks if "买" in m["label"])
         nSell = sum(1 for m in marks if "卖" in m["label"])
+        buyPts = pts.get("buy") or []
+        sellPts = pts.get("sell") or []
+        latest = buyPts[-1]["type"] if buyPts else "-"
+        latestSell = sellPts[-1]["type"] if sellPts else "-"
         print(f"[{res:>4}] 笔 {len(bis):>3} 买卖点 {nMark:>3}（多{nBuy}/空{nSell}）"
-              f" 计划方向={p['direction']} 策略={p['strategy']} "
-              f"({p.get('pointDesc', '')})")
+              f" 最新锚 买侧={latest} 卖侧={latestSell}")
     entries = chain["entries"]
     total = sum(len(v) for v in entries.values())
     if total:

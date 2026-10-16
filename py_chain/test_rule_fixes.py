@@ -2,13 +2,13 @@
 """三处规则修复 + 跨级下沉的开关语义单测（2026-09-26；锚点案例=07-07 06:30 逐拍调查）。
 
 覆盖：
-- A anchorUndecidedSkip / anchorUndecidedMinBars：classifySecond「未定型」哨兵、
-  predictPlan 跳过未定型锚点回退前锚、真弱（after 存在未破左低）保留翻多；
 - B divergeReferByZs：pickDivergeRefer 中枢内部段不参与比较、参照=入中枢段；
 - C pointEnoughForming：形成中段 enough 计数到极值块；synthIntrabarBars 的
   provisional 累加器与 append 一致性；
 - D sinkSkipLevel：下沉链方向不符/含糊区/展开不足时跳级。
-A 未定型不接管默认开；其余开关默认关。关侧用例显式关掉再断言。
+（A 未定型哨兵/提前入列与双侧锚用例随 2026-10-16 交易计划策略行删除而移除——
+  未定型弱先行/双侧锚语义由 test_plan_strategy 的 pointStrategyOf/side_candidates
+  直映射用例接管；开关本身均已淘汰。）
 """
 
 import unittest
@@ -17,7 +17,6 @@ from py_chain import chan_core
 from py_chain.chan_core import (
     CHAN_CFG, MacdAccumulator, AtrAccumulator, buildStructureContext,
 )
-from py_chain import trading_plan as TP
 from py_chain import mark_entry as ME
 
 
@@ -47,116 +46,6 @@ class CfgSwitch:
                 CHAN_CFG.pop(k, None)
             else:
                 CHAN_CFG[k] = v
-
-
-class AnchorUndecidedTests(unittest.TestCase):
-    """A：未定型哨兵与提前入列（2026-10-10 起 anchorUndecidedSkip 淘汰——未定型点
-    接管锚点并按弱档先行路由，定型后滚动翻档；哨兵保留，定型阈值固定 2 合并块）。"""
-
-    def setUp(self):
-        # 结构：down(前底) -> up(形成中，2卖挂在端点) —— 点后无任何下跌笔
-        self.bis = [
-            _bi("down", 0, 50, 10.0, 8.0),
-            _bi("up", 50, 100, 8.0, 12.0, _forming=True, phase="running", mergedCount=6),
-        ]
-        self.p2sell = {"type": "2卖", "time": 100, "price": 12.0}
-
-    def test_after_missing_marks_undecided(self):
-        self.assertEqual(TP.classifySecond(self.bis, [], self.p2sell), "未定型")
-
-    def test_forming_after_below_minbars(self):
-        bis = self.bis + [_bi("down", 100, 130, 12.0, 11.0, _forming=True,
-                              phase="expected", mergedCount=1)]
-        self.assertEqual(TP.classifySecond(bis, [], self.p2sell), "未定型")
-
-    def test_true_weak_keeps_flip(self):
-        # after 存在（形成中、达 2 块）且未破左低 8.0 → 定型（真弱走中间档/其他，翻多语义不变）
-        bis = self.bis + [_bi("down", 100, 160, 12.0, 11.0, _forming=True,
-                              phase="running", mergedCount=2)]
-        self.assertEqual(TP.classifySecond(bis, [], self.p2sell), "前低附近")
-
-    def test_undecided_takes_over_weak_first(self):
-        # 端点 100 上挂未定型 2卖；前一笔端点 50 上挂 1买 → 提前入列：未定型点接管，
-        # 弱档先行路由 wait2SellBear（等待高点附近的2卖），不再回退前锚 1买。
-        bis = [
-            _bi("up", -100, 0, 8.5, 10.0),
-            _bi("down", 0, 50, 10.0, 8.0),
-            _bi("up", 50, 100, 8.0, 12.0, _forming=True, phase="running", mergedCount=6),
-        ]
-        buy_pts = [{"type": "1买", "time": 50, "price": 8.0}]
-        sell_pts = [{"type": "2卖", "time": 100, "price": 12.0}]
-        import py_chain.chan_core as cc
-        saved = (cc.findBuyPoints, cc.findSellPoints)
-        cc.findBuyPoints = lambda *a, **k: buy_pts
-        cc.findSellPoints = lambda *a, **k: sell_pts
-        try:
-            TP.findBuyPoints = cc.findBuyPoints
-            TP.findSellPoints = cc.findSellPoints
-            out = TP.predictPlan(res="60", bis=bis, upperBis=[], macdArr=[],
-                                 lastPrice=11.0, bars=[], atr=2.0, barSec=3600)
-            self.assertIn("等待高点附近的2卖", out["strategy"])
-            self.assertIn("2卖", out["pointDesc"])
-        finally:
-            cc.findBuyPoints, cc.findSellPoints = saved
-            TP.findBuyPoints, TP.findSellPoints = saved
-
-    def test_forming_first_buy_routes_wait1buy(self):
-        # 形成中 1买（末笔仍在新低中）→ 直接档 wait1Buy，不切回调档 wait2Buy。
-        bis = [
-            _bi("down", -200, -120, 16.0, 13.0),
-            _bi("up", -120, -20, 13.0, 17.0),
-            _bi("down", -20, 60, 17.0, 9.0, _forming=True, phase="running", mergedCount=6),
-        ]
-        buy_pts = [{"type": "1买", "time": 60, "price": 9.0}]
-        import py_chain.chan_core as cc
-        saved = (cc.findBuyPoints, cc.findSellPoints)
-        cc.findBuyPoints = lambda *a, **k: buy_pts
-        cc.findSellPoints = lambda *a, **k: []
-        try:
-            TP.findBuyPoints = cc.findBuyPoints
-            TP.findSellPoints = cc.findSellPoints
-            out = TP.predictPlan(res="60", bis=bis, upperBis=[], macdArr=[],
-                                 lastPrice=9.5, bars=[], atr=2.0, barSec=3600)
-            self.assertIn("等待低点附近的一买", out["strategy"])
-        finally:
-            cc.findBuyPoints, cc.findSellPoints = saved
-            TP.findBuyPoints, TP.findSellPoints = saved
-
-
-class DualSideAnchorTests(unittest.TestCase):
-    """2026-10-10 买卖双侧独立：各自维护锚、互不影响，多空可同时评估。"""
-
-    def test_both_sides_anchored(self):
-        # 买侧锚 = 最新买点（1买@50），卖侧锚 = 最新卖点（2卖@100，更新）→ 主侧=卖，
-        # alt=买侧 wait2Buy 不因更新的卖点消失。
-        bis = [
-            _bi("up", -150, -60, 12.0, 15.0),
-            _bi("down", -60, 0, 15.0, 10.0),
-            _bi("up", 0, 50, 10.0, 14.0),     # 1买挂在 50 端点（down 终点 10.0）
-            _bi("down", 50, 100, 14.0, 13.0),  # 2卖挂 100 端点
-        ]
-        buy_pts = [{"type": "1买", "time": 50, "price": 10.0}]
-        sell_pts = [{"type": "2卖", "time": 100, "price": 14.0}]
-        import py_chain.chan_core as cc
-        saved = (cc.findBuyPoints, cc.findSellPoints)
-        cc.findBuyPoints = lambda *a, **k: buy_pts
-        cc.findSellPoints = lambda *a, **k: sell_pts
-        saved_rv = TP._rangeVerdict
-        TP._rangeVerdict = lambda *a, **k: None  # 绕过自身 A/B 震荡判定（专注双侧锚语义）
-        try:
-            TP.findBuyPoints = cc.findBuyPoints
-            TP.findSellPoints = cc.findSellPoints
-            out = TP.predictPlan(res="60", bis=bis, upperBis=[], macdArr=[],
-                                 lastPrice=13.5, bars=[], atr=1.0, barSec=3600)
-            # 主侧 = 更新的卖点族（2卖@100，无 after → 未定型弱档先行 wait2SellBear）；alt = 买侧
-            self.assertEqual(out["direction"], "多头空")
-            self.assertIn("2卖", out["strategy"])
-            self.assertEqual(out["altStrategy"], "等待回调后做2买")
-            self.assertEqual(out["altDirection"], "多头多")
-        finally:
-            cc.findBuyPoints, cc.findSellPoints = saved
-            TP.findBuyPoints, TP.findSellPoints = saved
-            TP._rangeVerdict = saved_rv
 
 
 class DivergeReferZsTests(unittest.TestCase):

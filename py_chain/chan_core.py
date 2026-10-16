@@ -135,10 +135,9 @@ CHAN_CFG = {
                                   # 默认关=强二买不看 0 轴。过前高闸对强二买取消（1买的
                                   # 等待回调后做2买仍保留过前高与 0 轴）
     # ---- 三处规则修复（2026-09-26 用户逐条确认；详见 plan/三处规则修复）----
-    # anchorUndecidedSkip/anchorUndecidedMinBars（A 开关）已于 2026-10-10 淘汰：
-    # 「未定型不接管」被「提前入列」取代——未定型点接管锚点并按弱档先行路由
-    # （strategyOf cls="未定型"），档位随点后走势滚动修正；classifySecond 的
-    # 未定型哨兵仍保留（定型阈值固定 2 合并块），仅供路由与展示。
+    # anchorUndecidedSkip/anchorUndecidedMinBars（A 开关）已于 2026-10-10 淘汰；
+    # strategyOf/classifySecond（计划层三档路由/四态分类）已于 2026-10-16 随交易计划
+    # 策略行删除（买卖点直连进出场，强弱档只看点 strong 字段）。
     "divergeReferByZs": True,      # B 背驰中枢参照：参照笔=入中枢段——跳过 F 之前紧邻中枢
                                    # 内部/之后的同向笔（用户规则：背驰=入中枢段 vs 出中枢段，
                                    # 中枢内部振荡段不参与比较）。默认开（2026-09-28）

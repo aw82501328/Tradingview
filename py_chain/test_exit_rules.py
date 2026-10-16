@@ -50,11 +50,15 @@ def bar(time, open_, high, low, close):
 
 
 def make_pos(direction="short", signalTime=100, entryPrice=4450.0, stopRef=4463.0,
-             beStop=4455.0, planDirection="空头空", lots=4):
-    """构造持仓 dict（_fill_pending 产出的出场状态机字段子集）。"""
+             beStop=4455.0, planDirection="空头空", lots=4, strategyKey=None):
+    """构造持仓 dict（_fill_pending 产出的出场状态机字段子集）。
+    2026-10-16 起顺势按 strategyKey 判定（计划方向口径取消）：planDirection 为
+    逆势（多头空/空头多）时 strategyKey 缺省配逆势键 wait1Sell，与直连映射一致。"""
+    if strategyKey is None:
+        strategyKey = "wait2Sell" if planDirection in ("空头空", "多头多") else "wait1Sell"
     return {"direction": direction, "signalTime": signalTime, "entryPrice": entryPrice,
             "stopRef": stopRef, "beStop": beStop, "planDirection": planDirection,
-            "strategyKey": "wait2Sell", "lots": lots,
+            "strategyKey": strategyKey, "lots": lots,
             "beDone": False, "halfDone": False, "exits": [], "pendingExit": None,
             "state": "open"}
 
@@ -792,7 +796,7 @@ class TestExitModes(unittest.TestCase):
     def make(self, **kw):
         pos = make_pos(**{k: v for k, v in kw.items()
                           if k in ("direction", "signalTime", "entryPrice", "stopRef",
-                                   "beStop", "planDirection", "lots")})
+                                   "beStop", "planDirection", "lots", "strategyKey")})
         # _fill_pending 新增字段子集（advance_exit_decision 消费）
         pos["lotsLeft"] = float(pos["lots"])
         pos["trailMark"] = pos["signalTime"]

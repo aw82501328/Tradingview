@@ -1,12 +1,12 @@
 ---
 name: mark-entry
-description: Mark entry signals (进出场) on the TradingView Desktop chart via CDP. Reads the trading-plan result (plan_<symbol>.json) to determine each timeframe's current entry state, maps it to one of 12 entry strategies (1:1 with the 2026-09-25 plan-strategy texts + 2026-10-09 weak-tier origin split: wait2Sell/wait2Buy/wait1Sell/wait1Buy/waitBuy/waitSell/wait3Buy/wait3Sell/waitLike2Buy/waitLike2Sell/wait2BuyBear/wait2SellBear), validates that strategy's entry conditions (enough strokes / breaking previous low-high / MACD zero axis / weaker momentum leaving ZhongShu / lower-timeframe divergence / near S/R level), and marks buy/sell arrows on the divergence timeframe. Long = up red arrow, short = down green arrow. Also simulates exits per position (stop = intrabar break of the direction-aware S/R reference; TP1 breakeven after divergence-TF stroke completes; TP2 half-close after detection-TF stroke completes; TP3 full close on detection-TF breaking prior low/high) with same-direction mutual exclusion (no new same-direction entry while one is open; long/short independent), marking exits as yellow arrows (down = close long, up = close short, title EXIT_<divergence TF>).
+description: Mark entry signals (进出场) on the TradingView Desktop chart via CDP. Since 2026-10-16 consumes chan-core buy/sell points directly (same source as mark-buy-sell marks; no longer reads plan_<symbol>.json) — each detection timeframe takes the latest buy-side and sell-side anchors on recent stroke endpoints, maps point type + strong flag to one of 12 entry strategies via pointStrategyOf (1买→wait1Buy direct entry, 2买/类2买 strong→wait2Buy / weak→wait2BuyBear, 3买→wait3Buy, 类3/4族→waitBuy; sell side mirrored), validates that strategy's entry conditions (enough strokes / breaking previous low-high / MACD zero axis / weaker momentum leaving ZhongShu / lower-timeframe divergence / near S/R level), and marks buy/sell arrows on the divergence timeframe. Long = up red arrow, short = down green arrow. Optional 震荡 gate (--range-res, off by default, from trading-plan computeRegime) and 顺势 filter (--trend-res, off by default). Also simulates exits per position (stop = intrabar break of the direction-aware S/R reference; TP1 breakeven after divergence-TF stroke completes; TP2 half-close after detection-TF stroke completes; TP3 full close on detection-TF breaking prior low/high) with same-direction mutual exclusion, marking exits as yellow arrows (title EXIT_<divergence TF>).
 disable-model-invocation: true
 ---
 
 # 进出场标记
 
-通过 CDP 连接 TradingView Desktop，**读取「交易计划」（trading-plan）落盘的结果文件**判定各周期当前进场状态，映射到 **10 种进场策略**（2026-09-25 起计划文案 1:1 拆分），校验该策略的进场条件后，在「背驰级别」（更低周期）标记进场箭头：
+通过 CDP 连接 TradingView Desktop，**直接用 chan-core 计算各周期买卖点**（`findBuyPoints`/`findSellPoints`，与图上 mark-buy-sell 标记同源；2026-10-16 起不再读取交易计划落盘文件），买卖双侧各自取**最近笔端点锚**，按点类型+强弱直映射到 **12 种进场策略**（`pointStrategyOf`），校验该策略的进场条件后，在「背驰级别」（更低周期）标记进场箭头：
 
 - **买点（多头）** → 向上**红色**箭头（`arrow_up`）
 - **卖点（空头）** → 向下**绿色**箭头（`arrow_down`）
@@ -16,16 +16,15 @@ disable-model-invocation: true
 - **终局出场**（支阻位止损 / 保本止损 / 全平）→ 黄 `↓/↑`
 - **平一半** → 黄 `↓/↑`（保本/仍持仓仅落盘，不画图）
 
-> **模块分类**：交易策略 · **缠论V1**（计划→进出场为同一策略的两步；分层与新增策略接入见 `.cursor/skills/README.md`）。
+> **模块分类**：交易策略 · **缠论V1**（进出场直接消费买卖点；分层与新增策略接入见 `.cursor/skills/README.md`）。
 >
-> **算法来源**：背驰判定复用 `chan-core` 的 `isBiDiverge`，中枢复用 `buildZSByUpper`（唯一算法源）；**进场状态判定不自行实现**，直接读取 `trading-plan` 落盘的 `.cursor/cache/plan_<品种>.json`（各周期 `direction/strategy`）。
+> **算法来源**：买卖点识别复用 `chan-core` 的 `findBuyPoints`/`findSellPoints`（唯一算法源，与 mark-buy-sell 同源），背驰判定复用 `isBiDiverge`，中枢复用 `buildZSByUpper`；**交易计划文案中转已取消**（2026-10-16）——买卖点 → 进场键在本脚本 `pointStrategyOf` 直映射；震荡 regime（`computeRegime`）与顺势方向（`trendStateOf`）复用 `trading-plan` 模块导出（默认均关闭）。
 >
-> **强制依赖三个前置数据**：
+> **强制依赖两个前置数据**：
 > 1. **画笔**（chan-bi）落盘的笔数据 `.cursor/cache/bis_<品种>.json`；
-> 2. **支阻互换位**（mark-sr-flip）落盘的支阻位数据 `.cursor/cache/srflip_<品种>.json`（读取其 `merged` 全量候选池支阻位）；
-> 3. **交易计划**（trading-plan）落盘的计划数据 `.cursor/cache/plan_<品种>.json`（读取各周期 `strategy` 判定进场状态）。
+> 2. **支阻互换位**（mark-sr-flip）落盘的支阻位数据 `.cursor/cache/srflip_<品种>.json`（读取其 `merged` 全量候选池支阻位）。
 >
-> 任一数据文件缺失、或品种不匹配，脚本会**报错退出**。**运行依赖链**（依序执行）：**画笔（chan-bi）→ 标记买卖点（mark-buy-sell）→ 支阻互换位（mark-sr-flip）→ 交易计划（trading-plan）→ 本脚本**。
+> 任一数据文件缺失、或品种不匹配，脚本会**报错退出**。**运行依赖链**（依序执行）：**画笔（chan-bi）→ 支阻互换位（mark-sr-flip）→ 本脚本**（2026-10-16 起不再依赖 trading-plan）。
 
 ## 前置条件
 
@@ -33,9 +32,7 @@ disable-model-invocation: true
 2. 已打开至少一张图表，且图表停留在**要标记的品种**上（脚本自动读取当前品种和周期）
 3. chrome-remote-interface 已安装（在 `server-cdp/node_modules/`）
 4. **已运行「画笔」**（chan-bi），生成笔数据文件
-5. **已运行「标记买卖点」**（mark-buy-sell），标记历史买卖点
-6. **已运行「支阻互换位」**（mark-sr-flip），生成支阻位数据文件
-7. **已运行「交易计划」**（trading-plan），生成计划数据文件
+5. **已运行「支阻互换位」**（mark-sr-flip），生成支阻位数据文件
 
 ## 使用方式
 
@@ -50,7 +47,7 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --dry --from=2026-06-30
 node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 ```
 
-> `--from` 起始日期应与画笔/支阻位/交易计划时一致。
+> `--from` 起始日期应与画笔/支阻位一致。
 > 小周期数据窗口与画笔同源：参数中心「基础组件 → 画笔」的「小周期绘制窗口」（`windowDays3/15/30S`），
 > 手动调用时若参数中心有自定义值应加 `--chan-cfg=` 透传（导出方式见 chan-bi SKILL）。
 
@@ -58,7 +55,7 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `--from=YYYY-MM-DD` | **必填**：起始日期，与画笔/支阻位/交易计划一致 | 无（缺少时报错退出） |
+| `--from=YYYY-MM-DD` | **必填**：起始日期，与画笔/支阻位一致 | 无（缺少时报错退出） |
 | `--periods=...` | 检测周期列表（逗号分隔，从大到小） | `240,60,15,3` |
 | `--with-30s` | 启用 30 秒级别：ALL_RES 追加 30S（需先用 `chan-bi --with-30s` 落盘 30S 笔数据），3 分钟状态可用 30S 背驰产生进场信号，箭头画在 30S 级别；30S 数据只取最近 3 天。检测周期列表本身**不变**（30S 无更低级别，不作检测周期） | 关闭 |
 | `--near=K` | 靠近支阻位阈值（**绝对价差**，2026-09-13 起不乘 ATR） | `10` |
@@ -73,52 +70,55 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 | `--zs-weak-ratio=K` | 出中枢力度衰减比例（离开笔幅度 < 进入笔×K 视为变弱；WEB 参数中心同名透传） | `1.0` |
 | `--chan-cfg=<json>` | 缠论核心 CHAN_CFG 整体覆盖（WEB 参数中心透传，未知键闲置无害） | 不覆盖 |
 | `--dry` | 只计算不绘图 | 关闭 |
-| `--trend-res=R` | 顺势参考周期：`240`=4小时 / `D`=日线 / `off`=关闭。参考周期及以上不作检测周期；其方向与信号方向相反时跳过（规则见 trading-plan SPEC §5 与 WEB 参数页「交易计划」页签） | `240` |
+| `--trend-res=R` | 顺势参考周期：`240`=4小时 / `D`=日线 / `off`=关闭（默认）。参考周期及以上不作检测周期；其方向与信号方向相反时跳过（规则见 trading-plan SPEC §5 与 WEB 参数页「交易计划」页签） | `off` |
+| `--range-res=R` | 震荡判定参考周期：`240`/`D`/`off`（默认）。参考周期及以上不作检测周期（只作锚）；参考周期 regime 震荡/笔不足 → 更低周期观望（trading-plan `computeRegime`，与引擎震荡闸同口径） | `off` |
 | `--debug` | 打印背驰、条件判定等调试信息 | 关闭 |
 
-## 顺势参考周期过滤（2026-09-15 起，默认开启）
+## 顺势参考周期过滤（--trend-res，默认关闭）
 
-低周期开单跟随参考周期方向（默认 4 小时，`--trend-res` 可配 / WEB 参数中心 plan 模块 `trendRes`）：
+低周期开单跟随参考周期方向（`--trend-res` 可配 240/D / WEB 参数中心 plan 模块 `trendRes`；默认关闭）：
 
 - **方向判定**归属 trading-plan 模块（`trendStateOf`），规则：最近买卖点定方向——1买/1卖须端点后出现**强分型**（右肩收盘穿左肩开盘，只比实体、不含影线）才确立；**非1类点出现即确立**；确立后**收盘价**破该点端点价 → 反向延续并**闩锁**到下一个买卖点；无点/强分型未现 → 回退最近一笔方向。详见 trading-plan SKILL 的 SPEC §5。
 - **参考周期及以上不再作为检测周期**（只作方向锚，结构性剔除）；`--trend-res=D` 时 240 恢复检测。
 - 命中信号附 `trendDirection`/`trendReason`（如 `多（4小时2买）`），回测信号列表方向列同口径显示。
-- `--trend-res=off` 关闭后行为与旧版一致（不过滤、参考周期照常检测）。
+- `--trend-res=off`（默认）时不过滤、参考周期照常检测。
+
+## 震荡参考周期闸（--range-res，默认关闭）
+
+参考周期（240/D）判震荡（trading-plan `computeRegime`：横盘窄带 A 支 / 未离开中枢且价在箱内 B 支）→ 更低检测周期全部观望；参考周期笔 <2 同样观望；参考周期及以上只作锚不作检测周期。默认关闭 = 无震荡闸，各周期直接走买卖点。与回测/实盘引擎同口径。
 
 ## 起始日期规则（每次标记必做，且必须输入日期）
 
-**用户说「标记进出场」时，必须先询问「起始日期」（格式 `YYYY-MM-DD`，与画笔/支阻位/交易计划一致），得到日期后再执行标记。不得在未获得日期的情况下直接运行脚本。**
+**用户说「标记进出场」时，必须先询问「起始日期」（格式 `YYYY-MM-DD`，与画笔/支阻位一致），得到日期后再执行标记。不得在未获得日期的情况下直接运行脚本。**
 
 ```
-① 询问：本次标记进出场从哪个日期开始？（格式 YYYY-MM-DD，与画笔/支阻位/交易计划一致）
+① 询问：本次标记进出场从哪个日期开始？（格式 YYYY-MM-DD，与画笔/支阻位一致）
 ② 用户给出日期 → 运行 node mark_entry.js --from=YYYY-MM-DD
 ③ 用户未给出明确日期 → 再次询问，直到获得日期后才执行
 ```
 
-## 进场状态 → 10 种策略映射
+## 买卖点 → 12 种进场策略直映射（2026-10-16 直连；pointStrategyOf）
 
-对每个检测周期 X（240/60/15/3），从交易计划结果 `plan_<品种>.json` 取该周期 `strategy`，映射到进场策略：
+对每个检测周期 X（240/60/15/3），买卖双侧各自取**最近笔端点锚**（从最后一笔终点逐笔向前扫描第一个落在笔端点上的买族/卖族点，容差：时间 1 根K / 价格 max(ATR×0.2, 0.05)），按点类型+强弱直映射进场策略（**不再经交易计划文案中转**）：
 
-| trading-plan strategy（plan 结果） | 进场策略（key） | 方向 | 箭头 |
+| 最近买卖点锚 | 进场策略（key） | 方向 | 箭头 |
 |------|------|------|------|
-| 等待反弹后做2卖（状态=1卖） | 等待反弹后做2卖（wait2Sell） | 空头 | 向下绿箭头 |
-| 等待回调后做2买（状态=1买） | 等待回调后做2买（wait2Buy） | 多头 | 向上红箭头 |
-| 等待高点附近的一卖（状态=2/3买+其他） | 等待一卖（wait1Sell） | 空头 | 向下绿箭头 |
-| 等待低点附近的一买（状态=2/3卖+其他） | 等待一买（wait1Buy） | 多头 | 向上红箭头 |
-| 等待回调后的新买点（状态=3买/类3买+过左高不背驰，开关开） | 等待回调后买点（waitBuy） | 多头 | 向上红箭头 |
-| 等待反弹后的新卖点（状态=3卖/类3卖+过左低不背驰，开关开） | 等待反弹后卖点（waitSell） | 空头 | 向下绿箭头 |
-| 等待回调后的3买点（状态=2买/类2买+过左高不背驰） | 等待回调后3买点（wait3Buy） | 多头 | 向上红箭头 |
-| 等待回调后的类2买点（状态=2买+前高附近/回到2买点） | 等待回调后类2买点（waitLike2Buy） | 多头 | 向上红箭头 |
-| 等待低点附近的2买（状态=2买/类2买+未过原始点，2026-10-09） | 等待低点附近的2买（wait2BuyBear，抬低回调） | 多头 | 向上红箭头 |
-| 等待高点附近的2卖（状态=2卖/类2卖+未过原始底，2026-10-09） | 等待高点附近的2卖（wait2SellBear，压低反弹） | 空头 | 向下绿箭头 |
-| 等待反弹后的3卖点（状态=2卖/类2卖+过左低不背驰） | 等待反弹后3卖点（wait3Sell） | 空头 | 向下绿箭头 |
-| 等待反弹后的类2卖点（状态=2卖+前低附近/回到2卖点） | 等待反弹后类2卖点（waitLike2Sell） | 空头 | 向下绿箭头 |
-| 震荡/数据不足/趋势中无匹配买卖点（方向=观望） | 不触发 | — | — |
+| 1买（形成中与已确认统一，直接档） | 等待一买（wait1Buy） | 多头 | 向上红箭头 |
+| 1卖（形成中与已确认统一，直接档） | 等待一卖（wait1Sell） | 空头 | 向下绿箭头 |
+| 2买 / 类2买 + strong=true | 等待回调后做2买（wait2Buy） | 多头 | 向上红箭头 |
+| 2买 / 类2买 + strong=false/null（未定型弱先行） | 等待低点附近的2买（wait2BuyBear，抬低回调） | 多头 | 向上红箭头 |
+| 2卖 / 类2卖 + strong=true | 等待反弹后做2卖（wait2Sell） | 空头 | 向下绿箭头 |
+| 2卖 / 类2卖 + strong=false/null | 等待高点附近的2卖（wait2SellBear，压低反弹） | 空头 | 向下绿箭头 |
+| 3买 | 等待回调后3买点（wait3Buy） | 多头 | 向上红箭头 |
+| 3卖 | 等待反弹后3卖点（wait3Sell） | 空头 | 向下绿箭头 |
+| 类3买 / 4买 / 类4买 | 等待回调后买点（waitBuy，新买点） | 多头 | 向上红箭头 |
+| 类3卖 / 4卖 / 类4卖 | 等待反弹后卖点（waitSell，新卖点） | 空头 | 向下绿箭头 |
+| 最近笔端点均无买卖点锚 | 不触发（双侧无锚） | — | — |
 
-> 2026-09-25 拆分：此前 3买点/3卖点/类2买点/类2卖点 4 条文案并入 `waitBuy`/`waitSell`，现 1:1 拆为独立键（`wait3Buy`/`wait3Sell`/`waitLike2Buy`/`waitLike2Sell`），便于记录溯源；4 个新键与 `waitBuy`/`waitSell` 同校验（无专属条件），`waitBuy`/`waitSell` 从此仅指「新买点/新卖点」（3类点强档）。进场校验逻辑不变。
-> 2026-10-09 弱档原始点分流：2买/类2买（2卖/类2卖）弱档且点后反弹高（低）点均未过原始点（产生该点的下跌/上涨段起点）→ 档位转 空头多/等待低点附近的2买（多头空/等待高点附近的2卖），新键 `wait2BuyBear`/`wait2SellBear`，专属条件=抬低/压低（末笔不破前一同向笔终点）。
+> 2026-10-16 直连变更：①交易计划三档路由/未定型滚动翻档/跨侧兜底（如弱2买转等一卖）已删除，按点类型**同名直映射**；②1类点统一走直接档 wait1Buy/wait1Sell（此前已收笔1买→等回调做2买、仅形成中走直接档的口径废除）；③waitLike2Buy/waitLike2Sell 键保留但无映射入口（eval 比对兼容）。
+> 买卖双侧并行独立评估，多空可同时持仓（2026-10-10 口径保留）。二买族强弱=点上的 `strong` 字段（首段上涨/下跌未走完按弱先行，过前高后滚动翻强——chan-core 规则，两侧一致）。
 
-## 10 种进场策略的条件（全部需同时满足）
+## 12 种进场策略的条件（全部需同时满足）
 
 **公共条件**（所有策略）：
 
@@ -134,7 +134,8 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 | 等待回调后做2买 | MACD 上0轴后回调不破0轴（当前 DIF>0）+ 上涨段过前高 |
 | 等待一卖 | 够笔且过高点（最后一笔 up 且突破前高）+ 出中枢的力度变弱 |
 | 等待一买 | 够笔且过低点（最后一笔 down 且跌破前低）+ 出中枢的力度变弱 |
-| 等待回调后买点 / 等待反弹后卖点 / 等待回调后3买点 / 等待反弹后3卖点 / 等待回调后类2买点 / 等待反弹后类2卖点 | （仅公共条件） |
+| 等待低点附近的2买 / 等待高点附近的2卖 | 抬低/压低（末笔不破/不过前一同向笔终点） |
+| 等待回调后买点 / 等待反弹后卖点 / 等待回调后3买点 / 等待反弹后3卖点 | （仅公共条件） |
 
 **关键量定义**：
 
@@ -155,12 +156,12 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 | 顺序 | 事件 | 触发条件 | 动作 |
 |------|------|----------|------|
 | 1 | **保本 breakeven** | 背驰周期**够笔**：进场后首笔有利方向笔（short→down / long→up）完成 | 止损位上移至**保本止损位 beStop**（仅落盘，不画图） |
-| 2 | **平一半 half** | **仅顺势**（计划 direction ∈ {多头多, 空头空}）：检测周期首个有利方向、**合并后 ≥5 根K且有成笔预期**的形成段 | 平一半（下一开盘成交），剩余半仓止损移至 beStop，黄 `↓/↑` |
-| 3 | **全平 close** | 顺势：检测周期**有利方向笔破前高/前低**；逆势（多头空/空头多）：检测周期首个有利方向形成段（合并后 ≥5 根K成笔预期） | 全平终局（下一开盘成交），黄 `↓/↑` |
+| 2 | **平一半 half** | 检测周期首个有利方向、**合并后 ≥5 根K且有成笔预期**的形成段 | 平一半（下一开盘成交），剩余半仓止损移至 beStop，黄 `↓/↑` |
+| 3 | **全平 close** | 检测周期**有利方向笔破前高/前低**（确认口径）；或当根收盘K极值破前一同向笔端点（预期口径，2026-10-10 起不分顺势逆势） | 全平终局（下一开盘成交），黄 `↓/↑` |
 | 4 | **止损 stopSr** | 背驰级别K线盘中破坏止损位（short `high>` 位 / long `low<` 位；跳空按开盘价成交） | 全平终局，黄 `↓/↑` |
 | — | **保本止损 stopBe** | 保本触发后盘中破坏 **beStop**（跳空按开盘价成交） | 全平终局，黄 `↓/↑` |
 
-- **顺势 / 逆势**：**顺势** = 计划方向 ∈ {多头多, 空头空}；**逆势** = {多头空, 空头多}。顺势阶梯完整（保本 → 半平 → 破前高/前低全平）；**逆势没有半平**——「形成段 ≥5 根K」一到就全平快速离场。
+- **顺势 / 逆势**（出场阶梯分支用，2026-10-16 起按 strategyKey 判定）：**顺势** = wait2Buy/waitBuy/wait3Buy 及卖侧镜像 wait2Sell/waitSell/wait3Sell；**逆势** = wait1Buy/wait1Sell（一买卖直接档）与 wait2BuyBear/wait2SellBear（弱二买卖）。原「计划方向 ∈ {多头多, 空头空}」口径随计划策略行取消。
 - **止损位**（`stopRefOf`，方向感知）：short 取进场价**上方**最近支阻位 + 有效止损滑点、long 取**下方**最近 − 有效止损滑点；信号自带 `nearSr` 已在正确侧则直接沿用（± 有效滑点）。**无正确侧位 → 兜底 = 进场价 ± 有效兜底滑点**（止损位永不为 null，不再有「不设止损」仓位）。**有效滑点 = 固定值 + ATR系数 × ATR(14, 背驰周期 markRes)**（系数默认 0=关闭，WEB 参数中心各滑点行内配置）。
 - **保本止损位 beStop** = 进场K线极值 ± 有效保本滑点（short: high+ / long: low−；ATR 分量同上）。
 - **合并后 ≥5 根K成笔预期**：检测周期形成段自段起点合并块起 ≥5 块（chan_core `isValid` gap≥4 同口径），触发 bar = 计数首次达 5 的已收盘K线、成交 = 下一开盘。已知近似差异：形成段达 5 后被最终笔结构吸收时，py 引擎当下已触发、JS hindsight 不触发。
@@ -183,7 +184,7 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 
 每次标记（含 `--dry`）都会把各周期信号写入 **`.cursor/cache/entry_<品种>.json`**：
 顶层含 `nearAtr`、`lots`（手数）、`slipStop`/`slipFallback`/`slipBe`（三个滑点参数，供复现）及 `slipStopAtrK`/`slipFallbackAtrK`/`slipBeAtrK`（滑点 ATR 系数）；
-`periods` 按**背驰级别**聚合，字段：`periodX` 状态所在周期、`time` 背驰时间、`price` 背驰点价格、`direction`（`long` 做多 / `short` 做空）、`strategyKey`（策略标识）、`nearSr` 靠近的支阻位价格、`planDirection`（该周期计划方向，顺势/逆势判定用）、`color` 箭头颜色；
+`periods` 按**背驰级别**聚合，字段：`periodX` 状态所在周期、`time` 背驰时间、`price` 背驰点价格、`direction`（`long` 做多 / `short` 做空）、`strategyKey`（策略标识）、`nearSr` 靠近的支阻位价格、`pointType`/`pointStrong`（进场锚买卖点类型与2族强弱，2026-10-16 直连后取代 planDirection）、`color` 箭头颜色；
 出场相关新增字段：`stopRef` 止损位（支阻位±滑点或兜底，永不为 null）、`beStop` 保本止损位（进场K线极值±保本滑点）、`state`（`closed` 已终局 / `open` 仍持仓）、`exits` 出场事件列表 `[{type, time, price}]`（type：`breakeven` 保本 / `half` 平一半 / `close` 全平 / `stopSr` 支阻位止损 / `stopBe` 保本止损 / `stillOpen` 仍持仓）、互斥过滤的信号带 `suppressed: true` + `suppressedBy`（占用仓位的信号时间）。
 
 ## 常见问题排查
@@ -194,17 +195,16 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 | 未找到页面 | 图表标签未打开 | 打开一张图表即可 |
 | **报错「未找到笔数据文件」** | 未先运行「画笔」SKILL（chan-bi） | 先画笔，再运行本脚本 |
 | **报错「未找到支阻位数据文件」** | 未先运行「支阻互换位」SKILL（mark-sr-flip） | 先标记支阻位，再运行本脚本 |
-| **报错「未找到交易计划数据文件」** | 未先运行「交易计划」SKILL（trading-plan） | 先运行交易计划，再运行本脚本 |
-| 某周期「交易计划无进场状态」 | 该周期为震荡/数据不足/趋势中无匹配买卖点 | 运行交易计划查看该周期状态 |
+| 某周期「最近笔端点无买卖点锚」 | 该周期最近笔端点上没有买族/卖族买卖点 | 运行「标记买卖点」查看该周期买卖点分布；`--debug` 查看锚匹配过程 |
 | 某周期「条件未满足」 | 策略专属条件（够笔/破前底过前高/MACD0轴/出中枢力度变弱/以下级别背驰/支阻位附近）未全部满足 | 用 `--debug` 查看各条件判定 |
 | **切到小周期后早期箭头错位/漂移** | TradingView 小周期默认只加载最近若干根K线，早期箭头被吸附到数据边缘 | 切到该周期后**滚动到图表最左**加载完整历史，箭头即恢复正确位置 |
 
 ## 注意事项
 
 - 脚本自动读取**当前图表**的品种和周期，切换品种后需重新运行。
-- **必须先依次运行「画笔」→「标记买卖点」→「支阻互换位」→「交易计划」**，本脚本才能标记；否则报错退出。
-- 本 SKILL 只负责进出场箭头标记，**不画笔、不清除笔/中枢/买卖点/支阻位/交易计划**。
-- 进场信号 = 「状态映射策略」+「该策略全部进场条件」共振，缺一不可；状态为观望（震荡/无匹配）时不产生任何信号。
+- **必须先依次运行「画笔」→「支阻互换位」**，本脚本才能标记；否则报错退出（买卖点由本脚本用 chan-core 现算，不读买卖点/计划落盘文件）。
+- 本 SKILL 只负责进出场箭头标记，**不画笔、不清除笔/中枢/买卖点/支阻位标记**。
+- 进场信号 = 「买卖点锚映射策略」+「该策略全部进场条件」共振，缺一不可；双侧无锚时不产生任何信号。
 - **箭头锚点用K线索引存储**：TradingView 切周期时会重置为「默认加载最近K线」，小周期（3/15分钟）默认范围短，早期箭头切周期后可能漂移；这是平台限制，滚动到图表最左加载完整历史即可恢复（画笔的笔同样存在此现象，但箭头是单点所以更明显）。
 
 

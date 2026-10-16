@@ -200,8 +200,9 @@ class TestQueryFold(unittest.TestCase):
                       "entryPrice": 100.2, "direction": "short"})
         jr.reject(1699999000, "near_sr_fail", "60", 1699990000, "wait2Sell",
                   price=100.0, srPrice=111.0, dist=11.0, near=10.0, markRes="15")
-        jr.state(1699999000, "60", {"planDir": "空头空", "planStrategy": "等待反弹后做2卖",
-                                    "planReason": "测试", "trendDir": "short",
+        jr.state(1699999000, "60", {"rangeGate": False, "rangeReason": "",
+                                    "buyPt": "1买", "sellPt": "2卖",
+                                    "trendDir": "short",
                                     "trendReason": "", "segStart": 1699990000,
                                     "segType": "up", "segForming": True,
                                     "segEnd": 1699999000, "segEndPrice": 100.0})
@@ -224,7 +225,7 @@ class TestQueryFold(unittest.TestCase):
         self.assertEqual(len(j.fills), 1)
         self.assertEqual(len(j.rejects), 1)   # 坏行被容忍
         r = j.state_at("60", 1700000000)
-        self.assertEqual(r["planDir"], "空头空")
+        self.assertEqual(r["buyPt"], "1买")
         line = bt_query.fmt_reject(j.rejects[0])
         self.assertIn("不在支阻位附近", line)
         self.assertIn("near 10", line)
@@ -236,7 +237,7 @@ class TestQueryFold(unittest.TestCase):
             bt_query.show_time(j, 1700000000, 1.0)
         out = buf.getvalue()
         self.assertIn("信号 id=1", out)
-        self.assertIn("空头空", out)
+        self.assertIn("买锚 1买", out)
 
 
 class TestRetention(unittest.TestCase):

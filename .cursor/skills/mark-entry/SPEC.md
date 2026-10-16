@@ -1,8 +1,8 @@
 # 标记进出场 mark-entry 规格（SPEC）
 
-> 文档用途：描述「标记进出场」SKILL 的功能规格——读取交易计划落盘结果判定各周期当前进场状态，映射到 10 种进场策略（2026-09-25 起计划文案 1:1 拆分），校验策略进场条件（够笔/破前底过前高/MACD 0轴/出中枢力度变弱/以下级别背驰/支阻位附近），在「背驰级别」（更低周期）标记买点（向上红箭头）/卖点（向下绿箭头）；并对每个进场模拟**出场**（止损±滑点+兜底 + 三档止盈，出场阶梯重构 2026-09-09）与**同向持仓互斥**，出场点以统一**黄色箭头**标记（多头出场 ↓ / 空头出场 ↑，title = `EXIT_<背驰级别>`，与 Web 控制台一致）。
+> 文档用途：描述「标记进出场」SKILL 的功能规格——**2026-10-16 起直接消费 chan-core 买卖点**（与图上 mark-buy-sell 标记同源，不再读取 `plan_<品种>.json`）：买卖双侧各自取最近笔端点锚，按点类型+强弱直映射（`pointStrategyOf`）到 12 种进场策略，校验策略进场条件（够笔/破前底过前高/MACD 0轴/出中枢力度变弱/以下级别背驰/支阻位附近），在「背驰级别」（更低周期）标记买点（向上红箭头）/卖点（向下绿箭头）；并对每个进场模拟**出场**（止损±滑点+兜底 + 三档止盈，出场阶梯重构 2026-09-09）与**同向持仓互斥**，出场点以统一**黄色箭头**标记（多头出场 ↓ / 空头出场 ↑，title = `EXIT_<背驰级别>`，与 Web 控制台一致）。
 > 对应脚本：`.cursor/skills/mark-entry/scripts/mark_entry.js`。
-> 算法来源：缠论算法复用 `chan-core`（唯一算法源）；**进场状态判定不自行实现**，直接读取 `trading-plan` 落盘的 `plan_<品种>.json`；「以下级别背驰」的区间套下沉判定与出场规则均与 `py_chain` 回测引擎（mark_entry.py / backtest.py）对齐。
+> 算法来源：缠论算法复用 `chan-core`（唯一算法源）；震荡 regime（`computeRegime`）/顺势方向（`trendStateOf`）复用 trading-plan 模块导出（默认均关闭）；「以下级别背驰」的区间套下沉判定与出场规则均与 `py_chain` 回测引擎（mark_entry.py / backtest.py）对齐。
 
 ## 1. 输入
 
@@ -10,7 +10,7 @@
 |----|------|------|
 | 笔数据 | `.cursor/cache/bis_<品种>.json`（chan-bi 画笔落盘） | **强制依赖**；缺文件或品种不符 → 报错退出 |
 | 支阻位数据 | `.cursor/cache/srflip_<品种>.json`（mark-sr-flip 落盘） | **强制依赖**：取 `merged` 字段（全量候选池，2026-09-12 起不合并展平）；为空 → 报错退出。merged 含密集区/黄金分割/BOLL/人工位全部来源（2026-09-13 起支持 `--manual` 人工支阻位）——本脚本消费口径不变（nearSr/止损参考位只读 `price`），全部来源自动同等参与判定 |
-| 交易计划数据 | `.cursor/cache/plan_<品种>.json`（trading-plan 落盘） | **强制依赖**：取 `periods` 字段（各周期 `direction/strategy`）；缺失/为空 → 报错退出 |
+| 买卖点 | 本脚本用 chan-core `findBuyPoints`/`findSellPoints` 现算 | 2026-10-16 直连（与 mark-buy-sell 同源；不再读取 plan 文件） |
 | K 线 | TradingView 图表实时读取 | 用于 ATR、MACD 0轴、以下级别背驰判定 |
 | 品种/当前周期 | 图表自动读取 | `chart.symbol()` / `chart.resolution()` |
 | 参数 | 命令行 | 见下表 |
@@ -19,8 +19,10 @@
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--from=YYYY-MM-DD` | 无（必填） | 起始日期，应与画笔/支阻位/交易计划一致 |
+| `--from=YYYY-MM-DD` | 无（必填） | 起始日期，应与画笔/支阻位一致 |
 | `--periods=...` | `240,60,15,3` | 检测周期（注意：默认不含日线） |
+| `--range-res=R` | off | 震荡判定参考周期（240/D/off）：参考周期 regime 震荡/笔不足 → 更低周期观望；参考周期及以上只作锚（trading-plan `computeRegime`，与引擎震荡闸同口径） |
+| `--trend-res=R` | off | 顺势参考周期（240/D/off）：参考周期及以上不作检测周期；方向与信号相反时跳过 |
 | `--near=K` | 10 | 靠近支阻位阈值（**绝对价差**，2026-09-13 起不乘 ATR；Web 工作台与回测界面同参同名同默认） |
 | `--lots=N` | 4 | 每笔进场手数（仅落盘记录；盈亏口径 = 价格差×方向×手数，JS 端不算盈亏） |
 | `--slip-stop=K` | 3 | 止损位滑点（绝对价格：正确侧支阻位外侧偏移，short +/long −） |
@@ -34,35 +36,31 @@
 
 ## 2. 信号定义
 
-**进场信号 = 交易计划状态映射策略 + 该策略进场条件全部满足**。
+**进场信号 = 买卖点锚直映射策略 + 该策略进场条件全部满足**。
 
-> 计划行口径（2026-10-08）：`plan_<品种>.json` 由 trading-plan 按**参考周期震荡闸门**生成
-> （`--range-res`，默认 4小时，与 py_chain `compute_plan` 强一致）——≥参考周期的行为
-> 「参考周期，观望（只作锚不交易）」（无策略键，不发信号）；`rangeRes` 关闭时低于 4 小时的周期不自判震荡，4 小时与日线仍自判，
-> 240/D 恢复正常策略行（此时 240 是否发信号还取决于 `--trend-res` 的结构性剔除）。
+> 震荡/顺势口径（2026-10-16）：`--range-res` 开启时参考周期 regime 震荡/笔不足 → 更低
+> 检测周期观望（`range_watch`）；参考周期及以上只作锚（`res_ge_range`）。`--trend-res`
+> 开启时逆参考周期方向的信号被跳过（`trend_filter`）。两者默认关闭，关闭时直接走买卖点。
 
-### 2.1 状态 → 策略映射（entryStrategyOf）
+### 2.1 买卖点 → 策略直映射（pointStrategyOf，2026-10-16 直连）
 
-对每个检测周期 X，读取 `plan_<品种>.json` 的 `periods[X].strategy`（trading-plan 的 `strategyOf` 输出）：
+对每个检测周期 X，买卖双侧各自取**最近笔端点锚**（`sideCandidates`：从最后一笔终点逐笔向前扫描第一个落在笔端点上的买族/卖族点，容差：时间 1 根K / 价格 max(ATR×0.2, 0.05)；双侧并行独立评估，多空可同时持仓），按点类型+strong 直映射：
 
-| plan.strategy | 策略标识 key | direction | 箭头 |
+| 最近买卖点锚 | 策略标识 key | direction | 箭头 |
 |------|------|------|------|
-| 等待反弹后做2卖 | `wait2Sell` | short | 向下绿箭头 |
-| 等待回调后做2买 | `wait2Buy` | long | 向上红箭头 |
-| 等待高点附近的一卖 | `wait1Sell` | short | 向下绿箭头 |
-| 等待低点附近的一买 | `wait1Buy` | long | 向上红箭头 |
-| 等待回调后的新买点（3类点强档，`thirdStrongTrend` 开） | `waitBuy` | long | 向上红箭头 |
-| 等待反弹后的新卖点（3类点强档） | `waitSell` | short | 向下绿箭头 |
-| 等待回调后的3买点（2买/类2买 强档） | `wait3Buy` | long | 向上红箭头 |
-| 等待回调后的类2买点（2买 中间档） | `waitLike2Buy` | long | 向上红箭头 |
-| 等待反弹后的3卖点（2卖/类2卖 强档） | `wait3Sell` | short | 向下绿箭头 |
-| 等待反弹后的类2卖点（2卖 中间档） | `waitLike2Sell` | short | 向下绿箭头 |
-| 等待低点附近的2买（2买/类2买 弱档·未过原始点，2026-10-09） | `wait2BuyBear` | long | 向上红箭头 |
-| 等待高点附近的2卖（2卖/类2卖 弱档·未过原始底，2026-10-09） | `wait2SellBear` | short | 向下绿箭头 |
-| 其他（震荡/数据不足/趋势中无匹配，方向=观望） | 无 | — | 不触发 |
+| 1买（形成中与已确认统一，直接档） | `wait1Buy` | long | 向上红箭头 |
+| 1卖（形成中与已确认统一，直接档） | `wait1Sell` | short | 向下绿箭头 |
+| 2买 / 类2买 + strong=true | `wait2Buy` | long | 向上红箭头 |
+| 2买 / 类2买 + strong=false/null（未定型弱先行） | `wait2BuyBear`（抬低回调） | long | 向上红箭头 |
+| 2卖 / 类2卖 + strong=true | `wait2Sell` | short | 向下绿箭头 |
+| 2卖 / 类2卖 + strong=false/null | `wait2SellBear`（压低反弹） | short | 向下绿箭头 |
+| 3买 | `wait3Buy` | long | 向上红箭头 |
+| 3卖 | `wait3Sell` | short | 向下绿箭头 |
+| 类3买 / 4买 / 类4买 | `waitBuy`（新买点） | long | 向上红箭头 |
+| 类3卖 / 4卖 / 类4卖 | `waitSell`（新卖点） | short | 向下绿箭头 |
+| 双侧均无锚 | 无 | — | 不触发（no_point） |
 
-> 2026-09-25 键拆分：此前 3买点/3卖点/类2买点/类2卖点 4 条文案并入 `waitBuy`/`waitSell`，现 1:1 拆为独立键（`wait3Buy`/`wait3Sell`/`waitLike2Buy`/`waitLike2Sell`）便于记录溯源；4 个新键与 `waitBuy`/`waitSell` 同校验（够笔+以下级别背驰+支阻位附近，无专属条件），`waitBuy`/`waitSell` 从此仅指「新买点/新卖点」。进场校验逻辑不变（2026-09-24 三档文案扩展的后续调整）。
-> 2026-10-09 弱档原始点分流：2买/类2买（2卖/类2卖）弱档且点后反弹高（低）点均未过原始点（原始点定义见 trading-plan SPEC §2.3）时，档位由 多头空/等一卖（空头多/等一买）转 空头多/等待低点附近的2买（多头空/等待高点附近的2卖），新键 `wait2BuyBear`/`wait2SellBear` 共 12 键。
+> 2026-10-16 直连变更：交易计划三档路由/未定型滚动翻档/跨侧兜底（如弱2买转等一卖）已删除，按点类型同名直映射；1类点统一走直接档 wait1Buy/wait1Sell（原「已收笔1买→等回调做2买」口径废除）；`waitLike2Buy`/`waitLike2Sell` 键保留但无映射入口（eval 比对兼容）。二买族强弱=chan-core 点上的 `strong` 字段（首段未走完按弱先行，过前高后滚动翻强）。
 
 ### 2.2 进场条件（evaluateEntry，全部同时满足）
 
@@ -112,7 +110,7 @@
 | 止损 `stopSr` | 背驰级别（markRes）K线**盘中**破坏止损位：short `high > 位` / long `low < 位`（跳空按开盘价成交）。**最大止损兜底**（2026-10-09，成对 py 引擎）：止损类通道 latch 后或有效止损位宽于 maxLoss 时，盘中破坏 maxLoss（进场价±有效兜底滑点）→ 全平剩余手数（记 `stopSr`，永不 latch） | 按比例平仓（默认 100% 终局；下一开盘成交） | 黄 `↓/↑` |
 | 保本 `breakeven` | **背驰周期够笔**：markRes 首个 `endTime > 进场时间`、type 为有利方向（short→down / long→up）的笔完成（随保本止损开关） | 止损位上移至**保本止损位 beStop** | 仅落盘 |
 | 背驰周期够笔 `halfMr`（默认关） | markRes 首个 `endTime > 进场时间`、type 为有利方向的笔完成（**与 TP1 保本同事件源，不限顺势**） | 按比例平仓（默认 50%；下一开盘成交），剩余止损移至 beStop | 黄 `↓/↑` |
-| 检测周期够笔 `half`（原「够笔止盈」） | **仅顺势**（plan.direction ∈ {多头多, 空头空}）：periodX 首个有利方向、**合并后 ≥5 根K且有成笔预期**的形成段（`favSeg5Time`） | 按比例平仓（默认 50%；下一开盘成交），剩余止损移至 beStop（不要求保本先触发） | 黄 `↓/↑` |
+| 检测周期够笔 `half`（原「够笔止盈」） | periodX 首个有利方向、**合并后 ≥5 根K且有成笔预期**的形成段（`favSeg5Time`） | 按比例平仓（默认 50%；下一开盘成交），剩余止损移至 beStop（不要求保本先触发） | 黄 `↓/↑` |
 | 过高低点止盈 `close` | **顺势**：periodX 进场后**有利方向**笔破前高/前低（`findBiEvent(..., fav, breakPrev)`）；**逆势**（多头空/空头多）：periodX 首个有利方向形成段（合并后 ≥5 根K成笔预期） | 按比例平仓（默认 100% 终局；下一开盘成交） | 黄 `↓/↑` |
 | 保本止损 `stopBe` | 保本触发后盘中破坏 **beStop**（short `high > beStop` / long `low < beStop`） | 按比例平仓（默认 100% 终局；跳空按开盘价成交） | 黄 `↓/↑` |
 | 跟踪止盈上移 `trailRaise` | （仅跟踪止盈启用；**门控保本 2026-10-09，成对 py 引擎**：`be`（TP1/half/halfMr 置保本位）之前不执行，门控开启当拍水位一次性推进到当拍——保本前的参照点不追溯）信号流出现**同向 3类买卖点**（`wait3Buy/waitBuy/wait3Sell/waitSell`，含被互斥抑制的）→ 止损一次性上移至 点价∓跟踪止盈滑点（只上移；水位只进不退） | 状态迁移（下一拍生效） | 仅落盘 |
@@ -127,7 +125,7 @@
 
 **合并后 ≥5 根K且有成笔预期**（TP2 条件；2026-10-10 起逆势 TP3 改破前一同向笔端点参照，不再用此门槛）：检测周期形成段自段起点合并块起 **≥5 块**（chan_core `isValid` 的 gap≥4 成笔门槛同口径）。JS 用 `favSeg5Time`（`mergeStep` 回放记录每块诞生时间，触发 = 段内第 5 块诞生 bar，成交 = 其后第一根 markRes bar 开盘）；py 引擎用 `enough_fav_bars`（增量 `_merged_times` 计数，锚点=末笔延伸终点块与进场块较晚者）。**已知近似差异**：形成段达 5 后若被最终笔结构吸收（未成笔），py 引擎当下已触发、JS hindsight 不触发。
 
-**顺势 / 逆势**（决定半平与全平的分支）：**顺势** = 计划方向 ∈ {多头多, 空头空}（计划结构方向 = 操作方向）；**逆势** = {多头空, 空头多}。计划方向缺失时按 `strategyKey` 兜底（`wait2Buy`/`waitBuy`/`wait3Buy`/`waitLike2Buy` 及卖侧对称 → 顺势，`wait1Buy`/`wait1Sell`/`wait2BuyBear`/`wait2SellBear` → 逆势）。**顺势**阶梯完整——保本 → 半平 → 破前高/前低全平；**逆势**：过高低点止盈与顺势同口径（破前一同向笔端点，2026-10-10 与 py 引擎同步；旧「形成段 ≥5 根 K 快速离场」废除）。JS 视图已知漂移：py 引擎 2026-10-10 起够笔（half）不限顺势，JS 半平仍仅顺势。
+**顺势 / 逆势**（出场分支标签）：2026-10-16 起按 `strategyKey` 判定（原「计划方向」口径随计划策略行取消）——**顺势** = `wait2Buy`/`waitBuy`/`wait3Buy`/`waitLike2Buy` 及卖侧对称；**逆势** = `wait1Buy`/`wait1Sell`（一买卖直接档）与 `wait2BuyBear`/`wait2SellBear`（弱二买卖）。过高低点止盈不分顺势逆势（破前一同向笔端点，2026-10-10 与 py 引擎同步；旧「形成段 ≥5 根 K 快速离场」废除）。
 
 **结算：手数与盈亏**：手数 `--lots` 默认 4（JS 端仅落盘记录，不算盈亏）。平仓盈亏按部分平仓事件逐笔手数结算 + 剩余手数按终局价（默认比例下 = 原 0.5×半平价 + 0.5×终局价 加权口径）；未触发部分平仓则 =（终局价 − 进场价）× 方向 × 手数。已在 Web 控制台显示。
 
@@ -147,20 +145,22 @@
 
 ### 3.1 强制依赖数据
 
-- 读取 `bis_<品种>.json`（笔数据）、`srflip_<品种>.json`（支阻位 `merged` 字段）、`plan_<品种>.json`（交易计划 `periods` 字段），任一缺失/为空 → **报错退出**。
+- 读取 `bis_<品种>.json`（笔数据）、`srflip_<品种>.json`（支阻位 `merged` 字段），任一缺失/为空 → **报错退出**（2026-10-16 起不再读取 `plan_<品种>.json`，买卖点由 chan-core 现算）。
 
 ### 3.2 数据预取（periodData）
 
 - 遍历 `["D","240","60","15","3"]`（取笔数据存在的周期），逐周期 `ensureResolution` + `fetchBars`，计算 `{bis, bars, atr, macdArr}` 存入 `periodData[res]`；
-- `upperResOf(res)`：更大一级周期（240→D、60→240、15→60、3→15），供 `buildZSByUpper` 分解中枢。
+- `upperResOf(res)`：更大一级周期（240→D、60→240、15→60、3→15），供 `buildZSByUpper` 分解中枢与 `computePeriodPoints` 的 `findBuyPoints` 上级笔取数；
+- 预计算买卖点 `computePeriodPoints(periodData, ALL_RES)` → `{res: {buy, sell}}`（与 mark-buy-sell 同源）与震荡 regime（`--range-res` 开启时）。
 
 ### 3.3 逐周期判定（主循环）
 
 对每个检测周期 X（`PERIODS`）：
-1. 取 `planPeriods[X].strategy`；为空或方向=观望 → 跳过（无进场状态）；
-2. `entryStrategyOf` 映射策略；无 → 跳过；
-3. `evaluateEntry` 逐条件校验；任一不满足 → 记录原因并跳过；
-4. 命中 → 生成信号 `{periodX, time, price, direction, strategyKey, nearSr, color}`，按 `markRes`（背驰级别）聚合存入 `allEntries[markRes]`。
+1. `--trend-res`/`--range-res` 开启时的结构性剔除与 regime 观望闸（见 §2）；
+2. `sideCandidates` 取买卖双侧锚；双侧无锚 → 跳过（no_point）；
+3. `pointStrategyOf` 直映射策略；无映射 → 跳过；
+4. `evaluateEntry` 逐条件校验；任一不满足 → 记录原因并跳过；
+5. 命中 → 生成信号 `{periodX, time, price, direction, strategyKey, nearSr, pointType, pointStrong, color}`，按 `markRes`（背驰级别）聚合存入 `allEntries[markRes]`。
 
 ### 3.4 同向互斥 + 出场模拟
 
@@ -187,7 +187,7 @@
   "slipFallbackAtrK": 0,
   "slipBe": 3,
   "slipBeAtrK": 0,
-  "periods": { "15": [{ "periodX": "60", "time": 1724908800, "price": 4631.98, "direction": "short", "strategyKey": "wait2Sell", "nearSr": 4640.1, "planDirection": "空头空", "color": "#089981",
+  "periods": { "15": [{ "periodX": "60", "time": 1724908800, "price": 4631.98, "direction": "short", "strategyKey": "wait2Sell", "nearSr": 4640.1, "pointType": "2卖", "pointStrong": true, "color": "#089981",
                          "stopRef": 4643.1, "beStop": 4636.5, "state": "closed",
                          "exits": [{ "type": "breakeven", "time": 1724913000, "price": 4620.5 },
                                     { "type": "stopBe", "time": 1724918000, "price": 4636.5 }] }] }
@@ -221,9 +221,8 @@
 |------|------|
 | 笔数据文件不存在/品种不符 | 报错退出，提示先运行「画笔」 |
 | 支阻位文件不存在/`merged` 为空 | 报错退出，提示先运行「支阻互换位」 |
-| 交易计划文件不存在/品种不符/`periods` 为空 | 报错退出，提示先运行「交易计划」 |
 | 某周期无周期数据（K线读取失败） | 跳过该周期 |
-| 某周期交易计划为观望（震荡/无匹配） | 跳过该周期（无进场状态） |
+| 某周期最近笔端点无买卖点锚（双侧） | 跳过该周期（no_point，--debug 可见锚匹配过程） |
 | 某周期策略条件未满足 | 记录原因并跳过（--debug 可见） |
 | 3 分钟周期 | 默认为最小周期，无更低级别背驰 → 状态不产生进场信号；`--with-30s` 启用后可检测 30S 背驰 → 状态产生信号（箭头画在 30S 级别） |
 | 数据未覆盖起始日期 | `scrollToFirstBar` 加载完整历史（周期性重新触发，防回弹） |
@@ -246,24 +245,24 @@
 |------|------|
 | `chan-bi`（画笔） | **强制依赖**：读取其落盘笔数据 `bis_<品种>.json` |
 | `mark-sr-flip`（支阻位） | **强制依赖**：读取其落盘 `srflip_<品种>.json` 的 `merged` 字段 |
-| `trading-plan`（交易计划） | **强制依赖**：读取其落盘 `plan_<品种>.json` 的 `periods` 字段（判定各周期进场状态） |
-| `chan-core` | 复用 `calcATR`/`calcMACD`/`isBiDiverge`/`buildZSByUpper`/`fmtT`/`lowerResOf`/`intervalSecOf`/`mergeStep`（TP2/逆势TP3 的形成段合并K线计数） |
+| `chan-core` | 复用 `calcATR`/`calcMACD`/`isBiDiverge`/`buildZSByUpper`/`findBuyPoints`/`findSellPoints`/`fmtT`/`lowerResOf`/`intervalSecOf`/`mergeStep`（TP2/逆势TP3 的形成段合并K线计数）；买卖点候选与其 `mark-buy-sell` 同源 |
+| `trading-plan`（交易计划） | 模块级依赖（不读落盘文件）：`trendStateOf`（顺势过滤）/`computeRegime`（震荡闸），默认均关闭 |
 
 ## 8. 依赖链总览
 
 ```
 chan-bi（画笔）────────────→ mark-buy-sell（买卖点）
       │                            │
-      └────→ mark-sr-flip（支阻位）─┼─→ trading-plan（交易计划）→ mark-entry（进出场）
+      └────→ mark-sr-flip（支阻位）─┼─→ mark-entry（进出场，买卖点由 chan-core 现算)
                                     │
 chan-core（算法库，被以上全部复用）──┘
 ```
 
-**运行依赖链（依序执行）**：
+**运行依赖链（2026-10-16 起简化，依序执行）**：
 
 ```
-画笔（chan-bi）→ 标记买卖点（mark-buy-sell）→ 支阻互换位（mark-sr-flip）→ 交易计划（trading-plan）→ 进出场（mark-entry）
+画笔（chan-bi）→ 支阻互换位（mark-sr-flip）→ 进出场（mark-entry）
 ```
 
-- `mark-entry` 直接读取三个落盘文件：`bis_<品种>.json`（画笔）、`srflip_<品种>.json`（支阻位）、`plan_<品种>.json`（交易计划）；任一缺失 → 报错退出。
+- `mark-entry` 直接读取两个落盘文件：`bis_<品种>.json`（画笔）、`srflip_<品种>.json`（支阻位）；任一缺失 → 报错退出。买卖点由本脚本用 chan-core 现算，不再依赖 trading-plan 落盘。
 - 依赖链中前序技能执行时使用同一 `--from` 起始日期，保证各缓存数据时间范围一致。

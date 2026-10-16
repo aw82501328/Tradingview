@@ -651,20 +651,21 @@ class TestEntryFiltering(unittest.TestCase):
       - 参考周期及以上被剔出检测周期（即使无周期数据也结构性剔除）
       - trend_dir 与策略方向相反 → 不产生信号；一致 → 信号附 trend 字段
       - trend_res=""（关闭）→ 无剔除、不过滤、无 trend 字段
+    2026-10-16 起候选来源为 periodPoints 买卖点（2卖 strong→wait2Sell 空头锚）。
     """
 
-    def _entries_with(self, trend_res, trend_state, plan_direction="空头空",
-                      plan_strategy="等待反弹后做2卖"):
-        """构造 60m 检测周期一笔空头计划，收集 evaluateRealtimeEntries 输出。"""
+    def _entries_with(self, trend_res, trend_state, detect_res="60"):
+        """构造检测周期一笔空头锚（2卖 strong 挂末笔端点 → wait2Sell），收集输出。"""
         bis60 = [
             bi("up", 0, 3600, 100, 110),
             bi("down", 3600, 7200, 110, 105),
             bi("up", 7200, 10800, 105, 108),
         ]
         periodBis = {"240": bottom_fixture_bis(), "60": bis60, "15": bis60, "3": bis60}
-        periodTimes = {r: [b["startTime"], b["endTime"]] for r, b in
-                       ((r, periodBis[r][0]) for r in periodBis)}
-        plan = {"60": {"direction": plan_direction, "strategy": plan_strategy}}
+        # 末笔端点 (10800, 108.0) 上挂 2卖 strong → wait2Sell（做空）
+        points = {detect_res: {"buy": [],
+                               "sell": [{"type": "2卖", "time": 10800, "price": 108.0,
+                                         "strong": True}]}}
         with mock.patch.object(me, "realtimeLowerDiverge",
                                return_value=[{"res": "15", "segStart": 7200,
                                               "point": {"time": 9000, "price": 105.0}}]), \
@@ -674,15 +675,14 @@ class TestEntryFiltering(unittest.TestCase):
                 mock.patch.object(me, "near_zone",
                                   return_value={"sr": {"price": 105.0}}):
             sigs = me.evaluateRealtimeEntries(
-                periodBis, {}, {}, plan, [{"price": 105.0}],
+                periodBis, {}, {}, points, [{"price": 105.0}],
                 ["240", "60", "15", "3"], trend_res=trend_res,
                 trend_state=trend_state, fired=set())
         return sigs
 
     def test_anchor_period_excluded(self):
-        # 240（参考周期）被结构性剔除：即使其 plan 有策略也不出信号
-        # （fixture 的 plan 只给 60，240 无 plan 本身也跳过——这里验证剔除优先级：
-        #  detectPeriods 含 240 时输出无 240 检测周期的信号）
+        # 240（参考周期）被结构性剔除：即使其有买卖点锚也不出信号
+        # （fixture 的锚只给 60；这里验证剔除优先级：detectPeriods 含 240 时输出无 240 信号）
         sigs = self._entries_with("240", {"dir": "short", "reason": "4小时2卖", "res": "240"})
         self.assertTrue(all(s["periodX"] != "240" for s in sigs))
 
@@ -692,6 +692,10 @@ class TestEntryFiltering(unittest.TestCase):
         self.assertEqual(len(sigs), 1)
         self.assertEqual(sigs[0]["trendDirection"], "short")
         self.assertEqual(sigs[0]["trendReason"], "4小时2卖")
+        # 信号携带买卖点锚字段（2026-10-16 直连）
+        self.assertEqual(sigs[0]["pointType"], "2卖")
+        self.assertTrue(sigs[0]["pointStrong"])
+        self.assertEqual(sigs[0]["strategyKey"], "wait2Sell")
         # 参考周期判多 → 空头信号被滤
         sigs = self._entries_with("240", {"dir": "long", "reason": "4小时2买", "res": "240"})
         self.assertEqual(sigs, [])
@@ -717,7 +721,7 @@ class TestEntryFiltering(unittest.TestCase):
 
     def test_daily_anchor_keeps_240_detect(self):
         # trendRes=D：240 恢复检测（周期剔除只针对参考周期及以上）——
-        # 用 plan 含 240 验证 240 信号可产生
+        # 用锚在 240 验证 240 信号可产生
         bis60 = [
             bi("up", 0, 3600, 100, 110),
             bi("down", 3600, 7200, 110, 105),
@@ -725,7 +729,9 @@ class TestEntryFiltering(unittest.TestCase):
         ]
         periodBis = {"D": bottom_fixture_bis(), "240": bis60, "60": bis60,
                      "15": bis60, "3": bis60}
-        plan = {"240": {"direction": "空头空", "strategy": "等待反弹后做2卖"}}
+        points = {"240": {"buy": [],
+                          "sell": [{"type": "2卖", "time": 10800, "price": 108.0,
+                                    "strong": True}]}}
         with mock.patch.object(me, "realtimeLowerDiverge",
                                return_value=[{"res": "60", "segStart": 7200,
                                               "point": {"time": 9000, "price": 105.0}}]), \
@@ -735,7 +741,7 @@ class TestEntryFiltering(unittest.TestCase):
                 mock.patch.object(me, "near_zone",
                                   return_value={"sr": {"price": 105.0}}):
             sigs = me.evaluateRealtimeEntries(
-                periodBis, {}, {}, plan, [{"price": 105.0}],
+                periodBis, {}, {}, points, [{"price": 105.0}],
                 ["240", "60", "15", "3"], trend_res="D",
                 trend_state={"dir": "short", "reason": "日线2卖", "res": "D"},
                 fired=set())

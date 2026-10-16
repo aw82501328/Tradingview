@@ -2,16 +2,19 @@
 """
 进出场逻辑（Python 移植版，与 .cursor/skills/mark-entry/scripts/mark_entry.js 对齐）
 
-纯函数模块：依赖「交易计划」（trading_plan）结果判定各周期当前进场状态，
-映射到 10 种进场策略（2026-09-25 起计划文案 1:1 拆分，见 entryStrategyOf），
-校验该策略的进场条件后生成进场信号：
+纯函数模块：2026-10-16 起直接消费 chan_core 买卖点（与图上 mark-buy-sell 标记同源，
+compute_period_points）判定各周期当前进场状态——原「交易计划」文案中转已取消，
+买卖双侧各自取最近笔端点锚（_side_anchor，原 trading_plan.predictPlan.matchSide 平移），
+按 pointStrategyOf 直映射到 12 种进场策略键，校验该策略的进场条件后生成进场信号：
   - 买点（多头）= 红色向上箭头（arrow_up）
   - 卖点（空头）= 向下绿色箭头（arrow_down）
+交易计划模块只保留震荡（compute_regime → range_watch 闸）与顺势（trend_state_of →
+trend_filter 闸）两项判定，均默认关闭。
 
 信号画在「背驰级别」（更低周期）。出场规则（止损 + 滑点/兜底 + 三档止盈）的状态机由
 backtest.BacktestEngine 增量推进；本模块提供出场构件（与 mark_entry.js 对齐）：
   - stop_ref_of        方向感知止损参考位（支阻位 ± 滑点，最大止损硬上限 进场价±滑点，永不为 None）
-  - trend_following_of 顺势/逆势判定（计划 direction ∈ {多头多,空头空} 为顺势）
+  - trend_following_of 顺势/逆势判定（strategyKey ∈ 顺势键集合为顺势；计划方向已取消）
   - forming_seg_ready  检测周期形成段「合并后≥5根K成笔预期」判定（历史 TP2/逆势 TP3b
                        事件源；2026-10-10 逆势 TP3 改破前低参照后仅工具/测试用）
   - find_bi_event      笔事件查找（TP1/TP3a 事件源，返回含 startTime）
@@ -25,8 +28,9 @@ from .chan_core import (
     calcATR, calcMACD, isBiDiverge, lowerResOf, buildZSByUpper, buildZS, intervalSecOf,
     fmtT, CHAN_CFG, biMacdMetrics, _areaDurComparable,
     mergeBars, markWickBars, mergedSegmentCount, structurePeriods, pointEligibleBis,
+    findBuyPoints, findSellPoints,
 )
-from .trading_plan import TREND_RES, trend_state_of
+from .trading_plan import TREND_RES, RANGE_RES, trend_state_of
 
 # 箭头颜色：买点（多头）红色、卖点（空头）绿色
 BUY_COLOR = "#F23645"
@@ -95,7 +99,8 @@ DEFAULT_SLIP_BE_ATR_K = 0.0
 EXIT_MIN_MERGED = 5
 # 出中枢力度衰减比例：离开笔 span < 进入笔 span × ratio 即力度变弱（参数中心可调）
 ZS_EXIT_WEAK_RATIO = 1.0
-# 顺势（计划方向=多头多/空头空）判定集合；plan_direction 缺失时按 strategyKey 兜底
+# 顺势判定键集合（2026-10-16 起唯一口径：计划方向已取消，按 strategyKey 判定；
+# waitLike2Buy/waitLike2Sell 已无映射入口，保留仅为集合完整性）
 TREND_PLAN_DIRS = {"多头多", "空头空"}
 TREND_STRATEGY_KEYS = {"wait2Buy", "waitBuy", "wait3Buy", "waitLike2Buy",
                        "wait2Sell", "waitSell", "wait3Sell", "waitLike2Sell"}
@@ -558,35 +563,139 @@ def sinkChainConfirm(periodData, X, pTime, pDir):
 
 
 # ============================================================
-# 进场状态 → 策略映射（依赖交易计划 plan 结果）
+# 买卖点 → 进场策略直映射（2026-10-16 取消交易计划文案中转）
 # ============================================================
 
+# 买/卖点族（与原 trading_plan.predictPlan 双侧锚同族划分）
+BUY_FAMILY = ("1买", "2买", "类2买", "3买", "类3买", "4买", "类4买")
+SELL_FAMILY = ("1卖", "2卖", "类2卖", "3卖", "类3卖", "4卖", "类4卖")
+_FAMILY_CLS = {"2买": "二买", "类2买": "类2买", "2卖": "二卖", "类2卖": "类2卖"}
 
-def entryStrategyOf(planStrategy):
-    """交易计划策略 → 进场策略映射（用户规则，2026-09-25 起 10 文案 1:1 拆分为独立键，
-    便于记录溯源是哪一档触发；此前 3买点/3卖点/类2买点/类2卖点 并入 waitBuy/waitSell）。
-    震荡/数据不足/趋势中无匹配（方向=观望）等不产生进场策略，返回 None。
-    waitBuy/waitSell 仅指「新买点/新卖点」（3类点强档，thirdStrongTrend 开）；
-    4 个新键与 waitBuy/waitSell 同校验（够笔+以下级别背驰+支阻位附近，无专属条件）。
-    2026-10-09 弱档原始点分流新增 2 键：wait2BuyBear/wait2SellBear（空头结构2买/
-    多头结构2卖，专属条件=抬低/压低，见 strategyExtraOk），共 12 键。
-    @returns None 或 { key, direction, label }
-    """
-    mapping = {
-        "等待反弹后做2卖": {"key": "wait2Sell", "direction": "short", "label": "等待反弹后做2卖"},
-        "等待回调后做2买": {"key": "wait2Buy", "direction": "long", "label": "等待回调后做2买"},
-        "等待高点附近的一卖": {"key": "wait1Sell", "direction": "short", "label": "等待一卖"},
-        "等待低点附近的一买": {"key": "wait1Buy", "direction": "long", "label": "等待一买"},
-        "等待回调后的新买点": {"key": "waitBuy", "direction": "long", "label": "等待回调后买点"},
-        "等待反弹后的新卖点": {"key": "waitSell", "direction": "short", "label": "等待反弹后卖点"},
-        "等待回调后的3买点": {"key": "wait3Buy", "direction": "long", "label": "等待回调后3买点"},
-        "等待回调后的类2买点": {"key": "waitLike2Buy", "direction": "long", "label": "等待回调后类2买点"},
-        "等待反弹后的3卖点": {"key": "wait3Sell", "direction": "short", "label": "等待反弹后3卖点"},
-        "等待反弹后的类2卖点": {"key": "waitLike2Sell", "direction": "short", "label": "等待反弹后类2卖点"},
-        "等待低点附近的2买": {"key": "wait2BuyBear", "direction": "long", "label": "等待低点附近的2买"},
-        "等待高点附近的2卖": {"key": "wait2SellBear", "direction": "short", "label": "等待高点附近的2卖"},
-    }
-    return mapping.get(planStrategy)
+
+def point_cls_of(point):
+    """2族强弱档（原 trading_plan.cls_of 的 strong 二分）：强二买/弱二买/强类2买…；
+    strong=None（首段未走完）按弱先行；非2族（1类/3类族）返回 None。"""
+    if "strong" in point and point["type"] in _FAMILY_CLS:
+        return ("强" if point.get("strong") else "弱") + _FAMILY_CLS[point["type"]]
+    return None
+
+
+def pointStrategyOf(point):
+    """买卖点 type+strong → 进场策略键直映射（用户规则，2026-10-16；替代原
+    entryStrategyOf(计划文案)——计划层 strategyOf 三档路由/未定型滚动翻档/
+    跨侧 fallback/形成中1类特殊分支均已取消）：
+      1买→wait1Buy、1卖→wait1Sell（直接档：形成中与已确认统一，点本身即信号）；
+      2买/类2买 strong→wait2Buy、弱/未定型→wait2BuyBear（卖侧镜像）；
+      3买→wait3Buy、3卖→wait3Sell；类3买/4买/类4买→waitBuy、卖侧→waitSell。
+    waitLike2Buy/waitLike2Sell 无映射入口（键定义与 strategyExtraOk 校验保留，
+    eval 比对兼容）。
+    @returns None 或 { key, direction, label, pointCls }"""
+    t_ = point.get("type")
+    if t_ == "1买":
+        row = {"key": "wait1Buy", "direction": "long", "label": "等待一买"}
+    elif t_ == "1卖":
+        row = {"key": "wait1Sell", "direction": "short", "label": "等待一卖"}
+    elif t_ in ("2买", "类2买"):
+        row = ({"key": "wait2Buy", "direction": "long", "label": "等待回调后做2买"}
+               if point.get("strong")
+               else {"key": "wait2BuyBear", "direction": "long", "label": "等待低点附近的2买"})
+    elif t_ in ("2卖", "类2卖"):
+        row = ({"key": "wait2Sell", "direction": "short", "label": "等待反弹后做2卖"}
+               if point.get("strong")
+               else {"key": "wait2SellBear", "direction": "short", "label": "等待高点附近的2卖"})
+    elif t_ == "3买":
+        row = {"key": "wait3Buy", "direction": "long", "label": "等待回调后3买点"}
+    elif t_ == "3卖":
+        row = {"key": "wait3Sell", "direction": "short", "label": "等待反弹后3卖点"}
+    elif t_ in ("类3买", "4买", "类4买"):
+        row = {"key": "waitBuy", "direction": "long", "label": "等待回调后买点"}
+    elif t_ in ("类3卖", "4卖", "类4卖"):
+        row = {"key": "waitSell", "direction": "short", "label": "等待反弹后卖点"}
+    else:
+        return None
+    row["pointCls"] = point_cls_of(point)
+    return row
+
+
+def _side_anchor(bis, points, family, tolSec, tolPrice):
+    """买卖单侧最新锚（原 trading_plan.predictPlan.matchSide 平移，2026-10-16）：
+    从最后一笔终点逐笔向前扫描，返回第一个落在笔端点上的 family 族买卖点。
+    容差与原口径一致：时间 ≤ tolSec（本周期 1 bar）、价格 ≤ max(ATR×0.2, 0.05)。
+    @returns (point, bi) 或 (None, None)。"""
+    all_ = list(points.get("buy") or []) + list(points.get("sell") or [])
+    for j in range(len(bis) - 1, -1, -1):
+        bi = bis[j]
+        if bi is None:
+            continue
+        for p in all_:
+            if p["type"] not in family:
+                continue
+            if abs(p["time"] - bi["endTime"]) <= tolSec and abs(p["price"] - bi["endPrice"]) <= tolPrice:
+                return p, bi
+    return None, None
+
+
+def side_candidates(bis, points, atr, barSec):
+    """买卖双侧锚点（2026-10-10 双侧独立口径保留）：买侧与卖侧各自取最近笔端点锚，
+    并行评估、互不影响（多空可同时持仓）。@returns [point, ...] 0~2 个。"""
+    tolSec = barSec
+    tolPrice = max((atr or 0) * 0.2, 0.05)
+    cands = []
+    for family in (BUY_FAMILY, SELL_FAMILY):
+        p, _bi = _side_anchor(bis, points, family, tolSec, tolPrice)
+        if p is not None:
+            cands.append(p)
+    return cands
+
+
+def compute_period_points(periodBis, periods, periodMacd=None, work_cache=None,
+                          class2ZsTol=0.0, thirdZsTol=0.0):
+    """逐周期计算买卖点原始输出（chan_core.findBuyPoints/findSellPoints，与图上
+    mark-buy-sell 标记同源；2026-10-16 起作为进场候选的直接来源，替代交易计划锚）。
+    上级周期取法与 trend_state_of 同口径：periodBis 中比本周期大一级的最小周期。
+    @param work_cache 可选：{(res): (key, row)} 引擎级缓存——本周期/上级笔指纹与
+                      MACD 长度未变时直接复用（与 compute_regime 同一缓存 dict）。
+    @returns { res: {"buy": [...], "sell": [...]} }（无数据周期缺省）"""
+    from .sr_flip import _bis_fingerprint
+    periodBis = periodBis or {}
+    periodMacd = periodMacd or {}
+    out = {}
+    for res in periods:
+        bis = periodBis.get(res) or []
+        if len(bis) < 3:
+            continue
+        # 取最近 60 笔即可（原 compute_plan/predictPlan 同窗口：锚点只看最新结构，
+        # 全量 bis 会使 findBuyPoints 的 project_first_points 退化为长列表扫描）
+        if len(bis) > 60:
+            bis = bis[-60:]
+        sec = intervalSecOf(res) or 60
+        best = None
+        for r in periodBis:
+            s = intervalSecOf(r) or 0
+            if s > sec and (best is None or s < (intervalSecOf(best) or 0)):
+                best = r
+        upper = periodBis.get(best) if best is not None else None
+        macdArr = periodMacd.get(res) or []
+        key = ("points", res, _bis_fingerprint(bis), _bis_fingerprint(upper),
+               len(macdArr), class2ZsTol, thirdZsTol)
+        if work_cache is not None:
+            ent = work_cache.get(("points", res))
+            if ent is not None and ent[0] == key:
+                out[res] = ent[1]
+                continue
+        upperMacd = periodMacd.get(best) if best is not None else None
+        try:
+            buy = findBuyPoints(bis, upper or [], macdArr, sec, class2ZsTol, thirdZsTol,
+                                upperMacd=upperMacd)
+            sell = findSellPoints(bis, upper or [], macdArr, sec, class2ZsTol, thirdZsTol,
+                                  upperMacd=upperMacd)
+        except Exception:
+            buy, sell = [], []
+        row = {"buy": buy, "sell": sell}
+        out[res] = row
+        if work_cache is not None:
+            work_cache[("points", res)] = (key, row)
+    return out
 
 
 # ============================================================
@@ -939,11 +1048,11 @@ def evaluateEntry(ctx, strategy):
     atr = ctx.get("atr", 0)
     barSec = ctx.get("barSec", 0)
     near = ctx.get("near", NEAR)
+    key = strategy["key"]
+    direction = strategy["direction"]
     # 1类键（wait1Buy/wait1Sell）豁免黄金分割支阻（闸门口径，2026-10-10）
     srLevels = sr_drop_fib_for_class1(sr_of_detect(ctx.get("srLevels"), res), key)
     periodData = ctx.get("periodData")
-    key = strategy["key"]
-    direction = strategy["direction"]
     wantType = "up" if direction == "short" else "down"  # 空头等反弹(up)，多头等回调(down)
     divergeDir = direction  # 空头→顶背驰(short)，多头→底背驰(long)
 
@@ -1206,14 +1315,19 @@ def realtimeLowerDiverge(periodData, X, wantDir, tCut,
     return []
 
 
-def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLevels,
+def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLevels,
                             detectPeriods, near=NEAR, tCut=None, fired=None,
                             periodTimes=None, periodMacdTimes=None, divergeConfirm=None,
                             expectBiEnabled=None, realtimeMinBars=None,
                             zsExitWeakRatio=None, trend_res=None, trend_state=None,
                             periodMerged=None, periodBars=None, firedIndex=None,
-                            entryMacdShrink=None, on_reject=None):
+                            entryMacdShrink=None, range_res=None, range_gate=None,
+                            on_reject=None):
     """当下模式进场评估（每根 fine 收盘调用，信号无需等反向笔确认）。
+
+    候选来源（2026-10-16 起）：periodPoints 的 chan_core 买卖点——买卖双侧各自取
+    最近笔端点锚（side_candidates，原 predictPlan.matchSide 平移）→ pointStrategyOf
+    直映射策略键；原「交易计划」文案中转已取消，plan_watch 闸门随之删除。
 
     三条件与确认制同构，差异只在"何时评"与"②用什么评"：
       ① 够笔：检测周期最后一笔（引擎中=延伸中的形成段）方向匹配且段长 ≥ REALTIME_MIN_BARS；
@@ -1246,13 +1360,18 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
     @param trend_state       参考周期方向状态（trend_state_of 结果）。本函数无 bars
                              入参、无法自行计算，须由调用方传入（回测引擎在链路重算拍
                              算好复用；None = 不过滤，仅保留检测周期剔除）。
+    @param range_res         震荡判定参考周期（None→RANGE_RES，默认关闭；"240"/"D"=开启）。
+                             参考周期及以上不作检测周期（res_ge_range 结构性剔除）。
+    @param range_gate        震荡 regime（compute_regime 结果，调用方预计算传入；
+                             range=True → 本周期观望 range_watch；None/关闭 = 无震荡闸）。
     @param on_reject         可选 on_reject(gate, period, seg_start, strategy_key, ctx, t)：
                              每个静默 continue 闸门处上报（交易日志「为什么没开单」；
                              ctx 为结构化数字，bt_journal 按 (周期,策略,段,闸门) 去重落盘，
                              热路径只多一次调用+小 dict 构造）。
     @returns 新信号列表（flat），每项含 { periodX, markRes, time, price, direction,
-             strategyKey, strategyLabel, signalNote, nearSr, planDirection, realtime:True,
-             segStart, fallback?, nearEqual?, expectBi, trendDirection?, trendReason? }
+             strategyKey, strategyLabel, signalNote, nearSr, pointType, pointStrong,
+             realtime:True, segStart, fallback?, nearEqual?, expectBi,
+             trendDirection?, trendReason? }
     """
     fired = fired if fired is not None else set()
     # 出场参数（参数中心可调；None → 模块常量默认）
@@ -1289,6 +1408,9 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
     trend_sec = (intervalSecOf(trend_res) or 0) if trend_res else 0
     trend_dir = (trend_state or {}).get("dir") if trend_res else None
     trend_reason = (trend_state or {}).get("reason", "") if trend_res else ""
+    # 震荡参考周期（compute_regime 的 regime；默认关闭）
+    range_res = RANGE_RES if range_res is None else range_res
+    range_sec = (intervalSecOf(range_res) or 0) if range_res else 0
     for X in (detectPeriods or []):
         def _rej(gate, seg_start=None, skey=None, ctx=None):
             if on_reject is not None:
@@ -1302,28 +1424,25 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
         if trend_sec and (intervalSecOf(X) or 0) >= trend_sec:
             _rej("res_ge_trend", ctx={"res": X, "trendRes": trend_res})
             continue  # 顺势参考周期及以上不作检测周期（只作方向锚，结构性剔除）
-        plan = (planPeriods or {}).get(X)
-        # 2026-10-10 买卖双侧独立：主侧 + alt 侧（trading_plan.predictPlan 双锚）并行评估，
-        # 每侧各自过闸（够笔/专属/背驰链/支阻/顺势过滤），互不影响、多空可同时持仓。
-        candidates = []
-        if plan is not None and plan.get("strategy") and plan.get("direction") != "观望":
-            candidates.append(plan)
-        altRow = {"strategy": plan.get("altStrategy") if plan else None,
-                  "direction": plan.get("altDirection") if plan else None,
-                  "reason": plan.get("altReason") if plan else None,
-                  "pointCls": plan.get("altPointCls") if plan else None}
-        if altRow["strategy"] and altRow["direction"] != "观望":
-            candidates.append(altRow)
-        if not candidates:
-            _rej("plan_watch", ctx={"planDir": (plan or {}).get("direction"),
-                                    "planStrategy": (plan or {}).get("strategy"),
-                                    "reason": (plan or {}).get("reason")})
+        if range_sec and (intervalSecOf(X) or 0) >= range_sec:
+            _rej("res_ge_range", ctx={"res": X, "rangeRes": range_res})
+            continue  # 震荡参考周期及以上不作检测周期（只作锚，结构性剔除；原计划口径）
+        if range_res and range_gate is not None and range_gate.get("range"):
+            _rej("range_watch", ctx={"rangeRes": range_gate.get("resName") or range_res,
+                                     "reason": (range_gate.get("reason") or "")[:80]})
+            continue  # 参考周期 regime 震荡/笔不足 → 本周期观望（原计划「震荡整理观望」）
+        # 2026-10-10 买卖双侧独立（原 trading_plan.predictPlan 双锚口径保留）：
+        # 买侧 + 卖侧各自取最近笔端点锚，每侧各自过闸（够笔/专属/背驰链/支阻/顺势
+        # 过滤），互不影响、多空可同时持仓。
+        cands = side_candidates(pd["bis"], (periodPoints or {}).get(X) or {},
+                                pd.get("atr"), intervalSecOf(X) or 60)
+        if not cands:
+            _rej("no_point", ctx={})
             continue
-        for plan in candidates:
-            planStrategy = plan.get("strategy")
-            strategy = entryStrategyOf(planStrategy)
+        for point in cands:
+            strategy = pointStrategyOf(point)
             if strategy is None:
-                _rej("no_strategy_map", ctx={"planStrategy": planStrategy})
+                _rej("no_strategy_map", ctx={"pointType": point.get("type")})
                 continue
             if trend_dir and trend_dir != strategy["direction"]:
                 _rej("trend_filter", ctx={"trendDir": trend_dir,
@@ -1380,11 +1499,11 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
             elif any(f[0] == X and f[1] == key and f[3] == segStart for f in fired):
                 _rej("fired_dedup", seg_start=segStart, skey=key)
                 continue
-            # 策略专属条件（与确认制共用）
+            # 策略专属条件（与确认制共用；pointCls 由点 strong 直派生）
             upRes = upperResOf(X)
             upperBis = periodData[upRes]["bis"] if (upRes and upRes in periodData) else None
             extraReason = strategyExtraOk(key, bis, upperBis, pd["macdArr"], intervalSecOf(X),
-                                          zs_ratio, point_cls=plan.get("pointCls"))
+                                          zs_ratio, point_cls=strategy.get("pointCls"))
             if extraReason is not None:
                 _rej("strategy_extra", seg_start=segStart, skey=key, ctx={"reason": extraReason})
                 continue
@@ -1435,12 +1554,13 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, planPeriods, srLev
                     "strategyKey": key,
                     "strategyLabel": strategy["label"],
                     "signalNote": (
-                        f"{strategy['label']}｜检测周期 {X} 计划："
-                        f"{(plan or {}).get('reason') or plan.get('direction')}"
+                        f"{strategy['label']}｜检测周期 {X} 锚点："
+                        f"{point['type']}@{fmtT(point['time'])} {point['price']:.2f}"
                         f"｜背驰 {c['res']} @ {fmtT(c['point']['time'])} {c['point']['price']:.2f}"
                         f"｜近支阻位 {hit['sr']['price']:.2f}｜形成段自 {fmtT(c['segStart'])}"),
                     "nearSr": hit["sr"]["price"],
-                    "planDirection": plan.get("direction"),
+                    "pointType": point.get("type"),
+                    "pointStrong": point.get("strong"),
                     "realtime": True,
                     "segStart": c["segStart"],
                     "fallback": bool(c.get("fallback", False)),   # M1 回退候选（非停止级命中）
@@ -1465,15 +1585,17 @@ ALL_RES = ["D", "240", "60", "15", "3"]
 ALL_RES_WITH_30S = ["D", "240", "60", "15", "3", "30S"]
 
 
-def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriods,
+def compute_entries(periodBis, barsByPeriod, periodPoints, srLevels, detectPeriods,
                     near=NEAR, periodMacd=None, periodAtr=None, with_30s=False,
                     zs_exit_weak_ratio=ZS_EXIT_WEAK_RATIO,
-                    trend_res=None, trend_state=None, trend_cfg=None, on_reject=None):
-    """逐周期判定进场状态（依赖交易计划 plan 结果）→ 生成进场信号。
+                    trend_res=None, trend_state=None, trend_cfg=None,
+                    range_res=None, range_gate=None, on_reject=None):
+    """逐周期判定进场状态（直接消费买卖点，2026-10-16 起替代计划锚）→ 生成进场信号。
 
     @param periodBis     各周期笔 { 周期: [bis] }
     @param barsByPeriod  各周期原始K线 { 周期: [bars] }
-    @param planPeriods   交易计划结果 { 周期: {direction, strategy, ...} }
+    @param periodPoints  各周期买卖点 { 周期: {"buy": […], "sell": […]} }
+                         （compute_period_points 结果；买卖双侧锚 → pointStrategyOf 直映射）
     @param srLevels      支阻位列表（srflip.merged 全量候选池，每项含 price/level）；
                          各检测周期只使用 level 等于该周期的条目
     @param detectPeriods 检测周期列表（从大到小，默认 240,60,15,3）
@@ -1490,11 +1612,14 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
     @param trend_cfg     顺势相位判定参数（plan 模块 trendRebound/reboundNearPts/
                          reboundAngleRef；缺省用 trading_plan 常量默认，仅自算
                          trend_state 路径消费）。
+    @param range_res     震荡判定参考周期（None→RANGE_RES，默认关闭）；参考周期及以上
+                         不作检测周期（res_ge_range 结构性剔除）。
+    @param range_gate    震荡 regime（compute_regime 结果；range=True → 本周期观望）。
     @param on_reject     可选 on_reject(gate, period, seg_start, strategy_key, ctx, t)：
                          evaluateEntry 校验未过时上报（gate=eval_reason，ctx.reason=
                          中文失败原因；交易日志用，与当下制同签名）。
     @returns { 标记级别: [信号...] }，信号含 { periodX, time, price, direction, strategyKey,
-             strategyLabel, signalNote, nearSr, color, markRes, planDirection,
+             strategyLabel, signalNote, nearSr, color, markRes, pointType, pointStrong,
              trendDirection, trendReason }
     """
     periodBis = structurePeriods(periodBis, barsByPeriod)
@@ -1541,6 +1666,9 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
                                      periodMacd=periodMacd, cfg=trend_cfg)
     trend_dir = (trend_state or {}).get("dir") if trend_res else None
     trend_reason = (trend_state or {}).get("reason", "") if trend_res else ""
+    # 震荡参考周期（compute_regime 的 regime；默认关闭）
+    range_res = RANGE_RES if range_res is None else range_res
+    range_sec = (intervalSecOf(range_res) or 0) if range_res else 0
 
     allEntries = {}
     for res in detectPeriods:
@@ -1549,18 +1677,14 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
             continue
         if trend_sec and (intervalSecOf(res) or 0) >= trend_sec:
             continue  # 顺势参考周期及以上不作检测周期（只作方向锚，结构性剔除）
-        plan = planPeriods.get(res)
-        # 2026-10-10 买卖双侧独立：主侧 + alt 侧并行评估（与当下制同口径）
-        candidates = []
-        if plan is not None and plan.get("strategy") and plan.get("direction") != "观望":
-            candidates.append(plan)
-        altRow = {"strategy": plan.get("altStrategy") if plan else None,
-                  "direction": plan.get("altDirection") if plan else None,
-                  "reason": plan.get("altReason") if plan else None,
-                  "pointCls": plan.get("altPointCls") if plan else None}
-        if altRow["strategy"] and altRow["direction"] != "观望":
-            candidates.append(altRow)
-        if not candidates:
+        if range_sec and (intervalSecOf(res) or 0) >= range_sec:
+            continue  # 震荡参考周期及以上不作检测周期（只作锚，结构性剔除；原计划口径）
+        if range_res and range_gate is not None and range_gate.get("range"):
+            continue  # 参考周期 regime 震荡/笔不足 → 本周期观望（原计划「震荡整理观望」）
+        # 2026-10-10 买卖双侧独立口径保留：买侧 + 卖侧各自最近笔端点锚并行评估
+        cands = side_candidates(pd["bis"], (periodPoints or {}).get(res) or {},
+                                pd.get("atr"), intervalSecOf(res) or 60)
+        if not cands:
             continue
         upRes = upperResOf(res)
         ctx = {
@@ -1575,13 +1699,13 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
             "periodData": periodData,
             "zs_exit_weak_ratio": zs_exit_weak_ratio,
         }
-        for plan in candidates:
-            strategy = entryStrategyOf(plan.get("strategy"))
+        for point in cands:
+            strategy = pointStrategyOf(point)
             if strategy is None:
                 continue
             if trend_dir and trend_dir != strategy["direction"]:
                 continue  # 逆参考周期方向的信号跳过（顺势过滤，按侧独立过滤）
-            ctx["pointCls"] = plan.get("pointCls")
+            ctx["pointCls"] = strategy.get("pointCls")
             evalRes = evaluateEntry(ctx, strategy)
             if not evalRes["ok"]:
                 if on_reject is not None:
@@ -1601,14 +1725,15 @@ def compute_entries(periodBis, barsByPeriod, planPeriods, srLevels, detectPeriod
                 "strategyKey": strategy["key"],
                 "strategyLabel": strategy["label"],
                 "signalNote": (
-                    f"{strategy['label']}｜检测周期 {res} 计划："
-                    f"{plan.get('reason') or plan.get('direction')}"
+                    f"{strategy['label']}｜检测周期 {res} 锚点："
+                    f"{point['type']}@{fmtT(point['time'])} {point['price']:.2f}"
                     f"｜背驰 {evalRes['markRes']} @ {fmtT(evalRes['point']['time'])} "
                     f"{evalRes['point']['price']:.2f}｜近支阻位 {evalRes['nearSr']:.2f}"),
                 "nearSr": evalRes["nearSr"],
                 "color": BUY_COLOR if strategy["direction"] == "long" else SELL_COLOR,
                 "markRes": evalRes["markRes"],
-                "planDirection": plan.get("direction"),
+                "pointType": point.get("type"),
+                "pointStrong": point.get("strong"),
             }
             # 观望态（dir=None 但 reason 非空）也要带注记；方向门控仍只看 dir
             if trend_dir or trend_reason:
@@ -1676,13 +1801,13 @@ def stop_ref_of(direction, entry_price, near_sr, sr_levels,
 
 def trend_following_of(plan_direction, strategy_key=None):
     """顺势/逆势判定（TP2 平一半 / TP3 分支门槛）：
-    交易计划 direction ∈ {多头多, 空头空} 为顺势（计划结构方向=操作方向）；
-    {多头空, 空头多} 为逆势。plan_direction 缺失时按 strategyKey 兜底
+    2026-10-16 起交易计划 direction 已取消，恒按 strategy_key 判定
     （wait2Buy/waitBuy/wait3Buy/waitLike2Buy 及卖侧对称 → 顺势；
-    wait1Buy/wait1Sell → 逆势）。
+    wait1Buy/wait1Sell/wait2BuyBear/wait2SellBear → 逆势）。
+    plan_direction 形参保留仅为兼容旧调用方，传入即忽略。
     """
-    if plan_direction:
-        return plan_direction in TREND_PLAN_DIRS
+    if strategy_key is None and plan_direction:
+        return plan_direction in TREND_PLAN_DIRS  # 旧口径兼容（无 strategyKey 时）
     return strategy_key in TREND_STRATEGY_KEYS
 
 

@@ -688,23 +688,8 @@ class TestPointRulesV2(unittest.TestCase):
         self.assertEqual(cc.findSellPoints(bis, None, self.MACD_LOW, 900), [])
 
 
-class TestSecondFamilyRouting(unittest.TestCase):
-    """strategyOf 二买族强弱二分路由（2026-10-11）：强→等2买、弱→等2买Bear。"""
-
-    def test_routing(self):
-        from py_chain.trading_plan import strategyOf
-        strong_buy = strategyOf("15", "2买", "r", "l", "强二买")
-        self.assertEqual((strong_buy["direction"], strong_buy["strategy"]),
-                         ("多头多", "等待回调后做2买"))
-        weak_buy = strategyOf("15", "类2买", "r", "l", "弱类2买")
-        self.assertEqual((weak_buy["direction"], weak_buy["strategy"]),
-                         ("空头多", "等待低点附近的2买"))
-        strong_sell = strategyOf("15", "2卖", "r", "l", "强二卖")
-        self.assertEqual((strong_sell["direction"], strong_sell["strategy"]),
-                         ("空头空", "等待反弹后做2卖"))
-        weak_sell = strategyOf("15", "类2卖", "r", "l", "弱类2卖")
-        self.assertEqual((weak_sell["direction"], weak_sell["strategy"]),
-                         ("多头空", "等待高点附近的2卖"))
+# （2026-10-16 交易计划策略行删除：原 TestSecondFamilyRouting strategyOf 二买族
+#  路由用例移除——强弱二分语义由 test_plan_strategy 的 pointStrategyOf 直映射接管）
 
 
 class TestFixBiExtremesLastBiWick(unittest.TestCase):
