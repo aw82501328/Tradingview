@@ -61,6 +61,7 @@ GATE_LABELS = {
     "fired_dedup": "该段已发过信号（去重）",
     "strategy_extra": "策略专属条件未过",
     "cand_fired": "该形成段已发过（候选级去重）",
+    "anchor_bar_window": "锚点K线窗口外（小周期背驰仅限锚点所在大周期K线内）",
     "near_sr_fail": "不在支阻位附近",
     "eval_reason": "确认制条件未过",
     # realtimeLowerDiverge / _evalRealtimeNode 内部原因（gate=no_diverge 的细分）

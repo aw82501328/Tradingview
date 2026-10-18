@@ -382,6 +382,16 @@ def _bisect_gt_key(bis, key, t):
     return lo
 
 
+def _cover_bar_index(times, t):
+    """t 所在大周期K线的索引（times=该周期K线开盘时间升序数组）。
+    早于首根返回 None；晚于末根按末根计（times 未见进行中K线时的覆盖语义）。
+    2026-10-18 锚点K线窗口闸用：买卖点锚所在K线 = 小周期背驰触发窗口。"""
+    if not times or t is None:
+        return None
+    i = bisect.bisect_right(times, t) - 1
+    return None if i < 0 else i
+
+
 def _expansionCount(bisL, parentBi, endT, tolStart, tolEnd):
     """数 lower 级笔在上级笔 parentBi 内部的展开笔数：startTime ≥ parentBi.startTime - tolStart
     且 endTime ≤ endT + tolEnd（段间不跨上级笔边界；含形成中延伸段计 1 笔）。
@@ -1098,6 +1108,15 @@ def evaluateEntry(ctx, strategy):
     wantType = "up" if direction == "short" else "down"  # 空头等反弹(up)，多头等回调(down)
     divergeDir = direction  # 空头→顶背驰(short)，多头→底背驰(long)
 
+    # ⓪ 锚点K线窗口（2026-10-18 用户规则，确认制镜像）：小周期找背驰仅限锚点所在
+    # 大周期K线内。确认制不查评估拍（其信号本身即历史背驰点），只约束背驰点落窗；
+    # 锚点由 compute_entries 逐候选传入 ctx["anchorPoint"]，缺省（旧调用方/最小
+    # fixture）时降级放行。
+    barsX = ((periodData or {}).get(res) or {}).get("bars") or []
+    timesX = [b.get("time") for b in barsX]
+    anchorPt = ctx.get("anchorPoint")
+    anchorWinIdx = _cover_bar_index(timesX, anchorPt.get("time")) if anchorPt is not None else None
+
     # 1. 够笔
     if not lastBiOk(bis, wantType):
         return {"ok": False,
@@ -1117,8 +1136,13 @@ def evaluateEntry(ctx, strategy):
     cands = lowerDiverge(periodData, res, divergeDir)
     if not cands:
         return {"ok": False, "reason": "以下级别无匹配方向背驰"}
+    if timesX and anchorWinIdx is not None:
+        cands = [c for c in cands if _cover_bar_index(timesX, c["point"]["time"]) == anchorWinIdx]
+        if not cands:
+            return {"ok": False,
+                    "reason": "以下级别背驰点均不在锚点所在大周期K线内（锚点K线窗口外）"}
 
-    nearTol = near  # 绝对价差（2026-09-13 起不再乘 ATR）
+    nearTol = near  # 绝对价差（2026-09-13 起不乘 ATR）
     for c in cands:
         # 区间感知闸门：levels 模式（无区间候选）与 nearSr 逐位一致；
         # zones 模式=背驰点价落入方向匹配区间（多头=支撑区间 / 空头=压力区间）
@@ -1499,6 +1523,19 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
                 _rej("no_bis", skey=key)
                 continue
             times = (periodTimes or {}).get(X) or [b["time"] for b in (pd.get("bars") or [])]
+            # ⓪ 锚点K线窗口（2026-10-18 用户规则）：大周期某根K线满足买卖点条件（锚点
+            # 所在K线）→ 去小周期找背驰仅限该根K线内，K线走完窗口即关、此后不再触发。
+            # 无永久闩锁：锚随新高/新低漂移或换新点时，每拍按当前锚现算——新锚所在
+            # K线自动重开窗。times 缺失（无 periodTimes 且无 bars 的最小 fixture）时
+            # 降级放行，不影响既有最小单测。
+            if times:
+                anchorWinIdx = _cover_bar_index(times, point.get("time"))
+                nowWinIdx = _cover_bar_index(times, tCut)
+                if anchorWinIdx is None or nowWinIdx != anchorWinIdx:
+                    _rej("anchor_bar_window", skey=key,
+                         ctx={"pointType": point.get("type"), "anchorTime": point.get("time"),
+                              "nowBarTime": times[nowWinIdx] if nowWinIdx is not None else None})
+                    continue
             # ① 够笔（当下制）：最后一笔=形成中段，方向匹配 + 段长门槛；
             #    预期够笔（expectBiEnabled，页面可选默认开）：末笔方向不符（回调/反弹的反向段
             #    尚未确认为笔）但末笔端点后已走出 ≥ expectBiMinBars 根本级K线 → 视为回调/反弹中，
@@ -1572,6 +1609,13 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
                     _rej("cand_fired", seg_start=c["segStart"], skey=key,
                          ctx={"markRes": c["res"]})
                     continue  # 该形成段已发过，段延伸不重发
+                # 次级保险（锚点K线窗口）：当前拍在窗内、但背驰极值是早前K线的
+                # 陈旧极值时同样拒绝——背驰点本身必须落在锚点所在K线内
+                if times and _cover_bar_index(times, c["point"]["time"]) != anchorWinIdx:
+                    _rej("anchor_bar_window", seg_start=c["segStart"], skey=key,
+                         ctx={"markRes": c["res"], "divergeTime": c["point"]["time"],
+                              "anchorTime": point.get("time")})
+                    continue
                 # 区间感知闸门（同确认制 evaluateEntry：levels=逐位同 nearSr，
                 # zones=背驰点价落入方向匹配区间）
                 hit = near_zone(c["point"]["price"], srX, direction, nearTol)
@@ -1748,6 +1792,7 @@ def compute_entries(periodBis, barsByPeriod, periodPoints, srLevels, detectPerio
             if trend_dir and trend_dir != strategy["direction"]:
                 continue  # 逆参考周期方向的信号跳过（顺势过滤，按侧独立过滤）
             ctx["pointCls"] = strategy.get("pointCls")
+            ctx["anchorPoint"] = point  # 锚点K线窗口闸（2026-10-18）：背驰仅限锚点所在K线内
             evalRes = evaluateEntry(ctx, strategy)
             if not evalRes["ok"]:
                 if on_reject is not None:

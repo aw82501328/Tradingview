@@ -27,6 +27,14 @@
     ——每个形成段只发一次，段延伸不重发。①③所需的交易计划/支阻位仍在笔结构变化时重算
     并缓存（控性能：全区间 11475 根实时评估无耗时回退）。当下信号一律 **confirm 口径成交**
     （收集拍=信号拍，无未来函数，anchor 对其无意义）。
+    **锚点K线窗口闸**（2026-10-18 用户规则，`anchor_bar_window`）：大周期某根K线满足买卖点
+    条件（锚点所在K线，`_cover_bar_index` 覆盖查找）→ 去小周期找背驰**仅限该根K线内**——
+    触发拍 tCut 与背驰点都必须与锚点同属一根检测周期K线（次级保险防陈旧极值跨K线），闸在
+    够笔之前（窗口已关直接跳过背驰链计算）。K线走完窗口即关、此后不再触发；无永久闩锁：
+    锚随新高/新低漂移或换新点时每拍按当前锚现算，新锚所在K线自动重开窗。识别滞后超过
+    锚K线的点（尤其 240m 与 wait1 上级投影锚）不再开单，信号量显著下降属预期；全部回测
+    基线不可比。动因：10-1 11:09 waitSell@4168.56（锚 4卖@9-30 17:00，已离开锚K线约 18
+    小时）——离开最高点K线后的迟触发整类消除。
     **进场MACD柱缩闸**（2026-09-23，`CHAN_CFG.entryMacdShrink` 默认开，参数中心 entry
     模块可关；`BacktestEngine(entry_macd_shrink=)` / `evaluateRealtimeEntries(entryMacdShrink=)`
     形参同名透传）：背驰级别（markRes）最近两根**已收**K线的 MACD 柱状体（`|macd|`）变小
@@ -231,6 +239,7 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 1. **够笔** `lastBiOk`——检测周期最后一笔方向要「对着来」：做空要等一段反弹（up 笔），做多要等一段回调（down 笔）。
 2. **以下级别出现背驰** `lowerDiverge` / `realtimeLowerDiverge`——在更低周期里找同向背驰点（做空找顶背驰、做多找底背驰），且该点必须通过**下沉链**校验（见 §2.1.2.3）。
 3. **在支阻位附近** `nearSr`——背驰点价格与任一支阻位（`srflip.merged` 全量候选池，含密集区 / 黄金分割 / BOLL / 人工位）的价差 ≤ `near`（**绝对价差**，默认 10.0，CLI `--near`；2026-09-13 起 ×检测周期ATR 语义改为直接输入，与滑点同单位——`compute_entries(near=)`/`evaluateRealtimeEntries(near=)`/`BacktestEngine(near=)` 形参同名，Web 工作台与回测界面同参）。**1类豁免（2026-10-10）**：wait1Buy/wait1Sell（等一买/等一卖）的支阻池剔除黄金分割候选（`sr_drop_fib_for_class1`，`evaluateEntry` 与当下制同口径）——fib 位由非一类买卖点锚定派生，1类点创新低/高时旧摆动段回撤档不再有支撑/压力语义；止损重选（backtest `sr_pick`）同口径剔除。
+4. **锚点K线窗口（2026-10-18 用户规则）**——大周期某根K线满足买卖点条件（锚点所在K线）→ 去小周期找背驰**仅限该根K线内**：背驰点必须与锚点同属一根检测周期K线（当下制另要求触发拍在窗内，拒绝闸 `anchor_bar_window`；确认制 `evaluateEntry` 只查背驰点落窗，JS 侧 `coverBarIndex`+`ctx.anchorPoint`+`barTimesAll` 镜像）。K线走完窗口即关；无永久闩锁——锚漂移/换新点即重开窗（旧锚窗口失败后价格涨过/跌破、重新满足条件仍会再触发）。
 
 #### 2.1.2.3 背驰属于哪个级别（下沉链 / 区间套，2026-09-08 实现）
 

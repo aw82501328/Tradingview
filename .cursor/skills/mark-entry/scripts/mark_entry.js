@@ -519,6 +519,15 @@ function _bisectRightJs(arr, x) {
   return lo;
 }
 
+// t 所在大周期K线的索引（times=该周期K线开盘时间升序）。早于首根返回 -1，
+// 晚于末根按末根计。2026-10-18 锚点K线窗口闸用（与 py_chain/mark_entry.py
+// _cover_bar_index 对齐）：买卖点锚所在K线 = 小周期背驰触发窗口。
+function coverBarIndex(times, t) {
+  if (!times || !times.length || t == null) return -1;
+  const i = _bisectRightJs(times, t) - 1;
+  return i < 0 ? -1 : i;
+}
+
 function _sideIndex(points, family) {
   let ent = _sideIx.get(points);
   if (!ent) {
@@ -802,6 +811,14 @@ function evaluateEntry(ctx, strategy) {
   const wantType = direction === "short" ? "up" : "down"; // 空头等反弹(up)，多头等回调(down)
   const divergeDir = direction;                            // 空头→顶背驰(short)，多头→底背驰(long)
 
+  // 0. 锚点K线窗口（2026-10-18 用户规则，与 py_chain anchor_bar_window 闸同源）：
+  //    小周期找背驰仅限锚点所在大周期K线内。确认制不查评估拍（其信号本身即历史
+  //    背驰点），只约束背驰点落窗；锚点由 main() 逐候选传入 ctx.anchorPoint，
+  //    barTimesAll 须用未过滤全量K线（periodData[res].bars 已滤进行中K线，
+  //    背驰点落在当前大周期K线时会 bisect 到前一根误拒）。缺省时降级放行。
+  const timesX = (ctx.barTimesAll && ctx.barTimesAll[res]) || null;
+  const anchorWinIdx = (timesX && ctx.anchorPoint) ? coverBarIndex(timesX, ctx.anchorPoint.time) : -1;
+
   // 1. 够笔
   if (!lastBiOk(bis, wantType)) {
     return { ok: false, reason: `最后一笔为 ${bis[bis.length - 1] ? bis[bis.length - 1].type : "?"}，需 ${wantType}（反弹/回调不够笔）` };
@@ -856,8 +873,12 @@ function evaluateEntry(ctx, strategy) {
   //      策略专属条件不依赖背驰点（第2步已过），只需重试「支阻位附近」。
   //      （--with-30s 后 30S 高频背驰点常抢占原级别点，且其微观极值价常远离支阻位——
   //       无回退时信号彻底消失：旧点被抢占丢弃、新点校验被拒，两边都不出箭头。）
-  const cands = lowerDiverge(periodData, res, divergeDir);
+  let cands = lowerDiverge(periodData, res, divergeDir);
   if (cands.length === 0) return { ok: false, reason: "以下级别无匹配方向背驰" };
+  if (timesX && anchorWinIdx >= 0) {
+    cands = cands.filter(c => coverBarIndex(timesX, c.point.time) === anchorWinIdx);
+    if (cands.length === 0) return { ok: false, reason: "以下级别背驰点均不在锚点所在大周期K线内（锚点K线窗口外）" };
+  }
 
   const nearTol = near; // 绝对价差（2026-09-13 起不乘 ATR）
   const srX = srOfDetect(srLevels, res); // 只认检测周期，不跨周期
@@ -1526,6 +1547,10 @@ async function main() {
     const cutoff = Math.floor(Date.now()/1000);
     const barsByPeriod = {};
     for (const res of Object.keys(fetched)) barsByPeriod[res] = fetched[res].bars;
+    // 未过滤全量K线时间轴（2026-10-18 锚点K线窗口闸用；periodData[res].bars 已滤
+    // 进行中K线，覆盖查找会把当前大周期K线内的背驰点误判到前一根）
+    const barTimesAll = {};
+    for (const res of Object.keys(barsByPeriod)) barTimesAll[res] = barsByPeriod[res].map(b => b.time);
     const structOrder = Object.keys(fetched).sort((a, b) => (intervalSecOf(a) || 0) - (intervalSecOf(b) || 0));
     const structuredBis = {};
     for (const res of structOrder) {
@@ -1630,6 +1655,7 @@ async function main() {
         near: NEAR,
         srLevels,
         periodData,
+        barTimesAll,
       };
       for (const point of cands) {
         const strategy = pointStrategyOf(point);
@@ -1644,6 +1670,7 @@ async function main() {
           continue;
         }
         ctx.pointCls = strategy.pointCls;
+        ctx.anchorPoint = point; // 锚点K线窗口闸（2026-10-18）：背驰仅限锚点所在大周期K线内
         const evalRes = evaluateEntry(ctx, strategy);
         if (!evalRes.ok) {
           console.log(`
@@ -2046,6 +2073,7 @@ module.exports = {
   pointClsOf,
   sideAnchor,
   sideCandidates,
+  coverBarIndex,
   computePeriodPoints,
   lastBiOk,
   brokePrevLow,

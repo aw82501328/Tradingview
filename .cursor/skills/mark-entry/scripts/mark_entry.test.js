@@ -12,7 +12,7 @@ const assert = require("node:assert/strict");
 const {
   findDivergePoints, lowerDiverge, levelsBelow, sinkChainConfirm,
   stopRefOf, findBiEvent, trendFollowingOf, favSeg5Time, simulatePosition,
-  pointStrategyOf, sideCandidates,
+  pointStrategyOf, sideCandidates, evaluateEntry, coverBarIndex,
 } = require("./mark_entry.js");
 
 const bi = (type, startTime, endTime, startPrice, endPrice) => ({
@@ -128,6 +128,79 @@ describe("findDivergePoints / lowerDiverge 过滤", () => {
     // 3m 有裸顶背驰点，但该点下沉停止级是 15 → 过滤（15 又未创新高无候选）→ 空
     assert.ok(findDivergePoints(B3_RICH, m3).some(p => p.direction === "short"));
     assert.deepEqual(lowerDiverge(data, "60", "short"), []);
+  });
+});
+
+// ============================================================
+// 锚点K线窗口闸（2026-10-18 用户规则，与 py_chain/test_anchor_bar_window.py 成对同构）：
+// 大周期某根K线满足买卖点条件（锚点所在K线）→ 去小周期找背驰仅限该根K线内。
+// 确认制只约束背驰点落窗（不查评估拍）；无锚点/无 barTimesAll 时降级放行。
+// ============================================================
+describe("coverBarIndex 时间→大周期K线覆盖查找", () => {
+  const times = [0, 3600, 7200, 10800, 14400];
+  test("开盘时间恰等 → 该根；区间内 → 覆盖根；晚于末根 → 末根；早于首根 → -1", () => {
+    assert.equal(coverBarIndex(times, 10800), 3);   // 恰为开盘时间
+    assert.equal(coverBarIndex(times, 11000), 3);   // (10800, 14400) 内
+    assert.equal(coverBarIndex(times, 99999), 4);   // 未见进行中K线 → 按末根
+    assert.equal(coverBarIndex(times, -1), -1);     // 早于首根
+    assert.equal(coverBarIndex(times, null), -1);
+    assert.equal(coverBarIndex([], 100), -1);
+    assert.equal(coverBarIndex(null, 100), -1);
+  });
+});
+
+describe("evaluateEntry 锚点K线窗口（确认制）", () => {
+  // 15m 末段 up(72000→82800)，其内 3m 六笔展开：refer=up(78000→79500)@4456.0、
+  // 候选=up(81000→82800)@4461.7（更高高点 + 红柱面积缩小）→ 顶背驰点下沉停止级=3
+  const B15M = [
+    bi("up", 0, 36000, 4400, 4460),
+    bi("down", 36000, 72000, 4460, 4430),
+    bi("up", 72000, 82800, 4430, 4461.7),
+  ];
+  const B3M = [
+    bi("down", 72000, 75000, 4461.7, 4430),
+    bi("up", 75000, 76500, 4430, 4448.0),
+    bi("down", 76500, 78000, 4448.0, 4440),
+    bi("up", 78000, 79500, 4440, 4456.0),   // refer
+    bi("down", 79500, 81000, 4456.0, 4445),
+    bi("up", 81000, 82800, 4445, 4461.7),   // 顶背驰候选（time=82800）
+  ];
+  // MACD 覆盖两个候选参照段窗口（中枢回退会改选更早参照 up(75000→76500)，
+  // 两段都给大值 → 无论选哪个参照，候选段动能均更弱）
+  const M3 = macd([[75100, 6.0, 4.0], [76400, 6.0, 4.0],
+                   [78100, 5.0, 3.0], [79400, 5.0, 3.0],
+                   [81100, 1.0, 1.0], [82700, 1.0, 1.0]]);
+  const TIMES15 = Array.from({ length: 25 }, (_, i) => i * 3600); // 0..82800：82800=bar 23 开盘
+  const periodData = {
+    "15": { bis: B15M, bars: [], macdArr: [], atr: 0 },
+    "3": { bis: B3M, bars: [], macdArr: M3, atr: 0 },
+  };
+  const strategy = { key: "waitSell", direction: "short", label: "等待反弹后卖点", pointCls: null };
+  const baseCtx = (anchorTime) => ({
+    res: "15", bis: B15M, upperBis: null, macdArr: [], atr: 0, barSec: 900,
+    near: 30, srLevels: [{ price: 4462, level: "15" }], periodData,
+    barTimesAll: { "15": TIMES15 },
+    ...(anchorTime !== undefined ? { anchorPoint: { type: "4卖", time: anchorTime, price: 4461.7 } } : {}),
+  });
+
+  test("背驰点与锚点同K线 → 放行", () => {
+    // 锚 83000 与背驰点 82800 同在 bar 23（[82800, 86400)）
+    const res = evaluateEntry(baseCtx(83000), strategy);
+    assert.equal(res.ok, true);
+    assert.equal(res.markRes, "3");
+    assert.equal(res.point.time, 82800);
+  });
+
+  test("背驰点在锚点K线外 → 拒绝（锚点K线窗口外）", () => {
+    // 锚 81000（bar 22）、背驰点 82800（bar 23）→ 窗口外
+    const res = evaluateEntry(baseCtx(81000), strategy);
+    assert.equal(res.ok, false);
+    assert.ok(res.reason.includes("锚点所在大周期K线"));
+  });
+
+  test("不传 anchorPoint（旧调用方/最小 fixture）→ 降级放行", () => {
+    const res = evaluateEntry(baseCtx(undefined), strategy);
+    assert.equal(res.ok, true);
   });
 });
 
