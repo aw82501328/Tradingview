@@ -23,12 +23,13 @@ backtest.BacktestEngine 增量推进；本模块提供出场构件（与 mark_en
 """
 
 import bisect
+from collections import OrderedDict
 
 from .chan_core import (
     calcATR, calcMACD, isBiDiverge, lowerResOf, buildZSByUpper, buildZS, intervalSecOf,
     fmtT, CHAN_CFG, biMacdMetrics, _areaDurComparable,
     mergeBars, markWickBars, mergedSegmentCount, structurePeriods, pointEligibleBis,
-    findBuyPoints, findSellPoints,
+    findBuyPoints, findSellPoints, pointContext,
 )
 from .trading_plan import TREND_RES, RANGE_RES, trend_state_of
 
@@ -617,20 +618,54 @@ def pointStrategyOf(point):
     return row
 
 
+# _side_anchor 的族索引缓存（2026-10-16 性能等价改造）：键=points 行对象身份，
+# 持行强引用防 id 复用；行对象经 compute_period_points 的 work_cache 跨步复用时
+# 索引直接命中，避免每步重建全量点表。窗口内仍按原 all_ 顺序遍历，返回值与
+# 原双层线性扫逐位一致。
+_SIDE_IX = OrderedDict()
+
+
+def _side_index(points, family):
+    ent = _SIDE_IX.get(id(points))
+    if ent is not None and ent[0] is points:
+        ix = ent[1].get(family)
+        if ix is not None:
+            return ix
+    else:
+        ix = None
+        if len(_SIDE_IX) >= 8:
+            _SIDE_IX.clear()
+        ent = (points, {})
+        _SIDE_IX[id(points)] = ent
+    all_ = list(points.get("buy") or []) + list(points.get("sell") or [])
+    fam = [p for p in all_ if p["type"] in family]
+    order = sorted(range(len(fam)), key=lambda i: fam[i]["time"])
+    ftimes = [fam[i]["time"] for i in order]
+    ix = (fam, ftimes, order)
+    ent[1][family] = ix
+    return ix
+
+
 def _side_anchor(bis, points, family, tolSec, tolPrice):
     """买卖单侧最新锚（原 trading_plan.predictPlan.matchSide 平移，2026-10-16）：
     从最后一笔终点逐笔向前扫描，返回第一个落在笔端点上的 family 族买卖点。
-    容差与原口径一致：时间 ≤ tolSec（本周期 1 bar）、价格 ≤ max(ATR×0.2, 0.05)。
+    容差与原口径一致：时间 ≤ tolSec（本周期 1 bar）、价格 ≤ max(ATR×0.2, 0.05）。
+    实现（2026-10-16 性能等价改造）：族预过滤 + 点表按时间二分取 ±tolSec 窗，
+    窗口内按原 all_ 顺序取首个价格命中——与原全量嵌套线性扫同值。
     @returns (point, bi) 或 (None, None)。"""
-    all_ = list(points.get("buy") or []) + list(points.get("sell") or [])
+    fam, ftimes, order = _side_index(points, family)
     for j in range(len(bis) - 1, -1, -1):
         bi = bis[j]
         if bi is None:
             continue
-        for p in all_:
-            if p["type"] not in family:
-                continue
-            if abs(p["time"] - bi["endTime"]) <= tolSec and abs(p["price"] - bi["endPrice"]) <= tolPrice:
+        et = bi["endTime"]
+        lo = bisect.bisect_left(ftimes, et - tolSec)
+        hi = bisect.bisect_right(ftimes, et + tolSec)
+        if lo >= hi:
+            continue
+        for i in sorted(order[lo:hi]):
+            p = fam[i]
+            if abs(p["price"] - bi["endPrice"]) <= tolPrice:
                 return p, bi
     return None, None
 
@@ -653,8 +688,9 @@ def compute_period_points(periodBis, periods, periodMacd=None, work_cache=None,
     """逐周期计算买卖点原始输出（chan_core.findBuyPoints/findSellPoints，与图上
     mark-buy-sell 标记同源；2026-10-16 起作为进场候选的直接来源，替代交易计划锚）。
     上级周期取法与 trend_state_of 同口径：periodBis 中比本周期大一级的最小周期。
-    @param work_cache 可选：{(res): (key, row)} 引擎级缓存——本周期/上级笔指纹与
-                      MACD 长度未变时直接复用（与 compute_regime 同一缓存 dict）。
+    @param work_cache 可选：{(res): (key, row)} 引擎级缓存——本级合格笔视图与上级笔
+                      指纹未变时直接复用（与 compute_regime 同一缓存 dict；2026-10-16
+                      起键不再含 MACD 长度：买卖点判定不依赖 macd）。
     @returns { res: {"buy": [...], "sell": [...]} }（无数据周期缺省）"""
     from .sr_flip import _bis_fingerprint
     periodBis = periodBis or {}
@@ -676,8 +712,13 @@ def compute_period_points(periodBis, periods, periodMacd=None, work_cache=None,
                 best = r
         upper = periodBis.get(best) if best is not None else None
         macdArr = periodMacd.get(res) or []
-        key = ("points", res, _bis_fingerprint(bis), _bis_fingerprint(upper),
-               len(macdArr), class2ZsTol, thirdZsTol)
+        # 缓存键=真实输出依赖（2026-10-16 性能收紧）：买卖点输出只由合格笔视图与
+        # 上级笔决定——macdArr 不参与判定（findBuyPoints 文档），len(macdArr) 删除后
+        # 该周期每根收盘不再无谓失效；本级指纹改对 pointEligibleBis 视图取，形成中
+        # 未够笔的延伸不改输出。上级仍对全量取（形成中上级笔经中枢 upperEnd 标签
+        # 参与输出，不可收紧）。命中/未命中重算的结果均与旧键逐位一致。
+        key = ("points", res, _bis_fingerprint(pointEligibleBis(bis)),
+               _bis_fingerprint(upper), class2ZsTol, thirdZsTol)
         if work_cache is not None:
             ent = work_cache.get(("points", res))
             if ent is not None and ent[0] == key:
@@ -685,10 +726,11 @@ def compute_period_points(periodBis, periods, periodMacd=None, work_cache=None,
                 continue
         upperMacd = periodMacd.get(best) if best is not None else None
         try:
+            ctx = pointContext(bis, upper or [], sec)
             buy = findBuyPoints(bis, upper or [], macdArr, sec, class2ZsTol, thirdZsTol,
-                                upperMacd=upperMacd)
+                                upperMacd=upperMacd, _ctx=ctx)
             sell = findSellPoints(bis, upper or [], macdArr, sec, class2ZsTol, thirdZsTol,
-                                  upperMacd=upperMacd)
+                                  upperMacd=upperMacd, _ctx=ctx)
         except Exception:
             buy, sell = [], []
         row = {"buy": buy, "sell": sell}

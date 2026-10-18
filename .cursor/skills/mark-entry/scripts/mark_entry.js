@@ -501,18 +501,54 @@ function pointStrategyOf(point) {
  * 买卖单侧最新锚（原 trading_plan.predictPlan.matchSide 平移，2026-10-16）：
  * 从最后一笔终点逐笔向前扫描，返回第一个落在笔端点上的 family 族买卖点。
  * 容差与原口径一致：时间 ≤ tolSec（本周期 1 bar）、价格 ≤ max(ATR×0.2, 0.05)。
+ * 实现（2026-10-16 性能等价改造，与 PY 镜像）：族预过滤 + 点表按时间二分取 ±tolSec
+ * 窗，窗口内按原 all 顺序取首个价格命中——与原全量嵌套线性扫同值；索引按 points
+ * 行对象身份缓存（Map），行对象不变时直接复用。
  * @returns {object|null} 匹配的买卖点（无匹配返回 null）
  */
-function sideAnchor(bis, points, family, tolSec, tolPrice) {
+const _sideIx = new Map(); // points 行对象 → {family数组 → {fam, ftimes, order}}
+
+function _bisectLeftJs(arr, x) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] < x) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+function _bisectRightJs(arr, x) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] <= x) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+
+function _sideIndex(points, family) {
+  let ent = _sideIx.get(points);
+  if (!ent) {
+    if (_sideIx.size >= 8) _sideIx.clear();
+    ent = new Map();
+    _sideIx.set(points, ent);
+  }
+  let ix = ent.get(family);
+  if (ix) return ix;
   const all = (points.buy || []).concat(points.sell || []);
+  const fam = all.filter(p => family.includes(p.type));
+  const order = fam.map((_, i) => i).sort((a, b) => fam[a].time - fam[b].time);
+  const ftimes = order.map(i => fam[i].time);
+  ix = { fam, ftimes, order };
+  ent.set(family, ix);
+  return ix;
+}
+
+function sideAnchor(bis, points, family, tolSec, tolPrice) {
+  const { fam, ftimes, order } = _sideIndex(points, family);
   for (let j = bis.length - 1; j >= 0; j--) {
     const bi = bis[j];
     if (!bi) continue;
-    for (const p of all) {
-      if (!family.includes(p.type)) continue;
-      if (Math.abs(p.time - bi.endTime) <= tolSec && Math.abs(p.price - bi.endPrice) <= tolPrice) {
-        return p;
-      }
+    const lo = _bisectLeftJs(ftimes, bi.endTime - tolSec);
+    const hi = _bisectRightJs(ftimes, bi.endTime + tolSec);
+    if (lo >= hi) continue;
+    const idxs = order.slice(lo, hi).sort((a, b) => a - b); // 窗口内恢复原 all 顺序
+    for (const i of idxs) {
+      const p = fam[i];
+      if (Math.abs(p.price - bi.endPrice) <= tolPrice) return p;
     }
   }
   return null;
@@ -557,9 +593,11 @@ function computePeriodPoints(periodData, periods) {
     const upperBis = best !== null ? (periodData[best].bis || null) : null;
     const upperMacd = best !== null ? (periodData[best].macdArr || null) : null;
     try {
+      // 共享子计算上下文（2026-10-16 性能等价改造，与 PY 镜像）：投影/开窗/中枢两侧复用
+      const ctx = core.pointContext(bis, upperBis || [], barSec);
       out[res] = {
-        buy: core.findBuyPoints(bis, upperBis || [], pd.macdArr || [], barSec, undefined, undefined, upperMacd),
-        sell: core.findSellPoints(bis, upperBis || [], pd.macdArr || [], barSec, undefined, undefined, upperMacd),
+        buy: core.findBuyPoints(bis, upperBis || [], pd.macdArr || [], barSec, undefined, undefined, upperMacd, ctx),
+        sell: core.findSellPoints(bis, upperBis || [], pd.macdArr || [], barSec, undefined, undefined, upperMacd, ctx),
       };
     } catch (e) {
       if (DEBUG) console.log(`[买卖点] ${res} 计算失败: ${e.message}`);

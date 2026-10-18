@@ -2950,26 +2950,68 @@ def _second_family_v2(bis, firstPts, zss, c2tol, is_sell):
     want = "up" if is_sell else "down"  # 候选笔方向：买=回踩 down 端点 / 卖=反抽 up 端点
     rev = "down" if is_sell else "up"   # 反弹笔方向：买=up（锚后高点）/ 卖=down（锚后低点）
     want_top = not is_sell              # 买侧前高=顶角色端点；卖侧前低=底角色
+    # —— 2026-10-16 性能等价改造：预构索引。笔结束时刻与角色顶点表均按笔序构建、
+    # 时间非降，二分窗口与原全量线性扫同值（含同刻 tie 取首个命中的语序语义）；
+    # 数据退化（端点缺失致乱序）时整函数回退原线性路径。
+    end_times = [b["endTime"] or 0 for b in bis]
+    role_t, role_p = [], []
+    for b in bis:
+        ty = b.get("type")
+        st, et = b.get("startTime"), b.get("endTime")
+        sp, ep = b.get("startPrice"), b.get("endPrice")
+        if want_top:
+            if ty == "down" and st is not None and sp is not None:
+                role_t.append(st); role_p.append(sp)
+            elif ty == "up" and et is not None and ep is not None:
+                role_t.append(et); role_p.append(ep)
+        else:
+            if ty == "up" and st is not None and sp is not None:
+                role_t.append(st); role_p.append(sp)
+            elif ty == "down" and et is not None and ep is not None:
+                role_t.append(et); role_p.append(ep)
+    mono = (all(end_times[i] <= end_times[i + 1] for i in range(len(end_times) - 1))
+            and all(role_t[i] <= role_t[i + 1] for i in range(len(role_t) - 1)))
+    n_bis = len(bis)
     for ai, anchor in enumerate(anchors):
         anchor_t = anchor["time"]
         next_t = anchors[ai + 1]["time"] if ai + 1 < len(anchors) else float("inf")
         ref_p = anchor["price"]  # 抬高/压低参照
         zs2 = None               # 主点（2买/2卖）所在中枢；同中枢的后续点才是类点
         marked = False
-        # 前高/前低：锚之前最近的反向端点（买=最近的顶角色顶点：up 笔终点 / down 笔起点；卖镜像）
-        prev_extreme = None
-        prev_t = -float("inf")
-        for b in bis:
-            for t, p, is_top in ((b.get("startTime"), b.get("startPrice"), b["type"] == "down"),
-                                 (b.get("endTime"), b.get("endPrice"), b["type"] == "up")):
-                if is_top != want_top or t is None or p is None:
-                    continue
-                if t <= anchor_t and t > prev_t:
-                    prev_t = t
-                    prev_extreme = p
+        if mono:
+            # 前高/前低：角色顶点中 t<=anchor_t 的最后一个；同刻并列取首个命中
+            # （回退到等时刻 run 的首元素，与原 prev_t 严格递增扫描同值）。
+            i = bisect.bisect_right(role_t, anchor_t)
+            if i > 0:
+                j = i - 1
+                t0 = role_t[j]
+                while j > 0 and role_t[j - 1] == t0:
+                    j -= 1
+                prev_extreme = role_p[j]
+            else:
+                prev_extreme = None
+            # 候选窗 (anchor_t, next_t) 与笔列无交集 → 无候选无输出，整锚跳过
+            # （月龄老锚的窗早已滑出本级 60 笔窗口，占绝大多数）。
+            lo_i = bisect.bisect_right(end_times, anchor_t)
+            hi_i = n_bis if next_t == float("inf") else bisect.bisect_left(end_times, next_t)
+            if lo_i >= hi_i:
+                continue
+            seg = bis[lo_i:hi_i]
+        else:
+            seg = bis
+            prev_extreme = None
+            prev_t = -float("inf")
+            for b in bis:
+                for t, p, is_top in ((b.get("startTime"), b.get("startPrice"), b["type"] == "down"),
+                                     (b.get("endTime"), b.get("endPrice"), b["type"] == "up")):
+                    if is_top != want_top or t is None or p is None:
+                        continue
+                    if t <= anchor_t and t > prev_t:
+                        prev_t = t
+                        prev_extreme = p
         # 反弹极值：锚之后的反向端点滚动极值（买=最高、卖=最低）
         rebound_extreme = float("inf") if is_sell else -float("inf")
-        for b in bis:
+        for b in seg:
             t = b["endTime"] or 0
             if b["type"] == rev and t > anchor_t:
                 rebound_extreme = (min(rebound_extreme, b["endPrice"]) if is_sell
@@ -3073,15 +3115,19 @@ def _third_family_v2(bis, upper_bis, zss, t3tol, is_sell):
             return nxt["exitTime"], False
         return nxt.get("trioEndTime"), True
 
-    # 逐中枢处理：边界见 next_bound（已离开的下一中枢收到离开笔起点）
+    # 逐中枢处理：边界见 next_bound（已离开的下一中枢收到离开笔起点）。
+    # 匹配索引（2026-10-16 性能等价改造）：按 (upperStart, upperEnd) 预建字典，
+    # 取代 ub×zs 双层线性扫；同键多个中枢仍按 zss 原序处理，与原嵌套循环同值。
+    zs_by_win = {}
+    for k, zs in enumerate(zss):
+        zs_by_win.setdefault((zs.get("upperStart"), zs.get("upperEnd")), []).append(k)
     matched = set()
     for ub in conf:
         if ub["type"] != win_dir:
             continue
         j = 0  # 序号窗口内重新起算（2026-10-14 修正：此前跨窗口累计致现窗口一律类4）
-        for k, zs in enumerate(zss):
-            if zs.get("upperStart") != ub["startTime"] or zs.get("upperEnd") != ub["endTime"]:
-                continue
+        for k in zs_by_win.get((ub["startTime"], ub["endTime"]), ()):
+            zs = zss[k]
             matched.add(id(zs))
             bound_t, strict = next_bound(k)
             process_zs(zs, bound_t, strict)
@@ -3101,7 +3147,7 @@ def _third_family_v2(bis, upper_bis, zss, t3tol, is_sell):
     return dedup
 
 
-def _lower_vertex_of(lower_bis, t, p, bar_sec, is_top, lo=None, hi=None):
+def _lower_vertex_of(lower_bis, t, p, bar_sec, is_top, lo=None, hi=None, verts=None):
     """大级别笔端点落到本级顶点（一类点必须落在小级别）。
 
     搜索阶梯（2026-10-13 定稿）：
@@ -3115,6 +3161,10 @@ def _lower_vertex_of(lower_bis, t, p, bar_sec, is_top, lo=None, hi=None):
     lo/hi 为跨度搜索界（起点侧 [t-1bar, min(笔末,t+parent)]，终点侧
     [笔首, min(笔末+parent, 下一个上级顶点)]）：上界不越过下一个上级顶点，
     防止短笔几何下把后面别笔区域的小级别顶点搜进来。
+    verts（2026-10-16 性能等价改造）：可传入预构顶点表（project_first_points
+    复用同一 lower_bis 时一次构建）；四阶时间筛与空窗早退均走 vts 二分，
+    顶点表按笔序构建时间非降，切片保序 → sort 稳定性/max 首个命中等
+    语序敏感语义与全量线性扫逐位一致。
     """
     if not lower_bis or t is None or p is None:
         return t, p
@@ -3127,34 +3177,44 @@ def _lower_vertex_of(lower_bis, t, p, bar_sec, is_top, lo=None, hi=None):
         lo = t - teps
     if hi is None:
         hi = t + parent
-    verts = []
-    for b in lower_bis:
-        st, et = b.get("startTime"), b.get("endTime")
-        sp, ep = b.get("startPrice"), b.get("endPrice")
-        ty = b.get("type")
-        if st is not None and sp is not None:
-            verts.append((st, sp, ty == "up"))      # 笔起点：up=底角色
-        if et is not None and ep is not None:
-            verts.append((et, ep, ty == "down"))    # 笔终点：down=底角色
+    if verts is None:
+        verts = _lower_verts_of(lower_bis)
     if not verts:
         return t, p
+    vts = [v[0] for v in verts]
 
     def same_price(vp):
         return abs(vp - p) <= peps
 
+    # 空窗早退：四阶搜索窗全落在 [min(lo, t-teps), max(hi, t+teps)] 内，
+    # 与顶点时间域不相交 → 各阶必空 → 直接保持大级别时刻（第 5 阶）。
+    wlo = min(lo, t - teps)
+    whi = max(hi, t + teps)
+    if whi < vts[0] or wlo > vts[-1]:
+        return t, p
+
     # 1. ±1 根本级K内同价（最近）
-    on_grid = [(vt, vp) for vt, vp, _ in verts if same_price(vp) and abs(vt - t) <= teps]
+    g0 = bisect.bisect_left(vts, t - teps)
+    g1 = bisect.bisect_right(vts, t + teps)
+    on_grid = [(vt, vp) for vt, vp, _ in verts[g0:g1]
+               if same_price(vp) and abs(vt - t) <= teps]
     if on_grid:
         on_grid.sort(key=lambda x: abs(x[0] - t))
         return on_grid[0]
     # 2. 覆盖窗内同价（最晚）
-    inside = [(vt, vp) for vt, vp, _ in verts
-              if same_price(vp) and t <= vt < min(hi, t + parent)]
+    hi_eff = min(hi, t + parent)
+    i0 = bisect.bisect_left(vts, t)
+    i1 = bisect.bisect_left(vts, hi_eff)
+    inside = [(vt, vp) for vt, vp, _ in verts[i0:i1]
+              if same_price(vp) and t <= vt < hi_eff]
     if inside:
         vt, vp = max(inside, key=lambda x: x[0])
         return vt, vp
     # 3. 笔跨度内同价（离 t 最近）
-    span = [(vt, vp) for vt, vp, _ in verts if same_price(vp) and lo <= vt <= hi]
+    s0 = bisect.bisect_left(vts, lo)
+    s1 = bisect.bisect_right(vts, hi)
+    span = [(vt, vp) for vt, vp, _ in verts[s0:s1]
+            if same_price(vp) and lo <= vt <= hi]
     if span:
         span.sort(key=lambda x: abs(x[0] - t))
         return span[0]
@@ -3162,7 +3222,9 @@ def _lower_vertex_of(lower_bis, t, p, bar_sec, is_top, lo=None, hi=None):
     # 第 3 步同价才扫整段；极值只取 ±parent，避免中段拐点被当成笔终点。
     near_lo = max(lo, t - parent)
     near_hi = min(hi, t + parent)
-    pool = [(vt, vp) for vt, vp, bottom in verts
+    p0 = bisect.bisect_left(vts, near_lo)
+    p1 = bisect.bisect_right(vts, near_hi)
+    pool = [(vt, vp) for vt, vp, bottom in verts[p0:p1]
             if near_lo <= vt <= near_hi and bottom == (not is_top)]
     if pool:
         if is_top:
@@ -3172,6 +3234,20 @@ def _lower_vertex_of(lower_bis, t, p, bar_sec, is_top, lo=None, hi=None):
         return vt, vp
     # 5. 小级别在该笔内无结构 → 保持大级别时刻
     return t, p
+
+
+def _lower_verts_of(lower_bis):
+    """本级笔顶点表（起点+终点，按笔序时间非降）；供 _lower_vertex_of 复用预构。"""
+    verts = []
+    for b in lower_bis:
+        st, et = b.get("startTime"), b.get("endTime")
+        sp, ep = b.get("startPrice"), b.get("endPrice")
+        ty = b.get("type")
+        if st is not None and sp is not None:
+            verts.append((st, sp, ty == "up"))      # 笔起点：up=底角色
+        if et is not None and ep is not None:
+            verts.append((et, ep, ty == "down"))    # 笔终点：down=底角色
+    return verts
 
 
 def project_first_points(lower_bis, upper_bis, bar_sec):
@@ -3199,13 +3275,13 @@ def project_first_points(lower_bis, upper_bis, bar_sec):
     teps = bar_sec or 0
     parent = teps * 6
     uverts = sorted({b["startTime"] for b in upper} | {b["endTime"] for b in upper})
+    verts = _lower_verts_of(lower_bis)  # 预构一次，逐端点复用（性能等价）
 
     def next_upper_vert(t):
-        """t 之后最近的上级顶点时刻（不含 t）；没有则 None。"""
-        for v in uverts:
-            if v > t:
-                return v
-        return None
+        """t 之后最近的上级顶点时刻（不含 t）；没有则 None。
+        uverts 升序且逐笔查询单调 → 二分与原线性扫同值（纯性能等价）。"""
+        i = bisect.bisect_right(uverts, t)
+        return uverts[i] if i < len(uverts) else None
 
     for ub in upper:
         up = ub["type"] == "up"
@@ -3216,9 +3292,9 @@ def project_first_points(lower_bis, upper_bis, bar_sec):
         nxt_e = next_upper_vert(et_t)
         hi_e = et_t + parent if nxt_e is None else min(et_t + parent, nxt_e)
         st, sp = _lower_vertex_of(lower_bis, st_t, ub["startPrice"], bar_sec,
-                                  is_top=not up, lo=st_t - teps, hi=hi_s)
+                                  is_top=not up, lo=st_t - teps, hi=hi_s, verts=verts)
         et, ep = _lower_vertex_of(lower_bis, et_t, ub["endPrice"], bar_sec,
-                                  is_top=up, lo=st_t, hi=hi_e)
+                                  is_top=up, lo=st_t, hi=hi_e, verts=verts)
         if up:
             put("1买", st, sp)
             put("1卖", et, ep)
@@ -3295,8 +3371,23 @@ def nested_dirty_periods(periods, changed_spans):
     return out
 
 
+def pointContext(bis, upperBis, barSec):
+    """findBuyPoints/findSellPoints 的共享子计算上下文（2026-10-16 性能等价改造）。
+    两侧对相同入参分别重复计算的子结构（合格笔过滤/一类投影/方向开窗/上级分解中枢）
+    在此一次构建、经 _ctx 参数复用；子结构均为纯函数结果且下游只读不写，
+    共享复用与两侧各自独立计算逐位一致。
+    @returns (eligBis, projected, windows, tail_start, zss)；无上级时 projected=None。"""
+    elig = pointEligibleBis(bis)
+    if not upperBis or len(upperBis) == 0:
+        return (elig, None, None, None, None)
+    projected = project_first_points(elig, upperBis, barSec)
+    windows, tail_start = _direction_windows(upperBis)
+    zss = buildZSByUpper(elig, upperBis, barSec)
+    return (elig, projected, windows, tail_start, zss)
+
+
 def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.0, cache=None,
-                  upperMacd=None):
+                  upperMacd=None, _ctx=None):
     """买点识别（2026-10-14 规则v2，与 JS chan_core.js 同步）：
     1买 = 已收笔上级上涨笔内部的小级别起点（project_first_points 投影，同笔也标记，2026-10-16 起）；
     2买族 = 1买锚后低点逐一抬高（_second_family_v2：首个抬低=2买、同中枢后续=类2买）；
@@ -3304,15 +3395,14 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
     方向开窗：已收笔上涨笔窗只留买点、未收笔尾段双向放行（一类不参与过滤）。
     无上级（日线）返回空。macdArr/upperMacd/cache 参数仅为下游调用兼容保留，
     不再参与判定（旧记录缓存随无上级路径一并移除）。返回按 time 升序稳定排序。
+    _ctx（性能等价）：可传 pointContext(bis, upperBis, barSec) 结果供买卖两侧复用。
     """
-    bis = pointEligibleBis(bis)
-    if not upperBis or len(upperBis) == 0:
-        return []  # 无上级（日线）不标（2026-10-14 规则v2）
-    projected = project_first_points(bis, upperBis, barSec)
+    if _ctx is None:
+        _ctx = pointContext(bis, upperBis, barSec)
+    bis, projected, windows, tail_start, zss = _ctx
     if projected is None:
         return []
     t3tol = float(thirdZsTol or 0)
-    windows, tail_start = _direction_windows(upperBis)
 
     def allow(t):
         return _point_allowed_by_direction(windows, tail_start, t, "buy")
@@ -3323,7 +3413,6 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
         for fb in points:
             print(f"[一买] 上级笔端点 {fmtT(fb['time'])}({fb['price']})")
     first_times = {p["time"] for p in points}
-    zss = buildZSByUpper(bis, upperBis, barSec)
     second_times = set()
     for p in _second_family_v2(bis, projected["buys"], zss, float(class2ZsTol or 0), False):
         if not allow(p["time"]) or p["time"] in first_times:
@@ -3341,20 +3430,19 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
 
 
 def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.0, cache=None,
-                   upperMacd=None):
+                   upperMacd=None, _ctx=None):
     """卖点识别（2026-10-14 规则v2，与买点镜像、与 JS chan_core.js 同步）：
     1卖 = 已收笔上级上涨笔内部的小级别终点 / 下跌笔内部的小级别起点（投影，同笔也标记，2026-10-16 起）；
     2卖族 = 1卖锚后高点逐一压低；3类族 = 向下离开中枢反抽不进；方向开窗：已收笔下跌笔窗
     只留卖点、尾段双向放行。无上级（日线）返回空。返回按 time 升序稳定排序。
+    _ctx（性能等价）：可传 pointContext(bis, upperBis, barSec) 结果供买卖两侧复用。
     """
-    bis = pointEligibleBis(bis)
-    if not upperBis or len(upperBis) == 0:
-        return []  # 无上级（日线）不标（2026-10-14 规则v2）
-    projected = project_first_points(bis, upperBis, barSec)
+    if _ctx is None:
+        _ctx = pointContext(bis, upperBis, barSec)
+    bis, projected, windows, tail_start, zss = _ctx
     if projected is None:
         return []
     t3tol = float(thirdZsTol or 0)
-    windows, tail_start = _direction_windows(upperBis)
 
     def allow(t):
         return _point_allowed_by_direction(windows, tail_start, t, "sell")
@@ -3365,7 +3453,6 @@ def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0
         for fs in points:
             print(f"[一卖] 上级笔端点 {fmtT(fs['time'])}({fs['price']})")
     first_times = {p["time"] for p in points}
-    zss = buildZSByUpper(bis, upperBis, barSec)
     second_times = set()
     for p in _second_family_v2(bis, projected["sells"], zss, float(class2ZsTol or 0), True):
         if not allow(p["time"]) or p["time"] in first_times:

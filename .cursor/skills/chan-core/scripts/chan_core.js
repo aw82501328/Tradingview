@@ -1744,14 +1744,20 @@ function isSameAsUpperBi(bi, upperBis, barSec) {
  * [笔首, min(笔末+parent, 下一个上级顶点)]）：上界不越过下一个上级顶点，
  * 防止短笔几何下把后面别笔区域的小级别顶点搜进来。
  */
-function lowerVertexOf(lowerBis, t, p, barSec, isTop, lo, hi) {
-  if (!lowerBis || !lowerBis.length || t == null || p == null) return [t, p];
-  const pEps = 0.01;
-  const tEps = barSec || 0;
-  const parent = tEps * 6; // 本级约 4~6 根覆盖上级一根（3m←15m 为 5，D←4h 为 6）
-  if (tEps <= 0) return [t, p];
-  if (lo == null) lo = t - tEps;
-  if (hi == null) hi = t + parent;
+// 二分查找（与 Python bisect 同语义；升序数组）。2026-10-16 性能等价改造引入。
+function bisectLeftArr(arr, x) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] < x) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+function bisectRightArr(arr, x) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] <= x) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+
+// 本级笔顶点表（起点+终点，按笔序时间非降）；供 lowerVertexOf 复用预构。
+function lowerVertsOf(lowerBis) {
   const verts = [];
   for (const b of lowerBis) {
     if (b.startTime != null && b.startPrice != null) {
@@ -1761,24 +1767,44 @@ function lowerVertexOf(lowerBis, t, p, barSec, isTop, lo, hi) {
       verts.push([b.endTime, b.endPrice, b.type === "down"]);        // 笔终点：down=底角色
     }
   }
+  return verts;
+}
+
+function lowerVertexOf(lowerBis, t, p, barSec, isTop, lo, hi, vertsIn) {
+  if (!lowerBis || !lowerBis.length || t == null || p == null) return [t, p];
+  const pEps = 0.01;
+  const tEps = barSec || 0;
+  const parent = tEps * 6; // 本级约 4~6 根覆盖上级一根（3m←15m 为 5，D←4h 为 6）
+  if (tEps <= 0) return [t, p];
+  if (lo == null) lo = t - tEps;
+  if (hi == null) hi = t + parent;
+  const verts = vertsIn || lowerVertsOf(lowerBis); // 预构顶点表可传入复用（性能等价）
   if (!verts.length) return [t, p];
+  const vts = verts.map(v => v[0]);
   const samePrice = (vp) => Math.abs(vp - p) <= pEps;
+  // 空窗早退：四阶搜索窗全落在 [min(lo,t-tEps), max(hi,t+tEps)] 内，与顶点时间域
+  // 不相交 → 各阶必空 → 直接保持大级别时刻（第 5 阶）。月龄老锚零成本跳过。
+  const wLo = Math.min(lo, t - tEps), wHi = Math.max(hi, t + tEps);
+  if (wHi < vts[0] || wLo > vts[vts.length - 1]) return [t, p];
   // 1. ±1 根本级K内同价（最近）
-  const onGrid = verts.filter(([vt, vp]) => samePrice(vp) && Math.abs(vt - t) <= tEps);
+  const g0 = bisectLeftArr(vts, t - tEps), g1 = bisectRightArr(vts, t + tEps);
+  const onGrid = verts.slice(g0, g1).filter(([vt, vp]) => samePrice(vp) && Math.abs(vt - t) <= tEps);
   if (onGrid.length) {
     onGrid.sort((a, b) => Math.abs(a[0] - t) - Math.abs(b[0] - t));
     return [onGrid[0][0], onGrid[0][1]];
   }
   // 2. 覆盖窗内同价（最晚）
   const winHi = Math.min(hi, t + parent);
-  const inside = verts.filter(([vt, vp]) => samePrice(vp) && vt >= t && vt < winHi);
+  const i0 = bisectLeftArr(vts, t), i1 = bisectLeftArr(vts, winHi);
+  const inside = verts.slice(i0, i1).filter(([vt, vp]) => samePrice(vp) && vt >= t && vt < winHi);
   if (inside.length) {
     let best = inside[0];
     for (const v of inside) if (v[0] > best[0]) best = v;
     return [best[0], best[1]];
   }
   // 3. 笔跨度内同价（离 t 最近）
-  const span = verts.filter(([vt, vp]) => samePrice(vp) && vt >= lo && vt <= hi);
+  const s0 = bisectLeftArr(vts, lo), s1 = bisectRightArr(vts, hi);
+  const span = verts.slice(s0, s1).filter(([vt, vp]) => samePrice(vp) && vt >= lo && vt <= hi);
   if (span.length) {
     span.sort((a, b) => Math.abs(a[0] - t) - Math.abs(b[0] - t));
     return [span[0][0], span[0][1]];
@@ -1787,7 +1813,8 @@ function lowerVertexOf(lowerBis, t, p, barSec, isTop, lo, hi) {
   // 第 3 步同价才扫整段；极值只取 ±parent，避免中段拐点被当成笔终点。
   const nearLo = Math.max(lo, t - parent);
   const nearHi = Math.min(hi, t + parent);
-  const pool = verts.filter(([vt, , bottom]) => vt >= nearLo && vt <= nearHi && bottom === !isTop);
+  const p0 = bisectLeftArr(vts, nearLo), p1 = bisectRightArr(vts, nearHi);
+  const pool = verts.slice(p0, p1).filter(([vt, , bottom]) => vt >= nearLo && vt <= nearHi && bottom === !isTop);
   if (pool.length) {
     let best = pool[0];
     for (const v of pool) {
@@ -1833,9 +1860,11 @@ function projectFirstPoints(lowerBis, upperBis, barSec) {
     acc.push(b.startTime, b.endTime);
     return acc;
   }, []))].sort((a, b) => a - b);
+  const verts = lowerVertsOf(lowerBis); // 预构一次，逐端点复用（性能等价）
   const nextUpperVert = (t) => {
-    for (const v of uverts) if (v > t) return v;
-    return null;
+    // uverts 升序且逐笔查询单调 → 二分与原线性扫同值（纯性能等价）
+    const i = bisectRightArr(uverts, t);
+    return i < uverts.length ? uverts[i] : null;
   };
   for (const ub of upper) {
     const up = ub.type === "up";
@@ -1846,9 +1875,9 @@ function projectFirstPoints(lowerBis, upperBis, barSec) {
     const nxtE = nextUpperVert(etT);
     const hiE = nxtE == null ? etT + parent : Math.min(etT + parent, nxtE);
     const [st, sp] = lowerVertexOf(lowerBis, stT, ub.startPrice, barSec,
-      !up, stT - tEps, hiS);
+      !up, stT - tEps, hiS, verts);
     const [et, ep] = lowerVertexOf(lowerBis, etT, ub.endPrice, barSec,
-      up, stT, hiE);
+      up, stT, hiE, verts);
     if (up) {
       put("1买", st, sp);
       put("1卖", et, ep);
@@ -2023,28 +2052,65 @@ function secondFamilyV2(bis, firstPts, zss, c2tol, isSell) {
   const anchors = firstPts.map(p => ({ time: p.time, price: p.price })).sort((a, b) => a.time - b.time);
   const want = isSell ? "up" : "down"; // 候选笔方向：买=回踩 down 端点 / 卖=反抽 up 端点
   const rev = isSell ? "down" : "up";  // 反弹笔方向：买=up（锚后高点）/ 卖=down（锚后低点）
+  const wantTop = !isSell;
+  // —— 2026-10-16 性能等价改造（与 PY 镜像）：预构索引。笔结束时刻与角色顶点表均按
+  // 笔序构建、时间非降，二分窗口与原全量线性扫同值（含同刻 tie 取首个命中的语序语义）；
+  // 数据退化（端点缺失致乱序）时回退原线性路径。
+  const endTimes = bis.map(b => b.endTime || 0);
+  const roleT = [], roleP = [];
+  for (const b of bis) {
+    if (wantTop) {
+      if (b.type === "down" && b.startTime != null && b.startPrice != null) { roleT.push(b.startTime); roleP.push(b.startPrice); }
+      else if (b.type === "up" && b.endTime != null && b.endPrice != null) { roleT.push(b.endTime); roleP.push(b.endPrice); }
+    } else {
+      if (b.type === "up" && b.startTime != null && b.startPrice != null) { roleT.push(b.startTime); roleP.push(b.startPrice); }
+      else if (b.type === "down" && b.endTime != null && b.endPrice != null) { roleT.push(b.endTime); roleP.push(b.endPrice); }
+    }
+  }
+  let mono = true;
+  for (let i = 0; i + 1 < endTimes.length; i++) if (endTimes[i] > endTimes[i + 1]) { mono = false; break; }
+  if (mono) for (let i = 0; i + 1 < roleT.length; i++) if (roleT[i] > roleT[i + 1]) { mono = false; break; }
   for (let ai = 0; ai < anchors.length; ai++) {
     const anchorT = anchors[ai].time;
     const nextT = ai + 1 < anchors.length ? anchors[ai + 1].time : Infinity;
     let refP = anchors[ai].price; // 抬高/压低参照
     let zs2 = null;               // 主点（2买/2卖）所在中枢；同中枢的后续点才是类点
     let marked = false;
-    // 前高/前低：锚之前最近的反向端点（买=最近的顶角色顶点：up 笔终点 / down 笔起点；卖镜像）
-    let prevExtreme = null, prevT = -Infinity;
-    const wantTop = !isSell;
-    for (const b of bis) {
-      for (const [t, p, isTop] of [
-        [b.startTime, b.startPrice, b.type === "down"],
-        [b.endTime, b.endPrice, b.type === "up"],
-      ]) {
-        if (isTop !== wantTop || t == null || p == null) continue;
-        if (t <= anchorT && t > prevT) { prevT = t; prevExtreme = p; }
+    let prevExtreme = null;
+    let seg;
+    if (mono) {
+      // 前高/前低：角色顶点中 t<=anchorT 的最后一个；同刻并列取首个命中
+      // （回退到等时刻 run 的首元素，与原 prevT 严格递增扫描同值）。
+      let i = bisectRightArr(roleT, anchorT);
+      if (i > 0) {
+        let j2 = i - 1;
+        const t0 = roleT[j2];
+        while (j2 > 0 && roleT[j2 - 1] === t0) j2--;
+        prevExtreme = roleP[j2];
+      }
+      // 候选窗 (anchorT, nextT) 与笔列无交集 → 无候选无输出，整锚跳过
+      // （月龄老锚的窗早已滑出本级 60 笔窗口，占绝大多数）。
+      const loI = bisectRightArr(endTimes, anchorT);
+      const hiI = nextT === Infinity ? bis.length : bisectLeftArr(endTimes, nextT);
+      if (loI >= hiI) continue;
+      seg = bis.slice(loI, hiI);
+    } else {
+      seg = bis;
+      let prevT = -Infinity;
+      for (const b of bis) {
+        for (const [t, p, isTop] of [
+          [b.startTime, b.startPrice, b.type === "down"],
+          [b.endTime, b.endPrice, b.type === "up"],
+        ]) {
+          if (isTop !== wantTop || t == null || p == null) continue;
+          if (t <= anchorT && t > prevT) { prevT = t; prevExtreme = p; }
+        }
       }
     }
     // 反弹极值：锚之后的反向端点滚动极值（买=最高、卖=最低）
     let reboundExtreme = isSell ? Infinity : -Infinity;
-    for (let i = 0; i < bis.length; i++) {
-      const b = bis[i];
+    for (let i = 0; i < seg.length; i++) {
+      const b = seg[i];
       const t = b.endTime || 0;
       if (b.type === rev && t > anchorT) {
         reboundExtreme = isSell ? Math.min(reboundExtreme, b.endPrice)
@@ -2135,14 +2201,21 @@ function thirdFamilyV2(bis, upperBis, zss, t3tol, isSell) {
     if (nxt.exitTime != null) return [nxt.exitTime, false];
     return [nxt.trioEndTime, true];
   };
-  // 逐中枢处理：边界见 nextBound（已离开的下一中枢收到离开笔起点）
+  // 逐中枢处理：边界见 nextBound（已离开的下一中枢收到离开笔起点）。
+  // 匹配索引（2026-10-16 性能等价改造，与 PY 镜像）：按 (upperStart, upperEnd) 预建
+  // Map，取代 ub×zs 双层线性扫；同键多个中枢仍按 zss 原序处理，与原嵌套循环同值。
+  const zsByWin = new Map();
+  for (let k = 0; k < zss.length; k++) {
+    const key = `${zss[k].upperStart}|${zss[k].upperEnd}`;
+    if (!zsByWin.has(key)) zsByWin.set(key, []);
+    zsByWin.get(key).push(k);
+  }
   const matched = new Set();
   for (const ub of conf) {
     if (ub.type !== winDir) continue;
     j = 0; // 序号窗口内重新起算（2026-10-14 修正：此前跨窗口累计致现窗口一律类4）
-    for (let k = 0; k < zss.length; k++) {
+    for (const k of zsByWin.get(`${ub.startTime}|${ub.endTime}`) || []) {
       const zs = zss[k];
-      if (zs.upperStart !== ub.startTime || zs.upperEnd !== ub.endTime) continue;
       matched.add(zs);
       const [boundT, strict] = nextBound(k);
       processZs(zs, boundT, strict);
@@ -2171,20 +2244,39 @@ function thirdFamilyV2(bis, upperBis, zss, t3tol, isSell) {
 }
 
 /**
+ * findBuyPoints/findSellPoints 的共享子计算上下文（2026-10-16 性能等价改造，与 PY 镜像）。
+ * 两侧对相同入参分别重复计算的子结构（合格笔过滤/一类投影/方向开窗/上级分解中枢）
+ * 在此一次构建、经 _ctx 参数复用；子结构均为纯函数结果且下游只读不写，
+ * 共享复用与两侧各自独立计算逐位一致。
+ * @returns {{eligBis, projected, windows, tailStart, zss}}；无上级时 projected=null。
+ */
+function pointContext(bis, upperBis, barSec) {
+  const elig = pointEligibleBis(bis);
+  if (!upperBis || !upperBis.length) {
+    return { eligBis: elig, projected: null, windows: null, tailStart: null, zss: null };
+  }
+  const projected = projectFirstPoints(elig, upperBis, barSec);
+  const { windows, tailStart } = directionWindows(upperBis);
+  const zss = buildZSByUpper(elig, upperBis, barSec);
+  return { eligBis: elig, projected, windows, tailStart, zss };
+}
+
+/**
  * 买点识别（2026-10-14 规则v2）：1买=已收笔上级上涨笔内部的小级别起点（投影，同笔也标记，2026-10-16 起）；
  * 2买族=1买锚后抬低序列（secondFamilyV2）；3类族=离开中枢回踩不进（thirdFamilyV2）；
  * 方向开窗：已收笔上涨笔窗内只留买点、尾段双向放行。无上级（日线）返回空。
  * macdArr/upperMacd 参数仅为下游调用兼容保留，不再参与判定。
  * 返回按 time 升序（稳定排序；同刻优先级 一类 > 二类族 > 三类族）。
+ * _ctx（性能等价）：可传 pointContext(bis, upperBis, barSec) 结果供买卖两侧复用。
  */
-function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, upperMacd) {
-  bis = pointEligibleBis(bis);
-  if (!upperBis || !upperBis.length) return []; // 无上级（日线）不标（2026-10-14 规则v2）
-  const projected = projectFirstPoints(bis, upperBis, barSec);
+function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, upperMacd, _ctx) {
+  const ctx = _ctx || pointContext(bis, upperBis, barSec);
+  bis = ctx.eligBis;
+  const projected = ctx.projected;
   if (!projected) return [];
   const c2tol = +(class2ZsTol || 0);
   const t3tol = +(thirdZsTol || 0);
-  const { windows, tailStart } = directionWindows(upperBis);
+  const { windows, tailStart } = ctx;
   const allow = (t) => pointAllowedByDirection(windows, tailStart, t, "buy");
   const points = [];
   for (const p of projected.buys) points.push({ type: "1买", time: p.time, price: p.price });
@@ -2192,7 +2284,7 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, 
     for (const fb of points) console.log(`[一买] 上级笔端点 ${fmtT(fb.time)}(${fb.price})`);
   }
   const firstTimes = new Set(points.map(p => p.time));
-  const zss = buildZSByUpper(bis, upperBis, barSec);
+  const zss = ctx.zss;
   const secondTimes = new Set();
   for (const p of secondFamilyV2(bis, projected.buys, zss, c2tol, false)) {
     if (!allow(p.time) || firstTimes.has(p.time)) continue;
@@ -2214,15 +2306,16 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, 
  * 下跌笔起点（投影，同笔也标记，2026-10-16 起）；2卖族=1卖锚后压低序列；3类族=向下离开中枢反抽不进；
  * 方向开窗：已收笔下跌笔窗内只留卖点、尾段双向放行。无上级（日线）返回空。
  * 返回按 time 升序（稳定排序；同刻优先级 一类 > 二类族 > 三类族）。
+ * _ctx（性能等价）：可传 pointContext(bis, upperBis, barSec) 结果供买卖两侧复用。
  */
-function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, upperMacd) {
-  bis = pointEligibleBis(bis);
-  if (!upperBis || !upperBis.length) return []; // 无上级（日线）不标（2026-10-14 规则v2）
-  const projected = projectFirstPoints(bis, upperBis, barSec);
+function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, upperMacd, _ctx) {
+  const ctx = _ctx || pointContext(bis, upperBis, barSec);
+  bis = ctx.eligBis;
+  const projected = ctx.projected;
   if (!projected) return [];
   const c2tol = +(class2ZsTol || 0);
   const t3tol = +(thirdZsTol || 0);
-  const { windows, tailStart } = directionWindows(upperBis);
+  const { windows, tailStart } = ctx;
   const allow = (t) => pointAllowedByDirection(windows, tailStart, t, "sell");
   const points = [];
   for (const p of projected.sells) points.push({ type: "1卖", time: p.time, price: p.price });
@@ -2230,7 +2323,7 @@ function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol,
     for (const fs of points) console.log(`[一卖] 上级笔端点 ${fmtT(fs.time)}(${fs.price})`);
   }
   const firstTimes = new Set(points.map(p => p.time));
-  const zss = buildZSByUpper(bis, upperBis, barSec);
+  const zss = ctx.zss;
   const secondTimes = new Set();
   for (const p of secondFamilyV2(bis, projected.sells, zss, c2tol, true)) {
     if (!allow(p.time) || firstTimes.has(p.time)) continue;
@@ -2556,6 +2649,7 @@ module.exports = {
   findBuyPoints,
   findSellPoints,
   projectFirstPoints,
+  pointContext,
   directionWindows,
   secondFamilyV2,
   thirdFamilyV2,
