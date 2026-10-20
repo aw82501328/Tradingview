@@ -775,19 +775,6 @@ async function locateDetailRow(id) {
   }
 }
 
-// 定位结果里次级别笔链的状态片段（result.bis：覆盖检测跳过/逐级计数/失败原因）
-function biChainTxt(bi) {
-  if (!bi) return '';
-  if (bi.skipped) return `（笔：${bi.skipped}）`;
-  if (bi.error) return `（笔画线失败：${bi.error}）`;
-  const parts = Object.entries(bi.levels || {}).filter(([, n]) => n > 0).map(([r, n]) => `${r}m×${n}`);
-  if (!parts.length) return '';
-  let t = `并画次级别笔 ${parts.join('+')}`;
-  if (bi.failed) t += `（${bi.failed}根超范围跳过）`;
-  if (bi.already) t += `（${bi.already}）`;
-  return `（${t}）`;
-}
-
 function finishLocate(job) {
   if (!locatePending || job?.jobId !== locatePending.jobId || job.state === 'running') return;
   const pending = locatePending;
@@ -804,7 +791,7 @@ function finishLocate(job) {
       : mk?.skipped ? `（${mk.skipped}，不画标记）`
       : mk ? `并标记 ${mk.drawn} 个` : '';
     const replayTxt = job.result.replay ? '（K线回放）' : '';
-    setBtDetailLocateMsg(`#${btDetailLabelOf(id)} 已定位${replayTxt}${markTxt}${biChainTxt(job.result.bis)} · ${job.result.symbol} · ${job.result.markRes} · ${fmtTime(job.result.time)}`);
+    setBtDetailLocateMsg(`#${btDetailLabelOf(id)} 已定位${replayTxt}${markTxt} · ${job.result.symbol} · ${job.result.markRes} · ${fmtTime(job.result.time)}`);
   } else {
     setBtDetailLocateMsg(`#${btDetailLabelOf(id)} 定位失败：${job.error || '未知错误'}`, true);
   }

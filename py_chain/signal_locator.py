@@ -4,13 +4,8 @@
 单行标记（进场箭头+窗口内出场+近支阻横线）。回放定位用图表该根 K 线的
 真实时间做锚点、不写周期可见性（回放里 IV 会把箭头藏掉）。
 标记失败不否定定位结果（result['mark'] 带 error 说明）。
-
-标记之后追画次级别笔链（2026-10-09，见 locate_bi 与 _draw_bi_after_locate）：
-开仓时间被工作台缓存的 60/240 大周期笔覆盖时，从 bars.db 现算其下各级笔
-（60→15m+3m、240→60m+15m+3m，逐级区间套锁定）。检测周期是 15/3、或定位
-落在 3/15 分钟时，改挂覆盖开仓时间的 60 分钟笔，同样补 15 分钟和 3 分钟。
-逐级切周期时若图上没有这段 K 线，用回放把该级 K 线补上再画折线，画完回到
-定位周期；未覆盖/失败只记 result['bis']，不影响定位与标记。
+定位后不再追画次级别笔链（2026-10-18 用户要求取消，locate_bi 已删；
+「删除标记」仍能清掉图上遗留的 ML·BI 折线，见 marks.CLEAR_IDS_KEYS）。
 
 近期行情与历史行情都用 Bar Replay 跳到最后出场之后（无出场则进场后再留
 一段K线），右缘停在保留根数处再居中，进场点直接进窗口。实时图历史不够时
@@ -276,7 +271,7 @@ def _draw_after_locate(c, row, bar_time, colors=None, last_time=None):
 
 
 def _center_view(c, symbol, res, t_target, t_until):
-    """把目标K线居中（定位主流程与画笔回切周期后共用）。失败抛异常。"""
+    """把目标K线居中（定位主流程用）。失败抛异常。"""
     target = json.dumps({'symbol': symbol, 'res': str(res),
                          'time': int(t_target), 'until': int(t_until)})
     return c.evaluate("""(()=>{
@@ -302,93 +297,6 @@ def _center_view(c, symbol, res, t_target, t_until):
               index:bar.index,fromIndex:range.firstBar(),toIndex:range.lastBar(),
               until:uBar.value[0]};
     })()""".replace('TARGET', target))
-
-
-def _upper_res_of(row, landed):
-    """画次级别笔所依的大周期。
-
-    检测周期 periodX 是 60/240 时直接用它。检测周期是 15/3，或图落在 3/15
-    （背驰画在 3 分钟时落地就是 3，旧逻辑会直接跳过）时，改挂其上一级 60，
-    这样才能补 15 分钟和 3 分钟。落到 60 且检测周期不是 60/240 时改挂 240。
-    """
-    upper = str(row.get('periodX') or '')
-    if upper in ('60', '240'):
-        return upper
-    if upper in ('15', '3') or landed in ('3', '15'):
-        return '60'
-    return {'60': '240'}.get(landed, '')
-
-
-def _draw_bi_after_locate(c, row, result, view_until):
-    """单行标记之后：大周期笔覆盖开仓时间时画次级别笔链（240→[60,15,3]、60→[15,3]）。
-
-    覆盖检测用工作台缓存（「更新全部」同源大周期结构），笔链从 bars.db 现算、
-    逐级区间套锁定（首级锁覆盖笔两端点）。TV 折线只能锚定当前图表周期的K线
-    边界，故逐级临时切到该级周期创建，画完切回定位周期并重新居中（箭头全周期
-    可见不受影响）。任何失败只记入返回值，不否定定位本身。
-    """
-    from . import locate_bi
-    landed = str(result.get('markRes') or '')
-    upper = _upper_res_of(row, landed)
-    if upper not in ('60', '240'):
-        return {'drawn': 0, 'failed': 0, 'skipped': '无60/240大周期结构可依'}
-    t_entry = int(row['time'])
-    cover = locate_bi.find_covering_bi(row['symbol'], upper, t_entry)
-    if cover is None:
-        return {'drawn': 0, 'failed': 0, 'skipped': '大周期笔未覆盖开仓时间'}
-    out = locate_bi.compute_lower_chain(row['symbol'], upper, cover, t_entry, view_until)
-    levels = out.get('levels') or {}
-    if not levels:
-        first = next(iter((out.get('errors') or {}).values()), None)
-        return {'drawn': 0, 'failed': 0,
-                'skipped': first or '次级别笔计算失败（bars.db 无数据？）'}
-    # 图上画笔已经盖住开仓时间的级别不再补（否则和 CHAN_BI 叠成双线）
-    names = {'3': '3分钟', '15': '15分钟', '60': '1小时', '240': '4小时'}
-    already = [res for res in levels if locate_bi.chart_bi_covers(c, res, t_entry)]
-    levels = {res: bis for res, bis in levels.items() if res not in already}
-    already_txt = '、'.join(names.get(r, r) for r in already) + '已有画笔' if already else ''
-    if not levels:
-        locate_bi.clear_locate_bis(c)
-        return {'drawn': 0, 'failed': 0, 'skipped': already_txt}
-    # 回放态图表时间轴整体平移：图侧信号K线时间 − 开仓逻辑时间（限幅 ±15h，
-    # 正常图为 0；非整小时平移视为噪声归零）
-    tz = int(result['time']) - t_entry
-    if abs(tz) < 900 or abs(tz) > 15 * 3600:
-        tz = 0
-    counts, drawn_total, failed_total, first_level = {}, 0, 0, True
-    cur = landed
-    try:
-        for res, bis in levels.items():
-            if cur != res:
-                _set_resolution(c, res)
-                cur = res
-            # 切到本级后图上往往还没有这段历史K线（实时深度不够，或回放只带了
-            # 光标前约 300 根）。先补齐再画，否则折线锚不到K线边界会被删掉。
-            need_from = int(bis[0]['startTime'])
-            need_to = max(int(view_until), max(int(b['endTime']) for b in bis))
-            locate_bi.ensure_level_bars(c, res, need_from, need_to)
-            r = locate_bi.draw_level(c, res, bis, tz_off=tz, clear_first=first_level)
-            first_level = False
-            counts[res] = int(r.get('drawn') or 0)
-            drawn_total += counts[res]
-            failed_total += int(r.get('failed') or 0)
-    finally:
-        if cur != landed:
-            _set_resolution(c, landed)
-            locate_bi.wait_resolution(c, landed, timeout=20.0)
-    # 回到定位周期后重新居中（切周期改变K线索引；失败只记录不抛）
-    recenter_err = None
-    try:
-        _center_view(c, row['symbol'], landed, t_entry, view_until)
-    except Exception as exc:
-        recenter_err = str(exc)
-    out = {'upper': upper, 'levels': counts, 'drawn': drawn_total,
-           'failed': failed_total, 'errors': out.get('errors') or {}}
-    if already_txt:
-        out['already'] = already_txt
-    if recenter_err:
-        out['error'] = f'回切居中失败：{recenter_err}'
-    return out
 
 
 def locate_signal(row, cfg=None, timeout=360, colors=None, after_bars=DEFAULT_AFTER_BARS):
@@ -527,12 +435,6 @@ def locate_signal(row, cfg=None, timeout=360, colors=None, after_bars=DEFAULT_AF
                 last_time=data.get('last'))
         except Exception as exc:
             result['mark'] = {'drawn': 0, 'cleared': 0, 'error': str(exc)}
-        # 次级别笔链：大周期笔覆盖开仓时间时画（60/240 → 其下各级至 3m）。
-        # 失败不否定定位本身，只把结果带回 result['bis']。
-        try:
-            result['bis'] = _draw_bi_after_locate(c, row, result, view_until)
-        except Exception as exc:
-            result['bis'] = {'drawn': 0, 'failed': 0, 'error': str(exc)}
         return result
 
 
