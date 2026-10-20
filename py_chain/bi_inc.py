@@ -25,8 +25,23 @@
 - 重同步（BacktestEngine._resync_bis → invalidate + 批量重建）后严格归零。
   （曾试「批量结果与增量旧值深度相等则换绑续用」：输出相等不足以证明内部栈状态
   一致，增量漂移会跨重同步点存活导致后续 bis 偏离，已回退——见 SPEC §11。）
+
+2026-10-20 等价性能优化（输出零变化）：
+- _atr_gap_rewind_to 的翻转检测改为档位 bisect：对 i 的跳空布尔
+  = max(up,dn)≥th，翻转 ⟺ 档位落在 [min(old,new), max(old,new))——已固化对
+  按档位升序数组圈候选（替代每拍 O(n) 全表扫+O(n) seq 扫），命中集合与逐对
+  全扫逐位一致；未固化末对差值随末块包含合并变化、直接判定。
+- seq 维护 mergedIdx 平行数组 _seq_midx（非降），翻转对→受影响 seq 位置用
+  bisect 定位。
+（曾实现「锁变化检查点续算」与「回卷重放对齐提前退出」两机制：A/B 与合成
+随机场景先后抓出六处等价漏洞（旗标链深回看/探针跨续算刷新/本拍脏界/最末
+翻转对/末对值变化绕过翻转检测/前瞻守卫无界前向读），逐处修复后语义正确，
+但实测省量仅 ~3%（续算 r 被前瞻界钉在 ~4% 深度、提前退出被对齐验证压缩到
+平均 50 元素——深回卷的旗标重写在当前语义下必须整段重放），性价比不足，
+已退役。配方与教训见 _ab_biinc_equiv.py 与工作区记忆。）
 """
 
+from bisect import bisect_left, bisect_right, insort
 from itertools import accumulate
 from operator import add
 
@@ -38,6 +53,25 @@ from .chan_core import (BiBuildCtx, biSeqStep, biStep, biPair, fixBiExtremes,
 # 单次 _advance_cut（fine=3m）约并入 6 根 30S bar → 热区 seq 元素 ≤ ~8，
 # 结果净增长 ≤ 8 ≪ _TAIL-3；更大批量（监控补数据）由 lens 边界动态收紧。
 _TAIL = 24
+
+
+def _fold_seq(seq, seq_midx, seq_start, fractals, fold_from):
+    """阶段一折叠并同步 mergedIdx 平行数组（同型替换时改写末位，保持非降序）。
+
+    biSeqStep 同型更极端会原地替换 seq[-1]（元素换成后到的分型），此时其
+    mergedIdx 也要跟着改写——bisect 映射（翻转对 → 受影响 seq 位置）依赖
+    平行数组与 seq 逐位一致且非降。
+    """
+    for fi in range(fold_from, len(fractals)):
+        f = fractals[fi]
+        before = len(seq)
+        prev_last = seq[-1] if seq else None
+        biSeqStep(seq, f)
+        if len(seq) > before:
+            seq_start.append(fi)
+            seq_midx.append(f["mergedIdx"])
+        elif seq and seq[-1] is not prev_last:
+            seq_midx[-1] = f["mergedIdx"]
 
 
 class BiIncBuilder:
@@ -52,11 +86,13 @@ class BiIncBuilder:
         self._merged = None     # 合并块列表对象（同上；_mergeStep 原地追加）
         self._seq = []          # 阶段一序列（分型 dict 引用）
         self._seq_start = []    # seq[i] 的 run 起始分型索引（run=同型分型段）
+        self._seq_midx = []     # seq[i] 的 mergedIdx 平行数组（非降；bisect 映射用）
         self._heads = []        # heads[i] = 处理完 seq[:i+1] 的不可变栈头
         self._lens = []         # lens[i] = heads[i] 深度（冻结边界判定用）
         self._bis = []          # 缓存笔列表（尾部原地拼接；前缀 dict 按引用共享）
         self._gap_diffs = []    # 相邻块对 p → (nextLow-curHigh, curLow-nextHigh)
         self._gap_final = 0     # [0:_gap_final) 已固化（块 p+1 不再是末块）
+        self._gap_levels = []   # 已固化对的档位 (max(up,dn), p) 升序（翻转 bisect 检测）
         self._cum = [0]         # cum[i] = blocks[:i] 的 _rawCount 和
         self._cum_final = 1     # cum 有效下标数（0.._cum_final-1）
         self._gap_threshold = None  # 上次构建用的跳空阈值（ATR×gapFilter）
@@ -85,6 +121,8 @@ class BiIncBuilder:
         batch 存在中段漂移（近等后移的腿终局守卫读后继分型、无有界回看窗，
         冻结元素的 batch 真值可随后续数据翻转），全量重建每拍把栈拉回 batch 真值；
         局部回退会继承漂移栈 → 输出与全量路径分叉（XAUUSD 07-03 实测 3卖→类2卖）。
+        （2026-10-20 曾实现「检查点续算」替代：从 batch 快照续放尾部、五类输入侧
+        界可证前缀不变——语义正确但省量 ~4% 深度，性价比不足退役，详见模块注释。）
         """
         nearDouble = bool(nearDouble)
         lock_key = tuple((lp["dir"], lp["price"]) for lp in (lockedPivots or ()))
@@ -121,13 +159,9 @@ class BiIncBuilder:
         fold_from = self._seq_start[k] if k < len(self._seq_start) else d
         del self._seq[k:]
         del self._seq_start[k:]
+        del self._seq_midx[k:]
         n_seq0 = len(self._seq)
-        for fi in range(fold_from, len(fractals)):
-            f = fractals[fi]
-            before = len(self._seq)
-            biSeqStep(self._seq, f)
-            if len(self._seq) > before:
-                self._seq_start.append(fi)
+        _fold_seq(self._seq, self._seq_midx, self._seq_start, fractals, fold_from)
         # 重放区旗标重置（2026-10-03 修复）：分型 dict 跨拍复用，上一拍重放留下的
         # locked/nearDouble/_shiftAnchor 等残留会改变本拍重放的折叠结果（与批量口径
         # 漂移；实证见 chan_core.resetBiFlags 注释）。n_seq0==k（del 之后、重折叠之前
@@ -182,26 +216,36 @@ class BiIncBuilder:
 
         差值表与 ATR 无关；阈值 = atr×gapFilter 与批量 BiBuildCtx 一致。
         只回溯到首个翻转相邻对所影响的 seq 位置，避免无谓词变化时全量重放。
+        2026-10-20 等价优化：对 i 的翻转布尔 = max(up,dn)≥th，翻转 ⟺ 档位落在
+        [min(old,new), max(old,new))——已固化对按档位升序数组 bisect 圈候选
+        （替代每拍 O(n) 全表扫），未固化末对差值随末块包含合并变化、直接判定；
+        命中集合与逐对全扫逐位一致（首翻转 = 候中最小对号；测试
+        test_bi_inc_equiv_opt 随机对拍锁定）。
         """
         new_th = atr * CHAN_CFG["gapFilter"] if atr else 0
         old_th = self._gap_threshold
         self._gap_threshold = new_th
         if old_th is None or old_th == new_th or not self._gap_diffs:
             return None
+        lo, hi = (old_th, new_th) if old_th < new_th else (new_th, old_th)
         flip_at = None
-        for i, (up, dn) in enumerate(self._gap_diffs):
-            old_gap = up >= old_th or dn >= old_th
-            new_gap = up >= new_th or dn >= new_th
-            if old_gap != new_gap:
-                flip_at = i
-                break
+        i0 = bisect_left(self._gap_levels, (lo, -1))
+        i1 = bisect_left(self._gap_levels, (hi, -1))
+        if i1 > i0:
+            flip_at = min(idx for _lv, idx in self._gap_levels[i0:i1])
+        t = len(self._gap_diffs) - 1
+        if t >= self._gap_final:
+            up, dn = self._gap_diffs[t]
+            if (up >= old_th or dn >= old_th) != (up >= new_th or dn >= new_th):
+                if flip_at is None or t < flip_at:
+                    flip_at = t
         if flip_at is None:
             return None
         # 首个 mergedIdx > flip_at 的 seq 元素：其 biStep 才可能读到该相邻对
-        for k, f in enumerate(self._seq):
-            if f.get("mergedIdx", -1) > flip_at:
-                return max(0, k - 1)
-        return 0
+        j = bisect_right(self._seq_midx, flip_at)
+        if j >= len(self._seq_midx):
+            return 0
+        return max(0, j - 1)
 
     def count_raw(self, a, b):
         """(a, b] 区间原始K线数；前缀和 O(1)，涉及未固化末块时回退逐块累加。"""
@@ -223,13 +267,13 @@ class BiIncBuilder:
         self._gap_threshold = atr * CHAN_CFG["gapFilter"] if atr else 0
         self._seq = []
         self._seq_start = []
+        self._seq_midx = []
         self._heads = []
         self._lens = []
-        for fi, f in enumerate(fractals):
-            before = len(self._seq)
-            biSeqStep(self._seq, f)
-            if len(self._seq) > before:
-                self._seq_start.append(fi)
+        _fold_seq(self._seq, self._seq_midx, self._seq_start, fractals, 0)
+        self._gap_levels = sorted(
+            ((max(up, dn), i) for i, (up, dn) in
+             enumerate(self._gap_diffs[:self._gap_final])))
         # 全量重建同样先去污染（分型 dict 持久、可能带着增量期的残留旗标），再重标
         # 锁定——否则重建结果依赖历史路径，破坏「重同步点输出严格等于 batch(前缀)」。
         resetBiFlags(self._seq)
@@ -268,6 +312,11 @@ class BiIncBuilder:
                 self._gap_diffs[gf:end] = new
             else:
                 self._gap_diffs.extend(new)
+            # 新固化对按档位入序（此前仅为末对临时值，从未入序——无陈旧项）
+            levels = self._gap_levels
+            for off, (up, dn) in enumerate(new):
+                m2 = up if up >= dn else dn
+                insort(levels, (m2, gf + off))
         self._gap_final = max(gf, end)
         if m >= 2:
             p = m - 2

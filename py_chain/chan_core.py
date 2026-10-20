@@ -2873,18 +2873,48 @@ def _zs_time_range(zs):
     return t0, t1
 
 
+# _zs_covering_time 的派生元组缓存（2026-10-20 等价优化）：zss 列表按身份缓存
+# (t0,t1,zt) 平行数组，替代每命中判定 3-6 次 dict.get——该函数在二类族逐候选
+# 调用，曾是 _zs_time_range 7980 万次调用的唯一大来源。持强引用防 id 复用，
+# 容量 64 溢出清空（与 mark_entry._SIDE_IX 同模式）。列表构建后只读。
+_ZS_COVER_IX = {}
+
+
+def _zs_cover_ix(zss):
+    ent = _ZS_COVER_IX.get(id(zss))
+    if ent is not None and ent[0] is zss:
+        return ent
+    t0s, t1s, zts = [], [], []
+    for z in zss:
+        a, b = _zs_time_range(z)
+        t0s.append(a)
+        t1s.append(b)
+        zts.append(z.get("enterEndTime") or z["startTime"])
+    ent = (zss, t0s, t1s, zts)
+    if len(_ZS_COVER_IX) > 64:
+        _ZS_COVER_IX.clear()
+    _ZS_COVER_IX[id(zss)] = ent
+    return ent
+
+
 def _zs_covering_time(zss, t):
     """取时间上覆盖该点的中枢（2026-10-14 规则v2，类2买/类2卖「同一个中枢」判据）：
     同一个中枢=同一段盘整——按时间归属而非价格区间（2买低点常在中枢下沿之外，
-    价格包含会把主点判在枢外导致类点全部漏标）。多个命中取形成最晚的。"""
-    best = None
-    for z in zss or []:
-        t0, t1 = _zs_time_range(z)
-        if t0 <= t <= t1:
-            zt = z.get("enterEndTime") or z["startTime"]
-            if best is None or zt > (best.get("enterEndTime") or best["startTime"]):
-                best = z
-    return best
+    价格包含会把主点判在枢外导致类点全部漏标）。多个命中取形成最晚的。
+    2026-10-20 等价优化：判定改走预构元组（缓存见 _zs_cover_ix），
+    遍历序与比较式不变。"""
+    if not zss:
+        return None
+    _zss, t0s, t1s, zts = _zs_cover_ix(zss)
+    best = -1
+    best_zt = None
+    for i in range(len(zss)):
+        if t0s[i] <= t <= t1s[i]:
+            zt = zts[i]
+            if best < 0 or zt > best_zt:
+                best = i
+                best_zt = zt
+    return zss[best] if best >= 0 else None
 
 
 def _leave_type_by_ordinal(zs_ordinal, pull_ordinal, is_sell):
@@ -3165,6 +3195,9 @@ def _lower_vertex_of(lower_bis, t, p, bar_sec, is_top, lo=None, hi=None, verts=N
     复用同一 lower_bis 时一次构建）；四阶时间筛与空窗早退均走 vts 二分，
     顶点表按笔序构建时间非降，切片保序 → sort 稳定性/max 首个命中等
     语序敏感语义与全量线性扫逐位一致。
+    vts（2026-10-20 等价优化）：顶点时间表按 verts 身份缓存（此前每次调用
+    重建 O(n)，228 万次调用是交易段第一大单点）；持强引用防 id 复用、
+    容量 64 溢出清空，与 _ZS_COVER_IX 同模式。
     """
     if not lower_bis or t is None or p is None:
         return t, p
@@ -3181,7 +3214,7 @@ def _lower_vertex_of(lower_bis, t, p, bar_sec, is_top, lo=None, hi=None, verts=N
         verts = _lower_verts_of(lower_bis)
     if not verts:
         return t, p
-    vts = [v[0] for v in verts]
+    vts = _verts_ts_of(verts)
 
     def same_price(vp):
         return abs(vp - p) <= peps
@@ -3234,6 +3267,22 @@ def _lower_vertex_of(lower_bis, t, p, bar_sec, is_top, lo=None, hi=None, verts=N
         return vt, vp
     # 5. 小级别在该笔内无结构 → 保持大级别时刻
     return t, p
+
+
+# 顶点时间表缓存（_lower_vertex_of 用；见其 docstring 2026-10-20 条目）
+_VTS_IX = {}
+
+
+def _verts_ts_of(verts):
+    """verts → 平行时间数组 vts，按列表身份缓存（构建后只读）。"""
+    ent = _VTS_IX.get(id(verts))
+    if ent is not None and ent[0] is verts:
+        return ent[1]
+    vts = [v[0] for v in verts]
+    if len(_VTS_IX) > 64:
+        _VTS_IX.clear()
+    _VTS_IX[id(verts)] = (verts, vts)
+    return vts
 
 
 def _lower_verts_of(lower_bis):
