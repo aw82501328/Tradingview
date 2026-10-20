@@ -75,7 +75,7 @@ schtasks /Create /TN "live_trader" /RL HIGHEST /SC ONSTART /RU <用户名> ^
 | 手数上限 | 单笔/总敞口/仓位数 | 拒新开仓（shadow） |
 | 对账 | 每 `reconcile_min` 分钟 | 孤儿仓默认只告警不平（`orphan_policy=close` 才平）；券商侧消失的仓脱钩；量不齐告警 |
 | 实盘双条件 | `require_mode:"real"` + `data/LIVE_ARMED`（内容=确认日期） | 缺一拒启 |
-| 参数漂移 | module_params.json / live 配置变更后重启 | 拒自动恢复，`--accept-param-drift` 显式放行 |
+| 参数漂移 | 引擎消费的有效参数 / live 配置 / 引擎逻辑版本变化后重启（2026-10-20 起语义指纹） | 券商无本 magic 持仓 → 自动放行重建（记日志含差异）；有持仓 → 拒启并列差异与票号，`--accept-param-drift` 显式放行（旧仓脱离引擎管理） |
 
 告警通道（可选 Telegram）：`notify.enabled=true` + `chat_id` + 环境变量
 `LIVE_TG_TOKEN`（bot token）。事件全量落 bars.db `live_events`（审计主证据）。
@@ -84,6 +84,18 @@ schtasks /Create /TN "live_trader" /RL HIGHEST /SC ONSTART /RU <用户名> ^
 仅写 live_state kv + `trading_disabled/enabled` 审计事件，不触碰 live_trader
 进程与 live_config（无参数漂移拒启风险）；live_trader 每拍重读生效，shadow 模式
 下 gate 原因仍报 "shadow模式"（更强的全进程事实）。多策略时 /live 页按 TAB 分策略展示。
+
+**参数漂移守卫（2026-10-20 语义指纹）**：指纹 = 该策略实际消费的参数中心有效参数
+（基础 chan/zs/points + 策略 param_modules，chan_v1 另含 sr/plan/entry、fxma_v1 含
+fxma；sr 走 effective_sr）+ 解析后 live 配置 + 引擎逻辑版本（live_trader
+`ENGINE_LOGIC_VERSION`，决策级引擎代码变更须 bump）。参数中心任何保存造成的
+savedAt/格式/无关模块桶重写**不再算漂移**。守卫保护对象=重放与券商持仓的一致性：
+券商侧无本 magic 持仓时**自动放行重建**（日志 `[live] 参数漂移但券商无本 magic
+持仓，自动放行重建会话`，附差异明细）；有持仓才拒启，错误信息列出 `模块.键: 旧→新`
+差异（截断 12 条）、持仓票号与处置路径（先在 MT5 平旧仓或 `--kill-close`，再
+`--accept-param-drift` 放行重建）。session 存档带 `config_fp` 明细供差异比对
+（旧存档无此键 → 显示「指纹口径变更」，无持仓时同样自动放行）。页面改手数走 kv
+不动 live_config，不触发本守卫。
 
 ## 4. 常见演练（模拟盘阶段至少各做一次）
 

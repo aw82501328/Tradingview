@@ -166,6 +166,9 @@ class LiveIntegrationBase(unittest.TestCase):
                     "reconcile_min": 60, "param_drift": "refuse",
                     "kill_file": os.path.join(self.tmp, "KILL"),
                     "arm_file": os.path.join(self.tmp, "ARM")},
+            # 隔离 repo 的 live_config.local.json（真实账户 require_mode=real
+            # 会触发 ARM 开闸双条件拒启，与本套用例无关）
+            "account": {"require_mode": "demo"},
             "notify": {"enabled": False},
         })
 

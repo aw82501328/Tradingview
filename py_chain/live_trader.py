@@ -156,20 +156,69 @@ def provisional_sl(direction, bid, ask, near_sr, slip=DEFAULT_SLIP_STOP,
     return ask + fallback
 
 
-def config_hash(pm, cfg):
-    """参数指纹：module_params overrides 原文 + 解析后的实盘配置。漂移即拒自动恢复。"""
-    mp_path = os.path.join(REPO_ROOT, "py_chain", "web", "module_params.json")
-    mp_raw = ""
-    if os.path.exists(mp_path):
-        with open(mp_path, encoding="utf-8") as f:
-            mp_raw = f.read()
+# 引擎决策逻辑版本：影响「同参数、不同决策」的引擎级变更时 bump（对齐 mark 层
+# LOGIC_V 习惯；Python 侧无常量，实盘语义指纹以本串为准）。本值已覆盖 2026-10-13
+# 之后的规则变更：买卖点直连进出场（7c21a74）、同笔也标记（bdf4fee）、
+# 锚点K线窗口闸（0b9954f）。
+ENGINE_LOGIC_VERSION = "20261020-live-semantic-fp"
+
+
+def _fingerprint_modules(strategy_id):
+    """策略实际消费的参数中心模块：基础结构（chan/zs/points）+ 策略 param_modules。
+    无关策略的桶（如 fxma 对 chan_v1）不进指纹；sr/plan/entry 属策略步骤。"""
+    from . import module_registry
+    mods = ["chan", "zs", "points"]
+    for m in module_registry.STRATEGIES[strategy_id]["param_modules"]:
+        if m not in mods:
+            mods.append(m)
+    return mods
+
+
+def config_fingerprint(pm, cfg):
+    """语义参数指纹：引擎实际消费的有效参数 + 解析后实盘配置 + 引擎逻辑版本。
+
+    取代 2026-10-20 前的 module_params.json 原文哈希——参数中心任何保存都会全量
+    重写文件且 savedAt 必变，原文哈希把无关模块/品种、schema 重排、时间戳全部
+    算成漂移，多次误拒启动。语义口径：有效值不变 → 指纹不变（savedAt/缩进/
+    无关桶零影响）；有效值、代码默认值或引擎逻辑版本变 → 指纹变。
+    pm 为 start() 已算好的 effective_all(symbol) 快照（与引擎同源，品种归一化
+    一致）；sr 不在 PARAM_MODULES，单独走 effective_sr 同口径。
+    返回 {"hash": 16位, "modules": 模块→有效参数, "engine_version": ...}。"""
+    from . import module_registry
+    strategy_id = module_registry.normalize_strategy(cfg.get("strategy"))
+    mods = {}
+    for m in _fingerprint_modules(strategy_id):
+        if m == "sr":
+            mods[m] = param_center.effective_sr(cfg.get("symbol"))
+        else:
+            mods[m] = dict(pm.get(m) or param_center.effective(m, cfg.get("symbol")))
+    payload = {"engine_version": ENGINE_LOGIC_VERSION, "modules": mods, "cfg": cfg}
     h = hashlib.sha256()
-    h.update(mp_raw.encode("utf-8"))
-    h.update(json.dumps(cfg, sort_keys=True, ensure_ascii=False).encode("utf-8"))
-    # 策略口径版本：支阻/滑点改为与回测同一参数中心路径后，旧会话不能按原
-    # trade 序号重放挂接（决策已变）。哈希变化 → 参数漂移守卫拒自动恢复。
-    h.update(b"chan-live-parity-20261013")
-    return h.hexdigest()[:16]
+    h.update(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                        default=str).encode("utf-8"))
+    return {"hash": h.hexdigest()[:16], "modules": mods,
+            "engine_version": ENGINE_LOGIC_VERSION}
+
+
+def drift_diff(old_fp, new_fp):
+    """新旧语义指纹差异（人读）："模块.键: 旧→新" 列表，截断 12 条。
+    old_fp 为 session 存档（旧算法存档无此键 → 只报口径变更）。"""
+    if not isinstance(old_fp, dict):
+        return ["指纹口径变更（旧会话无语义指纹存档）"]
+    old_mods = old_fp.get("modules") or {}
+    new_mods = new_fp.get("modules") or {}
+    out = []
+    if old_fp.get("engine_version") != new_fp.get("engine_version"):
+        out.append(f"引擎逻辑版本: {old_fp.get('engine_version')}→"
+                   f"{new_fp.get('engine_version')}")
+    MISS = "<缺>"
+    for m in sorted(set(old_mods) | set(new_mods)):
+        a, b = old_mods.get(m) or {}, new_mods.get(m) or {}
+        for k in sorted(set(a) | set(b)):
+            av, bv = a.get(k, MISS), b.get(k, MISS)
+            if av != bv:
+                out.append(f"{m}.{k}: {av}→{bv}")
+    return out[:12]
 
 
 # ---------------------------------------------------------------------------
@@ -342,17 +391,9 @@ class LiveTrader:
                     f"fxma structure 主动止盈分批 {min_batch:.3f} 手 < volume_min "
                     f"{spec['volume_min']}，需部分→全平降级才可运行"
                     f"（risk.allow_odd_lots=true 显式接受）")
-        # ⑤ 会话与参数漂移守卫
-        h = config_hash(self._pm, self.cfg)
-        st = live_store.load_state(self._skey("session"))
-        if st and st.get("config_hash") != h:
-            if rc["param_drift"] == "refuse" and not self.accept_param_drift:
-                raise RuntimeError(
-                    f"参数漂移守卫：session config_hash={st.get('config_hash')} ≠ 当前 "
-                    f"{h}。重放会产生与券商持仓对不上的另一组交易；"
-                    f"--accept-param-drift 显式放行（将以新参数重建、不挂接旧仓）")
-            self.log("[live] 参数漂移已放行：重置会话")
-            st = None
+        # ⑤ 会话与参数漂移守卫（2026-10-20 起语义指纹，见 _drift_guard）
+        fp = config_fingerprint(self._pm, self.cfg)
+        st = self._drift_guard(fp)
         if st:
             self.session = st["id"]
             t_start = int(st["T_start"])
@@ -374,12 +415,15 @@ class LiveTrader:
                 self.log(f"[live] 预热完成：忽略初始历史信号 {len(init)} 个")
             live_store.save_state(self._skey("session"), {
                 "id": self.session, "started_at": int(time.time()), "T_start": t_start,
-                "config_hash": h, "symbol": c["symbol"], "lots": c["lots"],
+                "config_hash": fp["hash"], "symbol": c["symbol"], "lots": c["lots"],
                 "strategy": c.get("strategy"),
+                "config_fp": {"engine_version": fp["engine_version"],
+                              "modules": fp["modules"]},
                 "shadow": bool(c["run"]["shadow"])})
             live_store.log_event(self.session, "session_start", {
                 "account": {k: acc[k] for k in ("login", "server", "trade_mode")},
-                "spec": spec, "config_hash": h, "shadow": c["run"]["shadow"]})
+                "spec": spec, "config_hash": fp["hash"], "shadow": c["run"]["shadow"],
+                "engine_version": fp["engine_version"]})
         self._refresh_day_guard()
         self._refresh_trading_enabled()
         self._refresh_order_settings()
@@ -391,6 +435,42 @@ class LiveTrader:
             self.tick()
             return
         self.run_forever()
+
+    def _drift_guard(self, fp):
+        """⑤ 会话与参数漂移守卫（2026-10-20 起语义指纹）。返回 session 存档。
+
+        指纹=引擎实际消费的有效参数+cfg+引擎逻辑版本：module_params.json 的
+        savedAt/格式/无关模块桶不再误伤。守卫保护对象=重放与券商持仓的一致性：
+        无本 magic 持仓即无可保护 → 自动放行重建；有持仓才拒，拒时列出具体差异
+        与处置路径（旧仓脱离引擎管理，orphan_policy 默认只告警不平）。"""
+        c, rc = self.cfg, self.cfg["run"]
+        h = fp["hash"]
+        st = live_store.load_state(self._skey("session"))
+        if st and st.get("config_hash") != h:
+            note = "；".join(drift_diff(st.get("config_fp"), fp)) or "参数中心有效参数变化"
+            pos = self.broker.positions()   # 已按 magic 过滤；调用时 broker 已连接
+            if rc["param_drift"] == "refuse" and not self.accept_param_drift:
+                if not pos:
+                    self.log(f"[live] 参数漂移但券商无本 magic 持仓，自动放行重建会话"
+                             f"（差异：{note}）")
+                else:
+                    tickets = ",".join(str(p.get("ticket")) for p in pos)
+                    raise RuntimeError(
+                        f"参数漂移守卫：session config_hash={st.get('config_hash')} "
+                        f"≠ 当前 {h}（差异：{note}）。券商侧仍有本 magic 持仓 "
+                        f"{len(pos)} 笔（ticket={tickets}），重放会产生对不上的另一组"
+                        f"交易、放行则旧仓脱离引擎管理（orphan_policy="
+                        f"{c['risk'].get('orphan_policy', 'alert')} 只告警不平）；"
+                        f"处置：先在 MT5 手动平旧仓（或 --kill-close）再重启，"
+                        f"--accept-param-drift 显式放行（以新参数重建、不挂接旧仓）")
+            if pos:
+                tickets = ",".join(str(p.get("ticket")) for p in pos)
+                self.log(f"[live] 参数漂移放行警告：券商侧仍有 {len(pos)} 笔持仓将脱离"
+                         f"引擎管理（ticket={tickets}；orphan_policy 只告警不平），"
+                         f"请人工核对处置")
+            self.log("[live] 参数漂移已放行：重置会话")
+            st = None
+        return st
 
     def _fine_period(self):
         """恢复补缺口用的最小周期及其秒数，与 _build_engine 的 fine 口径一致。"""
