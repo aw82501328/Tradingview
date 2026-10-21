@@ -905,8 +905,12 @@ function unionIntervalVisibility(resList) {
               const iv = chart.getShapeById(id)._source._properties.intervalsVisibilities;
               iv.ticks.setValue(IV_CFG.ticks);
               iv.seconds.setValue(IV_CFG.seconds);
+              iv.secondsFrom.setValue(IV_CFG.secondsFrom);
+              iv.secondsTo.setValue(IV_CFG.secondsTo);
+              iv.minutes.setValue(IV_CFG.minutes);
               iv.minutesFrom.setValue(IV_CFG.minutesFrom);
               iv.minutesTo.setValue(IV_CFG.minutesTo);
+              iv.hours.setValue(IV_CFG.hours);
               iv.hoursFrom.setValue(IV_CFG.hoursFrom);
               iv.hoursTo.setValue(IV_CFG.hoursTo);
               iv.days.setValue(IV_CFG.days);
