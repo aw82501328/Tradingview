@@ -128,6 +128,12 @@ CHAN_CFG = {
     "stopEntryBarFloor": True,   # 进场K线止损下限（2026-09-23）：止损至少在进场时所在背驰
                                   # 周期K线极值外侧加滑点处——该K线运行中每创新低/高止损
                                   # 同步外推（只放松），收盘后冻结；与支阻位止损取更宽者
+    "anchorWinBars": 2,          # 锚点窗口K线数（2026-10-21 重定义，旧规则=1）：锚点（买卖点）
+                                  # 所在检测周期K线起 N 根内允许触发/背驰点落窗（当拍与背驰点
+                                  # 所在K都须落窗；锚K之前仍拒）
+    "anchorWinPts": 10.0,        # 锚点窗口距极值点数：触发价（当拍现价与背驰点价）距窗口
+                                  # 极值（买侧最低/卖侧最高=min(锚点价,窗口内实际极值)）的
+                                  # 最大点数；0=不限价距只看时间窗。bars=1+pts=0=旧单K规则
     "macdZeroTol": 5.0,          # 2买/2卖 MACD 0 轴容差（2026-09-16）：2买 dif > -tol、
                                   # 2卖 dif < +tol 视为「上/下过 0 轴后回调/反弹未破 0 轴太多」，
                                   # 动能还在（原严格口径 dif>0 / dif<0，tol=0 即回退）
@@ -3021,7 +3027,8 @@ def _second_family_v2(bis, firstPts, zss, c2tol, is_sell):
             else:
                 prev_extreme = None
             # 候选窗 (anchor_t, next_t) 与笔列无交集 → 无候选无输出，整锚跳过
-            # （月龄老锚的窗早已滑出本级 60 笔窗口，占绝大多数）。
+            # （全量笔视图 2026-10-21 起锚窗通常都在笔列内，此跳过仅剩锚早于本级
+            #   首笔/空窗的退化情形；旧 60 笔窗口时代月龄老锚在此占绝大多数）。
             lo_i = bisect.bisect_right(end_times, anchor_t)
             hi_i = n_bis if next_t == float("inf") else bisect.bisect_left(end_times, next_t)
             if lo_i >= hi_i:
@@ -3221,6 +3228,8 @@ def _lower_vertex_of(lower_bis, t, p, bar_sec, is_top, lo=None, hi=None, verts=N
 
     # 空窗早退：四阶搜索窗全落在 [min(lo, t-teps), max(hi, t+teps)] 内，
     # 与顶点时间域不相交 → 各阶必空 → 直接保持大级别时刻（第 5 阶）。
+    # 全量视图下仅锚早于本级首笔的退化情形命中（旧 60 笔窗口时代曾借此
+    # 零成本跳过月龄老锚）。
     wlo = min(lo, t - teps)
     whi = max(hi, t + teps)
     if whi < vts[0] or wlo > vts[-1]:

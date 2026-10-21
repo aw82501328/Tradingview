@@ -591,8 +591,10 @@ function computePeriodPoints(periodData, periods) {
   for (const res of periods) {
     const pd = periodData[res];
     if (!pd || !pd.bis || pd.bis.length < 3) continue;
-    // 取最近 60 笔即可（原 trading_plan predictPlan 同窗口：锚点只看最新结构）
-    const bis = pd.bis.length > 60 ? pd.bis.slice(-60) : pd.bis;
+    // 全量笔视图（2026-10-21 统一点源，与 PY compute_period_points / fxma 同口径；
+    // 旧「最近 60 笔」窗口曾使老锚投影退化/序列截断）。容差参数 JS 侧暂无管道
+    // （chan_cfg 不含 points 桶 thirdZsTol）——PY 侧 points 桶值若调非 0 须同步导出。
+    const bis = pd.bis;
     const barSec = intervalSecOf(res) || 60;
     let best = null;
     for (const r of Object.keys(periodData)) {
@@ -811,13 +813,17 @@ function evaluateEntry(ctx, strategy) {
   const wantType = direction === "short" ? "up" : "down"; // 空头等反弹(up)，多头等回调(down)
   const divergeDir = direction;                            // 空头→顶背驰(short)，多头→底背驰(long)
 
-  // 0. 锚点K线窗口（2026-10-18 用户规则，与 py_chain anchor_bar_window 闸同源）：
-  //    小周期找背驰仅限锚点所在大周期K线内。确认制不查评估拍（其信号本身即历史
-  //    背驰点），只约束背驰点落窗；锚点由 main() 逐候选传入 ctx.anchorPoint，
-  //    barTimesAll 须用未过滤全量K线（periodData[res].bars 已滤进行中K线，
-  //    背驰点落在当前大周期K线时会 bisect 到前一根误拒）。缺省时降级放行。
+  // 0. 锚点窗口（2026-10-18 用户规则，2026-10-21 重定义，与 py_chain anchor_bar_window
+  //    闸同源）：时间窗=锚K起 anchorWinBars 根检测周期K（旧口径=1）；价距窗=背驰点价
+  //    距窗口极值（买侧最低/卖侧最高=锚点价与锚K→背驰点各K极值取小/大）≤ anchorWinPts
+  //    （0=不限）。确认制不查评估拍（其信号本身即历史背驰点），只约束背驰点；锚点由
+  //    main() 逐候选传入 ctx.anchorPoint，barTimesAll 须用未过滤全量K线
+  //    （periodData[res].bars 已滤进行中K线，背驰点落在当前大周期K线时会 bisect 到
+  //    前一根误拒；锚K进行中时其极值由锚点价兜底）。缺省时降级放行。
   const timesX = (ctx.barTimesAll && ctx.barTimesAll[res]) || null;
   const anchorWinIdx = (timesX && ctx.anchorPoint) ? coverBarIndex(timesX, ctx.anchorPoint.time) : -1;
+  const winBars = Number(core.CHAN_CFG.anchorWinBars ?? 2) || 2;
+  const winPts = Number(core.CHAN_CFG.anchorWinPts ?? 10) || 0;
 
   // 1. 够笔
   if (!lastBiOk(bis, wantType)) {
@@ -876,8 +882,27 @@ function evaluateEntry(ctx, strategy) {
   let cands = lowerDiverge(periodData, res, divergeDir);
   if (cands.length === 0) return { ok: false, reason: "以下级别无匹配方向背驰" };
   if (timesX && anchorWinIdx >= 0) {
-    cands = cands.filter(c => coverBarIndex(timesX, c.point.time) === anchorWinIdx);
-    if (cands.length === 0) return { ok: false, reason: "以下级别背驰点均不在锚点所在大周期K线内（锚点K线窗口外）" };
+    // 价距基准：已收K线按时间窗 [锚K开盘, 背驰点所在K开盘] 取极值（periodData 已滤
+    // 进行中K线，索引与 barTimesAll 不同轴，须按时间过滤而非切片）
+    const barsX = (periodData[res] && periodData[res].bars) || [];
+    const t0 = timesX[anchorWinIdx];
+    cands = cands.filter(c => {
+      const i = coverBarIndex(timesX, c.point.time);
+      if (!(i >= anchorWinIdx && i - anchorWinIdx < winBars)) return false;
+      if (winPts > 0 && ctx.anchorPoint) {
+        let ref = ctx.anchorPoint.price;
+        const t1 = timesX[i];
+        for (const b of barsX) {
+          if (b.time < t0 || b.time > t1) continue;
+          const v = direction === "long" ? (b.low ?? b.close) : (b.high ?? b.close);
+          ref = direction === "long" ? Math.min(ref, v) : Math.max(ref, v);
+        }
+        const dist = direction === "long" ? c.point.price - ref : ref - c.point.price;
+        if (dist > winPts) return false;
+      }
+      return true;
+    });
+    if (cands.length === 0) return { ok: false, reason: "以下级别背驰点均不在锚点窗口内（锚K起 N 根检测周期K内且距窗口极值 ≤ 点数）" };
   }
 
   const nearTol = near; // 绝对价差（2026-09-13 起不乘 ATR）

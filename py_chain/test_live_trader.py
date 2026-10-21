@@ -78,6 +78,34 @@ class TestPure(unittest.TestCase):
         self.assertEqual(provisional_sl("short", 4000.0, 4000.2, 4005.0), 4010.2)
         self.assertEqual(provisional_sl("short", 4000.0, 4000.2, 3995.0), 4010.2)
 
+    def test_eff_stop_touch_first_full_line(self):
+        """触价口径挂线（2026-10-21 exitTouchOn）：券商SL=next_touch_lines 第一条
+        会全平剩余的线——跟踪部分线(25%×4=1手)不挂、武装后的锁定价(全平)挂；
+        剩余 1 手时跟踪线即全平线（trade#3 场景：券商SL在 4459.15 与引擎同线同价）；
+        无全平线/无 exitCfg（fxma）→ 回落旧口径有效止损位。"""
+        from .mark_entry import EXIT_MODE_DEFAULTS
+        ec = dict(EXIT_MODE_DEFAULTS, exitTrailOn=True, exitTrailPct=25.0,
+                  exitLockOn=True, exitLockPts=100.0)
+        t = {"direction": "long", "entryPrice": 4305.12, "lots": 4, "lotsLeft": 3,
+             "beDone": True, "beStop": 4305.12, "stopRef": 4459.15,
+             "trailRaised": True, "maxFavPx": 4510.93, "maxLoss": 4295.12,
+             "stopSrFired": False, "stopBeFired": False, "trailFired": False,
+             "exitCfg": ec}
+        # 候选序：跟踪线 4459.15（部分）→ 锁定价 4408.02（全平）→ SL 挂后者
+        self.assertAlmostEqual(LiveTrader._eff_stop_of(t), 4408.025)
+        # 剩余 1 手：跟踪线 25%×4=1=全平 → SL 挂跟踪线
+        t["lotsLeft"] = 1
+        self.assertEqual(LiveTrader._eff_stop_of(t), 4459.15)
+        # 锁定未武装（峰值 4330 盈利 25 < 100）且跟踪为部分线 → 无全平线，
+        # 回落旧口径（beStop 与上移后 stopRef 更紧者）
+        t["lotsLeft"] = 3
+        t["maxFavPx"] = 4330.0
+        self.assertEqual(LiveTrader._eff_stop_of(t), 4459.15)
+        # 无 exitTouchOn 的 cfg（如 fxma/旧持仓快照）→ 旧口径：beStop 与上移后
+        # stopRef 的更紧者
+        t["exitCfg"] = {"exitTrailOn": True}
+        self.assertEqual(LiveTrader._eff_stop_of(t), 4459.15)
+
 
 class TestReconcilePlan(unittest.TestCase):
     """对账判定穷举：量不齐/补平/脱钩/孤儿/缺行。"""
@@ -212,13 +240,61 @@ class LiveIntegrationBase(unittest.TestCase):
         return out
 
 
+class TestTouchBrokerFirst(LiveIntegrationBase):
+    """触价口径「券商SL先平」（2026-10-21）：SL 挂的=引擎全平线，盘中触价成交
+    先于引擎收盘判定——终局/部分事件到达时券商仓已无 → 跳过市价单、按
+    broker_sl_first 收口，镜像行 closed。轻量夹具直调 _on_exit/_partial_close。"""
+
+    def test_exit_and_partial_broker_first(self):
+        trader, _ = self._trader()
+        trader.session = "test-touch-broker-first"
+        live_store.upsert_trade({
+            "session": trader.session, "engine_trade_no": 5,
+            "position_ticket": 700123, "state": "open", "shadow": 0,
+            "direction": "long", "volume_open": 0.04, "volume_left": 0.04,
+            "entry_price": 4305.12})
+        # 券商侧仓已被 SL 打掉（positions_store 空 → volume_left=0）
+        t = {"tradeNo": 5, "direction": "long", "exitType": "trailStop",
+             "exitTime": 1788525000, "exitPrice": 4459.15, "pnl": 154.03,
+             "state": "closed"}
+        trader._open[5] = t
+        trader._on_exit(t)
+        row = live_store.get_trade(trader.session, 5)
+        self.assertEqual(row["state"], "closed")
+        self.assertEqual(row["exit_type"], "trailStop")
+        self.assertEqual(row["exit_price"], 4459.15)
+        orders = live_store.orders_of(trader.session)
+        full = [o for o in orders if o["action"] == "full_close"]
+        self.assertTrue(full, "应有一条 full_close 审计行")
+        self.assertIn("broker_sl_first", full[0]["retcomment"])
+        # 部分平仓事件在券商先平后到达 → 只记账不再下单
+        row2 = live_store.upsert_trade({
+            "session": trader.session, "engine_trade_no": 6,
+            "position_ticket": 700124, "state": "open", "shadow": 0,
+            "direction": "long", "volume_open": 0.04, "volume_left": 0.04})
+        trader._partial_close(trader.session and 6, {"tradeNo": 6, "direction": "long"},
+                              live_store.get_trade(trader.session, 6),
+                              {"type": "trailStop", "lots": 1, "price": 4459.15})
+        self.assertEqual(live_store.get_trade(trader.session, 6)["state"], "closed")
+
+
 class TestActionSequence(LiveIntegrationBase):
     """引擎事件 ↔ 券商动作 1:1：进场单/SL对齐/保本改单/终局平仓。"""
 
     def test_full_window_actions(self):
-        trader, feed = self._trader()
-        trader.start(once=True)          # 守卫+预热+首轮
-        n = self._run(trader, feed)
+        # 本用例的硬编码期望（trade#1 stopBe/be_done/sl_modify）锚定旧成交口径的
+        # 既定序列：触价口径（exitTouchOn，2026-10-21 默认开）下出场提前一根使
+        # 同向互斥解锁时点移动、窗口序列重排（trade#1 记 stopSr）。本用例验证的是
+        # live 镜像机制（事件↔订单 1:1/审计/无孤儿），不是成交口径——钉旧口径跑；
+        # 触价口径的 live 行为由 TestPure.test_eff_stop_touch_first_full_line 与
+        # TestTouchBrokerFirst 覆盖，TestRestartInvariance 全套在默认触价口径下通过。
+        from . import param_center as _pc
+        _emp = _pc.engine_module_params
+        with mock.patch("py_chain.param_center.engine_module_params",
+                        side_effect=lambda pm: dict(_emp(pm), exitTouchOn=False)):
+            trader, feed = self._trader()
+            trader.start(once=True)          # 守卫+预热+首轮
+            n = self._run(trader, feed)
         session = trader.session
         trades = live_store.all_trades(session)
         self.assertGreaterEqual(len(trades), 3, f"窗口应≥3笔（实际{len(trades)}）")

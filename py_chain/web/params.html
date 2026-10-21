@@ -536,11 +536,12 @@ const ENTRY_GROUPS = [
   ['支阻', ['near']],
   ['手数', ['lots']],
   ['滑点（ATR系数内嵌各行；跟踪止盈滑点随其开关置灰）', ['slip_stop', 'slip_fallback', 'slip_be', 'exitTrailSlip']],
-  ['出场判定', ['exit_min_merged', 'realtime_min_bars', 'zs_exit_weak_ratio']],
+  ['出场判定', ['exit_min_merged', 'realtime_min_bars', 'zs_exit_weak_ratio', 'exitTouchOn']],
   ['__EXIT_MODES__', []],
   ['进场扩展（M1/M4）', ['sinkFallback', 'sinkFallbackRearm',
                        'expectBiEnough', 'expectBiMinBars', 'divergeConfirm']],
-  ['进场闸门', ['__STRONG2_MACD__', '__MACD_DIVERGE__', 'entryMacdShrink', 'stopEntryBarFloor']],
+  ['进场闸门', ['__STRONG2_MACD__', '__MACD_DIVERGE__', 'entryMacdShrink', 'stopEntryBarFloor',
+              'anchorWinBars', 'anchorWinPts']],
   ['规则修复（07-07 06:30 案例锚点）', ['divergeReferByZs', 'sinkSkipLevel']],
 ];
 

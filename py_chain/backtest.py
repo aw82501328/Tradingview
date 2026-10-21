@@ -22,6 +22,14 @@ forming_break_ref/trend_following_of）：
   - 成交统一「下一根K线开盘」：止损/保本止损/平一半/全平的事件时间 = 触发 bar 的
     下一根 bar 时间、价格 = 其开盘价（跳空自然体现）；触发 bar 无下一根 → 未成交
     （持仓保持 open，mark-to-market 收尾）；
+  - 价格线类触价成交（exitTouchOn，2026-10-21 默认开）：支阻止损/保本止损/跟踪
+    止盈/最大止损兜底/锁定盈利改为「盘中触及线价即在触发根按线价即时成交」（与
+    fxma 2026-10-02 同口径：成交价=线价本身不另加滑点，跳空开盘已越线仍按线价；
+    同根多线被穿按线位从高到低逐线成交、平空即止，事件 time=触发根时间）——与
+    实盘券商SL挂线语义一致（live_trader 按 next_touch_lines 把第一条会全平的线
+    挂成 MT5 SL）；关 = 上述「下一根开盘」旧口径（A/B 基准）。结构类出场
+    （背驰/检测周期够笔、过高低点）依赖笔确认，两种口径下均维持收盘判定+下一开盘；
+
   - 止损位：正确侧最近支阻位 ± slip_stop（short 上方+ / long 下方−）；再按最大止损
     硬上限夹紧（多 ≥ 进场价−slip_fallback / 空 ≤ 进场价+slip_fallback；无正确侧位
     时止损即落在此价，止损位永不为 None）；
@@ -134,7 +142,8 @@ DEFAULT_WARMUP_BARS = 60
 RESYNC_EVERY = 200
 
 # ============================================================
-# 出场状态机（三模式统一口径：收盘判定 → 下一根开盘成交）
+# 出场状态机（三模式统一口径：收盘判定 → 下一根K线开盘成交；
+# 价格线类默认触价成交 exitTouchOn=True，见 _fire_touch_exits/next_touch_lines）
 # ============================================================
 
 
@@ -175,6 +184,8 @@ def exit_cfg_desc(ec):
     if ec.get("exitTrailOn"):
         parts.append(f"跟踪止盈{float(ec.get('exitTrailPct', 100)):.0f}%"
                      f"（{'背驰' if (ec.get('exitTrailSrc') or 'detect') == 'mark' else '检测'}）")
+    if ec.get("exitTouchOn"):
+        parts.append("价格线触价成交")
     return "·".join(parts) if parts else "无（至少启用一种）"
 
 
@@ -303,6 +314,189 @@ def _apply_profit_lock(pos, bar, ec, lots_left):
     return hit
 
 
+def _stop_line_of(pos, ec):
+    """有效止损线归属（原 advance_exit_decision 穿越判定的内联逻辑提取，
+    2026-10-21）：typ 按跟踪接管→保本→支阻优先（trailRaised 且开关开 → trailStop；
+    beDone 且 beStop 已落位 → stopBe；否则 stopSr），线价 = beStop/stopRef 的
+    更紧者（跟踪接管时）。收盘穿越判定（旧口径）与触价段/实盘挂线
+    （next_touch_lines）共用此函数——同一归属源，防双份口径漂移。
+    @returns (typ, stop, latch_key, on, pct)；stop 可能 None（防御，正常永不为 None）
+    """
+    is_short = pos["direction"] == "short"
+    be_active = bool(pos.get("beDone")) and pos.get("beStop") is not None
+    trail_on = (bool(ec.get("exitTrailOn")) and bool(pos.get("trailRaised"))
+                and bool(pos.get("beDone")))
+    typ = "trailStop" if trail_on else ("stopBe" if be_active else "stopSr")
+    latch = {"stopSr": "stopSrFired", "stopBe": "stopBeFired",
+             "trailStop": "trailFired"}[typ]
+    stop = pos.get("beStop") if be_active else pos.get("stopRef")
+    if (pos.get("beDone") and trail_on and stop is not None
+            and pos.get("stopRef") is not None):
+        stop = min(stop, pos["stopRef"]) if is_short else max(stop, pos["stopRef"])
+    if typ == "trailStop":
+        on, pct = True, float(ec.get("exitTrailPct", 100.0))
+    elif typ == "stopBe":
+        on, pct = bool(ec.get("exitStopBeOn")), float(ec.get("exitStopBePct", 100.0))
+    else:
+        on, pct = bool(ec.get("exitStopSrOn")), float(ec.get("exitStopSrPct", 100.0))
+    return typ, stop, latch, on, pct
+
+
+def next_touch_lines(pos, ec=None):
+    """当前存活的价格线出场候选（不判穿越、不落事件、不改状态）。
+
+    回测触价段（_fire_touch_exits）与实盘挂线（live_trader._eff_stop_of）共用的
+    唯一候选源（2026-10-21）：
+      ① 有效止损线：_stop_line_of 归属（latch/on/比例同收盘口径）；
+      ② 锁定盈利线：武装条件同 _apply_profit_lock（最大盈利超门槛），全平剩余；
+      ③ 最大止损硬上限兜底：条件同收盘口径（止损通道已 latch / 无有效止损 /
+         有效止损位比 maxLoss 宽时才是剩余手数的最后防线）。
+    @returns [{type, price, lots, full, src?}]，多头按价格从高到低（空头从低到高，
+    即价格向不利方向推进时先碰到的线在前）；lots=该线触发时平仓手数
+    （_exit_lots），full=是否全平剩余。lotsLeft≤0（已终局）返回 []。
+    """
+    ec = ec or pos.get("exitCfg") or EXIT_MODE_DEFAULTS
+    is_short = pos["direction"] == "short"
+    lots_left = pos.get("lotsLeft", pos.get("lots", 0)) or 0
+    if lots_left <= 1e-9:
+        return []
+    lots_total = pos.get("lots", lots_left)
+    out = []
+    typ, stop, latch, on, pct = _stop_line_of(pos, ec)
+    if stop is not None and on and not pos.get(latch):
+        lots = _exit_lots(lots_total, lots_left, pct)
+        out.append({"type": typ, "price": float(stop), "lots": lots,
+                    "full": lots >= lots_left - 1e-9})
+    if ec.get("exitLockOn"):
+        entry, peak = pos.get("entryPrice"), pos.get("maxFavPx")
+        if entry is not None and peak is not None:
+            peak_pts = (entry - peak) if is_short else (peak - entry)
+            need = float(ec.get("exitLockPts", 100.0))
+            if peak_pts > need:
+                pct_l = float(ec.get("exitLockPct", 50.0))
+                keep = peak_pts * pct_l / 100.0
+                out.append({"type": "profitLock",
+                            "price": float((entry - keep) if is_short else (entry + keep)),
+                            "lots": lots_left, "full": True})
+    ml = pos.get("maxLoss")
+    if (ml is not None and (pos.get(latch) or stop is None
+                            or (stop > ml if is_short else stop < ml))):
+        out.append({"type": "stopSr", "price": float(ml), "lots": lots_left,
+                    "full": True, "src": "ml"})
+    out.sort(key=lambda c: c["price"], reverse=not is_short)
+    return out
+
+
+def _fire_touch_exits(pos, bar, ec, lots_total):
+    """触价段（exitTouchOn，2026-10-21）：价格线类出场盘中触价即成交。
+
+    候选线（next_touch_lines 同源）按线位从高到低（多头）依次判穿越——多头当根
+    low 下穿线价 / 空头 high 上穿线价即【在触发根按线价即时成交】（事件
+    time=触发根时间、price=线价，无挂起、不等下一开盘；跳空开盘已越线仍按线价，
+    与 fxma 同约定）。同根多线被穿逐线扣手数、平空即止；部分平仓 latch / on 开关 /
+    峰值滞后一拍（本拍极值记完账下一拍才参与锁定价判定）口径与收盘判定完全一致。
+    终局时原地 close_trade（state=closed/pnl 结算），调用方据 pos["state"] 收槽。
+    @returns 首个触发的出场类型（部分平仓也回报，与收盘口径一致）或 None（无触发）
+    """
+    is_short = pos["direction"] == "short"
+    lots_left = pos.get("lotsLeft", pos.get("lots", 0)) or 0
+    fired_type = None
+    ext = bar["high"] if is_short else bar["low"]
+    for c in next_touch_lines(pos, ec):
+        if lots_left <= 1e-9:
+            break
+        line = c["price"]
+        crossed = bar["high"] > line if is_short else bar["low"] < line
+        if not crossed:
+            continue
+        n = min(c["lots"], lots_left)
+        typ = c["type"]
+        if typ == "profitLock":
+            entry, peak = pos.get("entryPrice"), pos.get("maxFavPx")
+            peak_pts = (entry - peak) if is_short else (peak - entry)
+            need = float(ec.get("exitLockPts", 100.0))
+            pct = float(ec.get("exitLockPct", 50.0))
+            keep = peak_pts * pct / 100.0
+            why = (f"锁定盈利触价出场：最大盈利 {peak_pts:.2f} 点已超过 {need:.2f} 点，"
+                   f"至少锁定 {pct:.0f}% = {keep:.2f} 点（锁定价 {line:.2f}）；"
+                   f"{fmtT(bar['time'])} 当根{'最高' if is_short else '最低'} {ext:.2f} "
+                   f"{'冲上' if is_short else '跌破'}锁定价，按触价 {line:.2f} 即时全平剩余 {n} 手")
+        elif typ == "trailStop":
+            pct = float(ec.get("exitTrailPct", 100.0))
+            why = (f"trailStop 触价出场：{fmtT(bar['time'])} 当根"
+                   f"{'最高' if is_short else '最低'} {ext:.2f} "
+                   f"{'冲上' if is_short else '跌破'}跟踪止盈上移后的止损位 {line:.2f}，"
+                   f"按触价 {line:.2f} 即时成交（平 {pct:.0f}%，{n} 手）")
+        elif typ == "stopBe":
+            pct = float(ec.get("exitStopBePct", 100.0))
+            why = (f"stopBe 触价出场：{fmtT(bar['time'])} 当根"
+                   f"{'最高' if is_short else '最低'} {ext:.2f} "
+                   f"{'冲上' if is_short else '跌破'}保本位 beStop {line:.2f}，"
+                   f"按触价 {line:.2f} 即时成交（平 {pct:.0f}%，{n} 手）")
+        else:
+            pct = float(ec.get("exitStopSrPct", 100.0))
+            src = (f"最大止损硬上限 {line:.2f}" if c.get("src") == "ml" else
+                   f"止损位 {line:.2f}（来源：{pos.get('stopSource') or '支阻位±滑点'}）")
+            why = (f"stopSr 触价出场：{fmtT(bar['time'])} 当根"
+                   f"{'最高' if is_short else '最低'} {ext:.2f} "
+                   f"{'冲上' if is_short else '跌破'}{src}，"
+                   f"按触价 {line:.2f} 即时成交（平 {pct:.0f}%，{n} 手）")
+        pos["exits"].append({"type": typ, "time": bar["time"],
+                             "price": line, "lots": n, "why": why})
+        if fired_type is None:
+            fired_type = typ  # 与收盘口径一致：部分平仓也回报触发类型
+        prev_left = lots_left
+        lots_left = round(lots_left - n, 9)
+        pos["lotsLeft"] = lots_left
+        latch = {"stopSr": "stopSrFired", "stopBe": "stopBeFired",
+                 "trailStop": "trailFired"}.get(typ)
+        if latch and n < prev_left - 1e-9:
+            pos[latch] = True  # 部分平仓：该方式一次性消费（防逐拍重触发）
+        if lots_left <= 1e-9:
+            close_trade(pos, typ, bar["time"], line)
+            break
+    # 峰值记账与 _apply_profit_lock 同口径：仅锁定盈利开启时记，本拍极值下一拍才参与
+    if ec.get("exitLockOn"):
+        fav = bar["low"] if is_short else bar["high"]
+        prev = pos.get("maxFavPx")
+        if prev is None or (fav < prev if is_short else fav > prev):
+            pos["maxFavPx"] = fav
+    return fired_type
+
+
+def _extend_entry_bar_floor(pos, bar, trail_on):
+    """进场K线止损下限外推（原 advance_exit_decision 内联块提取，2026-10-21；
+    逻辑逐字不变——触价段须在穿越判定前用同一份外推后的 stopRef，提取为两处
+    调用共用）。进场背驰周期K线仍在走（bar 落在其窗口内）且未保本 → 用当根极值
+    更新运行极值并把止损外推到 运行极值±有效止损滑点（只放松，与支阻位止损取更
+    宽者）；外推后再按最大止损价夹紧。bar 越出窗口即自然冻结。跟踪止盈已接管止损
+    （trailRaised）时跳过——外推只放松（远离价格）与上移收紧方向相反，会回撤已
+    上移的止损位。状态全在 pos 上，三模式共用。"""
+    is_short = pos["direction"] == "short"
+    bs, be = pos.get("entryBarStart"), pos.get("entryBarEnd")
+    if (bs is not None and not pos.get("beDone") and not trail_on
+            and bs <= bar["time"] < be):
+        prev_stop = pos.get("stopRef")
+        e = bar["high"] if is_short else bar["low"]
+        cur = pos.get("entryBarExt")
+        pos["entryBarExt"] = e if cur is None else \
+            (max(cur, e) if is_short else min(cur, e))
+        floor = (pos["entryBarExt"] + pos["slipStopEff"] if is_short
+                 else pos["entryBarExt"] - pos["slipStopEff"])
+        pos["stopRef"] = max(pos["stopRef"], floor) if is_short \
+            else min(pos["stopRef"], floor)
+        # 最大止损硬上限：外推不得越过进场价±最大止损
+        ml = pos.get("maxLoss")
+        if ml is not None:
+            pos["stopRef"] = min(pos["stopRef"], ml) if is_short \
+                else max(pos["stopRef"], ml)
+        if pos["stopRef"] != prev_stop:
+            # 止损位被进场K线极值外推改变（只放松）→ 来源注记同步（日志叙事用）
+            pos["stopSource"] = (f"进场K线外推：运行极值 {pos['entryBarExt']:.2f}"
+                                 f"{'+' if is_short else '-'}止损滑点 "
+                                 f"{pos.get('slipStopEff', 0):.2f}")
+
+
 def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
                           mark_merged_times=None,
                           min_merged=EXIT_MIN_MERGED, trail_sigs=None, trail_pts=None):
@@ -390,9 +584,14 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
     # 时段 15m 卖类点提损位扫掉 1 手并 latch 死止损通道，剩余 3 手裸扛 121 点）。
     trail_on = (bool(ec.get("exitTrailOn")) and bool(pos.get("trailRaised"))
                 and bool(pos.get("beDone")))
-    # 同一拍顺序：锁定盈利（最高） → 保本 → 背驰周期够笔 → 检测周期够笔 →
-    # 过高低点止盈 → 止损/跟踪止盈穿越（+最大止损兜底） → 跟踪止盈上移
-    if _apply_profit_lock(pos, bar, ec, lots_left):
+    touch_on = bool(ec.get("exitTouchOn"))
+    # 同一拍顺序（收盘判定口径）：锁定盈利（最高） → 保本 → 背驰周期够笔 →
+    # 检测周期够笔 → 过高低点止盈 → 止损/跟踪止盈穿越（+最大止损兜底） →
+    # 跟踪止盈上移。触价口径（exitTouchOn，2026-10-21）：价格线类（止损/保本/
+    # 跟踪/锁定盈利/兜底）在保本迁移之后、结构类判定之前即时成交——盘中触价
+    # 先于收盘事件发生（_fire_touch_exits）；结构类（halfMr/half/close）仍收盘
+    # 判定 + 下一开盘成交不变。
+    if not touch_on and _apply_profit_lock(pos, bar, ec, lots_left):
         return "profitLock"
     # 保本位 bi 口径惰性落位（2026-10-12）：背驰周期首笔有利方向笔确认那拍
     # beStop = 该笔起点 ± 开仓时点快照的保本滑点。值定义独立于 exitStopBeOn
@@ -407,6 +606,7 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
         sp = pos["entryPrice"] if sp is None else float(sp)
         pos["beStop"] = (sp + pos.get("slipBeEff", 0.0)) if is_short \
             else (sp - pos.get("slipBeEff", 0.0))
+    be_ev = None
     if (ec.get("exitStopBeOn") and tp1 and tp1["time"] <= t
             and not pos.get("beDone")):
         pos["beDone"] = True
@@ -414,12 +614,27 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
                   f"{'+' if is_short else '-'}保本滑点 "
                   f"{pos.get('slipBeEff', 0):.2f}）"
                   if (be_bi_mode and tp1.get("startPrice") is not None) else "")
-        pos["exits"].append({
+        be_ev = {
             "type": "breakeven", "time": tp1["time"], "price": tp1["price"],
             "why": (f"TP1 保本：背驰周期 {pos.get('markRes')} 首笔有利方向（{fav_cn}）笔 "
                     f"{fmtT(tp1['time'])} @ {tp1['price']:.2f} 完成（信号 "
                     f"{fmtT(pos['signalTime'])} 之后），止损位上移至保本位 beStop "
-                    f"{_be_stop_txt(pos)}（当拍生效，仅状态迁移不成交）{be_src}")})
+                    f"{_be_stop_txt(pos)}（当拍生效，仅状态迁移不成交）{be_src}")}
+        if not touch_on:
+            pos["exits"].append(be_ev)
+    if touch_on:
+        # 触价段（价格线类出场在触发根按线价即时成交，详见 _fire_touch_exits）：
+        # ① 进场K线外推先行——触价用外推后的 stopRef 判穿越（与收盘口径同线）；
+        # ② 保本迁移事件在未终局时才落（终局拍不补，与收盘口径「profitLock 先判
+        #    即 return、不落迁移事件」一致）；③ 部分平仓后刷新剩余手数供结构类
+        #    判定（half/close 的比例基数取剩余）。
+        _extend_entry_bar_floor(pos, bar, trail_on)
+        fired = _fire_touch_exits(pos, bar, ec, lots_total)
+        if be_ev is not None and pos.get("lotsLeft", 0) > 1e-9:
+            pos["exits"].append(be_ev)
+        if fired:
+            return fired
+        lots_left = pos.get("lotsLeft", lots_left)
     if (ec.get("exitHalfMrOn") and ((tp1 and tp1["time"] <= t) or exp_mr)
             and not pos.get("halfMrDone")):
         # 背驰周期够笔（2026-10-08 够笔止盈拆分；2026-10-10 统一口径）：确认口径
@@ -509,91 +724,55 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
                 f"{exp_break['price']:.2f}（{fmtT(exp_break['time'])}），不等确认笔，"
                 f"平 {pct:.0f}%（{pos['pendingLots']} 手）挂起")
         return "close"
-    # 进场K线止损下限（stopEntryBarFloor）：进场背驰周期K线仍在走（bar 落在其窗口内）
-    # 且未保本 → 用当根极值更新运行极值并把止损外推到 运行极值±有效止损滑点（只放松，
-    # 与支阻位止损取更宽者）；外推后再按最大止损价夹紧，避免冲破硬上限。
-    # bar 越出窗口即自然冻结。跟踪止盈已接管止损（trailRaised）时跳过——外推只放松
-    # （远离价格）与上移收紧方向相反，会回撤已上移的止损位。状态全在 pos 上，三模式共用。
-    bs, be = pos.get("entryBarStart"), pos.get("entryBarEnd")
-    if (bs is not None and not pos.get("beDone") and not trail_on
-            and bs <= bar["time"] < be):
-        prev_stop = pos.get("stopRef")
-        e = bar["high"] if is_short else bar["low"]
-        cur = pos.get("entryBarExt")
-        pos["entryBarExt"] = e if cur is None else \
-            (max(cur, e) if is_short else min(cur, e))
-        floor = (pos["entryBarExt"] + pos["slipStopEff"] if is_short
-                 else pos["entryBarExt"] - pos["slipStopEff"])
-        pos["stopRef"] = max(pos["stopRef"], floor) if is_short \
-            else min(pos["stopRef"], floor)
-        # 最大止损硬上限：外推不得越过进场价±最大止损
+    if not touch_on:
+        # 进场K线止损下限外推（旧口径位置：结构类判定未提前 return 才到达——
+        # half/halfMr/close 挂起的那拍不外推，下一拍再外推；触价口径已提前到触价段）
+        _extend_entry_bar_floor(pos, bar, trail_on)
+        # 止损/跟踪止盈穿越（成交型，收盘口径）：类型按当前有效止损位归属判定
+        # （_stop_line_of——与触价段/实盘挂线同一归属源）；被关闭的方式忽略（不挂起）；
+        # 部分平仓按方式 latch 一次性消费，防穿越后逐拍重复触发。
+        # bi 口径成笔前 beStop=None（half/halfMr 预期口径抢先置 beDone 的理论场景）：
+        # 「移保本」尚无落位值 → 穿越判定暂回落支阻位 stopRef/stopSr，成笔那拍自然切换
+        typ, stop, latch, on, pct = _stop_line_of(pos, ec)
+        if not pos.get(latch):
+            if stop is not None:  # 止损位永不为 None（最大止损兜底），此保护仅防御旧持仓数据
+                hit = bar["high"] > stop if is_short else bar["low"] < stop
+                if hit:
+                    if typ == "trailStop":
+                        src = f"跟踪止盈上移后的止损位 {stop:.2f}"
+                    elif typ == "stopBe":
+                        src = f"保本位 beStop {stop:.2f}"
+                    else:
+                        src = f"止损位 {stop:.2f}（来源：{pos.get('stopSource') or '支阻位±滑点'}）"
+                    if on:
+                        pos["pendingExit"] = typ
+                        pos["pendingLots"] = _exit_lots(lots_total, lots_left, pct)
+                        if pos["pendingLots"] < lots_left:
+                            pos[latch] = True  # 部分平仓：该方式一次性消费（防逐拍重触发）
+                        ext = bar["high"] if is_short else bar["low"]
+                        pos["pendingWhy"] = (
+                            f"{typ} 触发：{fmtT(bar['time'])} 当根{'最高' if is_short else '最低'} "
+                            f"{ext:.2f} {'冲上' if is_short else '跌破'}{src}，"
+                            f"平 {pct:.0f}%（{pos['pendingLots']} 手）挂起")
+                        return typ
+        # 最大止损硬上限兜底（2026-10-09，永不 latch）：止损类部分平仓 latch 会关掉整个
+        # 穿越判定，剩余手数将无任何价格保护（同上案例：跟踪止盈 25% 平 1 手后 3 手裸扛
+        # 至 -242/-107，约为 slip_fallback 上限的 9 倍）。此通道独立于 latch：止损类通道
+        # 已一次性消费、或有效止损位比 maxLoss 更宽时，盘中破坏 maxLoss 即全平剩余手数
+        # （记 stopSr，why 注明兜底来源），保证每手最大亏损 ≤ 最大止损 ± 成交滑点。
+        # 通道仍活着且位不宽于 maxLoss 时，正常穿越判定本拍已先返回，兜底不可达。
         ml = pos.get("maxLoss")
-        if ml is not None:
-            pos["stopRef"] = min(pos["stopRef"], ml) if is_short \
-                else max(pos["stopRef"], ml)
-        if pos["stopRef"] != prev_stop:
-            # 止损位被进场K线极值外推改变（只放松）→ 来源注记同步（日志叙事用）
-            pos["stopSource"] = (f"进场K线外推：运行极值 {pos['entryBarExt']:.2f}"
-                                 f"{'+' if is_short else '-'}止损滑点 "
-                                 f"{pos.get('slipStopEff', 0):.2f}")
-    # 止损/跟踪止盈穿越（成交型）：类型按当前有效止损位归属判定（跟踪止盈上移过 →
-    # trailStop；保本后 → stopBe；否则 stopSr）；被关闭的方式忽略（不挂起）；
-    # 部分平仓按方式 latch 一次性消费，防穿越后逐拍重复触发。
-    # bi 口径成笔前 beStop=None（half/halfMr 预期口径抢先置 beDone 的理论场景）：
-    # 「移保本」尚无落位值 → 穿越判定暂回落支阻位 stopRef/stopSr，成笔那拍自然切换
-    be_active = bool(pos.get("beDone")) and pos.get("beStop") is not None
-    typ = "trailStop" if trail_on else ("stopBe" if be_active else "stopSr")
-    latch = {"stopSr": "stopSrFired", "stopBe": "stopBeFired",
-             "trailStop": "trailFired"}[typ]
-    stop = pos.get("beStop") if be_active else pos.get("stopRef")
-    if (pos.get("beDone") and trail_on and stop is not None
-            and pos.get("stopRef") is not None):
-        # 跟踪止盈接管：有效止损取 beStop 与上移后 stopRef 的更紧者（空头更低/多头更高）
-        stop = min(stop, pos["stopRef"]) if is_short else max(stop, pos["stopRef"])
-    if not pos.get(latch):
-        if stop is not None:  # 止损位永不为 None（最大止损兜底），此保护仅防御旧持仓数据
-            hit = bar["high"] > stop if is_short else bar["low"] < stop
-            if hit:
-                if typ == "trailStop":
-                    on, pct = True, float(ec.get("exitTrailPct", 100.0))
-                    src = f"跟踪止盈上移后的止损位 {stop:.2f}"
-                elif typ == "stopBe":
-                    on = bool(ec.get("exitStopBeOn"))
-                    pct = float(ec.get("exitStopBePct", 100.0))
-                    src = f"保本位 beStop {stop:.2f}"
-                else:
-                    on = bool(ec.get("exitStopSrOn"))
-                    pct = float(ec.get("exitStopSrPct", 100.0))
-                    src = f"止损位 {stop:.2f}（来源：{pos.get('stopSource') or '支阻位±滑点'}）"
-                if on:
-                    pos["pendingExit"] = typ
-                    pos["pendingLots"] = _exit_lots(lots_total, lots_left, pct)
-                    if pos["pendingLots"] < lots_left:
-                        pos[latch] = True  # 部分平仓：该方式一次性消费（防逐拍重触发）
-                    ext = bar["high"] if is_short else bar["low"]
-                    pos["pendingWhy"] = (
-                        f"{typ} 触发：{fmtT(bar['time'])} 当根{'最高' if is_short else '最低'} "
-                        f"{ext:.2f} {'冲上' if is_short else '跌破'}{src}，"
-                        f"平 {pct:.0f}%（{pos['pendingLots']} 手）挂起")
-                    return typ
-    # 最大止损硬上限兜底（2026-10-09，永不 latch）：止损类部分平仓 latch 会关掉整个
-    # 穿越判定，剩余手数将无任何价格保护（同上案例：跟踪止盈 25% 平 1 手后 3 手裸扛
-    # 至 -242/-107，约为 slip_fallback 上限的 9 倍）。此通道独立于 latch：止损类通道
-    # 已一次性消费、或有效止损位比 maxLoss 更宽时，盘中破坏 maxLoss 即全平剩余手数
-    # （记 stopSr，why 注明兜底来源），保证每手最大亏损 ≤ 最大止损 ± 成交滑点。
-    # 通道仍活着且位不宽于 maxLoss 时，正常穿越判定本拍已先返回，兜底不可达。
-    ml = pos.get("maxLoss")
-    if (ml is not None and (bar["high"] > ml if is_short else bar["low"] < ml)
-            and (pos.get(latch) or stop is None
-                 or (stop > ml if is_short else stop < ml))):
-        pos["pendingExit"] = "stopSr"
-        pos["pendingLots"] = lots_left
-        ext = bar["high"] if is_short else bar["low"]
-        pos["pendingWhy"] = (
-            f"stopSr 兜底触发：{fmtT(bar['time'])} 当根{'最高' if is_short else '最低'} "
-            f"{ext:.2f} {'冲上' if is_short else '跌破'}最大止损硬上限 {ml:.2f}"
-            f"（止损类方式已部分平仓或有效止损位更宽），全平剩余 {lots_left} 手挂起")
-        return "stopSr"
+        if (ml is not None and (bar["high"] > ml if is_short else bar["low"] < ml)
+                and (pos.get(latch) or stop is None
+                     or (stop > ml if is_short else stop < ml))):
+            pos["pendingExit"] = "stopSr"
+            pos["pendingLots"] = lots_left
+            ext = bar["high"] if is_short else bar["low"]
+            pos["pendingWhy"] = (
+                f"stopSr 兜底触发：{fmtT(bar['time'])} 当根{'最高' if is_short else '最低'} "
+                f"{ext:.2f} {'冲上' if is_short else '跌破'}最大止损硬上限 {ml:.2f}"
+                f"（止损类方式已部分平仓或有效止损位更宽），全平剩余 {lots_left} 手挂起")
+            return "stopSr"
     # 跟踪止盈上移（最后执行：本拍上移、下一拍生效）。
     # 参照双模式（2026-10-09，exitTrailSrc；2026-10-11 detect 改结构点）：
     # detect=检测周期已破前低/前高的有利方向笔起点（空头下跌笔高点 / 多头上涨笔
@@ -1417,6 +1596,16 @@ class BacktestEngine:
                                           self._merged_times.get(pos.get("markRes")) or [],
                                           min_merged=self.exit_min_merged,
                                           trail_sigs=st["allSignals"].get(pos.get("markRes")))
+                    if pos.get("state") == "closed":
+                        # 触价口径当拍终局：即时成交（收盘口径终局在下方 next_ok 段，
+                        # 实时/实盘消费 out["exits"] 镜像平仓，与收盘口径同一出口）
+                        st["open_pos"][d] = None
+                        st["stats"]["closed"] += 1
+                        _et = str(pos.get("exitType", ""))
+                        if _et.startswith("stop") or _et == "trailStop":
+                            st["stats"]["stopped"] = st["stats"].get("stopped", 0) + 1
+                        self._rearm_fired(pos)
+                        out["exits"].append(pos)
             # ② 收集进场信号（与 run 同序同口径）
             if self.signal_mode == "realtime":
                 if changed:
@@ -1542,6 +1731,9 @@ class BacktestEngine:
                 "expectBi": self.expect_bi, "divergeConfirm": self.diverge_confirm,
                 "entryMacdShrink": self.entry_macd_shrink,
                 "stopEntryBarFloor": self.stop_entry_bar_floor,
+                # 锚点窗口（2026-10-21 重定义；闸门直读 CHAN_CFG，header 只记口径）
+                "anchorWinBars": int(CHAN_CFG.get("anchorWinBars", 2) or 2),
+                "anchorWinPts": float(CHAN_CFG.get("anchorWinPts", 10.0) or 0.0),
                 "exitMinMerged": self.exit_min_merged,
                 "exitCfg": dict(self.exit_cfg),
                 # 实际加载数据范围（诊断数据源截断：cards 说"跑到最新"但加载层少给数据时
@@ -1696,7 +1888,19 @@ class BacktestEngine:
                                       self._merged_times.get(pos.get("markRes")) or [],
                                       min_merged=self.exit_min_merged,
                                       trail_sigs=allSignals.get(pos.get("markRes")))
-                _jr_exits(pos)  # breakeven 当拍落事件；half/close/stop 挂起待下一拍成交
+                if pos.get("state") == "closed":
+                    # 触价口径当拍终局（_fire_touch_exits 已在触发根按线价即时成交并
+                    # close_trade）：当拍收槽解锁同向互斥；收盘口径的终局仍走下方
+                    # 「下一开盘」段（execute_pending_exit）
+                    open_pos[d] = None
+                    stats["closed"] += 1
+                    _et = str(pos.get("exitType", ""))
+                    if _et.startswith("stop") or _et == "trailStop":
+                        stats["stopped"] = stats.get("stopped", 0) + 1
+                    self._rearm_fired(pos)
+                    _emit_exit(pos)
+                else:
+                    _jr_exits(pos)  # breakeven/trailRaise 当拍落事件；触价部分平仓即时落；half/close/stop 挂起待下一拍成交
             if self.signal_mode == "realtime":
                 # 当下背驰：笔结构变化时重算链路（刷新①③所需的买卖点/支阻位缓存），
                 # 之后每根 fine 收盘都用当前增量状态（bis 已延伸到当下极值、MACD 增量）评估②
@@ -2003,6 +2207,10 @@ class BacktestEngine:
                 self._points = compute_period_points(periodBis,
                                                      points_periods if points_periods is not None else core,
                                                      periodMacd=periodMacd,
+                                                     # 容差与 fxma(_fx_all_points)/with_marks 标记层同源 =
+                                                     # points 品种桶（2026-10-21 统一点源；此前漏传恒 0.0）
+                                                     class2ZsTol=self.marks_params.get("class2ZsTol", 0.0),
+                                                     thirdZsTol=self.marks_params.get("thirdZsTol", 0.0),
                                                      work_cache=self._chain_work_cache)
             except Exception:
                 self._points = {}

@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from . import chan_core, data_store, live_store, param_center
-from .backtest import BacktestEngine, DEFAULT_PERIODS
+from .backtest import BacktestEngine, DEFAULT_PERIODS, next_touch_lines
 from .mark_entry import (DEFAULT_SLIP_FALLBACK, DEFAULT_SLIP_STOP,
                          contract_mult_of, EXIT_MODE_DEFAULTS, EXIT_MODE_ON_KEYS)
 from .mt5_broker import MT5Broker, _TP_UNCHANGED
@@ -159,8 +159,11 @@ def provisional_sl(direction, bid, ask, near_sr, slip=DEFAULT_SLIP_STOP,
 # 引擎决策逻辑版本：影响「同参数、不同决策」的引擎级变更时 bump（对齐 mark 层
 # LOGIC_V 习惯；Python 侧无常量，实盘语义指纹以本串为准）。本值已覆盖 2026-10-13
 # 之后的规则变更：买卖点直连进出场（7c21a74）、同笔也标记（bdf4fee）、
-# 锚点K线窗口闸（0b9954f）。
-ENGINE_LOGIC_VERSION = "20261020-live-semantic-fp"
+# 锚点K线窗口闸（0b9954f）、统一点源（2026-10-21：compute_period_points 撤 60 笔
+# 窗口改全量笔视图 + 进场候选透传 points 桶 class2ZsTol/thirdZsTol，与 fxma 同源）、
+# 锚点窗口重定义（2026-10-21：锚K起 anchorWinBars 根检测周期K + 触发价距窗口
+# 极值 ≤ anchorWinPts 点，默认 2根/10点，参数化）。
+ENGINE_LOGIC_VERSION = "20261021-anchorwin2"
 
 
 def _fingerprint_modules(strategy_id):
@@ -897,6 +900,18 @@ class LiveTrader:
                                       f"ticket={p['position_ticket']}（偏差="
                                       f"{r.deal_price}）")
 
+    def _broker_volume_left(self, row):
+        """券商侧该 ticket 的剩余手数（触价口径「券商SL先平」判定用）。
+        @returns float 剩余；0.0=持仓已不存在（被券商SL/手动平掉）；None=查询失败
+        （按旧路径直接市价平，失败由 reconcile 兜底）。"""
+        try:
+            for p in self.broker.positions() or []:
+                if p.get("ticket") == row["position_ticket"]:
+                    return float(p.get("volume") or 0.0)
+            return 0.0
+        except Exception:
+            return None
+
     def _on_exit(self, t):
         """终局出场：平掉券商剩余仓 + 收口镜像行。"""
         no = t["tradeNo"]
@@ -911,6 +926,11 @@ class LiveTrader:
         self._detached.discard(no)
         if row is None:
             return
+        # 终局收口统一带 be_done/half_done（引擎终态快照）：TP1 迁移与出场同拍时
+        # 行先关闭、_diff_states 跳过，状态位须在此落库（2026-10-21；此前只有
+        # sl_modify/half_close 路径写，同拍终局的行会漏记 be_done=1）
+        _final = {"be_done": int(bool(t.get("beDone"))),
+                  "half_done": int(bool(t.get("halfDone")))}
         if self.replaying and row["position_ticket"] and not row["shadow"] \
                 and row["state"] not in ("closed", "detached"):
             # 宕机窗口内引擎终局的仓：券商侧仓还在 → 挂 close_pending，
@@ -919,7 +939,7 @@ class LiveTrader:
                                      "state": "close_pending",
                                      "exit_type": t.get("exitType"),
                                      "exit_time": t.get("exitTime"),
-                                     "engine_pnl": t.get("pnl"),
+                                     "engine_pnl": t.get("pnl"), **_final,
                                      "engine_json": self._engine_json(t)})
             return
         if self.replaying or row["shadow"] or row["state"] in ("closed", "detached"):
@@ -928,10 +948,31 @@ class LiveTrader:
                                      "exit_type": t.get("exitType"),
                                      "exit_time": t.get("exitTime"),
                                      "exit_price": t.get("exitPrice"),
-                                     "engine_pnl": t.get("pnl"),
+                                     "engine_pnl": t.get("pnl"), **_final,
                                      "engine_json": self._engine_json(t)})
             return
         if row["position_ticket"]:
+            bleft = self._broker_volume_left(row)
+            if bleft is not None and bleft <= 1e-9:
+                # 触价口径「券商SL先平」：挂的 SL=引擎全平线（next_touch_lines），
+                # 盘中触价成交先于引擎收盘判定——跳过市价单，按券商先平收口
+                # （成交价取引擎触价线价，deviation=None 留痕，真实券商价后续
+                # 可经 deals 对账）
+                live_store.log_order(self.session, "full_close", engine_trade_no=no,
+                                     direction=t["direction"], volume=0.0,
+                                     position_ticket=row["position_ticket"], ok=1,
+                                     retcode=0, retcomment="broker_sl_first",
+                                     deal_price=t.get("exitPrice"), deal_volume=0.0)
+                live_store.upsert_trade({"session": self.session, "engine_trade_no": no,
+                                         "state": "closed", "volume_left": 0.0,
+                                         "exit_type": t.get("exitType"),
+                                         "exit_time": t.get("exitTime"),
+                                         "exit_price": t.get("exitPrice"),
+                                         "engine_pnl": t.get("pnl"), **_final,
+                                         "engine_json": self._engine_json(t)})
+                self.log(f"[live] trade#{no} 终局由券商SL先平（触价口径，"
+                         f"引擎价={t.get('exitPrice')}）")
+                return
             r = self.broker.close_position(row["position_ticket"],
                                            comment=f"exit_{t.get('exitType')}")
             live_store.log_order(self.session, "full_close", engine_trade_no=no,
@@ -952,7 +993,7 @@ class LiveTrader:
                                      "exit_type": t.get("exitType"),
                                      "exit_time": t.get("exitTime"),
                                      "exit_price": r.deal_price or t.get("exitPrice"),
-                                     "engine_pnl": t.get("pnl"),
+                                     "engine_pnl": t.get("pnl"), **_final,
                                      "broker_pnl": broker_pnl, "deviation": dev,
                                      "engine_json": self._engine_json(t)})
             self.log(f"[live] trade#{no} 终局平仓 {t.get('exitType')} 券商价="
@@ -962,7 +1003,7 @@ class LiveTrader:
                                      "state": "closed", "exit_type": t.get("exitType"),
                                      "exit_time": t.get("exitTime"),
                                      "exit_price": t.get("exitPrice"),
-                                     "engine_pnl": t.get("pnl"),
+                                     "engine_pnl": t.get("pnl"), **_final,
                                      "engine_json": self._engine_json(t)})
 
     def _fill_on_forming(self, t):
@@ -1039,10 +1080,19 @@ class LiveTrader:
                     self._snap[no] = self._snapshot(t)
                     continue
                 if stop_changed:
-                    trail_on = (bool(t.get("trailRaised"))
-                                and (t.get("exitCfg") or {}).get("exitTrailOn"))
-                    reason = "trail" if trail_on else \
-                        ("be" if t["beDone"] else "extrapolate")
+                    ec = t.get("exitCfg") or {}
+                    if ec.get("exitTouchOn"):
+                        # 触价口径：SL 挂的是 next_touch_lines 第一条全平线，
+                        # 变更原因按该线归属标注（lock/trail/be/sr/ml 兜底）
+                        full_typ = next((c["type"] for c in next_touch_lines(t, ec)
+                                         if c.get("full")), None)
+                        reason = {"profitLock": "lock", "trailStop": "trail",
+                                  "stopBe": "be", "stopSr": "sr"}.get(full_typ, "touch")
+                    else:
+                        trail_on = (bool(t.get("trailRaised"))
+                                    and ec.get("exitTrailOn"))
+                        reason = "trail" if trail_on else \
+                            ("be" if t["beDone"] else "extrapolate")
                     self._modify_stop(no, t, row, eff_stop, reason=reason)
                 if half_changed:
                     self._half_close(no, t, row)
@@ -1070,6 +1120,16 @@ class LiveTrader:
                 "engine_pnl_fragment": None}, symbol=self.cfg["symbol"])
             return
         left = row["volume_left"] or row["volume_open"]
+        bleft = self._broker_volume_left(row)
+        if bleft is not None and bleft <= 1e-9:
+            # 触价口径「券商SL先平」：全平线已把仓位全平，本部分平仓事件只记账
+            live_store.log_event(self.session, "partial_close_skip",
+                                 {"tradeNo": no, "why": "broker_sl_first", "ev": ev},
+                                 symbol=self.cfg["symbol"])
+            live_store.upsert_trade({"session": self.session, "engine_trade_no": no,
+                                     "volume_left": 0.0, "state": "closed"})
+            self.log(f"[live] trade#{no} 部分平仓跳过：券商SL已先平（触价口径）")
+            return
         vmin = self.broker.spec()["volume_min"]
         if vol_ev < vmin or vol_ev >= left:
             r = self.broker.close_position(row["position_ticket"], comment="partial_degrade_full")
@@ -1410,11 +1470,23 @@ class LiveTrader:
 
     @staticmethod
     def _eff_stop_of(t):
-        """引擎口径的当前有效止损位（advance_exit_decision 同口径：保本后=beStop；
-        跟踪止盈接管（trailRaised 且开关开）时取 beStop 与上移后 stopRef 的更紧者）。"""
+        """券商SL目标价（live_trader 口径的「下一条护住仓位的线」）：
+        - 触价口径（exitTouchOn，2026-10-21，缠论V1）：取引擎 next_touch_lines
+          （与回测触价段同一候选源，防双份漂移）中第一条会全平剩余手数的线——
+          多头=最高全平线（止损线/武装后的锁定价〔随峰值上抬〕/最大止损兜底）。
+          部分平仓线（如跟踪止盈 25%）不挂：由引擎收盘事件后市价分批（deviation
+          记录）；无任何全平线时回落旧口径有效止损位，绝不放松券商SL。
+        - 旧口径（exitTouchOn 缺省/关，或 fxma trade 无 exitCfg）：保本后=beStop；
+          跟踪止盈接管（trailRaised 且开关开）时取 beStop 与上移后 stopRef 的更紧者
+          （backtest.advance_exit_decision 同口径）。"""
+        ec = t.get("exitCfg") or {}
+        if ec.get("exitTouchOn"):
+            for c in next_touch_lines(t, ec):
+                if c.get("full"):
+                    return c["price"]
         eff = t.get("beStop") if t.get("beDone") else t.get("stopRef")
         if (t.get("beDone") and t.get("trailRaised")
-                and (t.get("exitCfg") or {}).get("exitTrailOn")
+                and ec.get("exitTrailOn")
                 and eff is not None and t.get("stopRef") is not None):
             eff = min(eff, t["stopRef"]) if t["direction"] == "short" \
                 else max(eff, t["stopRef"])

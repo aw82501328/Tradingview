@@ -158,6 +158,13 @@ EXIT_EXPECT_ON = True      # 出场预期口径（严进宽出，2026-10-09）�
 EXIT_LOCK_ON = True
 EXIT_LOCK_PTS = 100.0      # 最大盈利门槛（点，绝对价格）
 EXIT_LOCK_PCT = 50.0       # 至少锁定最大盈利的百分比
+# 价格线类触价成交（2026-10-21，仅缠论V1；FxMaEngine 出场本就是触价口径）：
+# 开=支阻止损/保本止损/跟踪止盈/最大止损兜底/锁定盈利「盘中触及线价即在触发根
+# 按线价即时成交」（同根多线被穿按线位从高到低逐线成交；与实盘券商SL挂线同口径，
+# live_trader 按 backtest.next_touch_lines 把第一条会全平的线挂成 MT5 SL）；
+# 关=收盘判定+下一根开盘成交（旧口径，A/B 基准）。结构类出场（够笔/过高低点）
+# 不受影响。成交方式开关，不列入 EXIT_MODE_ON_KEYS（同 exitExpectOn 先例）。
+EXIT_TOUCH_ON = True
 # 出场方式默认快照（BacktestEngine.exit_cfg 消费；_fill_pending 固化进 pos.exitCfg，
 # advance_exit_decision 纯函数读 pos——三模式（回测/实时/实盘）同一份判定）
 EXIT_MODE_DEFAULTS = {
@@ -173,6 +180,7 @@ EXIT_MODE_DEFAULTS = {
     "exitTrailSlip": EXIT_TRAIL_SLIP,
     "exitTrailSrc": EXIT_TRAIL_SRC,
     "exitExpectOn": EXIT_EXPECT_ON,
+    "exitTouchOn": EXIT_TOUCH_ON,
 }
 # 出场方式开关键（「至少启用一种」校验用；exitTrailSlip / 锁定盈利的两个数值非开关不列入）
 EXIT_MODE_ON_KEYS = ("exitLockOn", "exitStopSrOn", "exitStopBeOn", "exitHalfMrOn",
@@ -390,6 +398,49 @@ def _cover_bar_index(times, t):
         return None
     i = bisect.bisect_right(times, t) - 1
     return None if i < 0 else i
+
+
+def _anchor_in_window(idx, anchorIdx, winBars):
+    """锚点窗口落窗判定（2026-10-21 重定义）：idx 所在K须在锚K起 winBars 根内
+    （含锚K自身；锚K之前仍拒）。winBars=1 即旧单K规则。"""
+    return idx is not None and anchorIdx is not None and 0 <= idx - anchorIdx < winBars
+
+
+def _finest_res_with_bars(periodData):
+    """periodData 中有K线数据的周期里取最细一级。锚点窗口价距基准须用细周期
+    已收K：粗周期已收前缀不含进行中K线（锚K常在进行中，其低/高点不可见——
+    同 JS barTimesAll 必须用未过滤全量的教训）。"""
+    best, best_sec = None, None
+    for r, d in (periodData or {}).items():
+        if not (d or {}).get("bars"):
+            continue
+        sec = intervalSecOf(r) or 0
+        if best is None or sec < best_sec:
+            best, best_sec = r, sec
+    return best
+
+
+def _win_extreme_ref(periodData, fromT, direction, anchorPrice):
+    """锚点窗口价距基准（买侧 lowRef/卖侧 highRef）：锚K开盘时刻 fromT 起细周期
+    已收K极值与锚点价取小（买）/取大（卖），随新低/新高漂移。无K线数据降级
+    =锚点价。bars 为已收前缀，从尾部反向扫到 fromT 即止。"""
+    res = _finest_res_with_bars(periodData)
+    bars = ((periodData or {}).get(res) or {}).get("bars") if res else None
+    ref = anchorPrice
+    for b in reversed(bars or []):
+        if (b.get("time") or 0) < fromT:
+            break
+        v = b.get("low", b.get("close")) if direction == "long" else b.get("high", b.get("close"))
+        ref = min(ref, v) if direction == "long" else max(ref, v)
+    return ref
+
+
+def _beat_price(periodData):
+    """当拍现价 = 最细周期最后一根已收K收盘（与当拍 MACD 同源；无数据返回 None，
+    调用方跳过价距检查）。"""
+    res = _finest_res_with_bars(periodData)
+    bars = ((periodData or {}).get(res) or {}).get("bars") if res else None
+    return bars[-1].get("close") if bars else None
 
 
 def _expansionCount(bisL, parentBi, endT, tolStart, tolEnd):
@@ -710,10 +761,12 @@ def compute_period_points(periodBis, periods, periodMacd=None, work_cache=None,
         bis = periodBis.get(res) or []
         if len(bis) < 3:
             continue
-        # 取最近 60 笔即可（原 compute_plan/predictPlan 同窗口：锚点只看最新结构，
-        # 全量 bis 会使 findBuyPoints 的 project_first_points 退化为长列表扫描）
-        if len(bis) > 60:
-            bis = bis[-60:]
+        # 全量笔视图（2026-10-21 统一点源：与 fxma _fx_all_points / 图上标记层
+        # compute_all_marks 同口径）。旧「最近 60 笔」窗口（原计划窗口遗留）曾使
+        # 老于窗口的上级笔端点投影退化为大级别端点、1买锚后抬低序列/上级分解中枢
+        # 被截断——缠论V1 与 fxma 同周期点集因此分歧；project_first_points 的档位
+        # 二分与顶点缓存（2026-10-16/10-20 性能等价改造）已无长列表扫描问题，
+        # 重算频次仍由 work_cache 指纹闸住（全量指纹不再随窗口头滑动，只随真实结构变化）。
         sec = intervalSecOf(res) or 60
         best = None
         for r in periodBis:
@@ -1108,14 +1161,18 @@ def evaluateEntry(ctx, strategy):
     wantType = "up" if direction == "short" else "down"  # 空头等反弹(up)，多头等回调(down)
     divergeDir = direction  # 空头→顶背驰(short)，多头→底背驰(long)
 
-    # ⓪ 锚点K线窗口（2026-10-18 用户规则，确认制镜像）：小周期找背驰仅限锚点所在
-    # 大周期K线内。确认制不查评估拍（其信号本身即历史背驰点），只约束背驰点落窗；
-    # 锚点由 compute_entries 逐候选传入 ctx["anchorPoint"]，缺省（旧调用方/最小
-    # fixture）时降级放行。
+    # ⓪ 锚点窗口（2026-10-18 用户规则，2026-10-21 重定义参数化；确认制镜像）：
+    # 时间窗=锚K起 anchorWinBars 根检测周期K（旧口径=1），背驰点所在K须落窗；
+    # 价距窗=背驰点价距窗口极值 ≤ anchorWinPts（0=不限），极值=锚点价与锚K→
+    # 背驰点各已收K极值取小（买侧）/取大（卖侧）。确认制不查评估拍（其信号
+    # 本身即历史背驰点），只约束背驰点落窗；锚点由 compute_entries 逐候选传入
+    # ctx["anchorPoint"]，缺省（旧调用方/最小 fixture）时降级放行。
     barsX = ((periodData or {}).get(res) or {}).get("bars") or []
     timesX = [b.get("time") for b in barsX]
     anchorPt = ctx.get("anchorPoint")
     anchorWinIdx = _cover_bar_index(timesX, anchorPt.get("time")) if anchorPt is not None else None
+    winBars = int(CHAN_CFG.get("anchorWinBars", 2) or 2)
+    winPts = float(CHAN_CFG.get("anchorWinPts", 10.0) or 0.0)
 
     # 1. 够笔
     if not lastBiOk(bis, wantType):
@@ -1137,10 +1194,23 @@ def evaluateEntry(ctx, strategy):
     if not cands:
         return {"ok": False, "reason": "以下级别无匹配方向背驰"}
     if timesX and anchorWinIdx is not None:
-        cands = [c for c in cands if _cover_bar_index(timesX, c["point"]["time"]) == anchorWinIdx]
+        def _anchor_win_ok(c):
+            i = _cover_bar_index(timesX, c["point"]["time"])
+            if not _anchor_in_window(i, anchorWinIdx, winBars):
+                return False
+            if winPts > 0:
+                ref = anchorPt.get("price")
+                for b in barsX[anchorWinIdx:i + 1]:
+                    v = b.get("low", b.get("close")) if direction == "long" else b.get("high", b.get("close"))
+                    ref = min(ref, v) if direction == "long" else max(ref, v)
+                dist = (c["point"]["price"] - ref) if direction == "long" else (ref - c["point"]["price"])
+                if dist > winPts:
+                    return False
+            return True
+        cands = [c for c in cands if _anchor_win_ok(c)]
         if not cands:
             return {"ok": False,
-                    "reason": "以下级别背驰点均不在锚点所在大周期K线内（锚点K线窗口外）"}
+                    "reason": "以下级别背驰点均不在锚点窗口内（锚K起 N 根检测周期K内且距窗口极值 ≤ 点数）"}
 
     nearTol = near  # 绝对价差（2026-09-13 起不乘 ATR）
     for c in cands:
@@ -1523,19 +1593,41 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
                 _rej("no_bis", skey=key)
                 continue
             times = (periodTimes or {}).get(X) or [b["time"] for b in (pd.get("bars") or [])]
-            # ⓪ 锚点K线窗口（2026-10-18 用户规则）：大周期某根K线满足买卖点条件（锚点
-            # 所在K线）→ 去小周期找背驰仅限该根K线内，K线走完窗口即关、此后不再触发。
-            # 无永久闩锁：锚随新高/新低漂移或换新点时，每拍按当前锚现算——新锚所在
-            # K线自动重开窗。times 缺失（无 periodTimes 且无 bars 的最小 fixture）时
-            # 降级放行，不影响既有最小单测。
+            # ⓪ 锚点窗口（2026-10-18 用户规则；2026-10-21 重定义参数化）：时间窗=
+            # 锚K起 anchorWinBars 根检测周期K（旧口径=1），当拍与背驰点所在K都须
+            # 落窗、锚K之前仍拒；价距窗=触发价距窗口极值（买侧最低/卖侧最高=
+            # 锚点价与锚K开盘起细周期已收K极值取小/大）≤ anchorWinPts（0=不限）。
+            # 无永久闩锁：锚随新高/新低漂移或换新点时，每拍按当前锚现算——新锚
+            # 所在K线自动重开窗。times 缺失（无 periodTimes 且无 bars 的最小
+            # fixture）时降级放行，不影响既有最小单测。
+            winBars = int(CHAN_CFG.get("anchorWinBars", 2) or 2)
+            winPts = float(CHAN_CFG.get("anchorWinPts", 10.0) or 0.0)
+            anchorWinIdx = nowWinIdx = None
+            winRef = None
             if times:
                 anchorWinIdx = _cover_bar_index(times, point.get("time"))
                 nowWinIdx = _cover_bar_index(times, tCut)
-                if anchorWinIdx is None or nowWinIdx != anchorWinIdx:
+                if not _anchor_in_window(nowWinIdx, anchorWinIdx, winBars):
                     _rej("anchor_bar_window", skey=key,
                          ctx={"pointType": point.get("type"), "anchorTime": point.get("time"),
                               "nowBarTime": times[nowWinIdx] if nowWinIdx is not None else None})
                     continue
+                # 价距（主闸=当拍现价）：细周期K线/现价缺失（最小 fixture）时跳过，
+                # 次级仍以 winRef（含锚点价兜底）查背驰点价
+                if winPts > 0:
+                    winRef = _win_extreme_ref(periodData, times[anchorWinIdx],
+                                              direction, point.get("price"))
+                    nowPx = _beat_price(periodData)
+                    if nowPx is not None:
+                        dist = (nowPx - winRef) if direction == "long" else (winRef - nowPx)
+                        if dist > winPts:
+                            _rej("anchor_bar_window", skey=key,
+                                 ctx={"pointType": point.get("type"),
+                                      "anchorTime": point.get("time"),
+                                      "nowBarTime": times[nowWinIdx],
+                                      "price": nowPx, "winExt": winRef,
+                                      "dist": round(dist, 4)})
+                            continue
             # ① 够笔（当下制）：最后一笔=形成中段，方向匹配 + 段长门槛；
             #    预期够笔（expectBiEnabled，页面可选默认开）：末笔方向不符（回调/反弹的反向段
             #    尚未确认为笔）但末笔端点后已走出 ≥ expectBiMinBars 根本级K线 → 视为回调/反弹中，
@@ -1609,13 +1701,25 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
                     _rej("cand_fired", seg_start=c["segStart"], skey=key,
                          ctx={"markRes": c["res"]})
                     continue  # 该形成段已发过，段延伸不重发
-                # 次级保险（锚点K线窗口）：当前拍在窗内、但背驰极值是早前K线的
-                # 陈旧极值时同样拒绝——背驰点本身必须落在锚点所在K线内
-                if times and _cover_bar_index(times, c["point"]["time"]) != anchorWinIdx:
+                # 次级保险（锚点窗口）：当前拍在窗内、但背驰极值是窗口外更早K线的
+                # 陈旧极值时同样拒绝——背驰点所在K须落在锚K起 N 根内，且背驰点价
+                # 距窗口极值 ≤ anchorWinPts（winRef 主闸已算，含锚点价兜底）
+                if times and not _anchor_in_window(_cover_bar_index(times, c["point"]["time"]),
+                                                   anchorWinIdx, winBars):
                     _rej("anchor_bar_window", seg_start=c["segStart"], skey=key,
                          ctx={"markRes": c["res"], "divergeTime": c["point"]["time"],
                               "anchorTime": point.get("time")})
                     continue
+                if times and winPts > 0:
+                    ref = winRef if winRef is not None else point.get("price")
+                    px = c["point"]["price"]
+                    dist = (px - ref) if direction == "long" else (ref - px)
+                    if dist > winPts:
+                        _rej("anchor_bar_window", seg_start=c["segStart"], skey=key,
+                             ctx={"markRes": c["res"], "divergeTime": c["point"]["time"],
+                                  "anchorTime": point.get("time"),
+                                  "price": px, "winExt": ref, "dist": round(dist, 4)})
+                        continue
                 # 区间感知闸门（同确认制 evaluateEntry：levels=逐位同 nearSr，
                 # zones=背驰点价落入方向匹配区间）
                 hit = near_zone(c["point"]["price"], srX, direction, nearTol)

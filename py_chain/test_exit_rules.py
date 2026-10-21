@@ -53,13 +53,17 @@ def make_pos(direction="short", signalTime=100, entryPrice=4450.0, stopRef=4463.
              beStop=4455.0, planDirection="空头空", lots=4, strategyKey=None):
     """构造持仓 dict（_fill_pending 产出的出场状态机字段子集）。
     2026-10-16 起顺势按 strategyKey 判定（计划方向口径取消）：planDirection 为
-    逆势（多头空/空头多）时 strategyKey 缺省配逆势键 wait1Sell，与直连映射一致。"""
+    逆势（多头空/空头多）时 strategyKey 缺省配逆势键 wait1Sell，与直连映射一致。
+    2026-10-21 起缺省钉 exitTouchOn=False（本文件既有用例=收盘判定+下一开盘旧口径
+    的回归，触价口径见 TestTouchExits；test_legacy_pos_defaults_open_all 会删掉
+    exitCfg 以保留「无 exitCfg → 默认兜底」前提）。"""
     if strategyKey is None:
         strategyKey = "wait2Sell" if planDirection in ("空头空", "多头多") else "wait1Sell"
     return {"direction": direction, "signalTime": signalTime, "entryPrice": entryPrice,
             "stopRef": stopRef, "beStop": beStop, "planDirection": planDirection,
             "strategyKey": strategyKey, "lots": lots,
             "beDone": False, "halfDone": False, "exits": [], "pendingExit": None,
+            "exitCfg": dict(EXIT_MODE_DEFAULTS, exitTouchOn=False),
             "state": "open"}
 
 
@@ -781,11 +785,13 @@ class TestStopBeMode(unittest.TestCase):
 
 def ecfg(**over):
     """出场方式配置快照。算法场景钉在 2026-10-10 收默认之前的口径
-    （过高低点 100%、跟踪止盈关、保本位极值），调用方显式传入的键仍覆盖。"""
+    （过高低点 100%、跟踪止盈关、保本位极值），调用方显式传入的键仍覆盖。
+    2026-10-21 起钉 exitTouchOn=False：本文件既有用例=收盘判定+下一开盘旧口径
+    回归（保 exitTouchOn=False 的 A/B 正确性）；触价口径见 TestTouchExits。"""
     from py_chain.mark_entry import EXIT_MODE_DEFAULTS
     c = dict(EXIT_MODE_DEFAULTS)
     c.update(exitClosePct=100.0, exitTrailOn=False, exitTrailPct=100.0,
-             exitStopBeMode="extreme")
+             exitStopBeMode="extreme", exitTouchOn=False)
     c.update(over)
     return c
 
@@ -1225,12 +1231,215 @@ class TestExitModes(unittest.TestCase):
     def test_legacy_pos_defaults_open_all(self):
         # 旧 pos（无 exitCfg/新字段）→ EXIT_MODE_DEFAULTS 兜底 = 现网行为
         pos = make_pos()   # 不带 exitCfg / lotsLeft
+        pos.pop("exitCfg", None)   # 保留「无 exitCfg → 默认兜底」前提（make_pos 已钉旧口径）
         mark_bis = [bi("up", 0, 500, 4440, 4455)]
         px_bis = [bi("up", 0, 50, 4440, 4460), bi("down", 50, 300, 4460, 4440)]
         r = advance_exit_decision(pos, 700, bar(700, 4445, 4448, 4440, 4444),
                                   mark_bis, px_bis, T8)
         self.assertEqual(r, "half")
         self.assertEqual(pos["pendingLots"], 2.0)   # 默认 50% × lots 4
+
+
+class TestTouchExits(unittest.TestCase):
+    """价格线类触价成交（exitTouchOn，2026-10-21）：触发根按线价即时成交，
+    无挂起/不等下一开盘；同根多线按线位顺序逐线成交；latch/峰值滞后与收盘口径一致。
+    本文件其余用例钉 exitTouchOn=False（旧口径回归，保 A/B 正确性）。"""
+
+    def mkt(self, **kw):
+        """make_pos + 触价口径必需字段子集（lotsLeft/trail/latch/maxLoss）。"""
+        cfg = kw.pop("exitCfg", None)
+        pos = make_pos(**{k: v for k, v in kw.items()
+                          if k in ("direction", "signalTime", "entryPrice", "stopRef",
+                                   "beStop", "planDirection", "lots", "strategyKey")})
+        pos["lotsLeft"] = float(pos["lots"])
+        pos["trailMark"] = pos["signalTime"]
+        pos["trailRaised"] = False
+        pos["trailMoves"] = []
+        pos["stopSrFired"] = pos["stopBeFired"] = pos["trailFired"] = False
+        pos["exitCfg"] = cfg or ecfg(exitTouchOn=True)
+        for k, v in kw.items():
+            if k not in pos:
+                pos[k] = v
+        return pos
+
+    def test_stop_fills_at_line_price_on_trigger_bar(self):
+        # 空单穿越支阻位：当根即时成交@线价（事件 time=触发根），无挂起，全平终局
+        pos = self.mkt()
+        r = advance_exit_decision(pos, 400, bar(400, 4450, 4464, 4448, 4452),
+                                  [], [], None)
+        self.assertEqual(r, "stopSr")
+        self.assertIsNone(pos.get("pendingExit"))      # 触价无挂起
+        self.assertEqual(pos["state"], "closed")       # 当拍终局（close_trade 已结算）
+        self.assertEqual(pos["exitType"], "stopSr")
+        self.assertEqual(pos["exitPrice"], 4463.0)     # 线价本身
+        self.assertEqual(pos["exitTime"], 400)         # 触发根时间（非下一根）
+        ev = pos["exits"][-1]
+        self.assertEqual(ev["price"], 4463.0)
+        self.assertEqual(ev["lots"], 4)
+        self.assertIn("触价", ev["why"])
+        self.assertIn("即时成交", ev["why"])
+        self.assertNotIn("下一开盘", ev["why"])
+        self.assertEqual(pos["pnl"], (4463 - 4450) * (-1) * 4)
+
+    def test_gap_open_beyond_line_still_fills_at_line(self):
+        # 跳空开盘已越过线（空单 open 4465 > 4463）仍按线价成交（与 fxma 同约定）
+        pos = self.mkt()
+        advance_exit_decision(pos, 400, bar(400, 4465, 4466, 4460, 4462), [], [], None)
+        self.assertEqual(pos["exitPrice"], 4463.0)
+
+    def test_same_bar_trail_partial_then_lock_full(self):
+        # 多头同根双线被穿：先碰更高的跟踪线（部分 25% @118），再碰锁定价（全平剩余
+        # @115）；终局类型=最后成交的 profitLock，盈亏按逐段手数结算
+        pos = self.mkt(direction="long", planDirection="多头多",
+                       entryPrice=100.0, stopRef=118.0, beStop=None)
+        pos["beDone"] = True
+        pos["trailRaised"] = True                       # 跟踪线 118 接管
+        pos["maxFavPx"] = 130.0                         # 锁定价 = 100 + (30×50%) = 115
+        pos["exitCfg"] = ecfg(exitTouchOn=True, exitLockOn=True, exitLockPts=20.0,
+                              exitLockPct=50.0, exitTrailOn=True, exitTrailSlip=0.0,
+                              exitTrailPct=25.0, exitHalfOn=False, exitCloseOn=False,
+                              exitStopBeOn=False)
+        r = advance_exit_decision(pos, 500, bar(500, 119, 120, 110, 112), [], [], None)
+        self.assertEqual(r, "trailStop")                # 回报首个触发类型
+        self.assertEqual(pos["exitType"], "profitLock") # 终局=最后成交段
+        self.assertEqual(pos["exitPrice"], 115.0)
+        evs = [e for e in pos["exits"] if e.get("lots")]
+        self.assertEqual([(e["type"], e["price"], e["lots"]) for e in evs],
+                         [("trailStop", 118.0, 1), ("profitLock", 115.0, 3)])
+        self.assertTrue(pos["trailFired"])              # 部分平仓 latch
+        self.assertEqual(pos["lotsLeft"], 0)
+        self.assertEqual(pos["pnl"], (118 - 100) * 1 + (115 - 100) * 3)
+
+    def test_trade3_single_lot_trail_full_close(self):
+        # trade#3 场景（2026-09-04 非农根）：剩余 1 手、跟踪线 4459.15 高于锁定价
+        # 4408.02，同根全破 → 跟踪线先碰、25%×总仓 4=1 手=全平，触价成交在 4459.15
+        pos = self.mkt(direction="long", planDirection="多头多",
+                       entryPrice=4305.12, stopRef=4459.15, beStop=4305.12)
+        pos["lotsLeft"] = 1.0
+        pos["beDone"] = True
+        pos["trailRaised"] = True
+        pos["maxFavPx"] = 4510.93                       # 锁定价 4408.02
+        pos["exitCfg"] = ecfg(exitTouchOn=True, exitLockOn=True, exitLockPts=100.0,
+                              exitLockPct=50.0, exitTrailOn=True, exitTrailSlip=0.0,
+                              exitTrailPct=25.0, exitHalfOn=False, exitCloseOn=False)
+        # 此前两段部分平仓已消费 3 手（终局结算按 exits 事件手数，须在场景里补齐）
+        pos["exits"] += [{"type": "close", "time": 1788348960, "price": 4330.885,
+                          "lots": 1, "why": "前段"},
+                         {"type": "half", "time": 1788349500, "price": 4324.755,
+                          "lots": 2, "why": "前段"}]
+        r = advance_exit_decision(pos, 1788525000,
+                                  bar(1788525000, 4472.16, 4475.105, 4376.18, 4383.82),
+                                  [], [], None)
+        self.assertEqual(r, "trailStop")
+        self.assertEqual(pos["exitType"], "trailStop")
+        self.assertEqual(pos["exitPrice"], 4459.15)
+        # 全单累计：close 1手@4330.885 + half 2手@4324.755 + 触价终局 1手@4459.15
+        # （旧口径终局@下一开盘 4383.77 时为 143.69）
+        self.assertAlmostEqual(pos["pnl"], (4330.885 - 4305.12)
+                                + (4324.755 - 4305.12) * 2 + (4459.15 - 4305.12))
+
+    def test_partial_latch_then_maxloss_fallback(self):
+        # 触价部分平仓（支阻 50% 平 2 手 latch）→ 下一根破 maxLoss 兜底全平剩余
+        pos = self.mkt(direction="long", planDirection="多头多",
+                       entryPrice=100.0, stopRef=90.0, beStop=None)
+        pos["maxLoss"] = 80.0
+        pos["exitCfg"] = ecfg(exitTouchOn=True, exitStopSrPct=50.0)
+        r = advance_exit_decision(pos, 400, bar(400, 95, 96, 85, 88), [], [], None)
+        self.assertEqual(r, "stopSr")
+        self.assertEqual(pos["state"], "open")          # 部分平仓非终局
+        self.assertEqual(pos["lotsLeft"], 2.0)
+        self.assertTrue(pos["stopSrFired"])
+        r2 = advance_exit_decision(pos, 500, bar(500, 90, 91, 78, 82), [], [], None)
+        self.assertEqual(r2, "stopSr")                  # 兜底通道（src=ml）
+        self.assertEqual(pos["exitPrice"], 80.0)
+        self.assertEqual(pos["pnl"], (90 - 100) * 2 + (80 - 100) * 2)
+
+    def test_lock_peak_lags_one_bar(self):
+        # 峰值滞后一拍：本根创出的新高当根不武装锁定价（大阳上影不算回撤），
+        # 下一根起才参与回撤判定
+        pos = self.mkt(direction="long", planDirection="多头多",
+                       entryPrice=100.0, stopRef=50.0, beStop=None)
+        pos["exitCfg"] = ecfg(exitTouchOn=True, exitLockOn=True, exitLockPts=50.0,
+                              exitLockPct=50.0)
+        r = advance_exit_decision(pos, 400, bar(400, 100, 160, 130, 155), [], [], None)
+        self.assertIsNone(r)                            # maxFavPx 尚 None → 未武装
+        self.assertEqual(pos["maxFavPx"], 160.0)        # 记账已发生
+        r2 = advance_exit_decision(pos, 500, bar(500, 155, 156, 129, 131), [], [], None)
+        self.assertEqual(r2, "profitLock")              # 锁定价 100+(60×50%)=130
+        self.assertEqual(pos["exitPrice"], 130.0)
+
+    def test_breakeven_event_suppressed_when_touch_closes_same_beat(self):
+        # TP1 迁移拍触价终局：不落 breakeven 事件（与收盘口径「先判先 return」一致）；
+        # 未终局拍照常落
+        pos = self.mkt()
+        mark_bis = [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)]
+        # t=300 迁移拍 bar high 4456 > beStop 4455 → 同拍触价终局，无 breakeven
+        r = advance_exit_decision(pos, 300, bar(300, 4450, 4456, 4448, 4452),
+                                  mark_bis, [], None)
+        self.assertEqual(r, "stopBe")
+        self.assertEqual(pos["exitPrice"], 4455.0)
+        self.assertNotIn("breakeven", [e["type"] for e in pos["exits"]])
+        # 对照：迁移拍未破位 → breakeven 正常落
+        pos2 = self.mkt()
+        r2 = advance_exit_decision(pos2, 300, bar(300, 4440, 4450, 4435, 4441),
+                                   mark_bis, [], None)
+        self.assertIsNone(r2)
+        self.assertTrue(pos2["beDone"])
+        self.assertEqual(pos2["exits"][-1]["type"], "breakeven")
+
+    def test_touch_off_legacy_pending_semantics(self):
+        # exitTouchOn=False：旧口径逐位保留（挂起 → 下一开盘成交）
+        pos = self.mkt(exitCfg=ecfg(exitTouchOn=False))
+        r = advance_exit_decision(pos, 400, bar(400, 4450, 4464, 4448, 4452),
+                                  [], [], None)
+        self.assertEqual(r, "stopSr")
+        self.assertEqual(pos["pendingExit"], "stopSr")
+        self.assertEqual(pos["state"], "open")
+        tr = execute_pending_exit(pos, bar(500, 4462, 4466, 4455, 4460))
+        self.assertEqual(tr["exitPrice"], 4462.0)       # 下一根开盘价
+        self.assertEqual(tr["exitWhy"].count("下一开盘"), 1)
+
+    def test_next_touch_lines_ordering(self):
+        # 候选源排序：多头从高到低（价格下行先碰者在前）、空头从低到高；
+        # full 标记=该线触发时全平剩余；已终局 pos 返回 []
+        from py_chain.backtest import next_touch_lines
+        pos = self.mkt(direction="long", planDirection="多头多",
+                       entryPrice=100.0, stopRef=118.0, beStop=None)
+        pos["beDone"] = True
+        pos["trailRaised"] = True
+        pos["lotsLeft"] = 3.0
+        pos["maxFavPx"] = 130.0
+        pos["maxLoss"] = 80.0
+        pos["exitCfg"] = ecfg(exitTouchOn=True, exitLockOn=True, exitLockPts=20.0,
+                              exitLockPct=50.0, exitTrailOn=True, exitTrailSlip=0.0,
+                              exitTrailPct=25.0)
+        lines = next_touch_lines(pos, pos["exitCfg"])
+        # 止损通道存活（trailFired 未置）且线 118 > maxLoss 80（更紧）→ 兜底不可达
+        self.assertEqual([(c["type"], c["full"]) for c in lines],
+                         [("trailStop", False),    # 118 部分线（1 手 < 剩余 3）
+                          ("profitLock", True)])   # 115 全平线
+        self.assertEqual([c["price"] for c in lines], [118.0, 115.0])
+        # trailFired latch 后止损通道关闭 → maxLoss 兜底候选激活（src=ml，全平剩余）
+        pos["trailFired"] = True
+        lines2 = next_touch_lines(pos, pos["exitCfg"])
+        self.assertEqual([(c["type"], c["price"]) for c in lines2],
+                         [("profitLock", 115.0), ("stopSr", 80.0)])
+        self.assertEqual(lines2[1].get("src"), "ml")
+        pos["lotsLeft"] = 0.0
+        self.assertEqual(next_touch_lines(pos, pos["exitCfg"]), [])
+        # 空头镜像：价格上行先碰更低者
+        sp = self.mkt(entryPrice=100.0, stopRef=82.0)
+        sp["beDone"] = True
+        sp["trailRaised"] = True
+        sp["lotsLeft"] = 3.0
+        sp["maxFavPx"] = 70.0                          # 锁定价 = 100 − 15 = 85
+        sp["maxLoss"] = 120.0
+        sp["exitCfg"] = ecfg(exitTouchOn=True, exitLockOn=True, exitLockPts=20.0,
+                             exitLockPct=50.0, exitTrailOn=True, exitTrailSlip=0.0,
+                             exitTrailPct=25.0)
+        slines = next_touch_lines(sp, sp["exitCfg"])
+        # 止损通道存活且 82 < maxLoss 120（更紧）→ 兜底不可达（多头同型）
+        self.assertEqual([c["price"] for c in slines], [82.0, 85.0])
 
 
 if __name__ == "__main__":

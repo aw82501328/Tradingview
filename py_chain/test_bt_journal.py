@@ -18,7 +18,10 @@ from py_chain.backtest import advance_exit_decision, execute_pending_exit, close
 
 
 def _pos(**kw):
-    """最小可推进的持仓 dict（advance_exit_decision 所需字段）。"""
+    """最小可推进的持仓 dict（advance_exit_decision 所需字段）。
+    2026-10-21 起钉 exitTouchOn=False：本文件 why 断言=收盘判定+下一开盘旧口径
+    （触价口径的 why 见 test_exit_rules.TestTouchExits）。"""
+    from py_chain.mark_entry import EXIT_MODE_DEFAULTS
     base = {
         "tradeNo": 1, "direction": "short", "strategyKey": "wait2Sell",
         "planDirection": "空头空", "markRes": "3", "periodX": "15",
@@ -27,6 +30,7 @@ def _pos(**kw):
         "beStop": 97.0, "maxLoss": 110.0, "entryBarStart": None, "entryBarEnd": None,
         "entryBarExt": None, "slipStopEff": 3.0, "lots": 4, "mult": 1.0,
         "state": "open", "beDone": False, "halfDone": False, "exits": [],
+        "exitCfg": dict(EXIT_MODE_DEFAULTS, exitTouchOn=False),
     }
     base.update(kw)
     return base

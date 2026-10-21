@@ -37,9 +37,10 @@
 | footer | run 结束 | stats, wall, rows |
 
 闸门代码→中文见 `bt_journal.GATE_LABELS`（16 个进出场闸门 + 背驰下沉内部原因细分 +
-fxma 专属闸门；`anchor_bar_window`=锚点K线窗口外——小周期背驰仅限锚点所在大周期
-K线内（2026-10-18 用户规则），ctx 含 pointType/anchorTime/nowBarTime（或 markRes/
-divergeTime）；`fx_prov_invalidated`=pred2 预判点消失——收复前低/前高、结构重算或真点
+fxma 专属闸门；`anchor_bar_window`=锚点窗口外——触发/背驰点须在锚K起 anchorWinBars 根
+检测周期K内且距窗口极值 ≤ anchorWinPts 点（2026-10-18 用户规则、2026-10-21 重定义），
+ctx 含 pointType/anchorTime/nowBarTime（时间窗）或 markRes/divergeTime（次级时间窗），
+价距拒绝行另含 price/winExt/dist（当拍现价或背驰点价/窗口极值/距离）；`fx_prov_invalidated`=pred2 预判点消失——收复前低/前高、结构重算或真点
 接管，ctx 含 provTime/provPrice/dSegStart，2026-10-09）。**拒绝行存结构化数字，中文渲染
 统一在 bt_query**（写侧零格式化开销）。fxma state 行的买卖点类型带「预判」前缀
 （如「预判2卖」）= pred2 提前入列的未确认点承担尾点（判定/去重仍用原标签）。
@@ -74,6 +75,10 @@ python -m py_chain.bt_query --json ...                   # 机器可读
   不能到成交拍再读 `self._plan`——缓存计划可能已被后续结构重算，与信号判定时不一致。
 - 出场**决策与成交隔一拍**：`pos["pendingWhy"]` 跨拍携带（pendingExit 守卫保证不覆盖），
   execute_pending_exit 拼"下一开盘 … 成交"后落事件；breakeven 当拍即落。
+  （2026-10-21 触价口径 `exitTouchOn` 默认开后：价格线类出场〔stopSr/stopBe/
+  trailStop/profitLock/兜底〕改为触发根按线价**即时成交**——why 直接含"按触价 X 即时
+  成交"、无"下一开盘"后缀、`t`=触发根时间；同根可落多条 exit 行〔逐线〕。结构类
+  half/close 仍走挂起+下一开盘。test_bt_journal `_pos()` 钉旧口径测两种文案。）
 - `stopSource` 随止损位演变更新：进场时（近支阻沿用/正确侧重选/最大止损兜底）→
   进场K线极值外推 → 保本位 beStop（stopBe 时）。
 - fx_ma 均线差值等每拍变化的数值用 `volatile=()` 排除去重判定，防退化成逐 bar 写。

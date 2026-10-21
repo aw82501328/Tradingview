@@ -132,10 +132,14 @@ describe("findDivergePoints / lowerDiverge 过滤", () => {
 });
 
 // ============================================================
-// 锚点K线窗口闸（2026-10-18 用户规则，与 py_chain/test_anchor_bar_window.py 成对同构）：
-// 大周期某根K线满足买卖点条件（锚点所在K线）→ 去小周期找背驰仅限该根K线内。
-// 确认制只约束背驰点落窗（不查评估拍）；无锚点/无 barTimesAll 时降级放行。
+// 锚点窗口闸（2026-10-18 用户规则、2026-10-21 重定义，与
+// py_chain/test_anchor_bar_window.py 成对同构）：时间窗=锚K起 anchorWinBars 根
+// 检测周期K（默认 2，旧口径=1）；价距窗=背驰点价距窗口极值（买侧最低/卖侧最高
+// =锚点价与锚K→背驰点各K极值取小/大）≤ anchorWinPts（0=不限）。
+// 确认制只约束背驰点（不查评估拍）；无锚点/无 barTimesAll 时降级放行。
 // ============================================================
+const core = require("../../chan-core/scripts/chan_core.js");
+
 describe("coverBarIndex 时间→大周期K线覆盖查找", () => {
   const times = [0, 3600, 7200, 10800, 14400];
   test("开盘时间恰等 → 该根；区间内 → 覆盖根；晚于末根 → 末根；早于首根 → -1", () => {
@@ -149,7 +153,7 @@ describe("coverBarIndex 时间→大周期K线覆盖查找", () => {
   });
 });
 
-describe("evaluateEntry 锚点K线窗口（确认制）", () => {
+describe("evaluateEntry 锚点窗口（确认制）", () => {
   // 15m 末段 up(72000→82800)，其内 3m 六笔展开：refer=up(78000→79500)@4456.0、
   // 候选=up(81000→82800)@4461.7（更高高点 + 红柱面积缩小）→ 顶背驰点下沉停止级=3
   const B15M = [
@@ -176,11 +180,11 @@ describe("evaluateEntry 锚点K线窗口（确认制）", () => {
     "3": { bis: B3M, bars: [], macdArr: M3, atr: 0 },
   };
   const strategy = { key: "waitSell", direction: "short", label: "等待反弹后卖点", pointCls: null };
-  const baseCtx = (anchorTime) => ({
+  const baseCtx = (anchorTime, anchorPrice = 4461.7, pd = periodData) => ({
     res: "15", bis: B15M, upperBis: null, macdArr: [], atr: 0, barSec: 900,
-    near: 30, srLevels: [{ price: 4462, level: "15" }], periodData,
+    near: 30, srLevels: [{ price: 4462, level: "15" }], periodData: pd,
     barTimesAll: { "15": TIMES15 },
-    ...(anchorTime !== undefined ? { anchorPoint: { type: "4卖", time: anchorTime, price: 4461.7 } } : {}),
+    ...(anchorTime !== undefined ? { anchorPoint: { type: "4卖", time: anchorTime, price: anchorPrice } } : {}),
   });
 
   test("背驰点与锚点同K线 → 放行", () => {
@@ -191,11 +195,58 @@ describe("evaluateEntry 锚点K线窗口（确认制）", () => {
     assert.equal(res.point.time, 82800);
   });
 
-  test("背驰点在锚点K线外 → 拒绝（锚点K线窗口外）", () => {
-    // 锚 81000（bar 22）、背驰点 82800（bar 23）→ 窗口外
+  test("背驰点在锚K后第2根K内 → 放行（2026-10-21 重定义：窗口=锚K起2根）", () => {
+    // 锚 81000（bar 22）、背驰点 82800（bar 23）→ 旧口径拒、新口径放行
     const res = evaluateEntry(baseCtx(81000), strategy);
+    assert.equal(res.ok, true);
+  });
+
+  test("背驰点距锚K超过2根K → 拒绝（锚点窗口外）", () => {
+    // 锚 75600（bar 21）、背驰点 82800（bar 23）→ 相差 2 根（窗口=bar21,22）外
+    const res = evaluateEntry(baseCtx(75600), strategy);
     assert.equal(res.ok, false);
-    assert.ok(res.reason.includes("锚点所在大周期K线"));
+    assert.ok(res.reason.includes("锚点窗口"));
+  });
+
+  test("背驰点价距窗口极值超点数 → 拒绝（无K线极值时基准=锚点价）", () => {
+    // 锚 83000 同K线但锚价 4480 → 背驰点 4461.7 距 4480 达 18.3 点 > 10
+    const res = evaluateEntry(baseCtx(83000, 4480), strategy);
+    assert.equal(res.ok, false);
+    assert.ok(res.reason.includes("锚点窗口"));
+  });
+
+  test("窗口极值含检测周期K线极值（K线高点再抬基准）→ 超点数拒绝", () => {
+    // 锚K bar 23 的 high=4475 抬高基准 → 背驰点 4461.7 距 13.3 点 > 10
+    const bars = [{ time: 82800, open: 4460, close: 4461, high: 4475, low: 4455 }];
+    const pd = { ...periodData, "15": { ...periodData["15"], bars } };
+    const res = evaluateEntry(baseCtx(83000, 4461.7, pd), strategy);
+    assert.equal(res.ok, false);
+    assert.ok(res.reason.includes("锚点窗口"));
+  });
+
+  test("anchorWinPts=0 → 不限价距（仅时间窗）", () => {
+    const saved = core.CHAN_CFG.anchorWinPts;
+    core.CHAN_CFG.anchorWinPts = 0;
+    try {
+      const res = evaluateEntry(baseCtx(83000, 4480), strategy); // 价距 18.3 仍放行
+      assert.equal(res.ok, true);
+    } finally {
+      core.CHAN_CFG.anchorWinPts = saved;
+    }
+  });
+
+  test("旧口径回归：anchorWinBars=1 + anchorWinPts=0 → 锚K后第2根拒绝", () => {
+    const savedBars = core.CHAN_CFG.anchorWinBars, savedPts = core.CHAN_CFG.anchorWinPts;
+    core.CHAN_CFG.anchorWinBars = 1;
+    core.CHAN_CFG.anchorWinPts = 0;
+    try {
+      const res = evaluateEntry(baseCtx(81000), strategy); // bar22 vs bar23
+      assert.equal(res.ok, false);
+      assert.ok(res.reason.includes("锚点窗口"));
+    } finally {
+      core.CHAN_CFG.anchorWinBars = savedBars;
+      core.CHAN_CFG.anchorWinPts = savedPts;
+    }
   });
 
   test("不传 anchorPoint（旧调用方/最小 fixture）→ 降级放行", () => {

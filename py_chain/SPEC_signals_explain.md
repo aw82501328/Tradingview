@@ -23,7 +23,7 @@
 - 两条信号路径：确认制 `compute_entries`（mark_entry.py:518-607，sig 构造 596-605）与当下制 `evaluateRealtimeEntries`（mark_entry.py:406-505，out.append 494-504，多 `realtime`/`segStart`，无 `color`）。
 - 两条路径作用域内都有 `plan`（每周期 `{direction, strategy, reason, pointDesc}`，trading_plan.py:321-326），`plan.reason` 已是现成中文（"找到最近买卖点 1买 @ …"）。
 - `entryStrategyOf`（mark_entry.py:84-97）返回的 strategy dict 已含 `label`（"等待反弹后做2卖"等 6 条）。
-- 出场：`advance_exit_decision`（backtest.py:58-99）收盘判定（breakeven 当拍落事件 84 行；half/close/stopSr/stopBe 只挂 `pendingExit`），`execute_pending_exit`（102-115）下一根开盘成交并落事件（112 行），`close_trade`（118-131）终局。**决策与成交隔一拍**——用 `pos["pendingWhy"]` 跨拍携带（`pendingExit` 守卫 73 行保证不被并发覆盖）。
+- 出场：`advance_exit_decision`（backtest.py:58-99）收盘判定（breakeven 当拍落事件 84 行；half/close/stopSr/stopBe 只挂 `pendingExit`），`execute_pending_exit`（102-115）下一根开盘成交并落事件（112 行），`close_trade`（118-131）终局。**决策与成交隔一拍**——用 `pos["pendingWhy"]` 跨拍携带（`pendingExit` 守卫 73 行保证不被并发覆盖）。（2026-10-21 起：价格线类出场 stopSr/stopBe/trailStop/profitLock 兜底改触价即时成交——事件 time=触发根、price=线价、无挂起；half/close 结构类仍挂起下一开盘。见 SPEC.md §2.1.3.1。）
 - 触发细节在决策点可取：tp1/tp2/tp3 笔事件（78-80 行）、触发 bar 高低价与 stop 价（92-98 行）；`stop` 变量在 beDone 后即 entryPrice。唯缺 TP3"破前同向笔参照端点价"——给 `find_bi_event`（mark_entry.py:641-673）break_prev 命中处返回值**增量加 `refTime/refPrice`**（现有调用者只按 time/price 取值，零风险）。
 - 三模式唯一汇流点 = SignalLog 的 5 个方法（append_signal/fill_trade/fill_exit/fill_suppressed/clear），全在既有 `self.lock` 内 → 镜像写在这里即全覆盖。
 

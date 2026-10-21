@@ -117,7 +117,10 @@ def build_full_chain(bars_by_period, periods, with_marks=True, sr_types=None, fi
     regime = compute_regime(bis, bars_by_period, core, cfg=plan_mp or None,
                             range_res=range_res)
     period_macd = {res: calcMACD(bars_by_period.get(res) or []) for res in core}
-    points = compute_period_points(bis, core, periodMacd=period_macd)
+    points_mp = mp.get("marks") or {}
+    points = compute_period_points(bis, core, periodMacd=period_macd,
+                                   class2ZsTol=points_mp.get("class2ZsTol", 0.0),
+                                   thirdZsTol=points_mp.get("thirdZsTol", 0.0))
     srLevels = (sr or {}).get("merged") or []
     ep = mp.get("entry") or {}
     entries = compute_entries(bis, bars_by_period, points, srLevels,

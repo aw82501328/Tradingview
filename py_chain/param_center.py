@@ -80,6 +80,7 @@ ENTRY_CHAN_KEYS = (
     "expectBiEnough", "expectBiMinBars", "divergeConfirm", "macdZeroTol",
     "strong2BuyMacdOn",
     "entryMacdShrink", "stopEntryBarFloor",
+    "anchorWinBars", "anchorWinPts",
     "divergeReferByZs", "sinkSkipLevel",
 )
 # 旧 module_params.json 把上述键都写在 modules.chan 下；读入时迁到 points/entry
@@ -238,6 +239,7 @@ PARAM_MODULES = {
             "exitTrailPct": ("跟踪止盈平仓比例", "触发时平总仓位（初始手数）的百分比；100=全平。部分平仓 latch 后剩余手数由最大止损硬上限兜底全平（记支阻止损）", 1, 100),
             "exitTrailSrc": ("跟踪止盈参照", "detect=检测周期已破前低/前高的有利方向笔起点（空头=破前低的下跌笔高点，多头=破前高的上涨笔低点；够笔未破前低/前高不算；保本后价格破坏该结构点记跟踪止盈）；mark=背驰周期信号流同向3类点（wait3Buy/waitBuy/…）", ("detect", "mark"), None),
             "exitTrailSlip": ("跟踪止盈滑点", "止损上移到参照点价后向不利侧偏移的点数（同 fxma tpTrailSlipPts；仅跟踪止盈启用时生效）", 0.0, 100.0),
+            "exitTouchOn": ("价格线触价成交", "仅缠论V1。开=价格线类出场（支阻止损/保本/跟踪止盈/最大止损兜底/锁定盈利）盘中触及线价即在触发根按线价即时成交（同根多线被穿按线位从高到低逐线成交；实盘按同一候选源把第一条会全平的线挂成券商SL）；关=收盘判定+下一根开盘成交（旧口径）。够笔/过高低点等结构类出场不受影响", None, None),
             "sinkFallback": ("M1下沉链回退", "下沉停止级无候选时沿链向上一级重评", None, None),
             "sinkFallbackRearm": ("M1终局后重置去重", "同向持仓终局后重置段去重（同段可再进一次）", None, None),
             "macdDivergeBodyOn": ("MACD背驰容差", "与容差同一张卡，在进场闸门。开=影线未过时再比笔端点K实体（默认开）；关=只比影线", None, None),
@@ -247,6 +249,8 @@ PARAM_MODULES = {
             "divergeConfirm": ("M4背驰确认后成交", "开启=分型右邻K收盘后的下一根开盘成交（默认当下）", None, None),
             "entryMacdShrink": ("进场MACD柱缩闸", "开启=背驰级别上一根已收K线柱状体(|MACD|)较前一根缩小才出信号（确认背驰且柱缩，下一根开盘进场）", None, None),
             "stopEntryBarFloor": ("进场K线止损下限", "开启=止损至少在进场背驰周期K线极值外侧加滑点处（运行中外推、收盘冻结，与支阻位止损取更宽者）", None, None),
+            "anchorWinBars": ("锚点窗口K线数", "锚点（买卖点）所在检测周期K线起 N 根内允许触发——当拍与背驰点所在K都须落窗；1=旧单K规则（2026-10-21 重定义）", 1, 10),
+            "anchorWinPts": ("锚点窗口距极值点数", "触发价（当拍现价与背驰点价）距窗口极值（买侧最低/卖侧最高=锚点价与窗口内实际极值取小/大）的最大点数；0=不限价距只看时间窗", 0.0, 1000.0),
             "macdZeroTol": ("黄白线容差", "强2类买卖点黄白线容差：开闸后强二买 DIF > -该值才进（0=严格 0 轴）。1买/2卖的 0 轴判定仍用该值", 0.0, 100.0),
             "strong2BuyMacdOn": ("强2类买卖点黄白线", "与容差同一张卡，在进场闸门。开=强二买开单要求 DIF 高于 -容差；关=强二买不看黄白线（默认）", None, None),
             "divergeReferByZs": ("背驰参照按中枢",

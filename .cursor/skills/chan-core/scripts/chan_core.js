@@ -98,6 +98,11 @@ const CHAN_CFG = {
   sinkSkipLevel: true,          // D 跨级下沉：次级展开<3笔/方向不符/端点含糊时跳级继续向下（默认开）
   pointEnoughForming: true,     // C-2 成笔可能够笔：形成段 enough 计数只到极值块（默认开）
   synthIntrabarBars: true,      // C-1 盘中合成K（回测引擎侧实现；JS 标记端仅透传；默认开）
+  // 锚点窗口（2026-10-21 重定义，与 py_chain/chan_core.py CHAN_CFG.anchorWin* 同步）：
+  // anchorWinBars=锚K起检测周期K线根数（旧规则=1），anchorWinPts=触发价距窗口极值
+  // （买侧最低/卖侧最高）的最大点数、0=不限价距只看时间窗。mark_entry.js 确认制消费。
+  anchorWinBars: 2,
+  anchorWinPts: 10.0,
   // ---- 小周期绘制/加载窗口（2026-10-02 参数化；与 py_chain/chan_core.py CHAN_CFG 同步）----
   // 由 chan-bi/mark-buy-sell/mark-entry 三脚本消费：DRAW_WINDOW_DAYS 改由此构造。
   // 3分钟/15分钟/30秒 只画（并只加载）最近 N 天；60m/240m/D 不限、从 --from 全量。
@@ -1783,7 +1788,8 @@ function lowerVertexOf(lowerBis, t, p, barSec, isTop, lo, hi, vertsIn) {
   const vts = verts.map(v => v[0]);
   const samePrice = (vp) => Math.abs(vp - p) <= pEps;
   // 空窗早退：四阶搜索窗全落在 [min(lo,t-tEps), max(hi,t+tEps)] 内，与顶点时间域
-  // 不相交 → 各阶必空 → 直接保持大级别时刻（第 5 阶）。月龄老锚零成本跳过。
+  // 不相交 → 各阶必空 → 直接保持大级别时刻（第 5 阶）。全量视图下仅锚早于本级
+  // 首笔的退化情形命中（旧 60 笔窗口时代曾借此零成本跳过月龄老锚）。
   const wLo = Math.min(lo, t - tEps), wHi = Math.max(hi, t + tEps);
   if (wHi < vts[0] || wLo > vts[vts.length - 1]) return [t, p];
   // 1. ±1 根本级K内同价（最近）
@@ -2089,7 +2095,8 @@ function secondFamilyV2(bis, firstPts, zss, c2tol, isSell) {
         prevExtreme = roleP[j2];
       }
       // 候选窗 (anchorT, nextT) 与笔列无交集 → 无候选无输出，整锚跳过
-      // （月龄老锚的窗早已滑出本级 60 笔窗口，占绝大多数）。
+      // （全量笔视图 2026-10-21 起锚窗通常都在笔列内，此跳过仅剩锚早于本级
+      //   首笔/空窗的退化情形；旧 60 笔窗口时代月龄老锚在此占绝大多数）。
       const loI = bisectRightArr(endTimes, anchorT);
       const hiI = nextT === Infinity ? bis.length : bisectLeftArr(endTimes, nextT);
       if (loI >= hiI) continue;

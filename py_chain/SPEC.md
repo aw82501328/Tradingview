@@ -27,14 +27,17 @@
     ——每个形成段只发一次，段延伸不重发。①③所需的交易计划/支阻位仍在笔结构变化时重算
     并缓存（控性能：全区间 11475 根实时评估无耗时回退）。当下信号一律 **confirm 口径成交**
     （收集拍=信号拍，无未来函数，anchor 对其无意义）。
-    **锚点K线窗口闸**（2026-10-18 用户规则，`anchor_bar_window`）：大周期某根K线满足买卖点
-    条件（锚点所在K线，`_cover_bar_index` 覆盖查找）→ 去小周期找背驰**仅限该根K线内**——
-    触发拍 tCut 与背驰点都必须与锚点同属一根检测周期K线（次级保险防陈旧极值跨K线），闸在
-    够笔之前（窗口已关直接跳过背驰链计算）。K线走完窗口即关、此后不再触发；无永久闩锁：
-    锚随新高/新低漂移或换新点时每拍按当前锚现算，新锚所在K线自动重开窗。识别滞后超过
-    锚K线的点（尤其 240m 与 wait1 上级投影锚）不再开单，信号量显著下降属预期；全部回测
-    基线不可比。动因：10-1 11:09 waitSell@4168.56（锚 4卖@9-30 17:00，已离开锚K线约 18
-    小时）——离开最高点K线后的迟触发整类消除。
+    **锚点窗口闸**（2026-10-18 用户规则，2026-10-21 重定义参数化，`anchor_bar_window`）：
+    大周期某根K线满足买卖点条件（锚点所在K线，`_cover_bar_index` 覆盖查找）→ 去小周期找
+    背驰限**锚K起 `anchorWinBars` 根检测周期K内**（默认 2，旧口径=1；锚K之前仍拒）——触发拍
+    与背驰点所在K都须落窗（次级保险防陈旧极值跨K线），闸在够笔之前（窗口已关直接跳过
+    背驰链计算）；另加**价距窗**：触发价距窗口极值 ≤ `anchorWinPts` 点（0=不限）——极值=
+    锚点价与锚K开盘起细周期已收K极值取小（买侧最低）/取大（卖侧最高），当下制查当拍
+    现价+背驰点价、确认制只查背驰点价（防陈旧极值悬空、防已离极值太远追价）。无永久
+    闩锁：锚随新高/新低漂移或换新点时每拍按当前锚现算，新锚所在K线自动重开窗。bars=1
+    +pts=0 完整复现旧单K规则；2026-10-21 起全部回测基线不可比。动因：10-1 迟触发整类
+    消除（原单K规则），10-21 放宽到 2 根K+价距（diverge_confirm 等确认等待撞锚K边界的
+    差一根K场景，如 trade#3 2026-09-02 18:03 wait2BuyBear）。
     **进场MACD柱缩闸**（2026-09-23，`CHAN_CFG.entryMacdShrink` 默认开，参数中心 entry
     模块可关；`BacktestEngine(entry_macd_shrink=)` / `evaluateRealtimeEntries(entryMacdShrink=)`
     形参同名透传）：背驰级别（markRes）最近两根**已收**K线的 MACD 柱状体（`|macd|`）变小
@@ -190,7 +193,7 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 ```
 【进场】买卖点锚直映射策略（2026-10-16 起取消交易计划文案中转）→ 三个公共条件 → 策略专属条件 → 进场信号（画在背驰级别）
         → 下一根K线开盘价成交
-【出场】持仓后每根收盘判定：保本 → 背驰周期够笔 → 检测周期够笔 → 过高低点止盈 → 止损/跟踪止盈 → 跟踪止盈上移 → 结算（× 手数；出场方式可配置：开关+平仓比例，默认=原行为；2026-10-09 出场预期口径「严进宽出」默认开——检测够笔/顺势过高低点不等确认笔；同日跟踪止盈门控保本 + 最大止损硬上限兜底，见 §2.1.3.1）
+【出场】持仓后每根收盘判定：保本 → 背驰周期够笔 → 检测周期够笔 → 过高低点止盈 → 止损/跟踪止盈 → 跟踪止盈上移 → 结算（× 手数；出场方式可配置：开关+平仓比例，默认=原行为；2026-10-09 出场预期口径「严进宽出」默认开——检测够笔/顺势过高低点不等确认笔；同日跟踪止盈门控保本 + 最大止损硬上限兜底；2026-10-21 价格线类触价成交 exitTouchOn 默认开，见 §2.1.3.1）
 ```
 
 ### 2.1.2 进场
@@ -212,6 +215,8 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 | 类3买 / 4买 / 类4买 | `waitBuy` | 做多 |
 | 类3卖 / 4卖 / 类4卖 | `waitSell` | 做空 |
 
+> 2026-10-21 **统一点源（用户规则：缠论V1 与 fxma_v1 用同一套买卖点，只保留进出场条件差异）**：`compute_period_points`（`mark_entry.py`，JS 镜像 `mark_entry.js computePeriodPoints` 同步）撤「最近 60 笔」窗口改**全量笔视图**，并补传 points 品种桶 `class2ZsTol`/`thirdZsTol`（引擎 `backtest.py _rebuild_chain`/`main.py` 调用点此前漏传恒 0.0；class2ZsTol 已停用仅签名兼容、五品种 thirdZsTol 现值均 0.0 → 容差项默认零行为变化）。旧窗口（原计划窗口遗留）使老于窗口的上级笔端点投影退化为大级别端点、1买锚后抬低序列/上级分解中枢被截断——与 fxma `_fx_all_points`（全量）及图上标记层 `compute_all_marks`（全量）同周期点集分歧，3类族「逐中枢序号」在老中枢出窗时错序。fxma 侧点源零改动（本已全量+容差透传）；pred2 预判点维持 fxma 进场层增强（与 chan_v1 预期够笔 expectBi 同层的进场时机放宽，非 chan_core 点集成分）。`live_trader.ENGINE_LOGIC_VERSION` → `20261021-unified-points`（决策级变更；持仓重启须 --accept-param-drift）。A/B（XAUUSD 9-1→10-13 双策略对拍）：fxma_v1 信号/成交**逐位零变化**；chan_v1 116 信号中仅 2 笔点类别变化（北京 10-9 19:09 60m 3买→类4买 键 wait3Buy→waitBuy、9-24 08:45 15m 4卖→类4卖 键不变，均为同锚同价的中枢序号修正，与图上标记一致化）；chan_v1 回测墙钟 +20%（全量重算），fxma 持平。回归测试 `py_chain.test_unified_points`（全量视图/容差透传/引擎管道三层）。chan_status.js/trading_plan.js 各自的 60 笔窗口属状态预判/顺势锚自有语义未动（trading_plan 顺势开启时会与统一点源不同源，属已知残留）。**回测基线：fxma_v1 可比；chan_v1 存在罕见点类别漂移（老中枢序号修正），其余逐位可比**。
+
 > 2026-10-16 **买卖点直连（用户规则：取消交易计划开单角色，只留震荡/顺势判定且默认关闭）**：交易计划策略行（predictPlan/strategyOf/classifySecond/双侧 alt 字段/图上计划文字）整体删除，`compute_plan` 的闸门部分抽出为 `compute_regime`（震荡 regime 唯一入口，关闭时返回 None）；`evaluateRealtimeEntries`/`compute_entries` 的 `planPeriods` 参数改为 `periodPoints`（引擎 `compute_period_points` 现算 chan_core 买卖点，最近 60 笔窗口与旧计划同口径），`plan_watch` 闸门删除、新增 `no_point`（双侧无锚）与 `range_watch`/`res_ge_range`（震荡闸）；信号 `planDirection` 字段改为 `pointType`/`pointStrong`，顺势判定恒按 strategyKey（原「计划方向」口径取消）；1类点统一走直接档（原「已收笔1买→等回调做2买」口径废除）；waitLike2Buy/waitLike2Sell 无映射入口（键保留 eval 比对兼容）。参数中心 plan 桶下架 prevHighNearPts/secondNearPts/thirdStrongTrend/weakTierByOrigin；module_registry chan_v1 stages 改 [sr, entry]（plan 步骤移出策略链）。JS 镜像（mark_entry.js 直算买卖点 + trading_plan.js 缩为 regime-only）同步；回测信号数变化（直映射候选更多：2 天窗口实测 103→183）。**全部回测基线不可比**。
 
 > 2026-09-24 交易计划三档化新增 4 条文案；2026-09-25 键拆分：3买点/3卖点/类2买点/类2卖点 从 `waitBuy`/`waitSell` 拆为独立键（`wait3Buy`/`wait3Sell`/`waitLike2Buy`/`waitLike2Sell`）便于记录溯源，`waitBuy`/`waitSell` 从此仅指「新买点/新卖点」；4 个新键无专属条件，进场校验不变。历史方案旧行保留旧键不迁移。
@@ -228,7 +233,7 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 > 2026-10-10 **提前入列整合（缠论V1 × fxma pred2 统一，用户规则：所有买卖点按时间顺序尽早入列、避免过早拦截，强/弱二买都提前入列，参数淘汰默认生效）**：① `chan_core` 1买/1卖 循环取消 `_forming` 跳过——forming 段（enough ≥5 合并块）直接走参照/创新低路径，新低/新高的 1买/1卖 当下可见（端点漂移、尾段重算；同笔例外仍仅确认笔）；② `anchorUndecidedSkip/anchorUndecidedMinBars` 淘汰（param_center 旋钮删除）：未定型点（点后首段未走够）接管计划/顺势锚点，`strategyOf` 新增 `未定型→弱档先行` 路由（2买/类2买→wait2BuyBear、2卖/类2卖→wait2SellBear），定型后滚动翻档（强→wait3Buy/中间→类2买），`classifySecond` 未定型哨兵保留（定型阈值固定 2 合并块）；③ 形成中 1买/1卖（末笔仍在新低/新高中）计划切**直接档** wait1Buy/wait1Sell（其闸门当下正可判），收笔后才切回调档 wait2Buy/wait2Sell——避免形成中 1买 接管锚点反而关掉直接买窗口；④ fxma `pred2On` 参数淘汰、预判2买卖常开。验证（10-5→10-9 回放）：60m 1买@4066.53 北京 10-7 21:06 接管（原要等反弹确认）；2买@4105.50 北京 10-9 00:03 即评估 wait2BuyBear、00:06 锚定弱二买（原 08:03 才切 wait3Buy，决策窗 8h→3min）；15m 新增 wait2SellBear 两笔信号。**所有周期回测基线与买卖点列表不可比**。JS 镜像（chan_core.js/trading_plan.js）同步。
 > 2026-10-10 **1买/1卖 创新低/新高即标记**（用户规则，`CHAN_CFG.firstNoDiverge` 默认开，全周期对称，JS/Python 同构）：`findBuyPoints/findSellPoints` 的 1买/1卖 取消本级背驰硬门槛——下跌笔对参照笔创新低即 1买、创新高即 1卖（多空两侧各自标记、由实际走势修正：更新的点接管计划锚点，前顶/前底与够笔作废规则照旧）。参照笔选择（幅度 ≥50% 过滤）、同笔例外、_forming 跳过、锚定不变；`isBiDiverge` 本身不动——收笔/出中枢背驰/当下背驰信号/出入场背驰闸门全部照旧，画笔与中枢零影响。动因：10-7 17:00（北京）4066.53 为 240m 背驰 1买，但 60m 本级不背驰（绿柱 87.3 vs 11.8，末段加速）致计划锚点停在 10-6 4103.52。影响：图上 1买/1卖 标记与 fxma 1类信号显著增多、计划锚点切换更频繁，**所有周期回测基线与买卖点列表不可比**。
 
-映射函数 `pointStrategyOf`（`mark_entry.py` / `mark_entry.js`，2026-10-16 直映射）；候选买卖点由 `compute_period_points`（引擎/脚本现算 chan_core `findBuyPoints`/`findSellPoints`，最近 60 笔窗口）产出。
+映射函数 `pointStrategyOf`（`mark_entry.py` / `mark_entry.js`，2026-10-16 直映射）；候选买卖点由 `compute_period_points`（引擎/脚本现算 chan_core `findBuyPoints`/`findSellPoints`，**2026-10-21 统一点源**：全量笔视图 + points 品种桶 `class2ZsTol`/`thirdZsTol` 透传，与 fxma `_fx_all_points`/图上标记层 `compute_all_marks` 同口径）产出。
 
 **顺势参考周期过滤**（2026-09-15 起；**2026-09-17 方向判定改相位树**；**默认关闭**——`TREND_RES=""` 自 2026-10-10）：`compute_entries`/`evaluateRealtimeEntries` 形参 `trend_res`（None→`trading_plan.TREND_RES=""`；`"240"`/`"D"`=开启，参数中心 plan 模块 `trendRes` / JS CLI `--trend-res` 可配 240/D/关闭）。①参考周期及以上**结构性剔除**出检测周期（只作方向锚；`D` 锚时 240 恢复检测）；②方向状态（`trading_plan.trend_state_of`→`trend_direction`：最近买卖点定方向——1类点须强分型、收盘破锚定价反向闩锁（**优先于相位**）、无点回退末笔方向；**锚点确立后、闩锁未触发期间按相位树走**（2026-09-17，参数 `trendRebound` 默认开、`reboundNearPts`/`reboundAngleRef` 控制近位容差与 45° 角度基准，1类与非1类锚点都适用：形成段方向→够笔→位置（近中枢 ZG/ZD、前低/前高，绝对点数容差）→当前笔角度强弱（平均每根点数 vs 基准），可返回**观望态** dir=None 带 reason 双向放行带注记；规则全文见 `spec/plans/SPEC_trend_rebound_phase.md` v2 与 WEB 参数页交易计划页签表2/2a/2b）非 None 且与策略方向相反时跳过该周期；③命中信号附 `trendDirection`/`trendReason`（观望态 dir=None 也附注记），回测信号列表方向列显示「多（4小时1卖转多预期）」式注记（`web/index.html` `signalDirectionName`，方向过滤按基名 多/空 匹配）。当下制 `trend_state` 由回测引擎在链路重算拍（每根 fine）算好传入复用（`evaluateRealtimeEntries` 无 bars 入参不自算）。
 
@@ -239,7 +244,7 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 1. **够笔** `lastBiOk`——检测周期最后一笔方向要「对着来」：做空要等一段反弹（up 笔），做多要等一段回调（down 笔）。
 2. **以下级别出现背驰** `lowerDiverge` / `realtimeLowerDiverge`——在更低周期里找同向背驰点（做空找顶背驰、做多找底背驰），且该点必须通过**下沉链**校验（见 §2.1.2.3）。
 3. **在支阻位附近** `nearSr`——背驰点价格与任一支阻位（`srflip.merged` 全量候选池，含密集区 / 黄金分割 / BOLL / 人工位）的价差 ≤ `near`（**绝对价差**，默认 10.0，CLI `--near`；2026-09-13 起 ×检测周期ATR 语义改为直接输入，与滑点同单位——`compute_entries(near=)`/`evaluateRealtimeEntries(near=)`/`BacktestEngine(near=)` 形参同名，Web 工作台与回测界面同参）。**1类豁免（2026-10-10）**：wait1Buy/wait1Sell（等一买/等一卖）的支阻池剔除黄金分割候选（`sr_drop_fib_for_class1`，`evaluateEntry` 与当下制同口径）——fib 位由非一类买卖点锚定派生，1类点创新低/高时旧摆动段回撤档不再有支撑/压力语义；止损重选（backtest `sr_pick`）同口径剔除。
-4. **锚点K线窗口（2026-10-18 用户规则）**——大周期某根K线满足买卖点条件（锚点所在K线）→ 去小周期找背驰**仅限该根K线内**：背驰点必须与锚点同属一根检测周期K线（当下制另要求触发拍在窗内，拒绝闸 `anchor_bar_window`；确认制 `evaluateEntry` 只查背驰点落窗，JS 侧 `coverBarIndex`+`ctx.anchorPoint`+`barTimesAll` 镜像）。K线走完窗口即关；无永久闩锁——锚漂移/换新点即重开窗（旧锚窗口失败后价格涨过/跌破、重新满足条件仍会再触发）。
+4. **锚点窗口（2026-10-18 用户规则，2026-10-21 重定义参数化）**——大周期某根K线满足买卖点条件（锚点所在K线）→ 去小周期找背驰限**锚K起 `anchorWinBars` 根检测周期K内**（默认 2、旧口径=1）：背驰点所在K须落窗（当下制另要求触发拍在窗内，拒绝闸 `anchor_bar_window`；确认制 `evaluateEntry` 只查背驰点落窗，JS 侧 `coverBarIndex`+`ctx.anchorPoint`+`barTimesAll` 镜像），且触发价距窗口极值 ≤ `anchorWinPts` 点（0=不限；极值=锚点价与窗口内实际极值取小/大，买侧最低/卖侧最高）。无永久闩锁——锚漂移/换新点即重开窗（旧锚窗口失败后价格涨过/跌破、重新满足条件仍会再触发）。
 
 #### 2.1.2.3 背驰属于哪个级别（下沉链 / 区间套，2026-09-08 实现）
 
@@ -301,6 +306,8 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 > **锁定盈利（最高） → 保本 → 背驰周期够笔 → 检测周期够笔 → 过高低点止盈 → 止损/跟踪止盈穿越（+最大止损兜底） → 跟踪止盈上移（门控保本：beDone 前不执行）**
 
 所有成交型出场统一在**触发 K 线的下一根开盘价**成交；触发 K 线若已是最后一根则未成交（持仓保持 `open`，按最新收盘价 mark-to-market 收尾）。
+
+> **价格线类触价成交（2026-10-21，`exitTouchOn` 默认开，仅缠论V1）**：支阻止损 `stopSr` / 保本止损 `stopBe` / 跟踪止盈 `trailStop` / 最大止损兜底 / 锁定盈利 `profitLock` 改为**盘中触及线价即在触发根按线价即时成交**（事件 `time`=触发根时间、`price`=线价，与 fxma 2026-10-02 同口径：线价已含各自滑点不另加，跳空开盘已越过线仍按线价）。同根多线被穿按**线位从高到低**（多头；空头从低到高）逐线成交、平空即止——每条线按自己的比例平仓（`_exit_lots`），部分平仓 latch 语义与收盘口径一致；候选线唯一来源 `backtest.next_touch_lines`（有效止损线〔`_stop_line_of` 归属〕+ 武装后的锁定价 + maxLoss 兜底）。实盘侧同一候选源选**第一条会全平剩余手数的线**挂成券商 SL（`live_trader._eff_stop_of`；部分平仓线不挂，由引擎收盘事件后市价分批、deviation 记录），券商 SL 盘中先平由 `_on_exit`/`_partial_close` 的 broker-first 分支收口。动因：2026-09-04 非农单根 3m 从 4475 崩到 4376.18，跟踪线 4459.15 与锁定价 4408.02 同根被穿，旧口径只能成交在下一开盘 4383.77（trade#3，-75 点口径差）。关闭 `exitTouchOn` = 上述「下一根开盘」旧口径（结构类出场〔够笔/过高低点〕两种口径下均为收盘判定+下一开盘，依赖笔确认无法触价）。**全部缠论V1回测基线不可比**（含正常止损单的成交价，非仅闪崩根）；`live_trader.ENGINE_LOGIC_VERSION` → `20261021-touch-exit`（持仓重启须 `--accept-param-drift`）。
 
 **出场方式可配置（2026-10-08；参数中心 entry 模块「出场方式」组，`EXIT_MODE_DEFAULTS` 同名直通引擎；2026-10-08 够笔止盈拆两源——背驰周期/检测周期共一张卡）**：六种方式各 = 启用开关 + 平仓比例（% ，**占总仓位=初始开仓手数，非剩余仓位**；**至少启用一种**，`param_center.update` 跨键校验）。默认 = 现网行为（背驰周期够笔、跟踪止盈默认关，旧基线可比）。比例 <100% 为**部分平仓**：事件带 `lots` 手数，**恒整数**（`_exit_lots`：⌊总手数×比例%⌋ 向下取整、不足1手平1手、封顶剩余 `lotsLeft`），每种方式一次性触发（half/halfMr/close 分别用 `halfDone/halfMrDone/closeDone` latch——tp1/tp3a/seg5 是首个匹配事件，触发条件一旦满足每拍都成立，必须 latch；止损类部分平仓按 `stopSrFired/stopBeFired/trailFired` latch 防逐拍重触发），剩余仓位由其它启用方式了结或期末 mark-to-market。剩余手数本身不足 1（旧数据残留小数）时取全部剩余，防 0 手空事件与挂死尾仓。关闭的方式触发时不离场（位计算与状态迁移照旧维护）。
 
@@ -833,7 +840,7 @@ python -m unittest py_chain.test_sr_flip -v                           # sr_flip 
   背驰点并按时间降序返回候选列表；`evaluateEntry` 依次做「支阻位附近」校验，失败回退次新点。
   背景：30S 背驰点高频出现会按「时间最新」抢占 3/15 分钟点，而 30S 微观极值价常远离支阻位，
   无回退时信号彻底消失（旧点被抢占丢弃、新点校验被拒，两边都不出箭头）。
-- 进场候选买卖点取最近 60 笔（`compute_period_points`，2026-10-16 起，与原计划窗口同口径）；震荡判定 A（isRangeBound）与 B（未离开中枢且当前价在 ZD~ZG 内）由 `compute_regime` 承载（`range_res` 默认关闭，开启时 regime 震荡 → 更低周期观望，详见 §2.1.2.1）。
+- 进场候选买卖点用全量笔视图（`compute_period_points`，2026-10-21 统一点源：撤「最近 60 笔」窗口 + points 桶容差透传，与 fxma/图上标记层同口径）；震荡判定 A（isRangeBound）与 B（未离开中枢且当前价在 ZD~ZG 内）由 `compute_regime` 承载（`range_res` 默认关闭，开启时 regime 震荡 → 更低周期观望，详见 §2.1.2.1）。
 
 
 ## 近等双顶/双底参数简化与先影线后实体（2026-10-02）

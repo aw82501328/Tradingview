@@ -4,6 +4,14 @@
 架构一句话：`live_trader.py` 常驻进程经 MetaTrader5 官方库（本机 IPC）驱动 MT5 终端；
 引擎（backtest.py 零改动）为决策真相，券商侧每仓必带硬 SL，执行层镜像事件并对账收敛。
 
+> **触价口径挂线（2026-10-21 `exitTouchOn`，缠论V1 默认开）**：价格线类出场（支阻止损/
+> 保本/跟踪止盈/最大止损兜底/锁定盈利）引擎在触发根按线价即时成交；实盘把
+> `backtest.next_touch_lines` 中**第一条会全平剩余手数的线**挂成券商 SL（`_eff_stop_of`
+> 与回测触价段同一候选源；部分平仓线如跟踪止盈 25% 不挂，由引擎收盘事件后市价分批，
+> deviation 记录）。锁定价随峰值每拍上抬 → `modify_sl` 跟随（reason=lock）。券商 SL
+> 盘中先平时引擎终局/部分事件按 `broker_sl_first` 收口（跳过市价单、镜像行 closed）。
+> 关闭 `exitTouchOn` 实盘退回旧口径（SL 对齐 stopRef/beStop 有效止损位）。
+
 ## 0. 前置准备（一次性）
 
 1. **EXNESS 开户**：个人区开 Standard 模拟账户（MT5 / USD / 对冲模式）。记录登录号、
