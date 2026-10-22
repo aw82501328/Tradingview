@@ -34,10 +34,20 @@
     背驰链计算）；另加**价距窗**：触发价距窗口极值 ≤ `anchorWinPts` 点（0=不限）——极值=
     锚点价与锚K开盘起细周期已收K极值取小（买侧最低）/取大（卖侧最高），当下制查当拍
     现价+背驰点价、确认制只查背驰点价（防陈旧极值悬空、防已离极值太远追价）。无永久
-    闩锁：锚随新高/新低漂移或换新点时每拍按当前锚现算，新锚所在K线自动重开窗。bars=1
-    +pts=0 完整复现旧单K规则；2026-10-21 起全部回测基线不可比。动因：10-1 迟触发整类
+    闩锁：锚随新高/新低漂移或换新点时每拍按当前锚现算，新锚所在K线自动重开窗。
+    **trailing 重开**（2026-10-22 `anchorWinTrailOn` 默认开；False=固定锚K 2026-10-21
+    口径，A/B 基准）：窗口内创新高/新低时**时间窗锚K=窗口极值所在K**——价距基准本就随
+    极值漂移，时间窗此前只认锚点固定时间戳，而连续新高不可能产生新压低 2卖锚（2卖定义
+    即压低，更高的顶只抬参照不标点），窗口卡死触发（2026-09-08 12:00 案例：60m wait2SellBear
+    锚停 09:00、12:00 bar 内新高 4442.98 处 15m 背驰触发被距锚 3 根拒）。trailing 后
+    anchorWinPts 自然退化为「触发贴近最新极值」（触发价≈窗口极值时距离≈0），时间窗成为
+    主约束；单边趋势中窗口随新高持续重开（时间上不设上限），实际约束=MACD 柱缩闸、
+    同段去重、同向互斥、策略专属条件（不过前高/未破前底）等下游闸。极值仍落原锚K时
+    与旧口径逐位一致。bars=1
+    +pts=0 完整复现旧单K规则（trailing 开启时仅当窗口内无新极值成立）；2026-10-21 起
+    全部回测基线不可比（2026-10-22 再次不可比）。动因：10-1 迟触发整类
     消除（原单K规则），10-21 放宽到 2 根K+价距（diverge_confirm 等确认等待撞锚K边界的
-    差一根K场景，如 trade#3 2026-09-02 18:03 wait2BuyBear）。
+    差一根K场景，如 trade#3 2026-09-02 18:03 wait2BuyBear），10-22 时间窗随新极值重开。
     **进场MACD柱缩闸**（2026-09-23，`CHAN_CFG.entryMacdShrink` 默认开，参数中心 entry
     模块可关；`BacktestEngine(entry_macd_shrink=)` / `evaluateRealtimeEntries(entryMacdShrink=)`
     形参同名透传）：背驰级别（markRes）最近两根**已收**K线的 MACD 柱状体（`|macd|`）变小
@@ -244,7 +254,7 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 1. **够笔** `lastBiOk`——检测周期最后一笔方向要「对着来」：做空要等一段反弹（up 笔），做多要等一段回调（down 笔）。
 2. **以下级别出现背驰** `lowerDiverge` / `realtimeLowerDiverge`——在更低周期里找同向背驰点（做空找顶背驰、做多找底背驰），且该点必须通过**下沉链**校验（见 §2.1.2.3）。
 3. **在支阻位附近** `nearSr`——背驰点价格与任一支阻位（`srflip.merged` 全量候选池，含密集区 / 黄金分割 / BOLL / 人工位）的价差 ≤ `near`（**绝对价差**，默认 10.0，CLI `--near`；2026-09-13 起 ×检测周期ATR 语义改为直接输入，与滑点同单位——`compute_entries(near=)`/`evaluateRealtimeEntries(near=)`/`BacktestEngine(near=)` 形参同名，Web 工作台与回测界面同参）。**1类豁免（2026-10-10）**：wait1Buy/wait1Sell（等一买/等一卖）的支阻池剔除黄金分割候选（`sr_drop_fib_for_class1`，`evaluateEntry` 与当下制同口径）——fib 位由非一类买卖点锚定派生，1类点创新低/高时旧摆动段回撤档不再有支撑/压力语义；止损重选（backtest `sr_pick`）同口径剔除。
-4. **锚点窗口（2026-10-18 用户规则，2026-10-21 重定义参数化）**——大周期某根K线满足买卖点条件（锚点所在K线）→ 去小周期找背驰限**锚K起 `anchorWinBars` 根检测周期K内**（默认 2、旧口径=1）：背驰点所在K须落窗（当下制另要求触发拍在窗内，拒绝闸 `anchor_bar_window`；确认制 `evaluateEntry` 只查背驰点落窗，JS 侧 `coverBarIndex`+`ctx.anchorPoint`+`barTimesAll` 镜像），且触发价距窗口极值 ≤ `anchorWinPts` 点（0=不限；极值=锚点价与窗口内实际极值取小/大，买侧最低/卖侧最高）。无永久闩锁——锚漂移/换新点即重开窗（旧锚窗口失败后价格涨过/跌破、重新满足条件仍会再触发）。
+4. **锚点窗口（2026-10-18 用户规则，2026-10-21 重定义参数化；2026-10-22 trailing 重开）**——大周期某根K线满足买卖点条件（锚点所在K线）→ 去小周期找背驰限**锚K起 `anchorWinBars` 根检测周期K内**（默认 2、旧口径=1）：背驰点所在K须落窗（当下制另要求触发拍在窗内，拒绝闸 `anchor_bar_window`；确认制 `evaluateEntry` 只查背驰点落窗，JS 侧 `coverBarIndex`+`ctx.anchorPoint`+`barTimesAll` 镜像），且触发价距窗口极值 ≤ `anchorWinPts` 点（0=不限；极值=锚点价与窗口内实际极值取小/大，买侧最低/卖侧最高）。无永久闩锁——锚漂移/换新点即重开窗（旧锚窗口失败后价格涨过/跌破、重新满足条件仍会再触发）。**trailing 重开（2026-10-22 `anchorWinTrailOn` 默认开）**：窗口内创新高/新低时时间窗锚K=窗口极值所在K（False=固定锚K 2026-10-21 口径）——连续新高不可能产生新压低2卖锚，固定锚K会把极值处的触发卡死（2026-09-08 12:00 案例，详见 §2.1.3 进场链一节）。
 
 #### 2.1.2.3 背驰属于哪个级别（下沉链 / 区间套，2026-09-08 实现）
 
@@ -863,6 +873,17 @@ JS/Python 双端一致（`biStep` 阶段二「间隔不足→回溯替换」分�
 - 条件（k 与 prev=result[-2] 同类型、分支前提 last→k 间隔 <4）：近等 `prev−k ≤ thr`（thr = nearDoubleFixed；影线更极端时走 moreExtreme 顶替或 prev 受有效笔保护，影线不满足才比实体——后实体不低于前实体直接取后）；prev→last 反向幅度 ≥ thr；权限二选一 = k.locked（上级笔端点=区间套强制落地，任何周期、不受开关限制）或 nearDoubleOn(res) 周期 且 `nearDoubleRebound`（默认 True）；排除 prev.gapLocked/prev.locked/last.locked/prev.nearDouble（单跳封顶），回溯替换保护仍优先。
 - 效果：prev 让位、端点后移到 k（k 打 nearDouble 标记）；前顶/前底成为笔内极值。新配置 `nearDoubleRebound=True`（Python `near_double_rebound`）。
 - 固定样本：XAUUSD 60m 2026-09-18 顶 4399.67(15:00+8) → 底 4342.73(22:00+8，与23:00包含合并) → 9-19 01:00 顶 4397.045（实体差 4393.49−4393.05=0.44 ≤ thr），反弹腿 3 根合并K；240 层平台规则已把 4h 顶后移到 9-19 01:00 → 60m 经 k.locked 复现：上涨笔 09-18 11:00 4334.295 → 09-19 01:00 4397.045，下跌笔至 09-21 22:00 4322.81。底对称。测试 py_chain/test_near_double.py（fixture near_double_rebound_xauusd_20260919.json.gz）。完整条件见 chan-core SPEC §2.4.2-2b。
+
+
+## 死顶/死底近等吸收（2026-10-22）
+
+JS/Python 双端一致（`biStep` 阶段二「间隔足够但极值冲突 → 忽略 k」分支新增，近等家族第三条，详见 chan-core SPEC §2.4.2-2c/速查表 #6c）：双顶/双底的前一个顶/底自身因间隔不足被丢弃（`not _pair_forms_bi(last, f)`）时，与其近等的后顶/后底吸收它、追加为笔端点。
+
+- 条件：nearDoubleOn(res) 周期（当前五周期默认全开，含 3/15m）；k/last/被吸收 f 均非 locked；k 侧内部超越点全部归属同类死分型；f 与 k 实体近等（先影线后实体，diff ≤ nearDoubleFixed）；最早 f→k 夹层无相接成笔且有 ≥thr 真实回调；整笔重验 = 内部极值 ≤ k 极值+thr 且 fractalRangeClear 严格通过。
+- 效果：k 追加为笔端点（nearDouble 单跳封顶）；被吸收 f 的影线极值成为笔内极值；纯追加不弹栈，后续更高顶经既有同类型替换接管（无需腿终局守卫）。
+- 动因案例：XAUUSD 60m 2026-09-14 21:00 底 4253.64 → 09-15 00:00 顶 4317.83（间隔仅 3 根、MACD 到顶柱仍 -1.02 转正差一根 → 丢弃）→ 10:00 顶 4317.63（差 0.20，被笔内极值守卫忽略）→ 吸收后 09-10 14:00 4435.05 ↓ 4253.64 ↑ 4317.63 ↓ 续跌，用户拍板该双顶应按近等处理。
+- 行为影响：**全部周期笔结构变化（nearDouble 默认全开）→ 缠论V1/fxma 信号集与全部回测基线不可比**；实盘 ENGINE_LOGIC_VERSION 升至 20261022-deadtop-absorb（持仓重启需 --accept-param-drift）；标记层 LOGIC_V 升版全量重算。A/B（XAUUSD 2026-06-30 起窗口、只关本规则对拍）：60m +2 笔、240/D 零变化、15m 7→22 笔替换、3m 36→98 笔替换，PY/JS 对拍 0 差异。
+- 测试：py_chain/test_near_double.py `DeadTopAbsorbTests`（真实 fixture + 合成容差边界 1.0/1.5/0.9 + 无分型归属反例 + 只关本规则回退）与 test_near_double.cjs 镜像。
 
 
 ## 预期笔统一口径（2026-09-17）

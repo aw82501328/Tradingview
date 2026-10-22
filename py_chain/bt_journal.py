@@ -61,7 +61,7 @@ GATE_LABELS = {
     "fired_dedup": "该段已发过信号（去重）",
     "strategy_extra": "策略专属条件未过",
     "cand_fired": "该形成段已发过（候选级去重）",
-    "anchor_bar_window": "锚点窗口外（触发/背驰点须在锚K起N根检测周期K内且距窗口极值≤点数；2026-10-21 重定义）",
+    "anchor_bar_window": "锚点窗口外（触发/背驰点须在锚K起N根检测周期K内且距窗口极值≤点数；2026-10-21 重定义；2026-10-22 起锚K随窗口内新极值重开=anchorWinTrailOn）",
     "near_sr_fail": "不在支阻位附近",
     "eval_reason": "确认制条件未过",
     # realtimeLowerDiverge / _evalRealtimeNode 内部原因（gate=no_diverge 的细分）

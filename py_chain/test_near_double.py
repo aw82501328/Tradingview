@@ -361,5 +361,104 @@ class NearDoubleShiftLockedTests(unittest.TestCase):
             c.reset_cfg()
 
 
+class DeadTopAbsorbTests(unittest.TestCase):
+    """死顶/死底近等吸收（2026-10-22）。
+
+    双顶/双底的前一个顶/底自身与笔起点不成笔（间隔不足）时，与其近等的后顶/后底
+    吸收它作为笔端点（忽略分支内放行，整笔按 k 极值+thr 重验）。真实案例：60m
+    2026-09-14 21:00 底 4253.64 → 09-15 00:00 顶 4317.83（间隔仅 3 根、MACD 差
+    一根被丢弃）→ 10:00 后顶 4317.63 差 0.20 被笔内极值守卫忽略——吸收后上涨笔
+    4253.64 → 4317.63 成笔。"""
+
+    FIX = json.loads(gzip.decompress(
+        Path(__file__).with_name('fixtures').joinpath('dead_top_absorb_xauusd_20260915.json.gz').read_bytes()))
+
+    def _ts(self, s):
+        return int(datetime.datetime.fromisoformat(f'2026-{s}+08:00').timestamp())
+
+    def _build(self, near=True, patch_off=False, cfg=None):
+        bars = self.FIX['60']
+        merged = c.mergeBars(c.markWickBars(bars))
+        try:
+            if cfg:
+                c.apply_cfg(cfg)
+            orig = c._deadNearAbsorb
+            if patch_off:  # 只关新规则（近等家族其余照开），等价改前行为
+                c._deadNearAbsorb = lambda ctx, last, head, k: None
+            try:
+                return c.buildBi(c.findFractals(merged), merged, c.calcATR(bars, 14),
+                                 c.calcMACD(bars), None, near)
+            finally:
+                c._deadNearAbsorb = orig
+        finally:
+            if cfg:
+                c.reset_cfg()
+
+    def test_real_window_absorbs_dead_top(self):
+        start, end = self._ts('09-14T21:00:00'), self._ts('09-15T10:00:00')
+        up = next(b for b in self._build() if b['startTime'] == start and b['type'] == 'up')
+        self.assertEqual((up['endTime'], up['endPrice']), (end, 4317.63))
+        # 只关新规则 → 后顶 4317.63 不再是任何笔端点（旧行为：极值守卫忽略）
+        self.assertFalse(any(b['endTime'] == end for b in self._build(patch_off=True)))
+
+    # 合成场景（小时K，无包含、无长影压平干扰）：P(125) ↓ B(100) ↗2根 T1(111·间隔
+    # 不足死顶) ↘ 浅回调底(104·实体 107.5 与 B 实体 104.5 差 3.0>thr 不平台后移)
+    # ↗ T2(109.5·实体 109 与 T1 实体 110 差 1.0≤thr) ↘ B3(97)。T1 影线 111 ≤
+    # T2+thr=111.5（整笔重验的极值侧边界）。T0=2026-01-01 00:00 UTC。
+    OHLC = [
+        (120, 122, 118, 119), (121, 125, 119, 123), (120, 124, 116, 118), (117, 121, 113, 115),
+        (105, 109, 102, 104), (104, 108.5, 101, 103), (105, 108, 100, 104.5),
+        (105, 109, 103, 107), (107, 111, 105, 110), (108, 109.5, 104.5, 109),
+        (107.5, 108, 104, 107.8), (107.8, 109, 106, 108.5), (108.5, 109.5, 107, 109),
+        (107.5, 108.5, 104, 105), (104.5, 106, 101, 102.5), (102, 103.5, 99, 100.5),
+        (100.5, 103, 97, 98), (99, 104, 98, 103), (103, 106, 102, 105), (104, 107, 103, 106),
+        (105, 108, 104, 107),
+    ]
+    T0 = 1767225600
+
+    def _syn(self, ohlc=None, cfg=None, patch_off=False, near=True):
+        bars = [{'time': self.T0 + i * 3600, 'open': o, 'high': h, 'low': lo, 'close': cl}
+                for i, (o, h, lo, cl) in enumerate(self.OHLC if ohlc is None else ohlc)]
+        merged = c.mergeBars(c.markWickBars(bars))
+        try:
+            if cfg:
+                c.apply_cfg(cfg)
+            orig = c._deadNearAbsorb
+            if patch_off:
+                c._deadNearAbsorb = lambda ctx, last, head, k: None
+            try:
+                return c.buildBi(c.findFractals(merged), merged, c.calcATR(bars, 14),
+                                 c.calcMACD(bars), None, near)
+            finally:
+                c._deadNearAbsorb = orig
+        finally:
+            if cfg:
+                c.reset_cfg()
+
+    def test_synthetic_absorb_and_revert(self):
+        bis = self._syn()
+        self.assertEqual([(b['type'], b['startPrice'], b['endPrice']) for b in bis],
+                         [('down', 125.0, 100.0), ('up', 100.0, 109.5), ('down', 109.5, 97.0)])
+        # 只关新规则 → T1 死于间隔不足、T2 死于笔内极值守卫，单笔 125→97
+        bis = self._syn(patch_off=True)
+        self.assertEqual([(b['type'], b['startPrice'], b['endPrice']) for b in bis],
+                         [('down', 125.0, 97.0)])
+
+    def test_synthetic_tolerance_boundary(self):
+        # 实体差 1.0：fixed=1.5 → 吸收（且影线差 1.5 ≤ 1.5 恰过整笔重验）；fixed=0.9 → 不吸收
+        bis = self._syn(cfg={'nearDoubleFixed': 1.5})
+        self.assertTrue(any(b['type'] == 'up' and b['endPrice'] == 109.5 for b in bis))
+        bis = self._syn(cfg={'nearDoubleFixed': 0.9})
+        self.assertFalse(any(b['endPrice'] == 109.5 for b in bis))
+
+    def test_synthetic_unattributable_blocker(self):
+        # bar9 高点抬到 110：内部超越点无同类分型归属（bar8 111 更高压住分型）→ 不吸收
+        ohlc = list(self.OHLC)
+        ohlc[9] = (108, 110, 104.5, 109)
+        bis = self._syn(ohlc=ohlc)
+        self.assertEqual([(b['type'], b['startPrice'], b['endPrice']) for b in bis],
+                         [('down', 125.0, 97.0)])
+
+
 if __name__ == '__main__':
     unittest.main()

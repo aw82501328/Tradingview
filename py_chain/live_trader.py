@@ -162,8 +162,11 @@ def provisional_sl(direction, bid, ask, near_sr, slip=DEFAULT_SLIP_STOP,
 # 锚点K线窗口闸（0b9954f）、统一点源（2026-10-21：compute_period_points 撤 60 笔
 # 窗口改全量笔视图 + 进场候选透传 points 桶 class2ZsTol/thirdZsTol，与 fxma 同源）、
 # 锚点窗口重定义（2026-10-21：锚K起 anchorWinBars 根检测周期K + 触发价距窗口
-# 极值 ≤ anchorWinPts 点，默认 2根/10点，参数化）。
-ENGINE_LOGIC_VERSION = "20261021-anchorwin2"
+# 极值 ≤ anchorWinPts 点，默认 2根/10点，参数化）、锚点窗口随新极值重开
+# （2026-10-22：anchorWinTrailOn 默认开，时间窗锚K=窗口极值所在K；False 回退固定锚K）、
+# 死顶/死底近等吸收（2026-10-22：buildBi 忽略分支——前顶/前底间隔不足被丢弃后，
+# 近等后顶/后底吸收其为笔端点，nearDoubleOn 周期笔结构变化，回测基线不可比）。
+ENGINE_LOGIC_VERSION = "20261022-deadtop-absorb"
 
 
 def _fingerprint_modules(strategy_id):

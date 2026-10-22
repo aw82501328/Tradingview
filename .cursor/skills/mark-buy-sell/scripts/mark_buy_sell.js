@@ -506,7 +506,7 @@ function onlyThisInterval(res) {
 
     // 大级别笔变化时，从该周期起按区间套重算更小周期（2026-10-14 规则v2 起为笔区间粒度：
     // 脏区间 t0 之前沿用上次标记、之后取新算，见下方 marks 合并）；未变的大级别整体沿用
-    const LOGIC_V = "20261016-tongbi-also-mark"; // 一类点同笔也照常标记（原同笔抑制删除，8-13 08:30 顶补回 1卖）（逻辑变更必须升版使状态作废全量重算）
+    const LOGIC_V = "20261022-dead-neardouble-absorb"; // 死顶/死底近等吸收进 buildBi（前顶间隔不足被丢弃时近等后顶吸收为端点，笔结构变化）（逻辑变更必须升版使状态作废全量重算）
     const statePath = path.join(CACHE_DIR, `buysell_${String(SYMBOL).replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
     const fpOf = (bis) => (bis || []).map(b => [b.type, b.startTime, b.endTime, b.startPrice, b.endPrice]);
     let prevState = null;

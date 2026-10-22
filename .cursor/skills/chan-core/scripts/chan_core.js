@@ -101,8 +101,11 @@ const CHAN_CFG = {
   // 锚点窗口（2026-10-21 重定义，与 py_chain/chan_core.py CHAN_CFG.anchorWin* 同步）：
   // anchorWinBars=锚K起检测周期K线根数（旧规则=1），anchorWinPts=触发价距窗口极值
   // （买侧最低/卖侧最高）的最大点数、0=不限价距只看时间窗。mark_entry.js 确认制消费。
+  // anchorWinTrailOn（2026-10-22）=窗口内创新高/新低时时间窗锚K随极值所在K重开
+  // （false=固定锚K 2026-10-21 口径）。
   anchorWinBars: 2,
   anchorWinPts: 10.0,
+  anchorWinTrailOn: true,
   // ---- 小周期绘制/加载窗口（2026-10-02 参数化；与 py_chain/chan_core.py CHAN_CFG 同步）----
   // 由 chan-bi/mark-buy-sell/mark-entry 三脚本消费：DRAW_WINDOW_DAYS 改由此构造。
   // 3分钟/15分钟/30秒 只画（并只加载）最近 N 天；60m/240m/D 不限、从 --from 全量。
@@ -712,6 +715,78 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, res =
     return true;
   };
 
+  // 死顶/死底近等吸收（2026-10-22，与 py_chain/chan_core.py _deadNearAbsorb 同步）：
+  // 异类型 isValid 通过、仅因笔内极值守卫面临忽略时，k 侧每个内部超越点都归属于
+  // 一个同类「死分型」f（f 与笔起点无法成笔——not pairFormsBi(last, f)，典型如
+  // 间隔不足 3 根），且 f 与 k 近等（影线侧 f 已更极端，落到实体比较 ≤ nearDoubleFixed），
+  // 则 k 吸收这些死分型、放行为笔终点。平台语义与 tryNearEqualSameType 一致：最早
+  // f→k 无相接成笔 + 存在 ≥thr 真实回调；整笔重验 = 内部极值 ≤ k 极值 + thr 且
+  // fractalRangeClear 严格通过。例：60m 2026-09-14 21:00 底 4253.64 → 09-15 00:00 顶
+  // 4317.83（间隔仅 3 根被丢弃）→ 10:00 后顶 4317.63 差 0.20 被极值守卫忽略——
+  // 吸收后上涨笔 4253.64 → 4317.63 成笔。排除：任一相关分型 locked（区间套优先）。
+  // 命中返回 true（调用方 push k 并打 nearDouble 单跳封顶）。周期门控 nearDouble。
+  const deadNearAbsorb = (last, k) => {
+    if (!nearDouble) return false;
+    if (k.locked || last.locked) return false;
+    const isTop = k.type === "top";
+    const thr = CHAN_CFG.nearDoubleFixed;
+    const loI = last.mergedIdx, hiI = k.mergedIdx;
+    const kExt = isTop ? k.high : k.low;
+    const byIdx = new Map();
+    for (const f of fractals) {
+      if (f.type === k.type && f.mergedIdx > loI && f.mergedIdx < hiI) byIdx.set(f.mergedIdx, f);
+    }
+    const absorbed = [];
+    for (let i = loI + 1; i < hiI; i++) {
+      const ext = isTop ? merged[i].high : merged[i].low;
+      if (!(isTop ? ext > kExt : ext < kExt)) continue;
+      // 整笔重验（极值侧）：后端点加容差后仍被内部超越 → 不吸收
+      if (isTop ? ext > kExt + thr : ext < kExt - thr) return false;
+      const f = byIdx.get(i);
+      if (!f || f.locked) return false;
+      if (pairFormsBi(last, f)) return false; // f 与起点尚可成笔 → 不是死分型，维持忽略
+      absorbed.push(f);
+    }
+    if (!absorbed.length) return false;
+    // 近等：影线侧 f 已更极端（超越点前提），比实体（与 tryNearEqualSameType 同向）
+    const newPx = nearBodyPx(merged, k.mergedIdx, isTop);
+    if (newPx == null) return false;
+    for (const f of absorbed) {
+      const refPx = nearBodyPx(merged, f.mergedIdx, isTop);
+      if (refPx == null) return false;
+      if ((isTop ? refPx - newPx : newPx - refPx) > thr) return false;
+    }
+    // 平台语义（最早 f → k）：夹层无相接成笔 + 存在 ≥thr 真实回调
+    const first = absorbed[0];
+    let pull = false, cnt = 0;
+    const chain = [first];
+    for (const f of fractals) {
+      if (f.mergedIdx <= first.mergedIdx || f.mergedIdx >= hiI) continue;
+      cnt++;
+      if (isTop && f.type === "bottom" && first.high - f.low >= thr) pull = true;
+      if (!isTop && f.type === "top" && f.high - first.low >= thr) pull = true;
+      chain.push(f);
+    }
+    chain.push(k);
+    let joined = false;
+    if (cnt > 0) {
+      for (let i = 0; i < chain.length - 2; i++) {
+        if (pairFormsBi(chain[i], chain[i + 1]) && pairFormsBi(chain[i + 1], chain[i + 2])) {
+          joined = true;
+          break;
+        }
+      }
+    }
+    if (joined || !pull) return false;
+    if (!fractalRangeClear(last, k)) return false;
+    if (CHAN_CFG.debug) {
+      const names = absorbed.map(f => `${isTop ? "顶" : "底"}@${f.mergedIdx}(${isTop ? f.high : f.low})`).join("、");
+      console.log(`[阶段二] 死顶/死底近等吸收: ${isTop ? "顶" : "底"}@${k.mergedIdx}(${kExt}) 吸收 ${names}（内分型不可自成笔、实体近等 ≤ ${thr.toFixed(2)}），接入 ${last.type === "bottom" ? "底" : "顶"}@${last.mergedIdx}`);
+    }
+    k.nearDouble = true; // 单跳封顶
+    return true;
+  };
+
   if (CHAN_CFG.debug) {
     const ft = (s) => `${s.type === "top" ? "顶" : "底"}@${s.mergedIdx}(${s.type === "top" ? s.high : s.low})${s.locked ? "(锁定)" : ""}`;
     console.log("[阶段一] 交替分型序列:", seq.map(ft).join(" → "));
@@ -892,6 +967,12 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, res =
           result.pop();
           continue;
         }
+      }
+      // 死顶/死底近等吸收（2026-10-22）：双顶/双底的前一个顶/底自身不成笔（间隔
+      // 不足）时，与其近等的后顶/后底吸收它作为笔端点（详见 deadNearAbsorb 注释）。
+      if (deadNearAbsorb(last, k)) {
+        result.push(k);
+        continue;
       }
       if (CHAN_CFG.debug) {
         const fr = fractalRangeClear(last, k);

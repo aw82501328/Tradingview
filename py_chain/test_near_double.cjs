@@ -124,3 +124,49 @@ test('near-equal rebound mirrors for double bottom',()=>{
   assert.ok(!mirror().some(x=>x.endTime===rNew)); // 关开关（无锁定）→ 端点停在前底 09-18 15:00
  }finally{c.CHAN_CFG.nearDoubleRebound=saved;}
 });
+// ---- 死顶/死底近等吸收（2026-10-22）----
+// 双顶/双底的前一个顶/底自身与笔起点不成笔（间隔不足）时，与其近等的后顶/后底
+// 吸收它作为笔端点。真实案例：60m 2026-09-14 21:00 底 4253.64 → 09-15 00:00 顶
+// 4317.83（间隔仅 3 根被丢弃）→ 10:00 后顶 4317.63 差 0.20——吸收后上涨笔成笔。
+const ddata=JSON.parse(zlib.gunzipSync(fs.readFileSync('py_chain/fixtures/dead_top_absorb_xauusd_20260915.json.gz')));
+const dStart=ts('09-14T21:00:00'),dEnd=ts('09-15T10:00:00');
+function dbuild(nearDouble=true,cfg=null){
+ const bars=ddata['60'],m=c.mergeBars(c.markWickBars(bars));
+ const saved=cfg&&Object.fromEntries(Object.keys(cfg).map(k=>[k,c.CHAN_CFG[k]]));
+ try{if(cfg)Object.assign(c.CHAN_CFG,cfg);
+  return c.buildBi(c.findFractals(m),m,c.calcATR(bars,14),c.calcMACD(bars),null,nearDouble);
+ }finally{if(cfg)Object.assign(c.CHAN_CFG,saved);}}
+test('dead top absorbed: up stroke 4253.64 -> 4317.63 forms (09-14 21:00 -> 09-15 10:00)',()=>{
+ const up=dbuild().find(x=>x.startTime===dStart&&x.type==='up');
+ assert.equal(up.endTime,dEnd);assert.equal(up.endPrice,4317.63);
+ // 近等整族关闭（JS 无单规则开关，隔离语义由 py 侧 monkeypatch 用例承担）→ 不成笔
+ assert.ok(!dbuild(false).some(x=>x.endTime===dEnd));
+});
+// 合成场景（与 py DeadTopAbsorbTests.OHLC 同构）：P(125)↓B(100)↗2根T1(111·死顶)↘浅回调
+// 底(104)↗T2(109.5·实体差1.0≤thr)↘B3(97)；T1 影线 111 ≤ T2+thr=111.5。
+const dOHLC=[[120,122,118,119],[121,125,119,123],[120,124,116,118],[117,121,113,115],
+ [105,109,102,104],[104,108.5,101,103],[105,108,100,104.5],[105,109,103,107],[107,111,105,110],
+ [108,109.5,104.5,109],[107.5,108,104,107.8],[107.8,109,106,108.5],[108.5,109.5,107,109],
+ [107.5,108.5,104,105],[104.5,106,101,102.5],[102,103.5,99,100.5],[100.5,103,97,98],
+ [99,104,98,103],[103,106,102,105],[104,107,103,106],[105,108,104,107]];
+const dT0=1767225600;
+function dsyn(ohlc,cfg=null,nearDouble=true){
+ const list=ohlc||dOHLC;
+ const bars=list.map((x,i)=>({time:dT0+i*3600,open:x[0],high:x[1],low:x[2],close:x[3]}));
+ const m=c.mergeBars(c.markWickBars(bars));
+ const saved=cfg&&Object.fromEntries(Object.keys(cfg).map(k=>[k,c.CHAN_CFG[k]]));
+ try{if(cfg)Object.assign(c.CHAN_CFG,cfg);
+  return c.buildBi(c.findFractals(m),m,c.calcATR(bars,14),c.calcMACD(bars),null,nearDouble);
+ }finally{if(cfg)Object.assign(c.CHAN_CFG,saved);}}
+test('synthetic dead-top absorb, tolerance boundary, unattributable blocker',()=>{
+ const shape=b=>b.map(x=>[x.type,x.startPrice,x.endPrice]);
+ assert.deepEqual(shape(dsyn()),[['down',125,100],['up',100,109.5],['down',109.5,97]]);
+ // 近等关闭 → T1 死于间隔不足、T2 死于笔内极值守卫，单笔 125→97
+ assert.deepEqual(shape(dsyn(null,null,false)),[['down',125,97]]);
+ // 实体差 1.0：fixed=1.5 吸收；fixed=0.9 不吸收
+ assert.ok(dsyn(null,{nearDoubleFixed:1.5}).some(x=>x.type==='up'&&x.endPrice===109.5));
+ assert.ok(!dsyn(null,{nearDoubleFixed:0.9}).some(x=>x.endPrice===109.5));
+ // bar9 高点抬到 110：超越点无同类分型归属 → 不吸收
+ const ohlc=dOHLC.slice();ohlc[9]=[108,110,104.5,109];
+ assert.deepEqual(shape(dsyn(ohlc)),[['down',125,97]]);
+});

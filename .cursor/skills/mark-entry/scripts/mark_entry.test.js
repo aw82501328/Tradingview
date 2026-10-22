@@ -132,10 +132,12 @@ describe("findDivergePoints / lowerDiverge 过滤", () => {
 });
 
 // ============================================================
-// 锚点窗口闸（2026-10-18 用户规则、2026-10-21 重定义，与
-// py_chain/test_anchor_bar_window.py 成对同构）：时间窗=锚K起 anchorWinBars 根
+// 锚点窗口闸（2026-10-18 用户规则、2026-10-21 重定义、2026-10-22 trailing 重开，
+// 与 py_chain/test_anchor_bar_window.py 成对同构）：时间窗=锚K起 anchorWinBars 根
 // 检测周期K（默认 2，旧口径=1）；价距窗=背驰点价距窗口极值（买侧最低/卖侧最高
 // =锚点价与锚K→背驰点各K极值取小/大）≤ anchorWinPts（0=不限）。
+// trailing（anchorWinTrailOn 默认开）：窗口内创新高/新低时时间窗锚K=极值所在K；
+// false=固定锚K（2026-10-21 口径）。
 // 确认制只约束背驰点（不查评估拍）；无锚点/无 barTimesAll 时降级放行。
 // ============================================================
 const core = require("../../chan-core/scripts/chan_core.js");
@@ -246,6 +248,25 @@ describe("evaluateEntry 锚点窗口（确认制）", () => {
     } finally {
       core.CHAN_CFG.anchorWinBars = savedBars;
       core.CHAN_CFG.anchorWinPts = savedPts;
+    }
+  });
+
+  test("trailing 重开：窗口内创新高 → 时间窗锚K=极值所在K（2026-10-22）", () => {
+    // 锚 75600（bar 21）、bar 23 冲新高 4463（高于锚价 4461.7）、背驰点同 bar 23：
+    // 固定锚K口径 bar23 距 bar21 已 2 根 → 拒；trailing 锚K=bar 23 → 落窗放行
+    // （价距=4463−背驰点 4461.7=1.3 ≤ 10）
+    const bars = [{ time: 82800, open: 4460, close: 4461, high: 4463, low: 4455 }];
+    const pd = { ...periodData, "15": { ...periodData["15"], bars } };
+    const res = evaluateEntry(baseCtx(75600, 4461.7, pd), strategy);
+    assert.equal(res.ok, true);
+    const saved = core.CHAN_CFG.anchorWinTrailOn;
+    core.CHAN_CFG.anchorWinTrailOn = false;
+    try {
+      const res2 = evaluateEntry(baseCtx(75600, 4461.7, pd), strategy);
+      assert.equal(res2.ok, false);
+      assert.ok(res2.reason.includes("锚点窗口"));
+    } finally {
+      core.CHAN_CFG.anchorWinTrailOn = saved;
     }
   });
 

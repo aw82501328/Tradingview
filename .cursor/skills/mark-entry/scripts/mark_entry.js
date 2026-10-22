@@ -816,7 +816,9 @@ function evaluateEntry(ctx, strategy) {
   // 0. 锚点窗口（2026-10-18 用户规则，2026-10-21 重定义，与 py_chain anchor_bar_window
   //    闸同源）：时间窗=锚K起 anchorWinBars 根检测周期K（旧口径=1）；价距窗=背驰点价
   //    距窗口极值（买侧最低/卖侧最高=锚点价与锚K→背驰点各K极值取小/大）≤ anchorWinPts
-  //    （0=不限）。确认制不查评估拍（其信号本身即历史背驰点），只约束背驰点；锚点由
+  //    （0=不限）。trailing 重开（2026-10-22 anchorWinTrailOn 默认开，与 py 同口径）：
+  //    窗口内创新高/新低时时间窗锚K=窗口极值所在K；false=2026-10-21 固定锚K口径。
+  //    确认制不查评估拍（其信号本身即历史背驰点），只约束背驰点；锚点由
   //    main() 逐候选传入 ctx.anchorPoint，barTimesAll 须用未过滤全量K线
   //    （periodData[res].bars 已滤进行中K线，背驰点落在当前大周期K线时会 bisect 到
   //    前一根误拒；锚K进行中时其极值由锚点价兜底）。缺省时降级放行。
@@ -824,6 +826,7 @@ function evaluateEntry(ctx, strategy) {
   const anchorWinIdx = (timesX && ctx.anchorPoint) ? coverBarIndex(timesX, ctx.anchorPoint.time) : -1;
   const winBars = Number(core.CHAN_CFG.anchorWinBars ?? 2) || 2;
   const winPts = Number(core.CHAN_CFG.anchorWinPts ?? 10) || 0;
+  const trailOn = core.CHAN_CFG.anchorWinTrailOn !== false; // 默认开
 
   // 1. 够笔
   if (!lastBiOk(bis, wantType)) {
@@ -883,20 +886,28 @@ function evaluateEntry(ctx, strategy) {
   if (cands.length === 0) return { ok: false, reason: "以下级别无匹配方向背驰" };
   if (timesX && anchorWinIdx >= 0) {
     // 价距基准：已收K线按时间窗 [锚K开盘, 背驰点所在K开盘] 取极值（periodData 已滤
-    // 进行中K线，索引与 barTimesAll 不同轴，须按时间过滤而非切片）
+    // 进行中K线，索引与 barTimesAll 不同轴，须按时间过滤而非切片）；
+    // trailing（anchorWinTrailOn，2026-10-22）：窗口内创新高/新低时锚K=极值所在K
+    // （并列极值取先到者，与 py _anchor_win_ok 逐位同构）
     const barsX = (periodData[res] && periodData[res].bars) || [];
     const t0 = timesX[anchorWinIdx];
     cands = cands.filter(c => {
       const i = coverBarIndex(timesX, c.point.time);
-      if (!(i >= anchorWinIdx && i - anchorWinIdx < winBars)) return false;
-      if (winPts > 0 && ctx.anchorPoint) {
-        let ref = ctx.anchorPoint.price;
-        const t1 = timesX[i];
-        for (const b of barsX) {
-          if (b.time < t0 || b.time > t1) continue;
-          const v = direction === "long" ? (b.low ?? b.close) : (b.high ?? b.close);
-          ref = direction === "long" ? Math.min(ref, v) : Math.max(ref, v);
+      if (i < 0) return false;
+      let ref = ctx.anchorPoint.price;
+      let refJ = anchorWinIdx;
+      const t1 = timesX[i];
+      for (const b of barsX) {
+        if (b.time < t0 || b.time > t1) continue;
+        const v = direction === "long" ? (b.low ?? b.close) : (b.high ?? b.close);
+        if (direction === "long" ? v < ref : v > ref) {
+          ref = v;
+          refJ = coverBarIndex(timesX, b.time);
         }
+      }
+      const wIdx = trailOn ? refJ : anchorWinIdx;
+      if (!(i >= wIdx && i - wIdx < winBars)) return false;
+      if (winPts > 0) {
         const dist = direction === "long" ? c.point.price - ref : ref - c.point.price;
         if (dist > winPts) return false;
       }

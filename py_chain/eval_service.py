@@ -538,7 +538,7 @@ class EvalManager:
         source = payload.get("source")
         row_only = False
         if run_id:
-            run = app.bt_runs.detail(run_id)
+            run = app.bt_runs.get(run_id)
             if not run:
                 raise ValueError(f"方案不存在：{run_id}")
             cfg = dict(run.get("cfg") or {})

@@ -64,7 +64,7 @@ let bis = core.buildBi(fractals, merged, atr, macdArr); // ③ 笔构建
 | `lowerResOf(res)` | 逐级校准映射：15分钟←3分钟，1小时←15分钟，4小时←1小时，日线←4小时 |
 | `calibrateBiTimes(bis, bigBars, refBars, bigIntervalSec)` | 跨周期端点时间校准（用低一级K线确定极值精确位置） |
 | `intervalSecOf(res)` | 周期 → 单根K线时长（秒） |
-| `nearDoubleOn(res)` | 该周期是否开启「近等双顶/双底平台取后顶/后底」（读 `CHAN_CFG.nearDouble3/15/60/240/D` 每周期开关，默认 60/240/D 开；res 接受周期码或 barSec 秒数，五周期之外一律 false） |
+| `nearDoubleOn(res)` | 该周期是否开启「近等双顶/双底平台取后顶/后底」（读 `CHAN_CFG.nearDouble3/15/60/240/D` 每周期开关，2026-09-28 起默认全开；res 接受周期码或 barSec 秒数，五周期之外一律 false） |
 
 ### MACD 背驰
 
@@ -109,6 +109,14 @@ let bis = core.buildBi(fractals, merged, atr, macdArr); // ③ 笔构建
 - 修改后建议用各 SKILL 的 `--dry` 模式回归验证输出与预期一致；
 - 2026-10-14 规则v2 起：买卖点判定**不再使用背驰**（`isBiDiverge`/`biMacdMetrics`/`divergeDurRatio` 仅保留给收笔判定 `buildStructureContext`）；无上级（日线）`findBuyPoints/findSellPoints` 返回空；旧 API（`anchorFirstBuy/Sell`、`keepRecentEach`、`unformedTailSpan` 等）已随旧逻辑删除，备份见 git 历史 6971db6。
 
+
+## 死顶/死底近等吸收（2026-10-22）
+
+近等家族第三条（`biStep` 忽略分支，与平台取后/反弹不成笔取后互补）：双顶/双底的前一个顶/底自身因间隔不足被丢弃（`not _pair_forms_bi(last, f)`）时，与其近等的后顶/后底吸收它、追加为笔端点——补「前顶够不着（间隔不足）、后顶矮一点（笔内极值守卫）」的双顶死局。
+
+- 条件：nearDoubleOn(res) 周期；k/last/f 非 locked；k 侧内部超越点全部归属同类死分型（无分型归属的插针维持忽略）；f 与 k 实体近等（先影线后实体，diff ≤ nearDoubleFixed）；最早 f→k 无相接成笔且有 ≥thr 回调；整笔重验 = 内部极值 ≤ k 极值+thr 且 fractalRangeClear 严格过。
+- 效果：k 追加为端点（nearDouble 单跳封顶，被吸收影线极值成笔内极值）；纯追加不弹栈，后续更高顶由既有替换接管。
+- 例：60m 2026-09-14 21:00 底 4253.64 → 09-15 00:00 顶 4317.83（间隔 3 根被丢弃）→ 10:00 顶 4317.63 差 0.20 → 吸收后上涨笔 4253.64 → 4317.63 成笔。完整条件见 SPEC §2.4.2-2c（速查表 #6c）。测试 test_near_double.py/.cjs（fixture dead_top_absorb_xauusd_20260915.json.gz）。
 
 ## 一小时近等端点补充确认（2026-09-10）
 

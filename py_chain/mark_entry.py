@@ -420,19 +420,25 @@ def _finest_res_with_bars(periodData):
     return best
 
 
-def _win_extreme_ref(periodData, fromT, direction, anchorPrice):
+def _win_extreme_ref(periodData, fromT, direction, anchorPrice, anchorTime=None):
     """锚点窗口价距基准（买侧 lowRef/卖侧 highRef）：锚K开盘时刻 fromT 起细周期
     已收K极值与锚点价取小（买）/取大（卖），随新低/新高漂移。无K线数据降级
-    =锚点价。bars 为已收前缀，从尾部反向扫到 fromT 即止。"""
+    =锚点价。bars 为已收前缀，从尾部反向扫到 fromT 即止。
+    2026-10-22 起返回 (极值价, 极值时间)：极值时间=刷新极值的细周期K时间（锚点价
+    兜底时=anchorTime）——trailing 锚K窗口（anchorWinTrailOn）用极值所在K重开时间窗。
+    并列极值取先到者（min/max 与严格比较同语义）。"""
     res = _finest_res_with_bars(periodData)
     bars = ((periodData or {}).get(res) or {}).get("bars") if res else None
     ref = anchorPrice
+    refT = anchorTime
     for b in reversed(bars or []):
         if (b.get("time") or 0) < fromT:
             break
         v = b.get("low", b.get("close")) if direction == "long" else b.get("high", b.get("close"))
-        ref = min(ref, v) if direction == "long" else max(ref, v)
-    return ref
+        if (v < ref) if direction == "long" else (v > ref):
+            ref = v
+            refT = b.get("time")
+    return ref, refT
 
 
 def _beat_price(periodData):
@@ -1164,15 +1170,19 @@ def evaluateEntry(ctx, strategy):
     # ⓪ 锚点窗口（2026-10-18 用户规则，2026-10-21 重定义参数化；确认制镜像）：
     # 时间窗=锚K起 anchorWinBars 根检测周期K（旧口径=1），背驰点所在K须落窗；
     # 价距窗=背驰点价距窗口极值 ≤ anchorWinPts（0=不限），极值=锚点价与锚K→
-    # 背驰点各已收K极值取小（买侧）/取大（卖侧）。确认制不查评估拍（其信号
-    # 本身即历史背驰点），只约束背驰点落窗；锚点由 compute_entries 逐候选传入
-    # ctx["anchorPoint"]，缺省（旧调用方/最小 fixture）时降级放行。
+    # 背驰点各已收K极值取小（买侧）/取大（卖侧）。trailing 重开（2026-10-22
+    # anchorWinTrailOn 默认开，与当下制主闸同口径）：窗口内创新高/新低时，
+    # 时间窗锚K=极值所在检测周期K；False=固定锚K旧口径。
+    # 确认制不查评估拍（其信号本身即历史背驰点），只约束背驰点落窗；
+    # 锚点由 compute_entries 逐候选传入 ctx["anchorPoint"]，缺省（旧调用方/
+    # 最小 fixture）时降级放行。
     barsX = ((periodData or {}).get(res) or {}).get("bars") or []
     timesX = [b.get("time") for b in barsX]
     anchorPt = ctx.get("anchorPoint")
     anchorWinIdx = _cover_bar_index(timesX, anchorPt.get("time")) if anchorPt is not None else None
     winBars = int(CHAN_CFG.get("anchorWinBars", 2) or 2)
     winPts = float(CHAN_CFG.get("anchorWinPts", 10.0) or 0.0)
+    trailOn = bool(CHAN_CFG.get("anchorWinTrailOn", True))
 
     # 1. 够笔
     if not lastBiOk(bis, wantType):
@@ -1196,13 +1206,22 @@ def evaluateEntry(ctx, strategy):
     if timesX and anchorWinIdx is not None:
         def _anchor_win_ok(c):
             i = _cover_bar_index(timesX, c["point"]["time"])
-            if not _anchor_in_window(i, anchorWinIdx, winBars):
+            if i is None:
+                return False
+            # 窗口极值（价距基准）：锚点价与锚K→背驰点各已收K极值取小/大；
+            # refJ=极值所在检测周期K（trailing 锚K；并列极值取先到者，与
+            # min/max 逐位一致）
+            ref = anchorPt.get("price")
+            refJ = anchorWinIdx
+            for j in range(anchorWinIdx, i + 1):
+                b = barsX[j]
+                v = b.get("low", b.get("close")) if direction == "long" else b.get("high", b.get("close"))
+                if (v < ref) if direction == "long" else (v > ref):
+                    ref = v
+                    refJ = j
+            if not _anchor_in_window(i, refJ if trailOn else anchorWinIdx, winBars):
                 return False
             if winPts > 0:
-                ref = anchorPt.get("price")
-                for b in barsX[anchorWinIdx:i + 1]:
-                    v = b.get("low", b.get("close")) if direction == "long" else b.get("high", b.get("close"))
-                    ref = min(ref, v) if direction == "long" else max(ref, v)
                 dist = (c["point"]["price"] - ref) if direction == "long" else (ref - c["point"]["price"])
                 if dist > winPts:
                     return False
@@ -1598,25 +1617,44 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
             # 落窗、锚K之前仍拒；价距窗=触发价距窗口极值（买侧最低/卖侧最高=
             # 锚点价与锚K开盘起细周期已收K极值取小/大）≤ anchorWinPts（0=不限）。
             # 无永久闩锁：锚随新高/新低漂移或换新点时，每拍按当前锚现算——新锚
-            # 所在K线自动重开窗。times 缺失（无 periodTimes 且无 bars 的最小
-            # fixture）时降级放行，不影响既有最小单测。
+            # 所在K线自动重开窗。trailing 重开（2026-10-22 anchorWinTrailOn 默认开）：
+            # 窗口内创新高/新低时，时间窗锚K=窗口极值所在K（价距基准本就随极值漂移，
+            # 时间窗此前只认锚点固定时间戳——连续新高不可能产生新压低2卖锚，
+            # 窗口卡死，9-8 12:00 案例）；极值仍落原锚K时与旧口径逐位一致；
+            # False=2026-10-21 固定锚K口径（A/B 基准）。
+            # times 缺失（无 periodTimes 且无 bars 的最小 fixture）时降级放行，
+            # 不影响既有最小单测。
             winBars = int(CHAN_CFG.get("anchorWinBars", 2) or 2)
             winPts = float(CHAN_CFG.get("anchorWinPts", 10.0) or 0.0)
-            anchorWinIdx = nowWinIdx = None
-            winRef = None
+            trailOn = bool(CHAN_CFG.get("anchorWinTrailOn", True))
+            anchorWinIdx = nowWinIdx = winAnchorIdx = None
+            winRef = winExtT = None
             if times:
                 anchorWinIdx = _cover_bar_index(times, point.get("time"))
                 nowWinIdx = _cover_bar_index(times, tCut)
-                if not _anchor_in_window(nowWinIdx, anchorWinIdx, winBars):
+                if trailOn and anchorWinIdx is not None:
+                    winRef, winExtT = _win_extreme_ref(periodData, times[anchorWinIdx],
+                                                       direction, point.get("price"),
+                                                       point.get("time"))
+                    winAnchorIdx = _cover_bar_index(times, winExtT)
+                    if winAnchorIdx is None or winAnchorIdx < anchorWinIdx:
+                        winAnchorIdx = anchorWinIdx  # 极值时间早于锚K（不应发生）兜底
+                else:
+                    winAnchorIdx = anchorWinIdx
+                if not _anchor_in_window(nowWinIdx, winAnchorIdx, winBars):
                     _rej("anchor_bar_window", skey=key,
                          ctx={"pointType": point.get("type"), "anchorTime": point.get("time"),
-                              "nowBarTime": times[nowWinIdx] if nowWinIdx is not None else None})
+                              "nowBarTime": times[nowWinIdx] if nowWinIdx is not None else None,
+                              "effAnchorTime": (times[winAnchorIdx]
+                                                if winAnchorIdx is not None else None),
+                              "extTime": winExtT, "extPrice": winRef})
                     continue
                 # 价距（主闸=当拍现价）：细周期K线/现价缺失（最小 fixture）时跳过，
                 # 次级仍以 winRef（含锚点价兜底）查背驰点价
                 if winPts > 0:
-                    winRef = _win_extreme_ref(periodData, times[anchorWinIdx],
-                                              direction, point.get("price"))
+                    if winRef is None:
+                        winRef = _win_extreme_ref(periodData, times[anchorWinIdx],
+                                                  direction, point.get("price"))[0]
                     nowPx = _beat_price(periodData)
                     if nowPx is not None:
                         dist = (nowPx - winRef) if direction == "long" else (winRef - nowPx)
@@ -1702,10 +1740,11 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
                          ctx={"markRes": c["res"]})
                     continue  # 该形成段已发过，段延伸不重发
                 # 次级保险（锚点窗口）：当前拍在窗内、但背驰极值是窗口外更早K线的
-                # 陈旧极值时同样拒绝——背驰点所在K须落在锚K起 N 根内，且背驰点价
+                # 陈旧极值时同样拒绝——背驰点所在K须落在锚K起 N 根内（trailing 口径
+                # =窗口极值所在K，主闸已算 winAnchorIdx），且背驰点价
                 # 距窗口极值 ≤ anchorWinPts（winRef 主闸已算，含锚点价兜底）
                 if times and not _anchor_in_window(_cover_bar_index(times, c["point"]["time"]),
-                                                   anchorWinIdx, winBars):
+                                                   winAnchorIdx, winBars):
                     _rej("anchor_bar_window", seg_start=c["segStart"], skey=key,
                          ctx={"markRes": c["res"], "divergeTime": c["point"]["time"],
                               "anchorTime": point.get("time")})

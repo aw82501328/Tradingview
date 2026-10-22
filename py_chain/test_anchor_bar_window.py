@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""锚点窗口闸（anchor_bar_window）单元测试（2026-10-18 用户规则；2026-10-21 重定义）。
+"""锚点窗口闸（anchor_bar_window）单元测试（2026-10-18 用户规则；2026-10-21 重定义；
+2026-10-22 trailing 重开）。
 
 规则（重定义）：时间窗=锚点（买卖点）所在检测周期K线起 anchorWinBars 根（默认 2，
 旧口径=1），当拍与背驰点所在K都须落窗、锚K之前仍拒；价距窗=触发价距窗口极值
@@ -8,6 +9,11 @@
 换新点时，每拍按当前锚现算，新锚所在K线自动重开窗。当下制（evaluateRealtimeEntries）
 三重校验：触发拍所在K、当拍现价、背驰点（K线+价距）；确认制（evaluateEntry）只
 约束背驰点（K线落窗+价距）。
+
+trailing 重开（2026-10-22 anchorWinTrailOn 默认开）：窗口内创新高/新低时时间窗
+锚K=窗口极值所在K（价距基准本就随极值漂移，时间窗此前只认锚点固定时间戳——
+连续新高不可能产生新压低2卖锚，窗口卡死，9-8 12:00 案例）；极值仍落原锚K时
+与旧口径逐位一致；False=2026-10-21 固定锚K口径（A/B 基准）。
 
 运行：python -m unittest py_chain.test_anchor_bar_window -v
 """
@@ -68,6 +74,28 @@ FINE_DOWN_BOUNCE = [
     {"time": 11400, "high": 98.0, "low": 96.0, "close": 96.5},
     {"time": 11700, "high": 97.0, "low": 96.0, "close": 96.8},
     {"time": 12000, "high": 109.0, "low": 97.0, "close": 108.5},
+]
+# trailing fixture（9-8 12:00 形态）：锚 bar 3（10800@108，锚价即窗口极值），bar 5 才
+# 创新高 115 → trailing 锚K=bar 5 窗口重开；固定锚K口径（bar 3 起 2 根）则已超窗
+FINE_NEWHIGH_LATE = [
+    {"time": 10800, "high": 107.5, "low": 105.0, "close": 106.5},   # bar 3（high<锚价）
+    {"time": 14400, "high": 107.0, "low": 106.0, "close": 106.8},   # bar 4（无新高）
+    {"time": 18000, "high": 115.0, "low": 108.0, "close": 114.0},   # bar 5 新高 115
+    {"time": 18300, "high": 112.0, "low": 109.0, "close": 112.0},   # bar 5 回落收 112
+]
+# trailing 买侧镜像：锚 bar 3（10800@102），bar 5 创新低 95
+FINE_NEWLOW_LATE = [
+    {"time": 10800, "high": 104.0, "low": 102.5, "close": 103.0},   # bar 3（low>锚价）
+    {"time": 14400, "high": 103.5, "low": 102.8, "close": 103.2},   # bar 4（无新低）
+    {"time": 18000, "high": 101.0, "low": 95.0, "close": 95.5},     # bar 5 新低 95
+    {"time": 18300, "high": 99.0, "low": 96.0, "close": 98.5},      # bar 5 反弹收 98.5
+]
+# trailing 再失效：新高只发生在 bar 4，bar 6 触发时距 trailing 锚（bar 4）已 2 根 → 超窗
+FINE_EARLY_HIGH_THEN_NONE = [
+    {"time": 10800, "high": 109.0, "low": 105.0, "close": 108.5},   # bar 3
+    {"time": 14400, "high": 115.0, "low": 107.0, "close": 113.0},   # bar 4 新高 115
+    {"time": 18000, "high": 114.0, "low": 108.0, "close": 110.0},   # bar 5 无新高
+    {"time": 21600, "high": 113.0, "low": 109.0, "close": 111.0},   # bar 6 无新高
 ]
 
 
@@ -235,6 +263,48 @@ class TestRealtimeAnchorBarWindow(unittest.TestCase):
         self.assertEqual(len(sigs), 1)
         self.assertFalse(any(r["gate"] == "anchor_bar_window" for r in rejects))
 
+    # ---- trailing 重开（2026-10-22 anchorWinTrailOn 默认开）----
+
+    def test_trailing_new_high_reopens_window(self):
+        # 9-8 12:00 形态：锚 bar 3、bar 5 才创新高 115 且触发同 bar——固定锚K口径
+        # （bar 3 起 2 根）已超窗拒；trailing 锚K=极值所在 bar 5 → 窗口重开放行
+        sigs, rejects = _run(BIS60_SELL, self.SELL_PT, tCut=18600, divTime=18300,
+                             periodBars={"3": FINE_NEWHIGH_LATE}, divPrice=115.0)
+        self.assertEqual(len(sigs), 1)
+        self.assertFalse(any(r["gate"] == "anchor_bar_window" for r in rejects))
+
+    def test_trailing_off_falls_back_fixed_anchor(self):
+        # anchorWinTrailOn=False → 同场景回到 2026-10-21 固定锚K口径：超窗拒
+        # （ctx 的 effAnchorTime=原锚K，A/B 基准用）
+        with mock.patch.dict(me.CHAN_CFG, {"anchorWinTrailOn": False}):
+            sigs, rejects = _run(BIS60_SELL, self.SELL_PT, tCut=18600, divTime=18300,
+                                 periodBars={"3": FINE_NEWHIGH_LATE}, divPrice=115.0)
+        self.assertEqual(sigs, [])
+        win = [r for r in rejects if r["gate"] == "anchor_bar_window"]
+        self.assertEqual(len(win), 1)
+        self.assertEqual(win[0]["ctx"]["anchorTime"], 10800)
+        self.assertEqual(win[0]["ctx"]["nowBarTime"], 18000)
+        self.assertEqual(win[0]["ctx"]["effAnchorTime"], 10800)
+
+    def test_trailing_expires_again_after_no_new_extreme(self):
+        # 新高只发生在 bar 4（trailing 锚K=bar 4），bar 6 触发距其 2 根 → 再次超窗拒
+        sigs, rejects = _run(BIS60_SELL, self.SELL_PT, tCut=22200, divTime=21900,
+                             periodBars={"3": FINE_EARLY_HIGH_THEN_NONE}, divPrice=114.0)
+        self.assertEqual(sigs, [])
+        win = [r for r in rejects if r["gate"] == "anchor_bar_window"]
+        self.assertEqual(len(win), 1)
+        self.assertEqual(win[0]["ctx"]["effAnchorTime"], 14400)   # trailing 锚K=新高所在 bar 4
+        self.assertEqual(win[0]["ctx"]["nowBarTime"], 21600)
+        self.assertEqual(win[0]["ctx"]["extPrice"], 115.0)
+
+    def test_trailing_buy_side_mirror(self):
+        # 买侧镜像：锚 bar 3、bar 5 创新低 95 且触发同 bar → trailing 重开放行
+        sigs, rejects = _run(BIS60_BUY, self.BUY_PT, tCut=18600, divTime=18300,
+                             periodBars={"3": FINE_NEWLOW_LATE}, divPrice=95.0)
+        self.assertEqual(len(sigs), 1)
+        self.assertEqual(sigs[0]["strategyKey"], "wait2Buy")
+        self.assertFalse(any(r["gate"] == "anchor_bar_window" for r in rejects))
+
 
 class TestConfirmAnchorBarWindow(unittest.TestCase):
     """确认制（evaluateEntry）：只约束背驰点落窗+价距，不查评估拍。"""
@@ -303,6 +373,20 @@ class TestConfirmAnchorBarWindow(unittest.TestCase):
         bars[3]["high"] = 120.0
         div = [{"res": "15", "point": {"time": 11000, "price": 105.0}}]
         res = self._eval(self._ctx(10800, bars), div)
+        self.assertFalse(res["ok"])
+        self.assertIn("锚点窗口", res["reason"])
+
+    def test_confirm_trailing_new_high_reopens(self):
+        # trailing（2026-10-22）：锚 bar 3（锚价 108 高于各K high），bar 5 冲新高 120、
+        # 背驰点同 bar → trailing 锚K=极值所在 bar 5 落窗放行；False=固定锚K超窗拒
+        bars = [{"time": t, "open": 105, "close": 106, "high": 107, "low": 104}
+                for t in TIMES60]
+        bars[5]["high"] = 120.0
+        div = [{"res": "15", "point": {"time": 18900, "price": 120.0}}]
+        res = self._eval(self._ctx(10800, bars), div)
+        self.assertTrue(res["ok"])
+        with mock.patch.dict(me.CHAN_CFG, {"anchorWinTrailOn": False}):
+            res = self._eval(self._ctx(10800, bars), div)
         self.assertFalse(res["ok"])
         self.assertIn("锚点窗口", res["reason"])
 

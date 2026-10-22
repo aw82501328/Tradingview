@@ -80,7 +80,7 @@ ENTRY_CHAN_KEYS = (
     "expectBiEnough", "expectBiMinBars", "divergeConfirm", "macdZeroTol",
     "strong2BuyMacdOn",
     "entryMacdShrink", "stopEntryBarFloor",
-    "anchorWinBars", "anchorWinPts",
+    "anchorWinBars", "anchorWinPts", "anchorWinTrailOn",
     "divergeReferByZs", "sinkSkipLevel",
 )
 # 旧 module_params.json 把上述键都写在 modules.chan 下；读入时迁到 points/entry
@@ -251,6 +251,7 @@ PARAM_MODULES = {
             "stopEntryBarFloor": ("进场K线止损下限", "开启=止损至少在进场背驰周期K线极值外侧加滑点处（运行中外推、收盘冻结，与支阻位止损取更宽者）", None, None),
             "anchorWinBars": ("锚点窗口K线数", "锚点（买卖点）所在检测周期K线起 N 根内允许触发——当拍与背驰点所在K都须落窗；1=旧单K规则（2026-10-21 重定义）", 1, 10),
             "anchorWinPts": ("锚点窗口距极值点数", "触发价（当拍现价与背驰点价）距窗口极值（买侧最低/卖侧最高=锚点价与窗口内实际极值取小/大）的最大点数；0=不限价距只看时间窗", 0.0, 1000.0),
+            "anchorWinTrailOn": ("锚点窗口随新极值重开", "开启=窗口内创新高/新低时时间窗锚K=窗口极值所在K线（连续新高不产生新压低2卖锚时窗口不再卡死，9-8 12:00 案例）；关闭=固定锚K起算（2026-10-21 口径）。价距基准两口径均随极值漂移", None, None),
             "macdZeroTol": ("黄白线容差", "强2类买卖点黄白线容差：开闸后强二买 DIF > -该值才进（0=严格 0 轴）。1买/2卖的 0 轴判定仍用该值", 0.0, 100.0),
             "strong2BuyMacdOn": ("强2类买卖点黄白线", "与容差同一张卡，在进场闸门。开=强二买开单要求 DIF 高于 -容差；关=强二买不看黄白线（默认）", None, None),
             "divergeReferByZs": ("背驰参照按中枢",

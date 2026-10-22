@@ -134,6 +134,11 @@ CHAN_CFG = {
     "anchorWinPts": 10.0,        # 锚点窗口距极值点数：触发价（当拍现价与背驰点价）距窗口
                                   # 极值（买侧最低/卖侧最高=min(锚点价,窗口内实际极值)）的
                                   # 最大点数；0=不限价距只看时间窗。bars=1+pts=0=旧单K规则
+                                  # （trailing 开启时仅当窗口内无新极值成立）
+    "anchorWinTrailOn": True,    # 锚点窗口随新极值重开（2026-10-22）：窗口内创新高/新低时
+                                  # 时间窗锚K=窗口极值所在K（价距基准本就随极值漂移，时间
+                                  # 窗此前只认锚点固定时间戳——连续新高不产生新压低2卖锚，
+                                  # 窗口卡死，9-8 12:00 案例）；False=2026-10-21 固定锚K口径
     "macdZeroTol": 5.0,          # 2买/2卖 MACD 0 轴容差（2026-09-16）：2买 dif > -tol、
                                   # 2卖 dif < +tol 视为「上/下过 0 轴后回调/反弹未破 0 轴太多」，
                                   # 动能还在（原严格口径 dif>0 / dif<0，tol=0 即回退）
@@ -1255,6 +1260,99 @@ def tryNearEqualSameType(ctx, last, head, k):
     return _stkCons(k, head[1])
 
 
+def _deadNearAbsorb(ctx, last, head, k):
+    """死顶/死底近等吸收（2026-10-22）。命中返回追加 k 的新 head，否则 None。
+
+    异类型 isValid 通过、仅因笔内极值守卫面临忽略时：k 侧每个内部超越点（合并K
+    极值越过 k 极值）都归属于一个同类「死分型」f——f 与笔起点 last 本身无法成笔
+    （not _pair_forms_bi(last, f)，典型如间隔不足 3 根）——且 f 与 k 近等（影线侧
+    f 已更极端，落到实体比较，差 ≤ nearDoubleFixed），则 k 吸收这些死分型、放行
+    为笔终点。平台语义与 tryNearEqualSameType 一致：最早 f→k 无相接成笔、存在
+    ≥thr 真实回调；整笔重验 = 全部内部极值 ≤ k 极值 + thr（后端点加容差后整笔
+    仍成立）且 fractalRangeClear 严格通过。
+    例：60m 2026-09-14 21:00 底 4253.64 → 09-15 00:00 顶 4317.83（间隔仅 3 根
+    被丢弃）→ 10:00 后顶 4317.63 差 0.20 被极值守卫忽略——吸收后上涨笔
+    4253.64 → 4317.63 成笔。排除：任一相关分型 locked（区间套优先）。
+    周期门控 ctx.nearDouble（nearDoubleOn(res)，60/240/D）。"""
+    if not ctx.nearDouble:
+        return None
+    if k.get("locked", False) or last.get("locked", False):
+        return None
+    is_top = k["type"] == "top"
+    thr = CHAN_CFG["nearDoubleFixed"]
+    lo_i, hi_i = last["mergedIdx"], k["mergedIdx"]
+    k_ext = k["high"] if is_top else k["low"]
+    view = _nearEqIdx(ctx)
+    sub, idxs = ((view["top"], view["idx_top"]) if is_top
+                 else (view["bottom"], view["idx_bottom"]))
+    by_idx = {f["mergedIdx"]: f for f in
+              sub[bisect.bisect_right(idxs, lo_i):bisect.bisect_left(idxs, hi_i)]}
+    absorbed = []
+    for i in range(lo_i + 1, hi_i):
+        m = ctx.merged[i]
+        ext = m["high"] if is_top else m["low"]
+        if not ((ext > k_ext) if is_top else (ext < k_ext)):
+            continue
+        # 整笔重验（极值侧）：后端点加容差后仍被内部超越 → 不吸收
+        if (ext > k_ext + thr) if is_top else (ext < k_ext - thr):
+            return None
+        f = by_idx.get(i)
+        if f is None or f.get("locked", False):
+            return None
+        if _pair_forms_bi(ctx, last, f):
+            return None  # f 与起点尚可成笔 → 不是死分型，维持忽略
+        absorbed.append(f)
+    if not absorbed:
+        return None
+    # 近等：影线侧 f 已更极端（超越点前提），比实体（与 tryNearEqualSameType 同向）
+    new_px = _nearBodyPx(ctx.merged, k["mergedIdx"], is_top)
+    if new_px is None:
+        return None
+    for f in absorbed:
+        ref_px = _nearBodyPx(ctx.merged, f["mergedIdx"], is_top)
+        if ref_px is None:
+            return None
+        if ((ref_px - new_px) if is_top else (new_px - ref_px)) > thr:
+            return None
+    # 平台语义（最早 f → k）：夹层无相接成笔 + 存在 ≥thr 真实回调
+    first = absorbed[0]
+    pull, cnt = False, 0
+    mid = []
+    for f in reversed(ctx.fractals or ()):
+        mi = f["mergedIdx"]
+        if mi <= first["mergedIdx"]:
+            break
+        if mi < hi_i:
+            cnt += 1
+            if is_top and f["type"] == "bottom" and first["high"] - f["low"] >= thr:
+                pull = True
+            if (not is_top) and f["type"] == "top" and f["high"] - first["low"] >= thr:
+                pull = True
+            mid.append(f)
+    mid.reverse()
+    chain = [first] + mid + [k]
+    joined = False
+    if cnt > 0:
+        for i in range(len(chain) - 2):
+            if (_pair_forms_bi(ctx, chain[i], chain[i + 1])
+                    and _pair_forms_bi(ctx, chain[i + 1], chain[i + 2])):
+                joined = True
+                break
+    if joined or not pull:
+        return None
+    if not ctx.fractalRangeClear(last, k):
+        return None
+    if CHAN_CFG["debug"]:
+        names = "、".join(
+            f"{'顶' if is_top else '底'}@{f['mergedIdx']}({f['high'] if is_top else f['low']})"
+            for f in absorbed)
+        print(f"[阶段二] 死顶/死底近等吸收: {'顶' if is_top else '底'}@{k['mergedIdx']}({k_ext}) 吸收 "
+              f"{names}（内分型不可自成笔、实体近等 ≤ {thr:.2f}），接入 "
+              f"{'底' if last['type'] == 'bottom' else '顶'}@{last['mergedIdx']}")
+    k["nearDouble"] = True  # 单跳封顶（复用既有旗标，_REPLAY_FLAGS 已含）
+    return _stkCons(k, head)
+
+
 def applyNearDoubleOpen(ctx, head):
     """末根合并K不等右邻收盘成顶/底分型，即可参与同类型近等取后。
 
@@ -1541,6 +1639,11 @@ def biStep(ctx, head, k):
                 if prev.get("macdCross", False) is True:
                     k["macdCross"] = True
                 return _stkCons(k, head[1][1])        # result[-2] = k; pop()
+        # 死顶/死底近等吸收（2026-10-22，详见 _deadNearAbsorb docstring）：双顶/双底的
+        # 前一个顶/底自身不成笔（间隔不足）时，与其近等的后顶/后底吸收它作为笔端点。
+        absorbed = _deadNearAbsorb(ctx, last, head, k)
+        if absorbed is not None:
+            return absorbed
         if CHAN_CFG["debug"]:
             print(f"[阶段二] 忽略 k: {k['mergedIdx']}")
         return head

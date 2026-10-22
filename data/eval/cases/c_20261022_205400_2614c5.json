@@ -1,10 +1,10 @@
 {
- "id": "c_20261012_134635_ea4fb9",
- "name": "XAUUSD 9-7 19:30 多 60 wait2Buy +34.73",
+ "id": "c_20261022_205400_2614c5",
+ "name": "XAUUSD 9-23 03:36 空 60 wait2Sell +188.41",
  "kind": "pnl",
- "source": "live",
- "runId": null,
- "sourceKey": "row|chan_v1|OANDA:XAUUSD|1788220800|1789084799|OANDA:XAUUSD|1788780600|long|60|wait2Buy|1788781680",
+ "source": "run",
+ "runId": "20261022-204837-64f2",
+ "sourceKey": "row|chan_v1|OANDA:XAUUSD|1788220800|1790812799|OANDA:XAUUSD|1790105760|short|60|wait2Sell|1790106120",
  "scope": "rows",
  "symbol": "OANDA:XAUUSD",
  "strategy": "chan_v1",
@@ -17,7 +17,7 @@
    "3"
   ],
   "from": "2026-09-01",
-  "to": "2026-09-10",
+  "to": "2026-09-30",
   "lead_days": 60,
   "warmup": 60,
   "with_30s": false,
@@ -26,7 +26,7 @@
   "strategy": "chan_v1",
   "symbol": "OANDA:XAUUSD",
   "from_ts": 1788220800,
-  "to_ts": 1789084799,
+  "to_ts": 1790812799,
   "slip_stop": 3.0,
   "slip_fallback": 10.0,
   "slip_be": 3.0,
@@ -36,7 +36,7 @@
   "slip_be_atr_k": 0.0,
   "lots": 4,
   "contract_mult": 1.0,
-  "journal": "D:\\AI_PROJECTS\\Tradingview\\Tradingview\\data\\journal\\bt_chan_OANDA-XAUUSD_20261012_134309653.ndjson"
+  "journal": "E:\\AI_Projects\\TRADINGVIEW\\data\\journal\\bt_chan_OANDA-XAUUSD_20261022_200720130.ndjson"
  },
  "replay": {
   "strategy": "chan_v1",
@@ -47,7 +47,7 @@
    "wickRatio": 0.7,
    "wickMinLen": 0.5,
    "wickMinRange": 15.0,
-   "fractalSideRealWick": false,
+   "fractalSideRealWick": true,
    "endInnerRecoverOn": true,
    "wideBarOn": true,
    "wideBarPointsD": 30.0,
@@ -56,8 +56,6 @@
    "wideBarPoints15": 30.0,
    "wideBarPoints3": 30.0,
    "divergeDurRatio": 3,
-   "firstNoDiverge": true,
-   "secondDivergeGate": true,
    "nearDoubleFixed": 2.0,
    "nearDouble3": true,
    "nearDouble15": true,
@@ -75,6 +73,9 @@
    "divergeConfirm": false,
    "entryMacdShrink": true,
    "stopEntryBarFloor": true,
+   "anchorWinBars": 2,
+   "anchorWinPts": 10.0,
+   "anchorWinTrailOn": true,
    "macdZeroTol": 5.0,
    "strong2BuyMacdOn": false,
    "divergeReferByZs": true,
@@ -82,7 +83,7 @@
    "synthIntrabarBars": true,
    "pointEnoughForming": true,
    "windowDays3": 15,
-   "windowDays15": 30,
+   "windowDays15": 50,
    "windowDays30S": 3,
    "debug": false
   },
@@ -172,19 +173,12 @@
      "trendRes": "",
      "trendRebound": true,
      "reboundNearPts": 5.0,
-     "reboundAngleRef": 5.0,
-     "prevHighNearPts": 5.0,
-     "secondNearPts": 5.0,
-     "thirdStrongTrend": true,
-     "weakTierByOrigin": true
+     "reboundAngleRef": 5.0
     },
     "marks": {
-     "nearAtrRatio": 0.3,
-     "keep": 10,
-     "class2ZsTol": 0.0,
+     "keep": 100,
      "thirdZsTol": 0.0,
-     "divergeDurRatio": 3,
-     "secondDivergeGate": true
+     "divergeDurRatio": 3
     },
     "trendRes": "",
     "exit_min_merged": 5,
@@ -197,7 +191,7 @@
     "exitStopSrPct": 100.0,
     "exitStopBeOn": true,
     "exitStopBePct": 100.0,
-    "exitStopBeMode": "entry",
+    "exitStopBeMode": "bi",
     "exitHalfMrOn": false,
     "exitHalfMrPct": 50.0,
     "exitHalfOn": true,
@@ -208,7 +202,8 @@
     "exitTrailPct": 25.0,
     "exitTrailSlip": 1.0,
     "exitTrailSrc": "detect",
-    "exitExpectOn": true
+    "exitExpectOn": true,
+    "exitTouchOn": true
    },
    "entry_macd_shrink": null,
    "stop_entry_bar_floor": null
@@ -221,65 +216,73 @@
    "3"
   ],
   "data_from_ts": 1783036800,
-  "to_ts": 1789084799,
+  "to_ts": 1790812799,
   "start_ts": 1788220800,
   "from": "2026-09-01"
  },
  "positions": [
   {
-   "id": 48,
+   "id": 578,
    "mode": "backtest",
    "strategy": "chan_v1",
    "symbol": "OANDA:XAUUSD",
-   "time": 1788780600,
-   "direction": "long",
+   "time": 1790105760,
+   "direction": "short",
    "periodX": "60",
-   "strategyKey": "wait2Buy",
-   "markRes": "15",
-   "price": 4381.24,
-   "nearSr": 4369.83751,
+   "strategyKey": "wait2Sell",
+   "markRes": "3",
+   "price": 4371.38,
+   "nearSr": 4343.72218,
    "trendDirection": null,
    "trendReason": null,
-   "planDirection": "多头多",
+   "pointType": "类2卖",
+   "pointStrong": true,
    "fallback": false,
    "nearEqual": false,
    "expectBi": false,
    "status": "已平仓",
-   "entryTime": 1788781680,
-   "entryPrice": 4391.215,
+   "entryTime": 1790106120,
+   "entryPrice": 4368.635,
    "lots": 4,
    "mult": 1.0,
-   "stopRef": 4381.215,
+   "stopRef": 4378.635,
    "state": "closed",
-   "exitTime": 1788854040,
-   "exitPrice": 4392.615,
-   "exitType": "stopBe",
+   "exitTime": 1790331120,
+   "exitPrice": 4306.4525,
+   "exitType": "profitLock",
    "exits": [
     {
      "type": "breakeven",
-     "time": 1788792300,
-     "price": 4419.655,
-     "why": "TP1 保本：背驰周期 15 首笔有利方向（上涨）笔 9-7 22:45 @ 4419.65 完成（信号 9-7 19:30 之后），止损位上移至保本位 beStop 4391.22（当拍生效，仅状态迁移不成交）"
+     "time": 1790108460,
+     "price": 4358.31,
+     "why": "TP1 保本：背驰周期 3 首笔有利方向（下跌）笔 9-23 04:21 @ 4358.31 完成（信号 9-23 03:36 之后），止损位上移至保本位 beStop 4374.38（当拍生效，仅状态迁移不成交）（笔端点 4371.38+保本滑点 3.00）"
     },
     {
      "type": "half",
-     "time": 1788804000,
-     "price": 4407.18,
-     "why": "够笔止盈触发（顺势，计划方向 多头多）：检测周期 60 有利方向（上涨）笔 9-7 22:00 @ 4419.65 在进场 9-7 19:48 之后完成（末笔方向满足 lastBiOk），平 50%（2 手）挂起；剩余止损移至保本位 beStop 4391.22；下一开盘 9-8 02:00 @ 4407.18 成交",
+     "time": 1790139600,
+     "price": 4344.14,
+     "why": "够笔止盈触发（顺势·预期口径，策略 wait2Sell）：检测周期 60 自进场 9-23 03:42 所在合并块起向有利方向（下跌）已走 5 块合并K（不等确认笔），平 50%（2 手）挂起；剩余止损移至保本位 beStop 4374.38；下一开盘 9-23 13:00 @ 4344.14 成交",
      "lots": 2
     },
     {
-     "type": "stopBe",
-     "time": 1788854040,
-     "price": 4392.615,
-     "why": "stopBe 触发：9-8 15:51 当根最低 4391.01 跌破保本位 beStop 4391.22，平 100%（2 手）挂起；下一开盘 9-8 15:54 @ 4392.61 成交",
-     "lots": 2
+     "type": "close",
+     "time": 1790171100,
+     "price": 4291.395,
+     "why": "过高低点止盈触发（顺势·预期口径，策略 wait2Sell）：检测周期 60 有利方向（下跌）当根收盘K极值 4286.80（9-23 21:42）破前一同向笔端点 4291.49（9-22 16:00），不等确认笔，平 25%（1 手）挂起；下一开盘 9-23 21:45 @ 4291.40 成交",
+     "lots": 1
+    },
+    {
+     "type": "profitLock",
+     "time": 1790331120,
+     "price": 4306.4525,
+     "lots": 1,
+     "why": "锁定盈利触价出场：最大盈利 124.36 点已超过 100.00 点，至少锁定 50% = 62.18 点（锁定价 4306.45）；9-25 18:12 当根最高 4308.23 冲上锁定价，按触价 4306.45 即时全平剩余 1 手"
     }
    ],
-   "pnl": 34.72999999999956,
+   "pnl": 188.41249999999945,
    "fillMode": "confirm"
   }
  ],
- "expectedTotal": 34.73,
- "createdAt": 1791783995.1817172
+ "expectedTotal": 188.41,
+ "createdAt": 1792673640.7171881
 }

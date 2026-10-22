@@ -38,7 +38,9 @@
 
 闸门代码→中文见 `bt_journal.GATE_LABELS`（16 个进出场闸门 + 背驰下沉内部原因细分 +
 fxma 专属闸门；`anchor_bar_window`=锚点窗口外——触发/背驰点须在锚K起 anchorWinBars 根
-检测周期K内且距窗口极值 ≤ anchorWinPts 点（2026-10-18 用户规则、2026-10-21 重定义），
+检测周期K内且距窗口极值 ≤ anchorWinPts 点（2026-10-18 用户规则、2026-10-21 重定义；
+2026-10-22 起 anchorWinTrailOn 默认开=窗口内创新高/新低时时间窗锚K随极值所在K重开，
+reject ctx 增 effAnchorTime/extTime/extPrice），
 ctx 含 pointType/anchorTime/nowBarTime（时间窗）或 markRes/divergeTime（次级时间窗），
 价距拒绝行另含 price/winExt/dist（当拍现价或背驰点价/窗口极值/距离）；`fx_prov_invalidated`=pred2 预判点消失——收复前低/前高、结构重算或真点
 接管，ctx 含 provTime/provPrice/dSegStart，2026-10-09）。**拒绝行存结构化数字，中文渲染

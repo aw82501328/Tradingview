@@ -1731,9 +1731,11 @@ class BacktestEngine:
                 "expectBi": self.expect_bi, "divergeConfirm": self.diverge_confirm,
                 "entryMacdShrink": self.entry_macd_shrink,
                 "stopEntryBarFloor": self.stop_entry_bar_floor,
-                # 锚点窗口（2026-10-21 重定义；闸门直读 CHAN_CFG，header 只记口径）
+                # 锚点窗口（2026-10-21 重定义、2026-10-22 trailing 重开；
+                # 闸门直读 CHAN_CFG，header 只记口径）
                 "anchorWinBars": int(CHAN_CFG.get("anchorWinBars", 2) or 2),
                 "anchorWinPts": float(CHAN_CFG.get("anchorWinPts", 10.0) or 0.0),
+                "anchorWinTrailOn": bool(CHAN_CFG.get("anchorWinTrailOn", True)),
                 "exitMinMerged": self.exit_min_merged,
                 "exitCfg": dict(self.exit_cfg),
                 # 实际加载数据范围（诊断数据源截断：cards 说"跑到最新"但加载层少给数据时
