@@ -1264,10 +1264,32 @@ function applyStrategyFields() {
   });
 }
 // 回测每策略卡：字段显隐按该卡策略固定应用（无卡内下拉）
+// chan_v1 回测卡专属（2026-10-23 双周期链）：周期/30秒开关隐藏——周期由参数中心
+// 「周期链」页签驱动（链A/链B 节点勾选=开单周期，30S 为链A 细层开关仅回测）；
+// 回放/实时卡不受影响（仍用卡内周期多选）
+const BT_CARD_HIDE_EXTRA = { chan_v1: ['periods', 'with_30s'] };
 function applyBtCardFields() {
   BT_STRATEGIES.forEach(s => {
     const card = el(`card-bt-${s.id}`);
-    if (card) applyStrategyHide(card, s.id);
+    if (!card) return;
+    applyStrategyHide(card, s.id);
+    const extra = BT_CARD_HIDE_EXTRA[s.id] || [];
+    if (extra.includes('periods')) {
+      const fp = card.querySelector('.f-periods');
+      if (fp) fp.style.display = 'none';
+      let note = card.querySelector('.chain-note');
+      if (!note && fp) {
+        note = document.createElement('div');
+        note.className = 'chain-note';
+        note.style.cssText = 'grid-column:1/-1;color:#8a93a6;font-size:12px;margin:-6px 0 2px';
+        note.textContent = '周期由参数中心「交易策略·缠论V1 → 周期链」页签驱动：链A(30秒-3-15-60-240)/链B(1-5-30-240) 各节点勾选=开单周期，两条链可同时独立运行；勾选30秒=链A加载细层（仅回测）。历史方案载入回放不受影响。';
+        fp.parentNode.insertBefore(note, fp);
+      }
+    }
+    if (extra.includes('with_30s')) {
+      const f30 = card.querySelector('[data-cfg="with_30s"]')?.closest('.field');
+      if (f30) f30.style.display = 'none';
+    }
   });
 }
 async function loadStrategyOptions() {
@@ -1334,7 +1356,14 @@ function bindBtCard(sid) {
   el(`btn-start-${cid}`).onclick = async () => {
     const cfg = collectCfg(cid, 'backtest');
     cfg.strategy = sid;
-    if (!cfg.periods.length && !STRATEGY_FIELD_HIDE[sid]?.includes('periods')) { alert('请至少选择一个周期'); return; }
+    // 双周期链（2026-10-23）：chan 周期由参数中心·周期链驱动，不随 cfg 下发——
+    // 后端见 cfg.periods 会按「历史方案旧口径」优先处理
+    if (BT_CARD_HIDE_EXTRA[sid]?.includes('periods')) {
+      delete cfg.periods;
+      delete cfg.with_30s;
+    } else if (!cfg.periods.length && !STRATEGY_FIELD_HIDE[sid]?.includes('periods')) {
+      alert('请至少选择一个周期'); return;
+    }
     // 品种多选：空 → 拒绝；多品种批量=每品种一个子进程（数据源固定本地存储）
     cfg.symbols = String(cfg.symbols || '').split(',').map(s => s.trim()).filter(Boolean);
     if (!cfg.symbols.length) { alert('请至少选择一个品种'); return; }

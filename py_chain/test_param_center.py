@@ -531,5 +531,87 @@ class TestExitModesParams(unittest.TestCase):
         self.assertEqual(mp["exitHalfPct"], 50)
 
 
+class TestChainParams(unittest.TestCase):
+    """周期链模块（2026-10-23 双周期链）：multi 校验/跨键校验/chain_specs 推导/
+    engine_module_params 透传。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._orig_file = param_center.PARAMS_FILE
+        param_center.PARAMS_FILE = str(Path(self.tmp.name) / "module_params.json")
+
+    def tearDown(self):
+        param_center.PARAMS_FILE = self._orig_file
+        self.tmp.cleanup()
+
+    def test_defaults_and_spec(self):
+        d = param_center.defaults_of("chain")
+        self.assertTrue(d["chainAOn"])
+        self.assertEqual(d["chainA"], "60,15,3")     # 240 默认不勾（仅结构参考）
+        self.assertFalse(d["chainBOn"])
+        self.assertEqual(d["chainB"], "1,5,30")
+        self.assertEqual(param_center.PARAM_MODULES["chain"]["category"], "strategy")
+        # choices 白名单：30S 只在链A、1 只在链B
+        spec_a = param_center.PARAM_MODULES["chain"]["params"]["chainA"]
+        spec_b = param_center.PARAM_MODULES["chain"]["params"]["chainB"]
+        self.assertIn("30S", spec_a[2])
+        self.assertNotIn("30S", spec_b[2])
+        self.assertIn("1", spec_b[2])
+        self.assertNotIn("1", spec_a[2])
+
+    def test_normalize_rejects_cross_chain_node(self):
+        with self.assertRaises(ValueError):
+            param_center.normalize("chain", {"chainA": "60,15,30"})   # 30 不属于链A
+        with self.assertRaises(ValueError):
+            param_center.normalize("chain", {"chainB": "5,60"})       # 60 不属于链B
+        with self.assertRaises(ValueError):
+            param_center.normalize("chain", {"chainA": ""})           # multi 至少一项
+
+    def test_update_rejects_both_off(self):
+        with self.assertRaises(ValueError):
+            param_center.update("chain", {"chainAOn": False, "chainA": "60,15,3",
+                                          "chainBOn": False, "chainB": "1,5,30"})
+
+    def test_update_rejects_no_detect_period(self):
+        # 链A 只勾 3 且不勾 30S → 3 无下级不作检测周期 → 无检测周期拒保存
+        with self.assertRaises(ValueError):
+            param_center.update("chain", {"chainAOn": True, "chainA": "3",
+                                          "chainBOn": False, "chainB": "1,5,30"})
+        # 链B 只勾 5/1（1 是细层不开单）→ 5 需 1 已加载才作检测周期，但开单勾选里
+        # 5 有下级 1 → 5 是检测周期——此组合合法（不应抛）
+        eff = param_center.update("chain", {"chainAOn": True, "chainA": "60,15,3",
+                                            "chainBOn": True, "chainB": "5,1"})
+        self.assertTrue(eff["chainBOn"])
+
+    def test_chain_specs_default_and_enabling(self):
+        # 默认：仅链A，periods=D+240/60/15/3，检测=60/15（240 不勾、3 无 30S）
+        specs = param_center.chain_specs({"chain": param_center.defaults_of("chain")})
+        self.assertEqual([s["id"] for s in specs], ["A"])
+        self.assertEqual(specs[0]["periods"], ["D", "240", "60", "15", "3"])
+        self.assertEqual(specs[0]["open_res"], ["60", "15", "3"])
+        self.assertEqual(specs[0]["detect"], ["60", "15"])
+        # 链B 启用：D+240/30/5/1，检测=30/5（1 永不开单）
+        specs = param_center.chain_specs({"chain": {**param_center.defaults_of("chain"),
+                                                    "chainBOn": True}})
+        self.assertEqual([s["id"] for s in specs], ["A", "B"])
+        self.assertEqual(specs[1]["periods"], ["D", "240", "30", "5", "1"])
+        self.assertEqual(specs[1]["detect"], ["30", "5"])
+        # 链A 勾 30S：3 成为检测周期；链B 不勾 1：5 失去检测资格
+        specs = param_center.chain_specs({"chain": {
+            "chainAOn": True, "chainA": "60,15,3,30S",
+            "chainBOn": True, "chainB": "240,30,5"}})
+        self.assertEqual(specs[0]["periods"], ["D", "240", "60", "15", "3", "30S"])
+        self.assertEqual(specs[0]["detect"], ["60", "15", "3"])
+        self.assertEqual(specs[1]["periods"], ["D", "240", "30", "5"])
+        self.assertEqual(specs[1]["detect"], ["240", "30"])
+
+    def test_engine_module_params_carries_chain(self):
+        mp = param_center.engine_module_params({
+            "entry": {"exit_min_merged": 1, "realtime_min_bars": 3, "zs_exit_weak_ratio": 0.5},
+            "plan": {"trendRes": ""}, "points": {}})
+        self.assertEqual(mp["chain"]["chainA"], "60,15,3")   # 缺桶回默认
+        self.assertFalse(mp["chain"]["chainBOn"])
+
+
 if __name__ == "__main__":
     unittest.main()

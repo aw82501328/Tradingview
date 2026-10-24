@@ -298,44 +298,60 @@ def _upperResOf(periodData, res):
     return up
 
 
-def levelsBelow(periodData, X):
+def levelsBelow(periodData, X, chain=None):
     """检测周期 X 之下的**连续**低级别链（逐级映射 lowerResOf：60→15→3；3 之下挂 30S）。
     某级无笔数据（<3 笔）则链在该级截断——区间套逐级下沉、不可跳级
-    （60 与 3 之间缺 15 时链止于 60，不得由 60 直接下到 3）。"""
-    chain = []
+    （60 与 3 之间缺 15 时链止于 60，不得由 60 直接下到 3）。
+    chain（2026-10-23 双周期链）：引擎已加载周期集——映射按数据驱动（链B
+    30→5→1；30S 在集内时 3→30S 自然成立）；None=旧固定映射+3→30S 特挂。"""
+    chain_loaded = chain
+    out = []
     cur = X
     while True:
-        nxt = lowerResOf(cur)
-        if nxt is None and str(cur) == "3":
-            nxt = "30S"  # 3 分钟之下挂 30 秒（--with-30s 时加载）
+        nxt = lowerResOf(cur, chain_loaded)
+        if nxt is None and chain_loaded is None and str(cur) == "3":
+            nxt = "30S"  # 3 分钟之下挂 30 秒（--with-30s 时加载；链口径下 30S 在集内自然命中）
         if nxt is None:
             break
         pd = periodData.get(nxt)
         if not pd or not pd.get("bis") or len(pd["bis"]) < 3:
             break
-        chain.append(nxt)
+        out.append(nxt)
         cur = nxt
-    return chain
+    return out
 
 
-def filterDetectPeriods(periods):
+def filterDetectPeriods(periods, chain=None):
     """检测周期 = 自身之下存在**已加载**更低级别的周期（不含 D/30S）。
     下一级映射与 levelsBelow 一致：lowerResOf（240→60→15→3），3 之下挂 30S。
     30S 未加载时 3 之下无级别 → 3 不作为检测周期（最小检测 15m，背驰最深 3m），
-    避免 realtime 模式下沉链为空、背驰落在检测周期自身（det=3/div=3）。"""
+    避免 realtime 模式下沉链为空、背驰落在检测周期自身（det=3/div=3）。
+    chain（2026-10-23 双周期链）：数据驱动映射（链B 240/30/5 为检测周期、1 之下
+    无级别不作检测）；None=旧固定映射（历史子集回放零变化）。"""
     loaded = {str(p).upper() for p in periods}
     out = []
     for p in periods:
         pu = str(p).upper()
         if pu in ("D", "30S"):
             continue
-        nxt = lowerResOf(pu)
-        if nxt is None and pu == "3":
+        nxt = lowerResOf(pu, chain)
+        if nxt is None and chain is None and pu == "3":
             nxt = "30S"
-        if nxt is None or nxt not in loaded:
+        if nxt is None or str(nxt).upper() not in loaded:
             continue
         out.append(p)
     return out
+
+
+def detectPeriodsOf(periods, openRes, chain=None):
+    """开单周期 = filterDetectPeriods(periods, chain) ∩ openRes（2026-10-23 双周期链
+    的节点勾选口径：勾选=该周期开单；不勾=仅结构参考，仍加载笔/买卖点/支阻，
+    只是不作为检测周期产生进场信号）。openRes=None=不过滤（旧口径全检测）。"""
+    det = filterDetectPeriods(periods, chain)
+    if openRes is None:
+        return det
+    keep = {str(p).upper() for p in openRes}
+    return [p for p in det if str(p).upper() in keep]
 
 
 def biEndingAt(bis, pTime, tol, wantType):
@@ -496,7 +512,7 @@ def counterMoveQualifies(times, lastBi, tCut, enabled=None, merged=None, barSec=
 
 
 def _sinkChainRealtimeNodes(periodData, X, wantDir, tCut=None, periodTimes=None,
-                            expectBiEnabled=None):
+                            expectBiEnabled=None, chain=None):
     """当下制下沉链（逐级节点版，供 realtimeLowerDiverge 回退用；判定与原实现逐行等价）：
     返回节点列表 [ {res, F, parentBi} ... ]——
       - 节点 0 = X 自身（F = X 末段，parentBi = X 的上级包含笔，仅停止级=X 时用作 containment）；
@@ -524,7 +540,7 @@ def _sinkChainRealtimeNodes(periodData, X, wantDir, tCut=None, periodTimes=None,
             return []  # 末笔反向且反向段未预期成笔 → 无链（保持旧口径的短路行为）
     nodes = [{"res": X, "F": bisX[-1], "parentBi": None}]
     C, B_C = X, bisX[-1]
-    for L in levelsBelow(periodData, X):
+    for L in levelsBelow(periodData, X, chain):
         secC = intervalSecOf(C) or 0
         secL = intervalSecOf(L) or 0
         bisL = periodData[L]["bis"]
@@ -578,7 +594,7 @@ def _sinkChainRealtimeNodes(periodData, X, wantDir, tCut=None, periodTimes=None,
     return nodes
 
 
-def sinkChainRealtime(periodData, X, wantDir):
+def sinkChainRealtime(periodData, X, wantDir, chain=None):
     """当下制下沉链：P = 候选顶/底（随下沉逐级发现的各级末段当下极值）。
     X 级承载笔 B_X 两种形态：
       ① 末段终点 ≈ P（通常：X 末段与下级末段共享当下极值）→ B_X = X 末段；
@@ -586,7 +602,7 @@ def sinkChainRealtime(periodData, X, wantDir):
          B_X = 虚拟形成笔（X 末段端点 → P 开放段），段内展开 ≥3 同样下沉。
     @returns (stopRes, parentBi)：stopRes=下沉停止级（可为 X 自身）；parentBi=停止级段
     的所属上级笔（规则2 参照 containment 窗口）；链不通返回 (None, None)。"""
-    nodes = _sinkChainRealtimeNodes(periodData, X, wantDir)
+    nodes = _sinkChainRealtimeNodes(periodData, X, wantDir, chain=chain)
     if not nodes:
         return None, None
     if len(nodes) == 1:
@@ -594,7 +610,7 @@ def sinkChainRealtime(periodData, X, wantDir):
     return nodes[-1]["res"], nodes[-1]["parentBi"]
 
 
-def sinkChainConfirm(periodData, X, pTime, pDir):
+def sinkChainConfirm(periodData, X, pTime, pDir, chain=None):
     """确认制下沉链：P = 已完成背驰笔端点。X 级承载笔 B_X：
       ① X 级存在「以 P 为终点」的笔（任意位置，含末段延伸笔）→ 该笔；
       ② P 晚于 X 末段端点（X 端点已过、后续反向结构未确认，案例 A 同型）→ 虚拟形成笔；
@@ -613,7 +629,7 @@ def sinkChainConfirm(periodData, X, pTime, pDir):
             return None, None
     C = X
     parentBi = None
-    for L in levelsBelow(periodData, X):
+    for L in levelsBelow(periodData, X, chain):
         secC = intervalSecOf(C) or 0
         secL = intervalSecOf(L) or 0
         bisL = periodData[L]["bis"]
@@ -951,7 +967,7 @@ def _zs_by_upper_cached(bis, upperBis, barSec):
     return zss
 
 
-def lowerDiverge(periodData, X, wantDir):
+def lowerDiverge(periodData, X, wantDir, chain=None):
     """以下级别出现背驰（区间套下沉版，SPEC_divergence_chanset 规则 1/2/3）：
     收集所有更低周期中方向匹配的背驰点后逐个做下沉链校验，仅保留
     「候选级别 == 该点下沉停止级」且「参照笔与候选段同处其所属上级笔内部」的候选；
@@ -978,7 +994,7 @@ def lowerDiverge(periodData, X, wantDir):
             cands.append({"res": res, "point": p})
     filtered = []
     for c in cands:
-        stopRes, parentBi = sinkChainConfirm(periodData, X, c["point"]["time"], c["point"]["direction"])
+        stopRes, parentBi = sinkChainConfirm(periodData, X, c["point"]["time"], c["point"]["direction"], chain)
         if stopRes != c["res"]:
             continue  # 规则 1/3：该点的下沉停止级不是候选级别（其结构已在停止级或更高级判定）
         if parentBi is not None:
@@ -1200,7 +1216,7 @@ def evaluateEntry(ctx, strategy):
     #      策略专属条件不依赖背驰点（第2步已过），只需重试「支阻位附近」。
     #      （--with-30s 后 30S 高频背驰点常抢占原级别点，且其微观极值价常远离支阻位——
     #       无回退时信号彻底消失：旧点被抢占丢弃、新点校验被拒，两边都不出箭头。）
-    cands = lowerDiverge(periodData, res, divergeDir)
+    cands = lowerDiverge(periodData, res, divergeDir, ctx.get("chain"))
     if not cands:
         return {"ok": False, "reason": "以下级别无匹配方向背驰"}
     if timesX and anchorWinIdx is not None:
@@ -1382,7 +1398,7 @@ def _evalRealtimeNode(periodData, node, wantDir, tCut, periodTimes, minBars):
 def realtimeLowerDiverge(periodData, X, wantDir, tCut,
                           periodTimes=None, minBars=REALTIME_MIN_BARS,
                           divergeConfirm=None, expectBiEnabled=None,
-                          entryMacdShrink=None, reasons_out=None):
+                          entryMacdShrink=None, reasons_out=None, chain=None):
     """当下背驰（区间套下沉版，每根 fine 收盘调用）。
 
     形成中段 = 笔列表最后一笔——回测引擎的增量状态已用 extendLastBiFrom
@@ -1419,7 +1435,7 @@ def realtimeLowerDiverge(periodData, X, wantDir, tCut,
     """
     nodes = _sinkChainRealtimeNodes(periodData, X, wantDir, tCut=tCut,
                                     periodTimes=periodTimes,
-                                    expectBiEnabled=expectBiEnabled)
+                                    expectBiEnabled=expectBiEnabled, chain=chain)
     if not nodes or len(nodes) < 2:
         if reasons_out is not None:
             reasons_out.append({"gate": "sink_chain_short"})
@@ -1477,7 +1493,7 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
                             zsExitWeakRatio=None, trend_res=None, trend_state=None,
                             periodMerged=None, periodBars=None, firedIndex=None,
                             entryMacdShrink=None, range_res=None, range_gate=None,
-                            on_reject=None):
+                            on_reject=None, chain=None):
     """当下模式进场评估（每根 fine 收盘调用，信号无需等反向笔确认）。
 
     候选来源（2026-10-16 起）：periodPoints 的 chan_core 买卖点——买卖双侧各自取
@@ -1523,6 +1539,9 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
                              每个静默 continue 闸门处上报（交易日志「为什么没开单」；
                              ctx 为结构化数字，bt_journal 按 (周期,策略,段,闸门) 去重落盘，
                              热路径只多一次调用+小 dict 构造）。
+    @param chain             周期链上下文（2026-10-23 双周期链：引擎已加载周期集）——
+                             下沉链 levelsBelow 按数据驱动推导（链B 30→5→1）；
+                             None=旧固定映射（历史子集回放零变化）。
     @returns 新信号列表（flat），每项含 { periodX, markRes, time, price, direction,
              strategyKey, strategyLabel, signalNote, nearSr, pointType, pointStrong,
              realtime:True, segStart, fallback?, nearEqual?, expectBi,
@@ -1729,7 +1748,7 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
                                          divergeConfirm=divergeConfirm,
                                          expectBiEnabled=expectBiEnabled,
                                          entryMacdShrink=entryMacdShrink,
-                                         reasons_out=rsn)
+                                         reasons_out=rsn, chain=chain)
             if not cands and rsn:
                 for r in rsn:
                     _rej(r.pop("gate"), seg_start=r.pop("segStart", None), skey=key, ctx=r)
@@ -1812,13 +1831,16 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
 # with_30s=True 时追加 30S（3 分钟状态可用 30S 背驰产生进场信号，箭头画在 30S 级别）
 ALL_RES = ["D", "240", "60", "15", "3"]
 ALL_RES_WITH_30S = ["D", "240", "60", "15", "3", "30S"]
+# 双周期链（2026-10-23）：链B 周期码入白名单（res_chain 口径下 all_res 直接取引擎
+# 周期集，此处常量仅供旧调用方缺省/文档参照）
+ALL_RES_CHAIN_B = ["D", "240", "30", "5", "1"]
 
 
 def compute_entries(periodBis, barsByPeriod, periodPoints, srLevels, detectPeriods,
                     near=NEAR, periodMacd=None, periodAtr=None, with_30s=False,
                     zs_exit_weak_ratio=ZS_EXIT_WEAK_RATIO,
                     trend_res=None, trend_state=None, trend_cfg=None,
-                    range_res=None, range_gate=None, on_reject=None):
+                    range_res=None, range_gate=None, on_reject=None, res_chain=None):
     """逐周期判定进场状态（直接消费买卖点，2026-10-16 起替代计划锚）→ 生成进场信号。
 
     @param periodBis     各周期笔 { 周期: [bis] }
@@ -1832,6 +1854,9 @@ def compute_entries(periodBis, barsByPeriod, periodPoints, srLevels, detectPerio
     @param periodMacd    可选：各周期预计算 MACD { 周期: [macdArr] }
     @param periodAtr     可选：各周期预计算 ATR { 周期: atr }
     @param with_30s      启用 30 秒级别（ALL_RES 追加 30S，仍按数据存在性过滤）
+    @param res_chain     周期链上下文（2026-10-23 双周期链：引擎已加载周期集）——
+                         周期白名单/structurePeriods 收笔下级/下沉链 levelsBelow 均
+                         按数据驱动推导（链B 240→30→5→1）；None=旧固定映射（零变化）。
     @param trend_res     顺势参考周期（None→TREND_RES，默认关闭；"240"/"D"=开启）。
                          参考周期及以上不作检测周期（只作方向锚，结构性剔除）；
                          参考周期方向与信号方向相反时跳过（规则见
@@ -1851,10 +1876,14 @@ def compute_entries(periodBis, barsByPeriod, periodPoints, srLevels, detectPerio
              strategyLabel, signalNote, nearSr, color, markRes, pointType, pointStrong,
              trendDirection, trendReason }
     """
-    periodBis = structurePeriods(periodBis, barsByPeriod)
+    periodBis = structurePeriods(periodBis, barsByPeriod, res_chain=res_chain)
     periodMacd = periodMacd or {}
     periodAtr = periodAtr or {}
     all_res = ALL_RES_WITH_30S if with_30s else ALL_RES
+    if res_chain is not None:
+        # 双周期链（2026-10-23）：白名单=引擎已加载周期集（含 30S/链B 周期），
+        # 仍按数据存在性过滤（bis/bars 空跳过）
+        all_res = list(res_chain)
     periodData = {}
     for res in all_res:
         bis = periodBis.get(res, []) or []
@@ -1892,7 +1921,8 @@ def compute_entries(periodBis, barsByPeriod, periodPoints, srLevels, detectPerio
     trend_sec = (intervalSecOf(trend_res) or 0) if trend_res else 0
     if trend_state is None and trend_res:
         trend_state = trend_state_of(periodBis, barsByPeriod, trend_res,
-                                     periodMacd=periodMacd, cfg=trend_cfg)
+                                     periodMacd=periodMacd, cfg=trend_cfg,
+                                     res_chain=res_chain)
     trend_dir = (trend_state or {}).get("dir") if trend_res else None
     trend_reason = (trend_state or {}).get("reason", "") if trend_res else ""
     # 震荡参考周期（compute_regime 的 regime；默认关闭）
@@ -1927,6 +1957,7 @@ def compute_entries(periodBis, barsByPeriod, periodPoints, srLevels, detectPerio
             "srLevels": srLevels,
             "periodData": periodData,
             "zs_exit_weak_ratio": zs_exit_weak_ratio,
+            "chain": res_chain,
         }
         for point in cands:
             strategy = pointStrategyOf(point)

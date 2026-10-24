@@ -33,6 +33,25 @@ _lock = threading.Lock()
 _jobs = {}   # strategy -> {phase, error, thread, pid, spawned_at}
 
 
+# ---- 双周期链槽位（2026-10-23）----
+# chan_v1_b = 缠论V1·链B 虚拟槽位（不进 module_registry：策略/工作台目录零污染）。
+# kv/会话命名空间 ns="chan_v1:B" 与 live_trader.ns_strategy 一致；链A 键名与历史一致。
+
+
+def _slot_strategy(slot):
+    """槽位 id → live_api 内部 sid（kv 命名空间/进程检测/config 解析统一用它）。
+    chan_v1_b → chan_v1:B；其余经注册表校验（未知 → ValueError → 400）。"""
+    s = str(slot or "").strip()
+    if s == "chan_v1_b":
+        return "chan_v1:B"
+    return module_registry.normalize_strategy(s)
+
+
+def live_slots():
+    """overview 槽位清单：注册表策略 + 链B 虚拟槽位（前端 TAB 顺序稳定）。"""
+    return module_registry.strategy_ids() + ["chan_v1_b"]
+
+
 def _heartbeat_online(sid):
     """心跳 90 秒内视为进程在线（与页面「在线」徽章同一口径）。"""
     hb = live_store.load_state(live_store.state_key("heartbeat", sid)) or {}
@@ -140,7 +159,10 @@ def _terminal_running(exe):
 
 
 def _trader_running(sid):
-    """该策略的 live_trader 是否已在跑（预热期间尚无心跳也算）。"""
+    """该策略的 live_trader 是否已在跑（预热期间尚无心跳也算）。
+
+    双周期链（2026-10-23）：链B 进程经 live_config.chain_b.json / --chain B 识别；
+    链A（chan_v1）= 非 fxma 且非链B 的 chan 进程。"""
     out = _ps("Get-CimInstance Win32_Process -Filter "
               "\"Name='python.exe' OR Name='pythonw.exe'\" "
               "| ForEach-Object { $_.CommandLine }")
@@ -149,7 +171,14 @@ def _trader_running(sid):
         if "py_chain.live_trader" not in cmd:
             continue
         is_fxma = "live_config.fxma" in cmd or "--strategy fxma_v1" in cmd
-        if (sid == "fxma_v1" and is_fxma) or (sid != "fxma_v1" and not is_fxma):
+        is_chain_b = "live_config.chain_b" in cmd or "--chain B" in cmd
+        if sid == "fxma_v1":
+            if is_fxma:
+                return True
+        elif sid == "chan_v1:B":
+            if not is_fxma and is_chain_b:
+                return True
+        elif not is_fxma and not is_chain_b:
             return True
     return False
 
@@ -205,10 +234,18 @@ def _set_job(sid, **kw):
 
 
 def _strategy_cfg(sid):
-    """与 CLI 同一配置：缠论V1 走默认合并，强分型均线V1 走 fxma 本地文件。"""
+    """与 CLI 同一配置：缠论V1 走默认合并，强分型均线V1 走 fxma 本地文件，
+    缠论V1·链B（chan_v1:B）走 chain_b 本地文件（缺省回落模板——账号空会被
+    _assert_startable 拒启并提示）。"""
     from .live_trader import DEFAULT_CONFIG_PATH, load_config
     if sid == "chan_v1":
         return load_config(), None
+    if sid == "chan_v1:B":
+        base = os.path.join(os.path.dirname(DEFAULT_CONFIG_PATH),
+                            "live_config.chain_b.local.json")
+        path = base if os.path.isfile(base) else os.path.join(
+            os.path.dirname(DEFAULT_CONFIG_PATH), "live_config.chain_b.json")
+        return load_config(path), path
     if sid == "fxma_v1":
         path = os.path.join(os.path.dirname(DEFAULT_CONFIG_PATH),
                             "live_config.fxma.local.json")
@@ -300,8 +337,11 @@ def _launch_worker(sid, cfg, cfg_path):
 
 
 def begin_launch(strategy_id):
-    """开启交易时拉起终端与 live_trader。已在线或已在启动则不重复拉起。"""
-    sid = module_registry.normalize_strategy(strategy_id)
+    """开启交易时拉起终端与 live_trader。已在线或已在启动则不重复拉起。
+
+    双周期链（2026-10-23）：strategy_id 接受槽位 chan_v1_b（缠论V1·链B）——
+    独立 config/进程/magic/kv 命名空间 chan_v1:B；链A 仍传 chan_v1（键名不变）。"""
+    sid = _slot_strategy(strategy_id)
     with _lock:
         job = _jobs.get(sid)
         if job and job.get("thread") and job["thread"].is_alive():
@@ -377,16 +417,25 @@ def _effective_order(sid, session):
     return ("shadow" if shadow else "live"), lots, list(ORDER_LOTS_CHOICES)
 
 
-def _strategy_snapshot(sid):
-    """单策略快照：无会话也占位（offline 空表），保证 tab 列表稳定。"""
-    spec = module_registry.STRATEGIES.get(sid) or {}
+def _strategy_snapshot(slot):
+    """单槽位快照：无会话也占位（offline 空表），保证 tab 列表稳定。
+
+    双周期链：slot=chan_v1_b 时 strategy 字段回传槽位 id（前端路由键），kv/进程
+    检测用内部 sid=chan_v1:B。"""
+    sid = _slot_strategy(slot)
+    spec_sid = "chan_v1" if sid == "chan_v1:B" else sid
+    spec = module_registry.STRATEGIES.get(spec_sid) or {}
+    title = spec.get("title", spec_sid)
+    if sid == "chan_v1:B":
+        title = f"{title}·链B"
     session = live_store.load_state(live_store.state_key("session", sid)) or {}
     hb = live_store.load_state(live_store.state_key("heartbeat", sid)) or {}
     order_mode, order_lots, order_choices = _effective_order(sid, session)
     cursor = live_store.load_state(live_store.state_key("engine_cursor", sid)) or {}
     out = {
-        "ok": True, "strategy": sid,
-        "strategy_title": spec.get("title", sid),
+        "ok": True, "strategy": slot,
+        "chain": ("B" if sid == "chan_v1:B" else ("A" if spec_sid == "chan_v1" else None)),
+        "strategy_title": title,
         "online": _heartbeat_online(sid),
         "session": session, "heartbeat": hb, "engine_cursor": cursor,
         "trading_enabled": _trading_enabled(sid),
@@ -411,16 +460,17 @@ def _strategy_snapshot(sid):
 
 
 def overview():
-    """多策略实盘状态快照列表（live_trader 可能不在运行：heartbeat 超时即离线）。"""
+    """多策略实盘状态快照列表（live_trader 可能不在运行：heartbeat 超时即离线）。
+
+    双周期链（2026-10-23）：链B 以虚拟槽位 chan_v1_b 并列展示（独立 kv/会话/magic）。"""
     live_store.ensure_tables()   # webapp 可能先于 live_trader 首次运行启动（幂等）
     return {"ok": True,
-            "strategies": [_strategy_snapshot(sid)
-                           for sid in module_registry.strategy_ids()]}
+            "strategies": [_strategy_snapshot(slot) for slot in live_slots()]}
 
 
 def set_trading(strategy_id, enabled):
     """写页面交易开关 kv + 审计事件（进程离线时也照记，恢复后生效）。"""
-    sid = module_registry.normalize_strategy(strategy_id)   # 未知 → ValueError → 400
+    sid = _slot_strategy(strategy_id)   # 未知 → ValueError → 400
     live_store.ensure_tables()
     live_store.save_state(live_store.state_key(TRADING_KEY, sid),
                           {"enabled": bool(enabled)})
@@ -436,7 +486,7 @@ def set_order_settings(strategy_id, mode=None, lots=None):
     from .live_trader import lots_in_range, resolve_order_settings
     if mode is None and lots is None:
         raise ValueError("须指定 mode 或 lots")
-    sid = module_registry.normalize_strategy(strategy_id)
+    sid = _slot_strategy(strategy_id)
     live_store.ensure_tables()
     session = live_store.load_state(live_store.state_key("session", sid)) or {}
     if mode is not None:

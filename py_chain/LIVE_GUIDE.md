@@ -147,3 +147,29 @@ Windows Server VPS（2C/4G/60G，伦敦机房低延迟）：装 Python 3.12 + MT
 - 若未来允许 240 作 markRes，backtest.py 的 barStart 模对齐会静默错位（现状
   markRes 恒 ∈ {3,15,60}，安全）。
 - 风控上限按实例计数；多实例并行时账户总敞口=各实例上限之和，自行约束。
+
+## 双周期链实盘（2026-10-23）
+
+缠论V1 支持两条周期链各自独立实盘进程并行（链A=30S-3-15-60-240 在役；链B=
+1-5-30-240）：
+
+- **链A（现状不变）**：`live_config.json`（magic 20260923、data/LIVE_KILL、
+  data/LIVE_ARMED、kv 键 chan_v1@*）；周期由参数中心·周期链 链A 勾选决定——
+  勾 30S 拒启（MT5 由 M1 重采样无 30 秒行情；30S 仅回测）；fine 恒 3m。
+- **链B（新）**：配置 `web/live_config.chain_b.json`（真实账号放
+  `live_config.chain_b.local.json`，与 fxma 同款约定）——magic **20261023**、
+  kill/arm 文件 `data/LIVE_KILL_B`/`data/LIVE_ARMED_B`、kv 键 chan_v1:B@*。
+  启动前置：①参数中心·周期链 链B 总开关开；②本地库已有 1/5/30 周期数据
+  （首启无数据会按 warmup_days 从 MT5 深拉）。fine=1m，行情由 M1 重采样出
+  1/5/30（BIN_SEC 扩展；"1"=M1 直通）。
+- **页面**：实盘页出现第三 TAB「缠论V1·链B」（虚拟槽位 chan_v1_b）——状态/手数/
+  交易开关/持仓全部独立；进程检测按 config 文件名/live_config.chain_b 识别。
+- **CLI**：`python -m py_chain.live_trader --config py_chain/web/live_config.chain_b.json`
+  （或任意配置里 `"chain": "B"`；`--chain B` 可临时覆盖）。
+- **指纹与漂移**：chain 模块属 chan_v1 param_modules → 两链进程的语义指纹都含整份
+  链配置——改链B 勾选会同时变更链A 进程指纹（保守口径：有持仓拒启，需各自
+  --accept-param-drift 放行）。ENGINE_LOGIC_VERSION=20261023-dual-chain。
+- **风控**：每链实例上限独立计数；账户级跨 magic 守卫（positions(magic=0) 合计
+  max_account_total_volume/max_account_positions）覆盖双链合计敞口。
+- **默认口径变化**：链A 240 默认不勾（不在 240 开单，检测=60/15）——与 2026-10-22
+  前的实盘信号集不同，重启即按新口径（有持仓须 --accept-param-drift）。

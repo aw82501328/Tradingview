@@ -972,3 +972,57 @@ nearSr/止损推导消费）；锁变化局部化/漂移检测/resync 语义放�
 **既有失败（非本批引入，HEAD 6f53f08 同样失败，git worktree 验证）**：test_mark_entry_sink
 3（no_expansion_stops_at_x/only_stop_level_candidate/3m_candidate_filtered…）+
 test_divergence_fallback 6（10-02 近等简化既有，见 wickminrange 记忆）。
+
+## 双周期链（2026-10-23）
+
+链A=30S-3-15-60-240，链B=1-5-30-240（4小时=240分钟，两链各自独立构建 240 笔结构）。
+**链=引擎实例**：每条启用链一个 BacktestEngine（periods=`["D"]+链全节点`，D 隐式加载
+仅作参考不开单）；上下级映射数据驱动——`chan_core.lowerResOf(res, loaded)` 按已加载
+周期集 sec 序取下一级（链A 240→60、链B 240→30；loaded=None 走旧固定映射，历史子集
+回放零变化）。收笔链（structurePeriods/lowerStrokePack，trading_plan 透传）的 loaded
+集排除 30S（旧口径 3 的收笔下级恒空）。
+
+**节点勾选语义**（参数中心新模块 `chain`，params.html 缠论V1 组「周期链」页签）：
+勾=该周期作为开单周期（检测周期）；不勾=仅结构参考（仍加载笔/买卖点/支阻，不在该
+周期开单，类似 D）。最细周期（链A 30S / 链B 1）勾=加载参与背驰下沉、不勾=不加载
+（上一级失去检测周期资格——filterDetectPeriods 既有规则）。实现：引擎 kwargs
+`res_chain`（链上下文）+`open_res`（开单周期集）→ `mark_entry.detectPeriodsOf`
+（filterDetectPeriods ∩ 勾选）。默认：chainAOn=True、chainA=60,15,3（**240 默认不勾**，
+默认检测周期=60/15）、chainBOn=False、chainB=1,5,30（启用后检测=30/5）。
+**默认口径变化：全部 chan 回测基线不可比；ENGINE_LOGIC_VERSION=20261023-dual-chain。**
+
+**周期基建**：intervalSecOf 补 '1'→60；CHAN_CFG 档位键 nearDouble1/5/30（默认关）、
+wideBarPoints1/5/30（默认0）、windowDays1/5/30（5/20/60 天，JS 绘制消费）；秒档映射
+表补 60/300/1800。sr 扩展：UPPER_OF+{"30":"240","5":"30"}（两链无冲突——各引擎只算
+自己链上的级别）、LEVEL_ORDER/CANONICAL_LEVELS/MIN_TOUCH 补 30/5（缺 minTouchs 键走
+_MIN_TOUCH_DEFAULT：30→4、5→8）、periodNameOf 中文名、现价取级改数据驱动最细；
+SYNTH_PERIODS 加 "30"。
+
+**回测双链**：webapp `_chain_tasks`（优先级 cfg.periods 显式〔历史方案重放=旧口径单
+任务，逐位不变〕> cfg.chain_snapshot〔链式方案保存快照，重放忠实〕> 参数中心当前值）；
+bt_batch.run_symbol 循环 child_cfg["chains"]（每链独立引擎/journal：journal_strategy=
+chanA/chanB → 文件名 bt_chanA_*.ndjson、latest.json 键、cleanup 分组自动隔离；事件带
+chain 字段；stats/open/journal 合并单条 done）。SignalLog 行键与行加 chain（两链共用
+开单周期时同行不串写）；信号表检测周期列加「链A/B」角标；bt_runs cfg_summary 显示
+「链A开单60,15,3+链B开单1,5,30」。回测卡 chan 隐藏周期/30秒开关（周期由参数中心驱动，
+fxma 同款先例；回放/实时卡不受影响）。
+
+**实盘双链**：每链独立 live_trader 进程+独立 magic（链A=live_config.json magic 20260923
+不变；链B=live_config.chain_b.json〔.local 优先〕magic 20261023、kill/arm 文件带 _B
+后缀）；live_api 虚拟槽位 chan_v1_b（overview 第三 TAB「缠论V1·链B」，kv/会话命名空间
+chan_v1:B 与 live_trader.ns_strategy 一致；进程检测识别 live_config.chain_b/--chain B）。
+live_trader：cfg.chain 选 A/B（--chain CLI 可覆盖）、_build_engine 按链 periods/fine
+（链A=3m 旧口径、链B=1m）/res_chain/open_res；链未启用或链A 勾 30S 拒启（MT5 由 M1
+重采样无 30S；BIN_SEC 补 1/5/30——"1"=M1 直通、5/30 epoch 分箱）。chain 模块入
+chan_v1 param_modules → 实盘语义指纹自动含链配置（改链触发漂移守卫；注意两链共享
+同份 chain 配置→改链B 会同时变两链进程指纹，保守拒启口径）。账户级跨 magic 守卫
+（live_trader positions(magic=0)）天然覆盖双链总敞口。
+
+**JS 镜像**：chan_core.js（intervalSecOf '1'、lowerResOf loaded、秒档表、
+structurePeriods res_chain、resOf 反查表补 60/300/1800）；mark_entry.js（ALL_RES 收录
+30/5/1、levelsBelow/hasLowerResLoaded/lowerDiverge/sinkChainConfirm 链参数、RES_CHAIN=
+已加载集、可见性 1/5/30 case、windowDays1/5/30）；mark_sr_flip.js（UPPER_OF/LEVEL_ORDER/
+periodNameOf 补 30/5）。JS 图表脚本 --periods 传链B 周期集（如 240,30,5,1）即可按
+数据驱动链画标记。既有失败（HEAD 同样失败）：chan_core.test.js buildZS 1 例、
+test_params_view exitModeRowsHtml（陈旧断言）、test_mark_entry_sink 3 +
+test_divergence_fallback 若干（见上文既有失败注记）——均非本批引入。

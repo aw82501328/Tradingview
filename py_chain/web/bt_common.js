@@ -402,7 +402,7 @@ function signalRowsHtml(rows, opts = {}) {
       <td title="内部记录 id：${r.id}">${no}</td>
       <td>${fmtTime(r.time)}</td>
       <td class="${r.direction === 'long' ? 'long' : 'short'}">${signalDirectionName(r)}</td>
-      <td>${r.periodX || '-'}</td>
+      <td>${r.periodX || '-'}${r.chain ? `<span class="mini-badge" title="周期链${esc(String(r.chain))}">链${esc(String(r.chain))}</span>` : ''}</td>
       <td>${r.strategyKey || '-'}${candidateBadges(r)}${symBadge}</td>
       <td>${r.markRes || '-'}</td>
       <td>${r.price != null ? Number(r.price).toFixed(2) : '-'}</td>

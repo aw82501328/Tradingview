@@ -6,6 +6,8 @@
     "require_mode": "demo"
   },
   "strategy": "chan_v1",
+  "chain": "A",
+  "_comment_chain": "周期链（2026-10-23）：A=30S-3-15-60-240（在役链，实盘勾 30S 拒启——MT5 无 30 秒行情）/ B=1-5-30-240（须参数中心启用，链B 进程用 live_config.chain_b.json：独立 magic/kill/arm 文件）",
   "symbol": "XAUUSD",
   "db_symbol": "EXNESS:XAUUSD",
   "magic": 20260923,

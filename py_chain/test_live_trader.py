@@ -284,14 +284,22 @@ class TestActionSequence(LiveIntegrationBase):
     def test_full_window_actions(self):
         # 本用例的硬编码期望（trade#1 stopBe/be_done/sl_modify）锚定旧成交口径的
         # 既定序列：触价口径（exitTouchOn，2026-10-21 默认开）下出场提前一根使
-        # 同向互斥解锁时点移动、窗口序列重排（trade#1 记 stopSr）。本用例验证的是
-        # live 镜像机制（事件↔订单 1:1/审计/无孤儿），不是成交口径——钉旧口径跑；
-        # 触价口径的 live 行为由 TestPure.test_eff_stop_touch_first_full_line 与
-        # TestTouchBrokerFirst 覆盖，TestRestartInvariance 全套在默认触价口径下通过。
+        # 同向互斥解锁时点移动、窗口序列重排（trade#1 记 stopSr）；双周期链
+        # （2026-10-23 默认 240 不勾）会再剔掉 240 检测信号。本用例验证的是
+        # live 镜像机制（事件↔订单 1:1/审计/无孤儿），不是成交口径——钉旧口径跑
+        # （exitTouchOn=False + 链A 全勾 240）；触价口径的 live 行为由
+        # TestPure.test_eff_stop_touch_first_full_line 与 TestTouchBrokerFirst 覆盖，
+        # TestRestartInvariance 全套在默认触价+默认链口径下通过（自比较不变量）。
         from . import param_center as _pc
         _emp = _pc.engine_module_params
+        _eall = _pc.effective_all
+        _legacy_chain = {"chainAOn": True, "chainA": "240,60,15,3",
+                         "chainBOn": False, "chainB": "1,5,30"}
         with mock.patch("py_chain.param_center.engine_module_params",
-                        side_effect=lambda pm: dict(_emp(pm), exitTouchOn=False)):
+                        side_effect=lambda pm: dict(_emp(pm), exitTouchOn=False)), \
+             mock.patch("py_chain.param_center.effective_all",
+                        side_effect=lambda symbol=None: {**_eall(symbol),
+                                                         "chain": dict(_legacy_chain)}):
             trader, feed = self._trader()
             trader.start(once=True)          # 守卫+预热+首轮
             n = self._run(trader, feed)

@@ -63,8 +63,9 @@ let bis = core.buildBi(fractals, merged, atr, macdArr); // ③ 笔构建
 | `extendLastBi(bisArr, bars)` | 未完成笔延伸（最后一笔推进到最新极端价） |
 | `lowerResOf(res)` | 逐级校准映射：15分钟←3分钟，1小时←15分钟，4小时←1小时，日线←4小时 |
 | `calibrateBiTimes(bis, bigBars, refBars, bigIntervalSec)` | 跨周期端点时间校准（用低一级K线确定极值精确位置） |
-| `intervalSecOf(res)` | 周期 → 单根K线时长（秒） |
-| `nearDoubleOn(res)` | 该周期是否开启「近等双顶/双底平台取后顶/后底」（读 `CHAN_CFG.nearDouble3/15/60/240/D` 每周期开关，2026-09-28 起默认全开；res 接受周期码或 barSec 秒数，五周期之外一律 false） |
+| `intervalSecOf(res)` | 周期 → 单根K线时长（秒；2026-10-23 起识别 '1'=1分钟） |
+| `nearDoubleOn(res)` | 该周期是否开启「近等双顶/双底平台取后顶/后底」（读 `CHAN_CFG.nearDouble3/15/60/240/D` 每周期开关，2026-09-28 起默认全开；res 接受周期码或 barSec 秒数，无档周期一律 false。2026-10-23 起链B 周期有档位键 nearDouble1/5/30，默认关） |
+| `lowerResOf(res, loaded?)` | 逐级校准映射（15←3、60←15、240←60、D←240）；loaded（已加载周期集）提供时按数据驱动取下一级（链B 240→30→5→1；链A 完整集与旧映射一致），不传走旧固定映射（2026-10-23 双周期链） |
 
 ### MACD 背驰
 

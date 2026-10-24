@@ -206,14 +206,23 @@ def build_cfg_summary(cfg):
     """列表/对比表头用的参数摘要：策略 / 品种 / 周期（+ 连接）/ 起始日期 / 结束日期。
 
     strategy：多策略并行（2026-10-02）起 cfg 必带；更早的旧存档缺省 → 默认策略
-    （当时仅缠论V1 一个引擎，等价于历史事实）。"""
+    （当时仅缠论V1 一个引擎，等价于历史事实）。
+    periods：链式方案（2026-10-23 双周期链）无显式 periods，改按 chain_snapshot 展示
+    「链A 开单60,15,3+链B 开单1,5,30」式摘要。"""
     periods = cfg.get("periods") or []
     if isinstance(periods, str):
         periods = [p.strip() for p in periods.split(",") if p.strip()]
+    periods_txt = "+".join(str(p) for p in periods)
+    if not periods_txt:
+        snap = cfg.get("chain_snapshot") or []
+        if snap:
+            periods_txt = "+".join(
+                f"链{s.get('id')}开单{','.join(str(p) for p in s.get('open_res') or []) or '无'}"
+                for s in snap if isinstance(s, dict))
     return {
         "strategy": cfg.get("strategy") or module_registry.DEFAULT_STRATEGY,
         "symbol": cfg.get("symbol"),
-        "periods": "+".join(str(p) for p in periods),
+        "periods": periods_txt,
         "from": cfg.get("from"),
         "to": cfg.get("to") or "",
     }

@@ -34,7 +34,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse, quote
 
 from .data_loader import CDPConfig, DEFAULT_PERIODS, DEFAULT_CDP_PORT
-from .backtest import BacktestEngine
+from .backtest import BacktestEngine, merge_run_stats
 from .service_restart import RestartManager
 from .signal_locator import LocateManager, parse_after_bars
 from .main import parse_from
@@ -300,8 +300,10 @@ class SignalLog:
         self._suppressed = set()
 
     def _row_key(self, mode, s):
+        # chain 入键（2026-10-23 双周期链）：两链同时启用且共用同一开单周期（如都勾 240）
+        # 时，同时刻同方向同策略的信号在链A/链B 各自成行互不串写；单链/旧行无 chain=None
         return (mode, s.get("strategy"), s.get("symbol"), s.get("time") or s.get("signalTime"),
-                s.get("periodX"), s.get("direction"), s.get("strategyKey"))
+                s.get("periodX"), s.get("direction"), s.get("strategyKey"), s.get("chain"))
 
     def append_signal(self, mode, s, symbol=None, strategy=None):
         """记录一条新进场信号，返回该行；同向互斥过滤的信号返回 None（不进列表）。"""
@@ -321,6 +323,7 @@ class SignalLog:
                 "mode": mode,
                 "strategy": s.get("strategy"),
                 "symbol": symbol or s.get("symbol"),
+                "chain": s.get("chain"),
                 "time": s.get("time") or s.get("signalTime"),
                 "direction": s.get("direction"),
                 "periodX": s.get("periodX"),
@@ -373,6 +376,7 @@ class SignalLog:
                     "mode": mode,
                     "strategy": strategy or tr.get("strategy"),
                     "symbol": symbol or tr.get("symbol"),
+                    "chain": tr.get("chain"),
                     "time": tr.get("signalTime"),
                     "direction": tr.get("direction"),
                     "periodX": tr.get("periodX"),
@@ -845,6 +849,43 @@ class BacktestWorker(ModeWorker):
             entry_macd_shrink=cfg.get("entry_macd_shrink"),
             stop_entry_bar_floor=cfg.get("stop_entry_bar_floor"))
 
+    def _chain_tasks(self, cfg, symbol, log=None):
+        """chan 策略的链任务列表（2026-10-23 双周期链）。
+
+        优先级：cfg.periods 显式（历史方案重放/API 覆盖）→ 单任务旧口径（无链标签，
+        行为逐位不变）> cfg.chain_snapshot（链式方案保存的快照，重放忠实）>
+        参数中心 chain_specs 当前值（新发起）。每任务 {id(None=A/B), periods,
+        engine_kwargs}；kwargs 注入 res_chain/open_res。调用方负责把
+        [{id, periods, open_res}] 写进 cfg["chain_snapshot"] 供 bt_runs 快照。"""
+        explicit = [p for p in (cfg.get("periods") or []) if str(p).strip()]
+        if explicit:
+            kw = self._engine_kwargs_of(cfg, explicit, log=log)
+            return [{"id": None, "periods": explicit, "engine_kwargs": kw}]
+        snap = cfg.get("chain_snapshot")
+        specs = ([{"id": s.get("id"), "periods": [str(p) for p in s.get("periods") or []],
+                   "open_res": list(s.get("open_res") or [])} for s in snap]
+                 if isinstance(snap, list) and snap
+                 else param_center.chain_specs(param_center.effective_all(symbol)))
+        if not specs:
+            raise ValueError("两条周期链均未启用（参数中心·周期链 至少开一条，或回测卡显式传 periods）")
+        if log and any(sp.get("id") == "B" for sp in specs):
+            log("链B 已启用：1 分钟数据深度最浅，回测起始受其限制；缺 1/5/30 周期数据时先在基础数据页拉取")
+        tasks = []
+        for i, sp in enumerate(specs):
+            kw = self._engine_kwargs_of(cfg, sp["periods"], log=log if i == 0 else None)
+            kw["res_chain"] = list(sp["periods"])
+            kw["open_res"] = set(sp["open_res"])
+            tasks.append({"id": sp["id"], "periods": sp["periods"], "engine_kwargs": kw})
+        return tasks
+
+    @staticmethod
+    def _chain_snapshot_of(tasks):
+        """链任务 → cfg 快照（bt_runs 方案重放用；旧口径任务 id=None 不落快照）。"""
+        snap = [{"id": t["id"], "periods": list(t["periods"]),
+                 "open_res": sorted(t["engine_kwargs"].get("open_res") or [])}
+                for t in tasks if t["id"] is not None]
+        return snap or None
+
     def _run(self):
         cfg = self.cfg
         # 多品种批量并行（>1 个品种）：转 _run_batch（每品种一个子进程）；
@@ -862,7 +903,10 @@ class BacktestWorker(ModeWorker):
         strategy = module_registry.normalize_strategy(cfg.get("strategy"))
         if module_registry.STRATEGIES[strategy]["engine"] == "fx_ma":
             return self._run_fxma()
-        periods = cfg.get("periods") or DEFAULT_PERIODS
+        # 双周期链（2026-10-23）：chan 策略按链任务顺序跑（每链独立引擎实例、
+        # 持仓/信号/journal 按链隔离）；cfg.periods 显式=旧口径单任务（逐位不变）
+        tasks = self._chain_tasks(cfg, cfg.get("symbol"), log=self.log)
+        cfg["chain_snapshot"] = self._chain_snapshot_of(tasks)
         # 预热提前（lead_days > 0）：「起始日期=交易开始日」口径——取数自动前移 lead 天
         # 建状态（笔/支阻位/MACD 就绪），引擎 start_ts 前只推进状态不交易、从空仓起步；
         # 0 = 旧口径（从 from 起交易，warmup_bars 根预热）。旧方案库 cfg 无此键 → 0 → 行为不变。
@@ -876,55 +920,78 @@ class BacktestWorker(ModeWorker):
         # 数据源固定本地存储（2026-10-07）：只读 SQLite，不连 CDP，TV 关闭可跑
         if lead_days > 0:
             self.log(f"预热提前 {lead_days} 天：数据起点 {fmtT(data_from_ts)}，交易起点 {fmtT(from_ts)}")
-        self.log(f"取数：数据源=本地存储 symbol={cfg.get('symbol')} "
-                 f"periods={periods} from_ts={data_from_ts}"
-                 f"{' to_ts=' + str(to_ts) if to_ts else ''}")
-        bars = data_store.load_store(cfg.get("symbol"), periods=periods,
-                                     from_ts=data_from_ts, to_ts=to_ts)
-        for res in periods:
-            n = len(bars.get(res, []) or [])
-            if n:
-                self.log(f"  {res:>4}: {n} 根（{fmtT(bars[res][-1]['time'])} 止）")
-        # 参数中心（参数配置页统一管理）：API 显式值优先（历史方案复现/后端覆盖能力），
-        # 缺省用参数中心当前值；回写 cfg 保证 bt_runs 历史方案快照/对比表显示实际生效参数。
-        # 构造参数抽取为 _engine_kwargs_of（与多品种批量共用，逐参等价）
-        engine = BacktestEngine(bars, **self._engine_kwargs_of(cfg, periods, log=self.log))
-        self.log(f"回测开始（最小周期 {engine.fine_res}，成交口径 {engine.fill_mode}，"
-                 f"信号模式 {'当下背驰' if engine.signal_mode == 'realtime' else '确认制'}，"
-                 f"背驰进场 {'分型确认后下一根开盘' if engine.diverge_confirm else '当下'}，"
-                 f"柱缩闸 {'开' if engine.entry_macd_shrink else '关'}，"
-                 f"止损下限 {'开' if engine.stop_entry_bar_floor else '关'}，"
-                 f"检测周期够笔 {'预期' if engine.expect_bi else '分型确认'}）...")
-        result = engine.run(
-            start_ts=start_ts,
-            log=self.log,
-            on_progress=self._on_progress,
-            on_signal=self._on_signal,
-            on_trade=self._on_trade,
-            on_exit=self._on_exit,
-            on_suppressed=self._on_suppressed,
-            paused=self._pause_evt,
-            stopped=self._stop_evt,
-            journal_symbol=cfg.get("symbol"),
-        )
-        if result.get("journal"):
-            cfg["journal"] = result["journal"]   # bt_runs 保存快照随带日志路径
-            self.log(f"交易日志：{result['journal']}（bt_query 零重算查询单笔原因）")
+        merged = None
+        open_trades = []
+        journals = []
+        for task in tasks:
+            cid = task["id"]
+            tag = f"[链{cid}] " if cid else ""
+            periods = task["periods"]
+            self.log(f"{tag}取数：数据源=本地存储 symbol={cfg.get('symbol')} "
+                     f"periods={periods} from_ts={data_from_ts}"
+                     f"{' to_ts=' + str(to_ts) if to_ts else ''}")
+            bars = data_store.load_store(cfg.get("symbol"), periods=periods,
+                                         from_ts=data_from_ts, to_ts=to_ts)
+            for res in periods:
+                n = len(bars.get(res, []) or [])
+                if n:
+                    self.log(f"  {res:>4}: {n} 根（{fmtT(bars[res][-1]['time'])} 止）")
+            # 参数中心（参数配置页统一管理）：API 显式值优先（历史方案复现/后端覆盖能力），
+            # 缺省用参数中心当前值；回写 cfg 保证 bt_runs 历史方案快照/对比表显示实际生效参数。
+            # 构造参数抽取为 _engine_kwargs_of（与多品种批量共用，逐参等价）
+            engine = BacktestEngine(bars, **task["engine_kwargs"])
+            self.log(f"{tag}回测开始（最小周期 {engine.fine_res}，成交口径 {engine.fill_mode}，"
+                     f"信号模式 {'当下背驰' if engine.signal_mode == 'realtime' else '确认制'}，"
+                     f"背驰进场 {'分型确认后下一根开盘' if engine.diverge_confirm else '当下'}，"
+                     f"柱缩闸 {'开' if engine.entry_macd_shrink else '关'}，"
+                     f"止损下限 {'开' if engine.stop_entry_bar_floor else '关'}，"
+                     f"检测周期够笔 {'预期' if engine.expect_bi else '分型确认'}）...")
+            # 链事件包装：信号/成交/出场/过滤 dict 打链标签（SignalLog 行键含 chain，
+            # 两链共用开单周期时同行不串写）；旧口径任务（cid=None）回调零改动
+            if cid:
+                on_sig = lambda s: self._on_signal(dict(s, chain=cid), symbol=cfg.get("symbol"))
+                on_trd = lambda tr: self._on_trade(dict(tr, chain=cid), symbol=cfg.get("symbol"))
+                on_ext = lambda tr: self._on_exit(dict(tr, chain=cid), symbol=cfg.get("symbol"))
+                on_sup = lambda s: self._on_suppressed(dict(s, chain=cid), symbol=cfg.get("symbol"))
+            else:
+                on_sig, on_trd, on_ext, on_sup = (self._on_signal, self._on_trade,
+                                                  self._on_exit, self._on_suppressed)
+            result = engine.run(
+                start_ts=start_ts,
+                log=self.log,
+                on_progress=self._on_progress,
+                on_signal=on_sig,
+                on_trade=on_trd,
+                on_exit=on_ext,
+                on_suppressed=on_sup,
+                paused=self._pause_evt,
+                stopped=self._stop_evt,
+                journal_symbol=cfg.get("symbol"),
+                journal_strategy=(f"chan{cid}" if cid else "chan"),
+            )
+            if result.get("journal"):
+                journals.append(result["journal"])
+                self.log(f"{tag}交易日志：{result['journal']}（bt_query 零重算查询单笔原因）")
+            open_trades.extend(tr for tr in result["trades"] if tr.get("state") != "closed")
+            merged = merge_run_stats(merged, result["stats"])
+            if self._stop_evt.is_set():
+                break
+        if journals:
+            cfg["journal"] = ";".join(journals)   # bt_runs 保存快照随带日志路径（双链分号连接）
         if self._stop_evt.is_set():
             self.set_state("stopped")
         else:
             self.set_state("done")
         # 回测结束后回推「持仓中」行：浮动盈亏只在 _finish（循环后）算出，
         # 逐单 fill_trade + 广播把 pnl 推到表格（已平仓行终局时已带 pnl，不动）
-        for tr in result["trades"]:
-            if tr.get("state") == "closed":
-                continue
+        for tr in open_trades:
             row = self.signals.fill_trade(self.MODE, tr, symbol=self.cfg.get('symbol'),
                                           strategy=self.strategy)
             self.broadcaster.emit("signal", {"mode": self.MODE, "row": row})
-        st = result["stats"]
-        self.log(f"回测完成：{st['steps']} 步，信号 {st['signals']}，成交 {st['executed']}，"
-                 f"同向过滤 {st.get('suppressed', 0)}，已平仓 {st.get('closed', 0)}")
+        st = merged or {}
+        self.log(f"回测完成：{st.get('steps', 0)} 步，信号 {st.get('signals', 0)}，"
+                 f"成交 {st.get('executed', 0)}，同向过滤 {st.get('suppressed', 0)}，"
+                 f"已平仓 {st.get('closed', 0)}")
 
     def _run_fxma(self):
         """全量回测（强分型均线V1）：FxMaEngine.run() 逐根推进。
@@ -1036,13 +1103,20 @@ class BacktestWorker(ModeWorker):
             kw = param_center.fxma_engine_kwargs(
                 pm_sym, lots_override=cfg["lots"],
                 contract_mult=mark_entry.contract_mult_of(sym))
+            child_cfg = {"strategy": strategy,
+                         "chan_cfg": param_center.chan_cfg_effective(sym),
+                         "engine_kwargs": kw, "periods": periods,
+                         "data_from_ts": data_from_ts, "to_ts": to_ts, "start_ts": start_ts}
         else:
-            periods = cfg.get("periods") or DEFAULT_PERIODS
-            kw = self._engine_kwargs_of(cfg, periods, log=self.log)
-        child_cfg = {"strategy": strategy,
-                     "chan_cfg": param_center.chan_cfg_effective(sym),
-                     "engine_kwargs": kw, "periods": periods,
-                     "data_from_ts": data_from_ts, "to_ts": to_ts, "start_ts": start_ts}
+            # 双周期链（2026-10-23）：链任务列表（cfg.periods 显式=旧口径单任务），
+            # 子进程 bt_batch 逐链跑并合并 done；cfg.chain_snapshot 供 bt_runs 快照
+            tasks = self._chain_tasks(cfg, sym, log=self.log)
+            cfg["chain_snapshot"] = self._chain_snapshot_of(tasks)
+            child_cfg = {"strategy": strategy,
+                         "chan_cfg": param_center.chan_cfg_effective(sym),
+                         "chains": [{"id": t["id"], "periods": t["periods"],
+                                     "engine_kwargs": t["engine_kwargs"]} for t in tasks],
+                         "data_from_ts": data_from_ts, "to_ts": to_ts, "start_ts": start_ts}
         ctx = mp.get_context("spawn")
         msg_q = ctx.Queue()
         pause_e = ctx.Event()
@@ -1151,7 +1225,6 @@ class BacktestWorker(ModeWorker):
         from . import bt_batch
         cfg = self.cfg
         symbols = [s for s in (cfg.get("symbols") or []) if s]
-        periods = cfg.get("periods") or DEFAULT_PERIODS
         lead_days = int(cfg.get("lead_days") or 0)
         from_ts = int(cfg.get("from_ts", 0))
         data_from_ts = max(0, from_ts - lead_days * 86400)
@@ -1202,16 +1275,25 @@ class BacktestWorker(ModeWorker):
                     kw = param_center.fxma_engine_kwargs(
                         pm_sym, lots_override=None,
                         contract_mult=mark_entry.contract_mult_of(sym))
+                    # 记入 self.batch[sym] 供 _save_one 回写各自 cfg 快照
+                    self.batch[sym]["lots"] = kw["lots"]
+                    self.batch[sym]["contract_mult"] = kw["contract_mult"]
+                    child_cfg = {"strategy": strategy,
+                                 "chan_cfg": param_center.chan_cfg_effective(sym),
+                                 "engine_kwargs": kw, "periods": sym_periods,
+                                 "data_from_ts": data_from_ts, "to_ts": to_ts, "start_ts": start_ts}
                 else:
-                    sym_periods = periods
-                    kw = self._engine_kwargs_of(scfg, periods, log=self.log)
-                # 记入 self.batch[sym] 供 _save_one 回写各自 cfg 快照
-                self.batch[sym]["lots"] = kw["lots"]
-                self.batch[sym]["contract_mult"] = kw["contract_mult"]
-                child_cfg = {"strategy": strategy,
-                             "chan_cfg": param_center.chan_cfg_effective(sym),
-                             "engine_kwargs": kw, "periods": sym_periods,
-                             "data_from_ts": data_from_ts, "to_ts": to_ts, "start_ts": start_ts}
+                    # 双周期链（2026-10-23）：每品种按其参数中心链配置出任务列表
+                    tasks = self._chain_tasks(scfg, sym, log=self.log)
+                    scfg["chain_snapshot"] = self._chain_snapshot_of(tasks)
+                    kw0 = tasks[0]["engine_kwargs"]
+                    self.batch[sym]["lots"] = kw0["lots"]
+                    self.batch[sym]["contract_mult"] = kw0["contract_mult"]
+                    child_cfg = {"strategy": strategy,
+                                 "chan_cfg": param_center.chan_cfg_effective(sym),
+                                 "chains": [{"id": t["id"], "periods": t["periods"],
+                                             "engine_kwargs": t["engine_kwargs"]} for t in tasks],
+                                 "data_from_ts": data_from_ts, "to_ts": to_ts, "start_ts": start_ts}
                 p = ctx.Process(target=bt_batch.run_symbol,
                                 args=(child_cfg, sym, msg_q, pause_e, stop_e),
                                 name=f"bt-batch-{sym}", daemon=True)

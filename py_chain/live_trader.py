@@ -23,7 +23,7 @@ import urllib.request
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from . import chan_core, data_store, live_store, param_center
+from . import chan_core, data_store, live_store, module_registry, param_center
 from .backtest import BacktestEngine, DEFAULT_PERIODS, next_touch_lines
 from .mark_entry import (DEFAULT_SLIP_FALLBACK, DEFAULT_SLIP_STOP,
                          contract_mult_of, EXIT_MODE_DEFAULTS, EXIT_MODE_ON_KEYS)
@@ -85,6 +85,15 @@ def load_config(path=None, cli_overrides=None):
     cfg = deep_merge(cfg, cli_overrides or {})
     from . import module_registry
     cfg["strategy"] = module_registry.normalize_strategy(cfg.get("strategy"))
+    # 双周期链（2026-10-23）：chain 选 A/B（仅 chan 策略消费；默认/空=A）。
+    # 链启用性与 30S 实盘拒启在 chan_chain_spec（_build_engine/_fine_period）统一校验
+    if module_registry.STRATEGIES[cfg["strategy"]]["engine"] == "chan":
+        ch = str(cfg.get("chain") or "A").strip().upper() or "A"
+        if ch not in ("A", "B"):
+            raise ValueError(f"未知周期链 {ch}（可选 A/B）")
+        cfg["chain"] = ch
+    else:
+        cfg.pop("chain", None)
     if cfg["strategy"] == "fxma_v1":
         entry_res = param_center.effective_all(cfg.get("symbol"))["fxma"].get("entryRes", "")
         if "30S" in [r.strip().upper() for r in str(entry_res).split(",") if r.strip()]:
@@ -165,8 +174,37 @@ def provisional_sl(direction, bid, ask, near_sr, slip=DEFAULT_SLIP_STOP,
 # 极值 ≤ anchorWinPts 点，默认 2根/10点，参数化）、锚点窗口随新极值重开
 # （2026-10-22：anchorWinTrailOn 默认开，时间窗锚K=窗口极值所在K；False 回退固定锚K）、
 # 死顶/死底近等吸收（2026-10-22：buildBi 忽略分支——前顶/前底间隔不足被丢弃后，
-# 近等后顶/后底吸收其为笔端点，nearDoubleOn 周期笔结构变化，回测基线不可比）。
-ENGINE_LOGIC_VERSION = "20261022-deadtop-absorb"
+# 近等后顶/后底吸收其为笔端点，nearDoubleOn 周期笔结构变化，回测基线不可比）、
+# 双周期链（2026-10-23：链A 30S-3-15-60-240 / 链B 1-5-30-240 各自独立引擎实例并行，
+# 节点勾选=开单周期、不勾=仅结构参考；默认口径变化——240 默认不勾、链A 默认检测
+# 60/15，全部 chan 回测基线不可比，持仓重启须 --accept-param-drift）。
+ENGINE_LOGIC_VERSION = "20261023-dual-chain"
+
+
+def ns_strategy(cfg):
+    """kv/会话命名空间的策略 id（2026-10-23 双周期链）：同策略两链并行时链B 加
+    后缀互不覆盖；链A（在役链）与旧配置不加后缀，键名与历史一致。"""
+    sid = str(cfg.get("strategy") or "")
+    chain = str(cfg.get("chain") or "A").upper()
+    if not chain or chain == "A":
+        return sid
+    return f"{sid}:{chain}"
+
+
+def chan_chain_spec(cfg, pm):
+    """chan_v1 的链规格（2026-10-23 双周期链）：cfg["chain"] 选 A/B（默认 A）。
+
+    @returns chain_specs 的对应 {id, periods, open_res, detect}；链未启用/链A 勾了
+    30S → ValueError（拒启：MT5 行情由 M1 重采样无法生成 30S，30S 仅回测可用）。"""
+    chain = str(cfg.get("chain") or "A").upper()
+    specs = {sp["id"]: sp for sp in param_center.chain_specs(pm)}
+    if chain not in specs:
+        raise ValueError(f"周期链{chain} 未在参数中心启用（参数中心·周期链 链{chain}总开关）")
+    sp = specs[chain]
+    if chain == "A" and any(str(p).upper() == "30S" for p in sp["periods"]):
+        raise ValueError("链A 实盘勾选了 30 秒（MT5 行情由 M1 重采样无法生成 30S，"
+                         "30S 仅回测可用），请在参数中心·周期链 去掉 30S 勾选")
+    return sp
 
 
 def _fingerprint_modules(strategy_id):
@@ -299,8 +337,9 @@ class ReplayFeed:
 class LiveTrader:
     def __init__(self, cfg, broker, feed, log=None, accept_param_drift=False):
         self.cfg = cfg
-        # kv 状态键带策略后缀（多策略并存=路径A 多进程互不覆盖；单策略等价于独占）
-        self._skey = lambda base: live_store.state_key(base, cfg.get("strategy"))
+        # kv 状态键带策略后缀（多策略并存=路径A 多进程互不覆盖；单策略等价于独占；
+        # 双周期链链B 再加链后缀，与链A 进程互不覆盖——ns_strategy）
+        self._skey = lambda base: live_store.state_key(base, ns_strategy(cfg))
         self.broker = broker
         self.feed = feed
         self.log = log or (lambda *a, **k: print(*a))
@@ -490,7 +529,12 @@ class LiveTrader:
                                          ENTRY_RES_OPTIONS, "entryRes")
             fine = min(entry_res, key=lambda r: intervalSecOf(r) or 0)
             return str(fine), (intervalSecOf(fine) or 180)
-        return "3", 180
+        # 双周期链（2026-10-23）：fine=链最细周期（链A 无 30S 恒 3m；链B=1m），
+        # 与 _build_engine 的显式 fine_res 同口径
+        pm = self._pm or param_center.effective_all(self.cfg["symbol"])
+        sp = chan_chain_spec(self.cfg, pm)
+        fine = min(sp["periods"], key=lambda r: intervalSecOf(r) or 0)
+        return str(fine), (intervalSecOf(fine) or 180)
 
     def _fill_bar_gap(self):
         """停机恢复：fine 末根落后当前超过一根时，先把缺口补进 bars.db。
@@ -543,23 +587,28 @@ class LiveTrader:
                     contract_mult=contract_mult_of(self.cfg["symbol"]),
                     fill_at_open_bar=True, fine_res=fine))
             return
-        periods = [p for p in DEFAULT_PERIODS]
+        # 双周期链（2026-10-23）：periods/fine/开单周期由 cfg.chain 选链
+        # （链A 无 30S 恒 3m；链B=1m；链A 勾 30S 在 chan_chain_spec 拒启）
+        sp = chan_chain_spec(self.cfg, pm)
+        periods = list(sp["periods"])
+        fine = min(periods, key=lambda r: intervalSecOf(r) or 0)
         try:
             bars = data_store.load_store(self.cfg["db_symbol"], periods, from_ts, to_ts)
         except ValueError:
-            bars = {}   # 品种尚未入库，与窗口内无 3m 一样走下面的深拉
-        if not bars.get("3"):
+            bars = {}   # 品种尚未入库，与窗口内无 fine 一样走下面的深拉
+        if not bars.get(fine):
             # 首启：EXNESS:XAUUSD 库为空 → 深拉（MT5Feed 路径；ReplayFeed 数据已在）
-            self.log(f"[live] 本地无 {self.cfg['db_symbol']} 的 3 分钟数据，"
+            self.log(f"[live] 本地无 {self.cfg['db_symbol']} 的 {fine} 数据，"
                      f"从 MT5 深拉 {int(warmup_days)} 天")
             self.feed.history(min_depth_days=int(warmup_days))
             bars = data_store.load_store(self.cfg["db_symbol"], periods, from_ts, to_ts)
-            if not bars.get("3"):
-                raise RuntimeError("行情预热失败：3m 无数据")
-        n3 = len(bars["3"])
-        self.log(f"[live] 预载 {self.cfg['db_symbol']}：3m×{n3}（"
-                 f"{datetime.fromtimestamp(bars['3'][0]['time'], timezone.utc)} ~ "
-                 f"{datetime.fromtimestamp(bars['3'][-1]['time'], timezone.utc)}）")
+            if not bars.get(fine):
+                raise RuntimeError(f"行情预热失败：{fine} 无数据")
+        n_f = len(bars[fine])
+        self.log(f"[live] 预载 {self.cfg['db_symbol']}（链{sp['id']} 开单 "
+                 f"{','.join(sp['open_res']) or '无'}）：{fine}×{n_f}（"
+                 f"{datetime.fromtimestamp(bars[fine][0]['time'], timezone.utc)} ~ "
+                 f"{datetime.fromtimestamp(bars[fine][-1]['time'], timezone.utc)}）")
         from . import sr_service
         # 滑点/近支阻/出场方式与回测缺省回填同一来源（参数中心该品种 entry 桶）。
         # 回测卡上的显式覆盖只作用于那次回测，实盘没有这层覆盖。
@@ -577,9 +626,11 @@ class LiveTrader:
             module_params=param_center.engine_module_params(pm),
             sr_kwargs=sr_service.symbol_sr_kwargs(self.cfg.get("symbol"), periods),
             fill_at_open_bar=True,   # 逐拍同拍成交（见 backtest.py 注释；批量口径不变）
-            fine_res="3")            # 显式固定 fine=3m：OANDA 补深 240/D 后各周期数据
-                                    # 跨度不齐，自动探测会误选 240 作时间轴（2026-09-24
-                                    # shadow 实测踩中：fine_last 卡在 240 形成桶）
+            fine_res=fine,           # 显式固定 fine=链最细（链A=3m 旧口径；链B=1m）：
+                                    # 补深 240/D 后各周期数据跨度不齐，自动探测会误选
+                                    # 240 作时间轴（2026-09-24 shadow 实测踩中）
+            res_chain=periods,       # 链上下文：240 的收笔下级/下沉链按本链推导
+            open_res=set(sp["open_res"]))   # 开单周期=链节点勾选（240 不勾仅参考）
 
     def _restore(self, t_start):
         """确定性重放恢复：预热到 T_start → execute=True 重放到当前（抑制下单）。"""
@@ -1722,6 +1773,9 @@ def main(argv=None):
     ap.add_argument("--replay-to", type=int, default=None)
     ap.add_argument("--strategy", default=None,
                     help="覆盖配置的交易策略（默认 缠论V1；注册表见 module_registry）")
+    ap.add_argument("--chain", choices=["A", "B"], default=None,
+                    help="覆盖配置的周期链（缠论V1：A=30S-3-15-60-240 默认 / B=1-5-30-240；"
+                         "链B 需参数中心启用）")
     ap.add_argument("--log-file", default=None, help="日志文件（默认 data/live_trader.log）")
     args = ap.parse_args(argv)
 
@@ -1730,11 +1784,13 @@ def main(argv=None):
         cli["run"] = {"shadow": args.shadow}
     if args.strategy:
         cli["strategy"] = args.strategy
+    if args.chain:
+        cli["chain"] = args.chain
     cfg = load_config(args.config, cli)
 
     if args.audit:
         sess = live_store.load_state(
-            live_store.state_key("session", cfg.get("strategy")), {})
+            live_store.state_key("session", ns_strategy(cfg)), {})
         if not sess or not sess.get("id"):
             print("无会话")
             return
@@ -1751,14 +1807,25 @@ def main(argv=None):
         lf.write(f"{datetime.now(timezone.utc).isoformat()} {line}\n")
         lf.flush()
 
+    # 行情源周期（双周期链）：chan 按链取（链B 含 1/5/30——MT5 由 M1 重采样），
+    # fxma/回放沿用默认链；链A 无 30S 时与 DEFAULT_PERIODS 一致
+    feed_periods = list(DEFAULT_PERIODS)
+    if module_registry.STRATEGIES[cfg.get("strategy")]["engine"] == "chan":
+        try:
+            sp = chan_chain_spec(cfg, param_center.effective_all(cfg["symbol"]))
+            feed_periods = list(sp["periods"])
+        except ValueError as e:
+            log(f"[live] 启动失败：{e}")
+            return
     broker = MT5Broker(symbol=cfg["symbol"], magic=cfg["magic"],
                        deviation_pts=cfg["broker"]["deviation_pts"], log=log)
     if args.feed == "replay":
         assert args.replay_from and args.replay_to, "--replay-from/to 必填"
-        feed = ReplayFeed(cfg["db_symbol"], DEFAULT_PERIODS,
+        feed = ReplayFeed(cfg["db_symbol"], feed_periods,
                           args.replay_from, args.replay_to)
     else:
-        feed = MT5Feed(symbol=cfg["symbol"], weekend=cfg["risk"]["weekend"],
+        feed = MT5Feed(symbol=cfg["symbol"], periods=tuple(feed_periods),
+                       weekend=cfg["risk"]["weekend"],
                        db_symbol=cfg["db_symbol"], log=log)
     trader = LiveTrader(cfg, broker, feed, log=log,
                         accept_param_drift=args.accept_param_drift)

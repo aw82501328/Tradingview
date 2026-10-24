@@ -36,7 +36,9 @@ STRATEGIES = {
         "title": "缠论V1",
         "stages": ["sr", "entry"],
         "dependencies": {"sr": ["bi"], "entry": ["bi", "sr"]},
-        "param_modules": ["sr", "plan", "entry"],
+        # chain=周期链（2026-10-23 双周期链）：链A/B 节点勾选与开关——进实盘语义
+        # 指纹（改链配置触发漂移守卫）；params.html 缠论V1 组「周期链」页签
+        "param_modules": ["sr", "plan", "entry", "chain"],
         "engine": "chan",
     },
     # 强分型均线V1（2026-09-30 接入）：缠论买卖点 + 强分型 + 均线分离 + 收盘站线

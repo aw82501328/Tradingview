@@ -118,7 +118,7 @@ from .trading_plan import (compute_regime, trend_state_of,
                            TREND_REBOUND, REBOUND_NEAR_PTS, REBOUND_ANGLE_REF)
 from .mark_entry import (
     compute_entries, compute_period_points, stop_ref_of, sr_of_detect, sr_drop_fib_for_class1,
-    find_bi_event, filterDetectPeriods,
+    find_bi_event, filterDetectPeriods, detectPeriodsOf,
     trend_following_of, forming_break_ref, lastBiOk,
     enough_fav_bars, point_cls_of, _side_anchor, BUY_FAMILY, SELL_FAMILY,
     DEFAULT_LOTS, DEFAULT_SLIP_STOP, DEFAULT_SLIP_FALLBACK, DEFAULT_SLIP_BE,
@@ -158,6 +158,23 @@ def _exit_lots(lots_total, lots_left, pct):
     lots = int(float(lots_total) * float(pct) / 100.0)  # floor 整数
     lots = max(lots, 1)
     return min(lots, lots_left)
+
+
+def merge_run_stats(dst, src):
+    """合并两条周期链的 run() 统计（2026-10-23 双周期链，webapp/bt_batch 共用）：
+    数值键累加、字典键（markRes/strategyKeys）逐键累加；dst 缺省键以 src 补齐。"""
+    if dst is None:
+        return dict(src)
+    for k, v in (src or {}).items():
+        if isinstance(v, dict):
+            d = dst.setdefault(k, {})
+            for kk, vv in v.items():
+                d[kk] = d.get(kk, 0) + (vv or 0)
+        elif isinstance(v, (int, float)) and not isinstance(v, bool):
+            dst[k] = dst.get(k, 0) + v
+        elif k not in dst:
+            dst[k] = v
+    return dst
 
 
 def exit_cfg_desc(ec):
@@ -896,8 +913,17 @@ class BacktestEngine:
                  slip_be_atr_k=DEFAULT_SLIP_BE_ATR_K,
                  near=DEFAULT_NEAR, sr_kwargs=None,
                  diverge_confirm=None, expect_bi=None, module_params=None,
-                 entry_macd_shrink=None, stop_entry_bar_floor=None, fine_res=None):
+                 entry_macd_shrink=None, stop_entry_bar_floor=None, fine_res=None,
+                 # 双周期链（2026-10-23）：res_chain=引擎已加载周期集（链配置口径下
+                 # 传 self.periods）——收笔下级/下沉链/检测周期判定按数据驱动推导
+                 # （链B 240→30→5→1）；None=旧固定映射（历史子集回放零变化）。
+                 # open_res=开单周期集（链节点勾选：勾=该周期开单；不勾=仅结构参考，
+                 # 不作为检测周期）；None=不过滤（旧口径全部检测周期开单）。
+                 res_chain=None, open_res=None):
         self.periods = list(periods or DEFAULT_PERIODS)
+        self.res_chain = list(res_chain) if res_chain is not None else None
+        self.open_res = ({str(p).upper() for p in open_res}
+                         if open_res is not None else None)
         # 各周期按时间升序整理 + 缓存时间数组
         self.bars = {}
         self._times = {}
@@ -1182,7 +1208,8 @@ class BacktestEngine:
         return b
 
     # C-1 盘中合成K的注入周期（用户 2026-09-26 指定：15m/1h/4h；D 不合成）
-    SYNTH_PERIODS = ("15", "60", "240")
+    # 链B 盘中合成K白名单加 "30"（2026-10-23 双周期链；"5"/"1" 过细不合成，同 3/30S 旧例）
+    SYNTH_PERIODS = ("15", "60", "240", "30")
 
     def _synth_views(self):
         """C-1（synthIntrabarBars）盘中合成K：用 fine 已收K聚合出 15/60/240 当前 bin 的
@@ -2140,7 +2167,8 @@ class BacktestEngine:
                                          mBy, fBy, self._chain_work_cache,
                                          macdByPeriod=periodMacd,
                                          timesByPeriod=timesByPeriod,
-                                         mergedTimesByPeriod=mergedTimesByPeriod)
+                                         mergedTimesByPeriod=mergedTimesByPeriod,
+                                         res_chain=self.res_chain)
             self._structure_bis = periodBis
             # 跟踪止盈 detect 参照不再在这里算买卖点：advance_exit_decision 直接
             # 读检测周期笔（self._bis）的有利方向起点。
@@ -2200,7 +2228,8 @@ class BacktestEngine:
                 self._range_gate = compute_regime(periodBis, barsByPeriod, core,
                                                   periodMacd=periodMacd, periodAtr=periodAtr,
                                                   cfg=self.plan_cfg, work_cache=self._chain_work_cache,
-                                                  range_res=self.range_res)
+                                                  range_res=self.range_res,
+                                                  res_chain=self.res_chain)
             except Exception:
                 self._range_gate = None
             # 3.2 买卖点原始输出（进场候选直接来源，2026-10-16 起替代计划锚；
@@ -2223,7 +2252,8 @@ class BacktestEngine:
                 self._trend_state = trend_state_of(periodBis, barsByPeriod, self.trend_res,
                                                    periodMacd=periodMacd,
                                                    work_cache=self._chain_work_cache,
-                                                   cfg=self.rebound_cfg)
+                                                   cfg=self.rebound_cfg,
+                                                   res_chain=self.res_chain)
             except Exception:
                 self._trend_state = None
             # 4. 进出场（检测周期与 JS 一致：不含日线、不含 30S——30S 仅作背驰级别；
@@ -2234,7 +2264,8 @@ class BacktestEngine:
                 self._entries = {}
                 return
             srLevels = (self._sr or {}).get("merged") or []
-            detectPeriods = filterDetectPeriods(self.periods)
+            # 检测周期=须有已加载更低级别 ∩ 开单周期勾选（open_res=None=旧口径全检测）
+            detectPeriods = detectPeriodsOf(self.periods, self.open_res, self.res_chain)
             # 确认制拒绝原因（交易日志）：run() 期间挂 self._entry_reject_hook；
             # step_to 实时路径无日志（getattr 缺省 None，行为不变）
             try:
@@ -2247,7 +2278,8 @@ class BacktestEngine:
                                                 trend_state=self._trend_state,
                                                 range_res=self.range_res,
                                                 range_gate=self._range_gate,
-                                                on_reject=getattr(self, "_entry_reject_hook", None))
+                                                on_reject=getattr(self, "_entry_reject_hook", None),
+                                                res_chain=self.res_chain)
             except Exception:
                 self._entries = {}
 
@@ -2306,7 +2338,8 @@ class BacktestEngine:
         每个形成段只发一次；信号 time=形成中段当前极值时间（当下）。"""
         from .mark_entry import evaluateRealtimeEntries
         srLevels = (self._sr or {}).get("merged") or []
-        detectPeriods = filterDetectPeriods(self.periods)  # 与确认制一致：须有已加载更低级别
+        # 与确认制一致：须有已加载更低级别 ∩ 开单周期勾选（open_res=None=旧口径全检测）
+        detectPeriods = detectPeriodsOf(self.periods, self.open_res, self.res_chain)
         if self._rt_fired_idx is None:
             self._rt_fired_idx = {(f[0], f[1], f[3]) for f in self._rt_fired}
         # C-1 盘中合成K：当下背驰评估消费合成K尾接视图（macd/ATR/merged/macdTimes/bars），
@@ -2362,6 +2395,7 @@ class BacktestEngine:
                 range_res=self.range_res,
                 range_gate=self._range_gate,
                 on_reject=on_reject,
+                chain=self.res_chain,
             )
         finally:
             for lst in reversed(tail_lists):

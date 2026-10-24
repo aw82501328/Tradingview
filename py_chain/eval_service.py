@@ -730,8 +730,17 @@ class EvalManager:
                     contract_mult=mark_entry.contract_mult_of(symbol))
                 chan_cfg = param_center.chan_cfg_effective(symbol)
             else:
-                periods = list(cfg.get("periods") or DEFAULT_PERIODS)
-                kw = BacktestWorker._engine_kwargs_of(cfg, periods)
+                # 双周期链（2026-10-23）：显式 periods（历史方案）优先单口径；链式方案
+                # 取链任务列表（重放引擎按第一份任务跑——eval 比对以单链口径冻结，
+                # 双链并行的逐链统计走 Web 回测日志/journal）
+                explicit = [p for p in (cfg.get("periods") or []) if str(p).strip()]
+                if explicit:
+                    periods = list(explicit)
+                    kw = BacktestWorker._engine_kwargs_of(cfg, periods)
+                else:
+                    tasks = BacktestWorker._chain_tasks(cfg, symbol)
+                    periods = list(tasks[0]["periods"])
+                    kw = dict(tasks[0]["engine_kwargs"])
                 chan_cfg = param_center.chan_cfg_effective(symbol)
             replay = {
                 "strategy": strategy, "symbol": symbol,

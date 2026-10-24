@@ -24,6 +24,14 @@ from .chan_core import (
 
 from .chan_core import structurePeriods, buildStructureContext, mergedSegmentCount, lowerStrokePack
 
+
+def _stroke_chain(res_chain):
+    """收笔链 loaded 集（2026-10-23 双周期链）：链周期去掉 30S——秒级不参与收笔
+    背驰，与 chan_core.structurePeriods 的收笔链口径一致（旧口径 3 的收笔下级恒空）。"""
+    if res_chain is None:
+        return None
+    return [p for p in res_chain if str(p).upper() != "30S"]
+
 # ============================================================
 # 纯函数：震荡判定（复制自 chan-status SKILL，保持原逻辑不变）
 # ============================================================
@@ -173,7 +181,7 @@ def _range_gate_row(res, bis, bars, atr, upperBis, lastPrice, barSec, range_cfg,
 
 
 def compute_regime(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=None, cfg=None,
-                   work_cache=None, range_res=None):
+                   work_cache=None, range_res=None, res_chain=None):
     """震荡 regime 判定（交易计划保留的「震荡」职能；原 compute_plan 的闸门部分抽出）。
 
     @param range_res  震荡判定参考周期（None → RANGE_RES；"" = 关闭 → 返回 None；
@@ -189,7 +197,8 @@ def compute_regime(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=
         range_res = RANGE_RES
     if not range_res:
         return None
-    periodBis = structurePeriods(periodBis or {}, barsByPeriod or {}, work_cache=work_cache)
+    periodBis = structurePeriods(periodBis or {}, barsByPeriod or {}, work_cache=work_cache,
+                                 res_chain=res_chain)
     ref = next((r for r in periods if str(r).upper() == str(range_res).upper()), None)
     curBis = (periodBis.get(ref) or []) if ref is not None else []
     name = trend_res_name(range_res)
@@ -225,7 +234,8 @@ def compute_regime(periodBis, barsByPeriod, periods, periodMacd=None, periodAtr=
             return gate_ent[1]
     gate = _range_gate_row(ref, curBis, range_bars, atr, upper, lastPrice,
                            intervalSecOf(ref), cfg,
-                           lower_stroke=lowerStrokePack(ref, periodBis, barsByPeriod))
+                           lower_stroke=lowerStrokePack(ref, periodBis, barsByPeriod,
+                                                        loaded=_stroke_chain(res_chain)))
     if work_cache is not None:
         work_cache[("rangeGate", ref)] = (gate_key, gate)
     return gate
@@ -258,7 +268,7 @@ REBOUND_ANGLE_REF = 5.0 # 角度 45° 基准（点/根）：当前笔平均每�
 
 # 周期 → 中文名（方向成因展示用，如「4小时2买」「日线1卖」）
 RES_NAME_CN = {"D": "日线", "240": "4小时", "60": "1小时", "30": "30分钟",
-               "15": "15分钟", "3": "3分钟", "30S": "30秒"}
+               "15": "15分钟", "5": "5分钟", "3": "3分钟", "1": "1分钟", "30S": "30秒"}
 
 
 def trend_res_name(res):
@@ -496,7 +506,7 @@ def trend_direction(res, bis, bars, upperBis, macdArr, tCut=None, rebound=None, 
 
 
 def trend_state_of(periodBis, barsByPeriod, trend_res, periodMacd=None, work_cache=None,
-                   cfg=None):
+                   cfg=None, res_chain=None):
     """按配置计算参考周期方向状态（mark_entry 顺势过滤统一入口）。
 
     上级周期取法与 mark_entry.upperResOf 同口径：periodBis 中比参考周期大一级的
@@ -517,7 +527,8 @@ def trend_state_of(periodBis, barsByPeriod, trend_res, periodMacd=None, work_cac
         return None
     from .sr_flip import _bis_fingerprint
     tr = str(trend_res).upper()
-    periodBis = structurePeriods(periodBis or {}, barsByPeriod or {}, work_cache=work_cache)
+    periodBis = structurePeriods(periodBis or {}, barsByPeriod or {}, work_cache=work_cache,
+                                 res_chain=res_chain)
     bis = (periodBis or {}).get(tr) or []
     bars = (barsByPeriod or {}).get(tr) or []
     if not bis:
@@ -561,7 +572,8 @@ def trend_state_of(periodBis, barsByPeriod, trend_res, periodMacd=None, work_cac
         if ub:
             upperMacd = calcMACD(ub)
     d, reason = trend_direction(tr, bis, bars, upper, macdArr, rebound=rebound,
-                                lower_stroke=lowerStrokePack(tr, periodBis, barsByPeriod),
+                                lower_stroke=lowerStrokePack(tr, periodBis, barsByPeriod,
+                                                             loaded=_stroke_chain(res_chain)),
                                 upperMacd=upperMacd)
     row = {"dir": d, "reason": reason, "res": tr}
     if work_cache is not None:

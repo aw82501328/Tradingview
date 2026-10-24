@@ -191,8 +191,11 @@ function onlyThisInterval(res) {
   };
   switch (s) {
     case "30S":  return { ...NONE, seconds: true, secondsFrom: 30, secondsTo: 30 };
+    case "1":    return { ...NONE, minutes: true, minutesFrom: 1, minutesTo: 1 };
     case "3":    return { ...NONE, minutes: true, minutesFrom: 3, minutesTo: 3 };
+    case "5":    return { ...NONE, minutes: true, minutesFrom: 5, minutesTo: 5 };
     case "15":   return { ...NONE, minutes: true, minutesFrom: 15, minutesTo: 15 };
+    case "30":   return { ...NONE, minutes: true, minutesFrom: 30, minutesTo: 30 };
     case "60":
     case "1H":   return { ...NONE, hours: true, hoursFrom: 1, hoursTo: 1 };
     case "240":
@@ -298,20 +301,24 @@ function findDivergePoints(bis, macdArr) {
  * 检测周期 X 之下的**连续**低级别链（逐级映射 lowerResOf：60→15→3；3 之下挂 30S）。
  * 某级无笔数据（<3 笔）则链在该级截断——区间套逐级下沉、不可跳级
  * （60 与 3 之间缺 15 时链止于 60，不得由 60 直接下到 3）。
+ * chain（2026-10-23 双周期链）：已加载周期集——映射按数据驱动（链B 30→5→1；
+ * 30S 在集内时 3→30S 自然成立）；不传=旧固定映射+3→30S 特挂。
  */
-function levelsBelow(periodData, X) {
-  const chain = [];
+function levelsBelow(periodData, X, chain) {
+  const out = [];
   let cur = X;
   for (;;) {
-    let nxt = lowerResOf(cur);
-    if (nxt === null && String(cur) === "3") nxt = "30S"; // 3 分钟之下挂 30 秒（--with-30s 时加载）
+    let nxt = lowerResOf(cur, chain);
+    if (nxt === null && chain === undefined && String(cur) === "3") {
+      nxt = "30S"; // 3 分钟之下挂 30 秒（--with-30s 时加载；链口径下 30S 在集内自然命中）
+    }
     if (nxt === null) break;
     const pd = periodData[nxt];
     if (!pd || !pd.bis || pd.bis.length < 3) break;
-    chain.push(nxt);
+    out.push(nxt);
     cur = nxt;
   }
-  return chain;
+  return out;
 }
 
 /**
@@ -319,11 +326,12 @@ function levelsBelow(periodData, X) {
  * lowerResOf + 3 之下挂 30S）。无更低级别的周期不作为检测周期——与
  * py_chain/mark_entry.py 的 filterDetectPeriods 对齐：30S 未加载时 3 之下无级别，
  * 3 不作检测周期（最小检测 15m、背驰最深 3m）；30S 自身无更低级别，亦不作检测周期。
+ * chain（2026-10-23）：数据驱动映射（链B 240/30/5 为检测周期、1 之下无级别不作检测）。
  */
-function hasLowerResLoaded(periodData, X) {
-  let nxt = lowerResOf(X);
-  if (nxt === null && String(X) === "3") nxt = "30S";
-  return nxt !== null && !!periodData[nxt];
+function hasLowerResLoaded(periodData, X, chain) {
+  let nxt = lowerResOf(X, chain);
+  if (nxt === null && chain === undefined && String(X) === "3") nxt = "30S";
+  return nxt !== null && !!periodData[String(nxt)];
 }
 
 /**
@@ -405,7 +413,7 @@ function virtualBiOf(afterBi, pTime) {
  *   （可为 X 自身，此时无更低级别候选）；parentBi=停止级段的所属上级笔（规则2 参照
  *   containment 窗口）。stopRes=null 表示无链。
  */
-function sinkChainConfirm(periodData, X, pTime, pDir) {
+function sinkChainConfirm(periodData, X, pTime, pDir, chain) {
   const wantType = pDir === "short" ? "up" : "down";
   const bisX = (periodData[X] || {}).bis || [];
   if (bisX.length === 0) return [null, null];
@@ -420,7 +428,7 @@ function sinkChainConfirm(periodData, X, pTime, pDir) {
   }
   let C = X;
   let parentBi = null;
-  for (const L of levelsBelow(periodData, X)) {
+  for (const L of levelsBelow(periodData, X, chain)) {
     const secC = intervalSecOf(C) || 0;
     const secL = intervalSecOf(L) || 0;
     const bisL = periodData[L].bis;
@@ -737,9 +745,11 @@ function zsExitWeak(bis, upperBis, macdArr, barSec, ratio, wantDir) {
  * @param {object} periodData {res: {bis, macdArr, ...}} 全部周期的预取数据
  * @param {string} X         当前检测周期
  * @param {string} wantDir   期望背驰方向 "long"（底背驰）| "short"（顶背驰）
+ * @param {string[]} [chain] 周期链上下文（2026-10-23 双周期链：已加载周期集，链B
+ *                           30→5→1）；缺省=旧固定映射
  * @returns {{res:string, point:{time,price,direction,referStart}}[]} 候选列表，按 point.time 降序
  */
-function lowerDiverge(periodData, X, wantDir) {
+function lowerDiverge(periodData, X, wantDir, chain) {
   const xSec = intervalSecOf(X) || Infinity;
   const cands = [];
   for (const res of Object.keys(periodData)) {
@@ -756,7 +766,7 @@ function lowerDiverge(periodData, X, wantDir) {
   }
   const filtered = [];
   for (const c of cands) {
-    const [stopRes, parentBi] = sinkChainConfirm(periodData, X, c.point.time, c.point.direction);
+    const [stopRes, parentBi] = sinkChainConfirm(periodData, X, c.point.time, c.point.direction, chain);
     if (stopRes !== c.res) continue; // 规则 1/3：该点的下沉停止级不是候选级别
     if (parentBi) {
       const tol = intervalSecOf(c.res) || 0;
@@ -882,7 +892,7 @@ function evaluateEntry(ctx, strategy) {
   //      策略专属条件不依赖背驰点（第2步已过），只需重试「支阻位附近」。
   //      （--with-30s 后 30S 高频背驰点常抢占原级别点，且其微观极值价常远离支阻位——
   //       无回退时信号彻底消失：旧点被抢占丢弃、新点校验被拒，两边都不出箭头。）
-  let cands = lowerDiverge(periodData, res, divergeDir);
+  let cands = lowerDiverge(periodData, res, divergeDir, ctx.chain);
   if (cands.length === 0) return { ok: false, reason: "以下级别无匹配方向背驰" };
   if (timesX && anchorWinIdx >= 0) {
     // 价距基准：已收K线按时间窗 [锚K开盘, 背驰点所在K开盘] 取极值（periodData 已滤
@@ -1553,8 +1563,13 @@ async function main() {
     // 全部参与判定的周期：检测周期（PERIODS）+ 日线（仅作为 240 的上一级别笔）。
     // --with-30s：追加 30S（需 bis 数据中存在 30S 笔，即先用 chan_bi --with-30s 画过笔），
     // 使 3 分钟状态的「以下级别背驰」可以落到 30S 上。
-    const ALL_RES = ["D", "240", "60", "15", "3", ...(WITH_30S ? ["30S"] : [])]
+    // 2026-10-23 双周期链：白名单收录链B 周期（30/5/1）——--periods 传链B 周期集
+    // （如 240,30,5,1）时下沉链按数据驱动推导（240→30→5→1），仍按数据存在性过滤。
+    const ALL_RES = ["D", "240", "60", "30", "15", "5", "3", "1",
+                     ...(WITH_30S ? ["30S"] : [])]
       .filter(r => periodBis[r] && periodBis[r].length > 0);
+    // 链上下文（下沉链/检测周期判定用）：= 本脚本已加载周期集
+    const RES_CHAIN = ALL_RES;
     // 小周期数据窗口：默认 3分钟15天、15分钟30天、30秒3天，天数来自参数中心
     // CHAN_CFG.windowDays*（--chan-cfg 已在脚本头部合并进 core.CHAN_CFG），
     // 与 chan-bi/mark-buy-sell 同源同值；值 0 = 不限窗口。
@@ -1564,6 +1579,10 @@ async function main() {
     if (core.CHAN_CFG.windowDays3 > 0) DRAW_WINDOW_DAYS["3"] = core.CHAN_CFG.windowDays3;
     if (core.CHAN_CFG.windowDays15 > 0) DRAW_WINDOW_DAYS["15"] = core.CHAN_CFG.windowDays15;
     if (core.CHAN_CFG.windowDays30S > 0) DRAW_WINDOW_DAYS["30S"] = core.CHAN_CFG.windowDays30S;
+    // 链B 小周期窗口（2026-10-23；缺键=0 不限，同 60/240 口径）
+    if (core.CHAN_CFG.windowDays1 > 0) DRAW_WINDOW_DAYS["1"] = core.CHAN_CFG.windowDays1;
+    if (core.CHAN_CFG.windowDays5 > 0) DRAW_WINDOW_DAYS["5"] = core.CHAN_CFG.windowDays5;
+    if (core.CHAN_CFG.windowDays30 > 0) DRAW_WINDOW_DAYS["30"] = core.CHAN_CFG.windowDays30;
     const periodData = {};
     const fetched = {};
     let loadRes = originalRes;
@@ -1591,7 +1610,8 @@ async function main() {
     const structuredBis = {};
     for (const res of structOrder) {
       const d = fetched[res];
-      const lower = core.lowerResOf(res);
+      // 收笔下级按数据驱动推导（链B 240→30；收笔链不含 30S，与 py structurePeriods 同口径）
+      const lower = core.lowerResOf(res, Object.keys(fetched).filter(p => String(p).toUpperCase() !== "30S"));
       const lowerStroke = (lower && structuredBis[lower] && (barsByPeriod[lower] || []).length)
         ? { bis: structuredBis[lower], bars: barsByPeriod[lower], barSec: intervalSecOf(lower) }
         : null;
@@ -1605,8 +1625,9 @@ async function main() {
       if (DEBUG) console.log(`[数据] ${res}: K线 ${d.bars.length} 根 ATR=${periodData[res].atr.toFixed(2)} 笔 ${periodBis[res].length}`);
     }
 
-    // 生效检测周期：须自身之下存在已加载更低级别（30S 未加载时 3 被剔除，最小检测 15m）
-    const DETECT_RES = PERIODS.filter(res => periodData[res] && hasLowerResLoaded(periodData, res));
+    // 生效检测周期：须自身之下存在已加载更低级别（30S 未加载时 3 被剔除，最小检测 15m；
+    // 链B 口径 1 之下无级别不作检测，5/30/240 为检测周期）
+    const DETECT_RES = PERIODS.filter(res => periodData[res] && hasLowerResLoaded(periodData, res, RES_CHAIN));
     const dropped = PERIODS.filter(res => !DETECT_RES.includes(res));
     console.log("生效检测周期:", DETECT_RES.join(", ") || "（无）",
                 dropped.length ? `（剔除: ${dropped.join(", ")}——之下无已加载更低级别）` : "");
@@ -1657,7 +1678,7 @@ async function main() {
         console.log(`\n[周期 ${res}] 无周期数据，跳过`);
         continue;
       }
-      if (!hasLowerResLoaded(periodData, res)) {
+      if (!hasLowerResLoaded(periodData, res, RES_CHAIN)) {
         console.log(`\n[周期 ${res}] 之下无已加载更低级别，不作检测周期，跳过`);
         continue;
       }
@@ -1692,6 +1713,7 @@ async function main() {
         srLevels,
         periodData,
         barTimesAll,
+        chain: RES_CHAIN,   // 周期链上下文（2026-10-23：下沉链数据驱动推导）
       };
       for (const point of cands) {
         const strategy = pointStrategyOf(point);
@@ -2043,7 +2065,8 @@ async function main() {
       // 箭头创建在「低一级」周期：低一级周期 bar 边界更细，锚点时间（笔端点已校准到
       // 低一级边界）在其上精确定位；最小周期（默认 3 分钟、--with-30s 时为 30 秒）
       // 无更低级别、锚点在其自身读取始终返回原始时间（即使数据未覆盖），是天然稳定锚定周期。
-      const drawRes = lowerResOf(res) || res;
+      // 2026-10-23 双周期链：按已加载集数据驱动取下一级（链B 240 的绘制锚定周期=30）。
+      const drawRes = lowerResOf(res, RES_CHAIN) || res;
       if (drawRes !== drawCurrentRes) {
         await ensureResolution(drawRes);
         drawCurrentRes = drawRes;

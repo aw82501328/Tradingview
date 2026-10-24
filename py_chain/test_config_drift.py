@@ -96,8 +96,9 @@ class TestFingerprint(unittest.TestCase):
         self.assertEqual(fp_fx["hash"], _fp(self.pm, cfg_fx)["hash"])
 
     def test_modules_scope(self):
+        # chain（周期链）2026-10-23 入 chan_v1 param_modules → 进指纹（改链触发漂移守卫）
         self.assertEqual(set(_fp(self.pm, self.cfg)["modules"]),
-                         {"chan", "zs", "points", "sr", "plan", "entry"})
+                         {"chan", "zs", "points", "sr", "plan", "entry", "chain"})
         cfg_fx = load_config(None, {"strategy": "fxma_v1"})
         self.assertEqual(set(_fp(self.pm, cfg_fx)["modules"]),
                          {"chan", "zs", "points", "fxma"})

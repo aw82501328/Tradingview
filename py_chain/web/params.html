@@ -174,7 +174,7 @@ const TAB_IDS = ['chan', 'zs', 'points', 'sr', 'plan', 'entry'];
 // postMessage{type:'params-group'} 只显示该组页签；无 group（直连 /params.html）= 全部平铺
 const TAB_GROUPS = [
   { id: 'base', label: '基础组件', tabs: [['chan', '画笔'], ['zs', '画中枢'], ['points', '标记买卖点']] },
-  { id: 'strategy', label: '交易策略 · 缠论V1', tabs: [['sr', '支阻位'], ['plan', '交易计划'], ['entry', '标记进出场']] },
+  { id: 'strategy', label: '交易策略 · 缠论V1', tabs: [['sr', '支阻位'], ['plan', '交易计划'], ['entry', '标记进出场'], ['chain', '周期链']] },
   { id: 'fxma', label: '交易策略 · 强分型均线V1', tabs: [['fxmaBase', '基本参数'], ['fxmaEntry', '进场条件']] },
 ];
 const TABS = TAB_GROUPS.flatMap(g => g.tabs);
@@ -518,7 +518,9 @@ const CHOICE_LABELS = { trendRes: { '': '关闭', '240': '4小时', 'D': '日线
                         entryPick2: { '1': '三选一', '2': '三选二', '3': '三选三' },
                         entryPick2x: { '1': '三选一', '2': '三选二', '3': '三选三' },
                         entryPick3: { '1': '三选一', '2': '三选二', '3': '三选三' },
-                        entryPick3x: { '1': '三选一', '2': '三选二', '3': '三选三' } };
+                        entryPick3x: { '1': '三选一', '2': '三选二', '3': '三选三' },
+                        chainA: { '240': '4小时', '60': '1小时', '15': '15分钟', '3': '3分钟', '30S': '30秒(细层·仅回测)' },
+                        chainB: { '240': '4小时', '30': '30分钟', '5': '5分钟', '1': '1分钟(细层)' } };
 const choiceLabel = (key, v) => (CHOICE_LABELS[key] && CHOICE_LABELS[key][v]) || v;
 
 // 三滑点的 ATR 系数键（entry 模块）：系数不独立成行，内嵌进各自滑点行（2026-09-19）
@@ -782,6 +784,36 @@ const PLAN_GROUPS = [
   ['震荡', ['rangeRes', 'rangeBoundOn', 'rangeBarN', 'rangeBiN', 'rangeKMult', 'rangeBiMult', 'rangeBreakMult', 'rangeZsOn']],
   ['顺势', ['trendRes', 'trendRebound', 'reboundNearPts', 'reboundAngleRef']],
 ];
+
+// 「周期链」（2026-10-23 双周期链）：链A/链B 各一组（开关 + 开单周期勾选）；
+// 勾选=该周期开单（检测周期），不勾=仅结构参考（仍加载）；30S/1 为细层开关
+// （勾=加载参与背驰下沉）。未列键尾部兜底渲染。
+const CHAIN_GROUPS = [
+  ['链A · 30秒—3分钟—15分钟—60分钟—4小时', ['chainAOn', 'chainA']],
+  ['链B · 1分钟—5分钟—30分钟—4小时（启用前先在基础数据页拉取 1/5/30 周期K线）', ['chainBOn', 'chainB']],
+];
+function chainRowsHtml(m) {
+  const grouped = new Set(CHAIN_GROUPS.flatMap(([, keys]) => keys));
+  return `<div class="pgroup">勾选语义：勾=该周期作为开单周期；不勾=仅结构参考（笔/买卖点/支阻照算，不在该周期开单）。30秒/1分钟为细层开关（勾=加载）。日线不进链、始终隐式加载作参考。两条链同时启用时各自独立引擎并行、持仓互不影响；链B 默认关。</div>`
+    + CHAIN_GROUPS.map(([title, keys]) => `<div class="pgroup">${title}</div>`
+      + keys.filter(k => m.schema[k]).map(k => paramRow(m, k)).join('')).join('')
+    + Object.keys(m.schema).filter(k => !grouped.has(k)).map(k => paramRow(m, k)).join('');
+}
+// 链总开关关闭时：该链开单周期勾选变灰（数值仍随表单保存，只是链不参与运行）
+function applyChainDim() {
+  for (const onKey of ['chainAOn', 'chainBOn']) {
+    const on = document.querySelector(`#pgrid [data-k="${onKey}"]`);
+    if (!on) continue;
+    // 开关节点所在行的下一行即该链的开单周期勾选组（CHAIN_GROUPS 渲染顺序固定）
+    const row = on.closest('.prow');
+    const opts = row && row.nextElementSibling
+      ? row.nextElementSibling.querySelector('.multi-opts') : null;
+    if (!opts) continue;
+    const enabled = !!on.checked;
+    opts.classList.toggle('dim', !enabled);
+    opts.querySelectorAll('input').forEach(inp => { inp.disabled = !enabled; });
+  }
+}
 
 // 交易计划：按 震荡/顺势 2 类分组渲染（组标题占满整行；未分组键尾部兜底，不丢渲染）
 function planRowsHtml(m) {
@@ -1085,6 +1117,8 @@ function renderModule(name) {
     ? chanRowsHtml(m)
     : name === 'entry'
     ? entryRowsHtml(m)
+    : name === 'chain'
+    ? chainRowsHtml(m)
     : name === 'points'
     ? pointsRowsHtml(m)
     : name === 'plan'
@@ -1107,6 +1141,7 @@ function renderModule(name) {
     zs: '画中枢按当前品种：各周期是否绘制、以及每周期只保留最近几个中枢。',
     entry: '标记进出场按当前品种：近支阻、手数、滑点、出场判定、出场方式（开关+平仓比例，至少启用一种；锁定盈利优先级最高，门槛点数和锁定盈利比例都可配；够笔止盈拆背驰周期/检测周期两源，同一张卡）、进场扩展与闸门。进场扩展写入该品种 CHAN_CFG。「当下制够笔K线数」仅回测/监控引擎。有效滑点 = 固定值 + ATR系数×ATR(14)。手数口径：1手=0.01标准手，开/平仓手数恒整数。比例 = 触发时平总仓位（初始手数）百分比（⌊总手数×比例%⌋、不足1手平1手；每种方式一次性触发，部分平仓后剩余由其它方式了结）。锁定盈利的比例不是手数：最大盈利超过门槛后，回撤到只剩该比例的盈利就全平剩余。跟踪止盈同强分型均线V1（同向3类/类3类买卖点→止损上移，只上移；保本迁移后才接管、保本前参照点不追溯，部分平仓后剩余由最大止损硬上限兜底）。有任务运行中时会拒绝保存。',
     plan: '交易计划按当前品种分 2 类：震荡（参考周期闸门 rangeRes——关闭=默认，无震荡闸直接走买卖点；开启时 A 横盘/B 中枢内只给参考周期算结果，判震荡则更低周期观望）/ 顺势（参考周期 trendRes + 方向相位判定）。2026-10-16 起开单链路直连买卖点（买卖点→进场键见「进出场」页签图解表3），策略路由参数已下架。工作台/回测/实盘/监控同源读取。有任务运行中时会拒绝保存。',
+    chain: '周期链按当前品种（2026-10-23 双周期链）：链A=30秒-3分钟-15分钟-60分钟-4小时、链B=1分钟-5分钟-30分钟-4小时，各自独立引擎实例并行（回测同一任务内两链顺序跑、持仓/信号/交易日志按链隔离；实盘每链独立进程+独立 magic）。勾选=该周期作为开单周期（检测周期）；不勾=仅结构参考（仍加载笔/买卖点/支阻）。30秒（仅回测可用，MT5 无 30 秒行情）与 1 分钟为细层开关：勾=加载参与背驰下沉；不勾则上一级（3分钟/5分钟）无下级、不作检测周期。日线始终隐式加载作结构参考。链B 启用前须在基础数据页拉取 1/5/30 周期K线。240 默认不勾=只在 60/15（链B 为 30/5）开单。改链配置会变更实盘语义指纹：有持仓重启须 --accept-param-drift。',
     fxmaBase: '强分型均线V1·基本参数（按当前品种）：进出场周期/买卖点类别/点有效期/止损止盈/同根双触/同向互斥/默认手数/上级周期同向/预判2买卖/黄金分割附近。止盈方式三卡单选：固定点数（满仓一笔触价全平）/ 结构组合（每笔半仓、同向容量最多两笔且同一粗类 1/2/3 持仓期间不叠加、该类平仓后可再开——1/2类一半到前一点位主动止盈+另一半走3/4类点提损跟踪，3类只主动止盈）。点有效期=根数+价距双约束（同卡配置）。上级周期同向与黄金分割附近均为独立硬门槛（开启即必须通过才触发，不参与条件组合计票；黄金分割仅2/3类点判定、1类豁免，未通过该点不触发）。预判2买卖=只修点可见性（确认下跌/上涨笔破前低/前高后反弹/回调够笔即预判2卖/2买提前入列，闸门链全部照旧；锚随反弹延伸漂移、收复前低/前高判死、真点同锚接管）——开启后预判点比真点多，信号集变化大。',
     fxmaEntry: '强分型均线V1·进场条件（按当前品种）：次级别背驰与条件组合互斥——启用背驰=背驰为唯一触发条件（通过即触发，不过则等待，强分型/均线分离/收盘站线与条件满足数完全不参与，相关行变灰；黄金分割/上级同向在「基本参数」页签，若开启仍作为硬门槛拦一道）；关闭背驰=条件组合（三选N）：均线分离/收盘站线/强分型各设「启用+必选/可选」，各类买卖点设条件满足数，必选不通过该类点不触发、启用条件中通过数≥生效N 才触发（必选通过也计票；生效N=min(N,启用条件数)；三条件全停=点出现即触发）。次级别背驰=缠论V1同源区间套下沉链（次级别/次次级别由结构自动归属，点锚定·粘性窗口；3分钟周期须30秒级别已加载）。开关关闭时子参数变灰（数值仍随表单保存，只是不参与判定）。',
   }[name] || '';
@@ -1121,6 +1156,7 @@ function renderModule(name) {
   $('logicBlock').hidden = name !== 'plan';
   if (name === 'zs') applyZsKeepDim();
   if (name === 'chan') applyChanMasterDim();
+  if (name === 'chain') applyChainDim();
   if (name === 'points') applyAnchorDim();
   if (name === 'fxmaBase' || name === 'fxmaEntry') applyFxmaDim();
   if (name === 'entry') applyExitModeDim();
@@ -1348,6 +1384,8 @@ document.addEventListener('click', e => {
 document.addEventListener('change', e => {
   if (e.target && e.target.dataset
       && (e.target.dataset.k === 'rangeBoundOn' || e.target.dataset.k === 'trendRes')) applyPlanRangeDim();
+  if (e.target && e.target.dataset
+      && (e.target.dataset.k === 'chainAOn' || e.target.dataset.k === 'chainBOn')) applyChainDim();
   if (e.target && e.target.dataset && ZS_KEEP_PAIR[e.target.dataset.k]) applyZsKeepDim();
   if (e.target && e.target.dataset && e.target.dataset.k === 'anchorUndecidedSkip') applyAnchorDim();
   if (e.target && e.target.dataset && CHAN_KEEP_MASTERS.includes(e.target.dataset.k)) applyChanMasterDim();

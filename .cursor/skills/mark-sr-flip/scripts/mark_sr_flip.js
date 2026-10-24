@@ -169,7 +169,9 @@ const FIB_BUY_TYPES = ["2买", "类2买", "3买", "类3买", "4买", "类4买"];
 const FIB_SELL_TYPES = ["2卖", "类2卖", "3卖", "类3卖", "4卖", "类4卖"];
 // 上级周期映射（现算买卖点的区间套用；D 及未收录周期无上级，走结构底分支）。
 // 用固定映射而非 PERIODS 前一元素：--periods 可传子集，而 bis 文件含全部周期。
-const UPPER_OF = { "240": "D", "60": "240", "15": "60", "3": "15" };
+// 链B 键（2026-10-23 双周期链）：30→240、5→30——与链A 键无冲突（同一运行只算
+// 自己链上的级别）。
+const UPPER_OF = { "240": "D", "60": "240", "15": "60", "3": "15", "30": "240", "5": "30" };
 // BOLL 布林带参数（已收盘K线口径：剔除末根形成中K线后取末 BOLL_LENGTH 根收盘价）
 const BOLL_LENGTH = Math.max(parseInt(getStrArg("boll-length", "26"), 10) || 26, 1);
 const BOLL_MULT = Math.max(parseFloat(getArg("boll-mult", 2)) || 2, 0.01);
@@ -339,13 +341,17 @@ function typeNameOf(f) {
 }
 
 /**
- * 周期中文名（标注与打印用）：240→4小时、60→1小时、15→15分钟、3→3分钟、D→日线。
+ * 周期中文名（标注与打印用）：240→4小时、60→1小时、30→30分钟、15→15分钟、
+ * 5→5分钟、3→3分钟、1→1分钟、D→日线。
  */
 function periodNameOf(res) {
   const r = String(res).toUpperCase();
   switch (r) {
+    case "1": return "1分钟";
     case "3": return "3分钟";
+    case "5": return "5分钟";
     case "15": return "15分钟";
+    case "30": return "30分钟";
     case "60":
     case "1H": return "1小时";
     case "240":
@@ -776,8 +782,8 @@ function flipScore(f, group) {
   return TOUCH_WEIGHT * normTouch + BARS_WEIGHT * normBars;
 }
 
-// 级别大小顺序（从大到小），用于候选池排序与可见范围判断
-const LEVEL_ORDER = ["1W", "W", "1D", "D", "240", "4H", "60", "1H", "15", "3"];
+// 级别大小顺序（从大到小），用于候选池排序与可见范围判断（30/5 为链B 级别，2026-10-23）
+const LEVEL_ORDER = ["1W", "W", "1D", "D", "240", "4H", "60", "1H", "30", "15", "5", "3"];
 
 /**
  * 展平各周期候选为全量候选池（不合并，与 py flatten_candidates 逐行对齐）：

@@ -19,7 +19,7 @@ import time
 
 from . import chan_core, data_store, mark_entry
 from . import engine_dispatch
-from .backtest import BacktestEngine
+from .backtest import BacktestEngine, merge_run_stats
 from .chan_core import fmtT
 
 
@@ -27,7 +27,12 @@ def run_symbol(child_cfg, symbol, msg_q, pause_evt, stop_evt):
     """单品种 headless 全量回测。child_cfg 见 _run_batch：全部为可 pickle 的纯 dict。
 
     引擎按 child_cfg["strategy"] 分发（2026-09-30：fx_ma = 强分型均线V1）；
-    缺省 None = 缠论V1（历史 child_cfg 无该键，行为不变）。"""
+    缺省 None = 缠论V1（历史 child_cfg 无该键，行为不变）。
+
+    双周期链（2026-10-23）：chan 传 child_cfg["chains"]=[{id,periods,engine_kwargs}]
+    ——逐链独立引擎实例顺序跑（持仓/信号/交易日志按链隔离：journal_strategy=chanA/
+    chanB、事件带 chain 字段），stats/open/journal 合并为单条 done；无 chains 键的
+    旧 child_cfg（engine_kwargs+periods）走原单引擎路径，行为逐位不变。"""
 
     def _send(**msg):
         msg["symbol"] = symbol
@@ -39,6 +44,77 @@ def run_symbol(child_cfg, symbol, msg_q, pause_evt, stop_evt):
     try:
         t0 = time.time()
         chan_core.apply_cfg(child_cfg["chan_cfg"])
+        chains = child_cfg.get("chains")
+        if chains:
+            # 逐链顺序跑：链间完全独立（各自引擎实例/持仓/journal），互不影响
+            merged = None
+            open_trades = []
+            journals = []
+            for task in chains:
+                if stop_evt.is_set():
+                    break
+                cid = task.get("id")
+                tag = f"[链{cid}] " if cid else ""
+                periods = task["periods"]
+                _log(f"{tag}取数：数据源=本地存储 symbol={symbol} periods={periods} "
+                     f"from_ts={child_cfg['data_from_ts']}"
+                     f"{' to_ts=' + str(child_cfg['to_ts']) if child_cfg.get('to_ts') else ''}")
+                bars = data_store.load_store(symbol, periods=periods,
+                                             from_ts=child_cfg["data_from_ts"],
+                                             to_ts=child_cfg.get("to_ts"))
+                for res in periods:
+                    n = len(bars.get(res, []) or [])
+                    if n:
+                        _log(f"  {res:>4}: {n} 根（{fmtT(bars[res][-1]['time'])} 止）")
+                kw = dict(task["engine_kwargs"])
+                kw["contract_mult"] = mark_entry.contract_mult_of(symbol)
+                engine = BacktestEngine(bars, **kw)
+                from .backtest import exit_cfg_desc
+                _log(f"{tag}回测开始（最小周期 {engine.fine_res}，成交口径 {engine.fill_mode}，"
+                     f"信号模式 {'当下背驰' if engine.signal_mode == 'realtime' else '确认制'}，"
+                     f"背驰进场 {'分型确认后下一根开盘' if engine.diverge_confirm else '当下'}，"
+                     f"柱缩闸 {'开' if engine.entry_macd_shrink else '关'}，"
+                     f"止损下限 {'开' if engine.stop_entry_bar_floor else '关'}，"
+                     f"检测周期够笔 {'预期' if engine.expect_bi else '分型确认'}，"
+                     f"出场 {exit_cfg_desc(engine.exit_cfg)}）...")
+                chain_kw = {"chain": cid} if cid else {}
+
+                def _on_progress(i, total, _cid=cid):
+                    if i % max(1, total // 100) == 0 or i == total:
+                        m = {"kind": "progress", "current": i, "total": total,
+                             "pct": round(100.0 * i / total, 1) if total else 0}
+                        if _cid:
+                            m["chain"] = _cid
+                        _send(**m)
+
+                result = engine.run(
+                    start_ts=child_cfg.get("start_ts"),
+                    log=_log,
+                    on_progress=_on_progress,
+                    on_signal=lambda s: _send(kind="signal", signal=dict(s, **chain_kw)),
+                    on_trade=lambda tr: _send(kind="trade", trade=dict(tr, **chain_kw)),
+                    on_exit=lambda tr: _send(kind="exit", trade=dict(tr, **chain_kw)),
+                    on_suppressed=lambda s: _send(kind="suppressed", signal=dict(s, **chain_kw)),
+                    paused=pause_evt,
+                    stopped=stop_evt,
+                    journal_symbol=symbol,
+                    journal_strategy=(f"chan{cid}" if cid else "chan"))
+                jp = result.get("journal")
+                if jp:
+                    journals.append(jp)
+                    _log(f"{tag}交易日志：{jp}")
+                open_trades.extend(dict(tr, **chain_kw)
+                                   for tr in result.get("trades") or []
+                                   if tr.get("state") != "closed")
+                merged = merge_run_stats(merged, result.get("stats") or {})
+            _send(kind="done",
+                  stats=merged or {},
+                  open=open_trades,
+                  stopped=stop_evt.is_set(),
+                  duration=round(time.time() - t0, 1),
+                  journal=(";".join(journals) if journals else None))
+            return
+
         periods = child_cfg["periods"]
         _log(f"取数：数据源=本地存储 symbol={symbol} periods={periods} "
              f"from_ts={child_cfg['data_from_ts']}"

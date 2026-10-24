@@ -1708,9 +1708,23 @@ function extendLastBi(bisArr, bars) {
   return bisArr;
 }
 
-/** 逐级校准映射：每个周期用其「低一级」周期校准端点时间（15分钟←3分钟，1小时←15分钟，4小时←1小时，日线←4小时） */
-function lowerResOf(res) {
+/** 逐级校准映射：每个周期用其「低一级」周期校准端点时间（15分钟←3分钟，1小时←15分钟，4小时←1小时，日线←4小时）。
+ * 2026-10-23 双周期链：loaded（已加载周期集合，数组/Set）提供时改按数据驱动推导——
+ * 返回 loaded 中比 res 小的最近周期（链A 完整集与旧映射逐位一致，含 3→30S；
+ * 链B 240→30→5→1）；不传走旧固定映射（单链调用方零变化）。 */
+function lowerResOf(res, loaded) {
   const s = String(res).toUpperCase();
+  if (loaded !== undefined && loaded !== null) {
+    const tgt = intervalSecOf(s);
+    if (!tgt) return null;
+    let best = null, bestSec = 0;
+    for (const p of loaded) {
+      const sec = intervalSecOf(p);
+      if (!sec || sec >= tgt) continue;
+      if (best === null || sec > bestSec) { best = p; bestSec = sec; }
+    }
+    return best;
+  }
   if (s === "D" || s === "1D") return "240";
   if (s === "240" || s === "4H") return "60";
   if (s === "60" || s === "1H") return "15";
@@ -1751,6 +1765,7 @@ function calibrateBiTimes(bis, bigBars, refBars, bigIntervalSec) {
 function intervalSecOf(res) {
   const r = String(res).toUpperCase();
   if (/^\d+S$/.test(r)) return parseInt(r, 10) || 0; // "30S" → 30（秒级）
+  if (r === "1") return 60;   // 1分钟（链B 最细周期，2026-10-23）
   if (r === "3") return 180;
   if (r === "5") return 300;
   if (r === "15") return 900;
@@ -1763,13 +1778,14 @@ function intervalSecOf(res) {
 }
 
 // 每周期近等双顶开关：周期码（含 1H/4H/1D 别名）或 barSec 秒数 → CHAN_CFG 开关键。
-// 五周期之外（'30S'/'5'/'30'/'W'/未知秒数/非 str|number）一律 false——沿用旧口径
-// intervalSecOf(res) >= 3600 的失败安全语义。注意：旧口径对 W(604800) 会开启，
-// 此处收窄为 false；全链路（画笔/回测/对拍）无 W 调用点，零实际影响。
+// 无档周期（'30S'/'W'/未知秒数/非 str|number）一律 false——失败安全语义。链B 周期
+// （1/5/30）档位键默认关（2026-10-23 双周期链），开启走参数页。
 const NEAR_DOUBLE_SWITCH_BY_SEC = { 180: "nearDouble3", 900: "nearDouble15", 3600: "nearDouble60",
-                                   14400: "nearDouble240", 86400: "nearDoubleD" };
+                                   14400: "nearDouble240", 86400: "nearDoubleD",
+                                   60: "nearDouble1", 300: "nearDouble5", 1800: "nearDouble30" };
 const WIDE_BAR_POINTS_BY_SEC = { 180: "wideBarPoints3", 900: "wideBarPoints15", 3600: "wideBarPoints60",
-                                 14400: "wideBarPoints240", 86400: "wideBarPointsD" };
+                                 14400: "wideBarPoints240", 86400: "wideBarPointsD",
+                                 60: "wideBarPoints1", 300: "wideBarPoints5", 1800: "wideBarPoints30" };
 function wideBarPointsOf(res) {
   // 该周期「顶底分形不能包含」的单根长K豁免点数。未列周期、缺省、或配置为 0 时返回 0（不豁免）。
   // wideBarOn=false：总开关关闭，所有周期一律 0。
@@ -2623,8 +2639,10 @@ function reverseStrokeCloses(last, merged, barSec, enoughCount, lowerStroke, cut
   if (originMergedCount(merged, last, barSec) < 5) return true;
   return lowerExitEnterDiverge(lowerStroke, last, cutoff);
 }
-function lowerStrokePack(res, periodBis, barsByPeriod) {
-  const lower = lowerResOf(res);
+function lowerStrokePack(res, periodBis, barsByPeriod, loaded) {
+  // loaded（2026-10-23 双周期链）：传给 lowerResOf 的已加载周期集——链B 240 的收笔
+  // 下级是 30 而非 60；不传走旧固定映射（收笔链不含 30S，由调用方 loaded 集排除）
+  const lower = lowerResOf(res, loaded);
   if (!lower) return null;
   const bis = periodBis && periodBis[lower];
   const bars = barsByPeriod && barsByPeriod[lower];
@@ -2637,7 +2655,8 @@ function buildStructureContext(bis, bars, barSec, tCut = null, merged = null, fr
     raw = raw.filter(b => b.time + barSec <= tCut);
     merged = mergeBars(markWickBars(raw));
     fractals = findFractals(merged);
-    const resOf = {180: "3", 900: "15", 3600: "60", 14400: "240", 86400: "D"}[barSec] || null;
+    const resOf = {60: "1", 180: "3", 300: "5", 900: "15", 1800: "30", 3600: "60",
+                   14400: "240", 86400: "D"}[barSec] || null;
     known = buildBi(fractals, merged, calcATR(raw), calcMACD(raw), null, nearDoubleOn(barSec), resOf);
     known = fixBiExtremes(known, merged) || known;
     known = extendLastBi(known, markWickBars(raw));
@@ -2684,8 +2703,11 @@ function buildStructureContext(bis, bars, barSec, tCut = null, merged = null, fr
   result.current = current;
   return result;
 }
-function structurePeriods(periodBis, barsByPeriod, tCut = null) {
+function structurePeriods(periodBis, barsByPeriod, tCut = null, res_chain = null) {
   if (tCut == null) tCut = Math.max(0, ...Object.entries(barsByPeriod).filter(([,v])=>v.length).map(([r,v])=>v[v.length-1].time+intervalSecOf(r)));
+  // 收笔链 loaded 集（2026-10-23 双周期链）：链周期去掉 30S（秒级不参与收笔背驰，
+  // 与 Python 侧口径一致）；res_chain 不传=旧固定映射（单链调用方零变化）
+  const strokeLoaded = res_chain ? res_chain.filter(p => String(p).toUpperCase() !== "30S") : undefined;
   // 从小周期到大周期：上一级收笔要看下一级已经建好的笔。返回键顺序与输入一致。
   const computed = {};
   const order = Object.keys(periodBis).sort((a, b) => (intervalSecOf(a) || 0) - (intervalSecOf(b) || 0));
@@ -2693,7 +2715,7 @@ function structurePeriods(periodBis, barsByPeriod, tCut = null) {
     const bis = periodBis[r] || [];
     if (bis.length && bis[bis.length - 1]._contextReady) { computed[r] = bis; continue; }
     const ctx = buildStructureContext(bis, barsByPeriod[r] || [], intervalSecOf(r), tCut, null, null,
-      lowerStrokePack(r, computed, barsByPeriod));
+      lowerStrokePack(r, computed, barsByPeriod, strokeLoaded));
     const view = ctx.bis.slice();
     if (view.length && ctx.current) view[view.length - 1] = {...view[view.length - 1], coverageEnd: tCut};
     computed[r] = view;

@@ -1,0 +1,47 @@
+{
+  "_comment": "链B 实盘配置模板（1分钟-5分钟-30分钟-4小时周期链，2026-10-23 双周期链）。与链A（live_config.json）独立进程并行：独立 magic=20261023、独立 kill/arm 文件、kv 状态键带 :B 后缀。启用前置：①参数中心·周期链 链B总开关开；②基础数据页已拉取 1/5/30 周期K线（或首启由 MT5 深拉）。真实账号值请放 live_config.chain_b.local.json（已 gitignore）。",
+  "account": {
+    "login": 0,
+    "server": "",
+    "require_mode": "demo"
+  },
+  "strategy": "chan_v1",
+  "chain": "B",
+  "symbol": "XAUUSD",
+  "db_symbol": "EXNESS:XAUUSD",
+  "magic": 20261023,
+  "lots": 2,
+  "risk": {
+    "max_volume_per_order": 0.02,
+    "max_total_open_volume": 0.06,
+    "max_positions": 2,
+    "day_loss_halt_pct": 3.0,
+    "equity_floor": 0,
+    "max_spread_entry": 0.5,
+    "hard_spread_alert": 1.5,
+    "entry_session_block_srv": [["21:55", "22:15"]],
+    "weekend": "drop"
+  },
+  "broker": {
+    "deviation_pts": 50,
+    "order_retry": 3,
+    "modify_retry": 3,
+    "clamp_stops_level": true
+  },
+  "run": {
+    "shadow": true,
+    "poll_sec": 10,
+    "replay_start_days_ago": 10,
+    "kill_file": "data/LIVE_KILL_B",
+    "arm_file": "data/LIVE_ARMED_B",
+    "reconcile_min": 5,
+    "param_drift": "refuse",
+    "events_retention_days": 180
+  },
+  "notify": {
+    "enabled": false,
+    "channel": "telegram",
+    "chat_id": "",
+    "token_env": "LIVE_TG_TOKEN"
+  }
+}

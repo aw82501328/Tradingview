@@ -24,12 +24,14 @@ from .sr_flip import (LEVEL_ORDER, DEFAULT_SR_TYPES, FIB_LEVELS,
                       MAX_DIST_ATR, CLUSTER_ATR,
                       RECENT_CLUSTER_ATR, _kindOf, compute_srflip)
 
-# 级别（大 → 小，与 LEVEL_ORDER 相对顺序一致；不含 30S / 1W / 1D 别名键）
-CANONICAL_LEVELS = ["W", "D", "240", "60", "15", "3"]
+# 级别（大 → 小，与 LEVEL_ORDER 相对顺序一致；不含 30S / 1W / 1D 别名键）。
+# 30/5 为链B 级别（2026-10-23 双周期链）：仅链B 引擎按自身 periods 过滤后计算，
+# 默认级别集（DEFAULT_LEVELS）不含——链A 行为零变化。
+CANONICAL_LEVELS = ["W", "D", "240", "60", "30", "15", "5", "3"]
 DEFAULT_LEVELS = ["D", "240", "60", "15", "3"]
 DEFAULT_FROM = "2026-06-30"
 # 页面 minTouch 矩阵默认（与引擎 _MIN_TOUCH_DEFAULT 一致；W 引擎无收录落底 4）
-MIN_TOUCH_UI = {"W": 4, "D": 4, "240": 4, "60": 4, "15": 3, "3": 8}
+MIN_TOUCH_UI = {"W": 4, "D": 4, "240": 4, "60": 4, "30": 4, "15": 3, "5": 8, "3": 8}
 MIN_BARS_OK = 6   # 单周期可建笔的最少K线数（缓存覆盖判定下限）
 # 「时点+回溯」（SR 控制台）：回溯加载下限与跨度换算
 LOOKBACK_BARS_DEFAULT = 300   # 「向前K线根数」缺省（normalize 层与页面输入框一致）

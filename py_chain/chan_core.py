@@ -74,6 +74,11 @@ CHAN_CFG = {
     "wideBarPoints60": 30.0,
     "wideBarPoints15": 30.0,
     "wideBarPoints3": 30.0,
+    # 链B 周期（2026-10-23 双周期链）默认 0=不豁免（与近等开关同口径：新周期
+    # 家族默认关，参数页可开；缺键时 wideBarPointsOf 返回 0 的失败安全语义不变）
+    "wideBarPoints30": 0.0,
+    "wideBarPoints5": 0.0,
+    "wideBarPoints1": 0.0,
     "divergeDurRatio": 3,  # 背驰面积判据的时长可比上限：面积Σ=柱高×K线根数、与区间时长线性相关，
                            # 两段时长比 > 该值时不具可比性，面积项不计入背驰（只用 DIF/柱高判据）
     # 买卖点判定不再使用背驰（2026-10-14 规则v2：一类=已收笔上级笔端点投影、二类=锚后
@@ -94,6 +99,11 @@ CHAN_CFG = {
     "nearDouble60": True,
     "nearDouble240": True,
     "nearDoubleD": True,
+    # 链B 周期（2026-10-23 双周期链）默认关：新周期家族近等双顶/双底默认不开启，
+    # 参数页可开；nearDoubleOn 对缺档周期仍恒 False（失败安全）
+    "nearDouble30": False,
+    "nearDouble5": False,
+    "nearDouble1": False,
     # 近等后顶/后底（反弹不成笔）取后：阶段二「间隔不足→回溯替换」分支的扩展，详见该分支注释。
     # 关闭后仅 k.locked（上级笔端点，区间套强制落地）路径仍生效。
     "nearDoubleRebound": True,
@@ -166,6 +176,11 @@ CHAN_CFG = {
     "windowDays3": 15,
     "windowDays15": 30,
     "windowDays30S": 3,
+    # 链B 小周期绘制/加载窗口（2026-10-23）：按每日K线密度递进（1m≈1440根/日=5天，
+    # 5m≈288根/日=20天，30m≈48根/日=60天；60m 及以上不限）。Python 引擎不读，仅 JS 消费。
+    "windowDays1": 5,
+    "windowDays5": 20,
+    "windowDays30": 60,
     "debug": False,    # 调试打印（buildBi / 买卖点识别过程）
 }
 
@@ -618,13 +633,17 @@ def _reverseStrokeCloses(last, merged, barSec, enough_count, lower_stroke, cutof
     return lowerExitEnterDiverge(lower_stroke, last, cutoff)
 
 
-def lowerStrokePack(res, periodBis, barsByPeriod, macdByPeriod=None, timesByPeriod=None):
+def lowerStrokePack(res, periodBis, barsByPeriod, macdByPeriod=None, timesByPeriod=None,
+                    loaded=None):
     """组装下一级笔与 K 线，供收笔背驰。没有下一级或数据为空则返回 None。
 
     macdByPeriod/timesByPeriod 可选：调用方（回测引擎）已维护的下一级增量 MACD 与
     K 线时间轴；与 bars 逐位对齐（长度一致）时随包带下，供 lowerExitEnterDiverge
-    免全量重算，未传/不齐则 None → 消费方回退 calcMACD（与旧行为一致）。"""
-    lower = lowerResOf(res)
+    免全量重算，未传/不齐则 None → 消费方回退 calcMACD（与旧行为一致）。
+    loaded（2026-10-23 双周期链）：传给 lowerResOf 的已加载周期集——链B 引擎
+    240 的收笔下级是 30 而非 60；None=旧固定映射（收笔链不含 30S，由调用方
+    传入的 loaded 集排除）。"""
+    lower = lowerResOf(res, loaded)
     if not lower:
         return None
     bis = (periodBis or {}).get(lower) or []
@@ -728,14 +747,21 @@ def buildStructureContext(bis, bars, barSec, tCut=None, merged=None, fractals=No
 
 def structurePeriods(periodBis, barsByPeriod, tCut=None, mergedByPeriod=None,
                      fractalsByPeriod=None, work_cache=None, macdByPeriod=None,
-                     timesByPeriod=None, mergedTimesByPeriod=None):
+                     timesByPeriod=None, mergedTimesByPeriod=None, res_chain=None):
     """Prepare per-period structural views; cache only on closed-input changes.
 
     Coverage advances every decision even when the upper period has not closed.
     The caller invalidates work_cache on historical corrections/resynchronization.
+    res_chain（2026-10-23 双周期链）：引擎已加载周期集——收笔下级按数据驱动推导
+    （链B 240→30→5→1）；收笔链不含 30S（旧口径 3 的收笔下级恒空，此处从 loaded
+    集显式排除保持一致）。None=旧固定映射（历史子集回放零变化）。
     """
     if tCut is None:
         tCut = max((v[-1]["time"] + intervalSecOf(r) for r, v in barsByPeriod.items() if v), default=0)
+    # 收笔链 loaded 集：链周期去掉 30S（秒级不参与收笔背驰，与旧口径一致）
+    stroke_loaded = None
+    if res_chain is not None:
+        stroke_loaded = [p for p in res_chain if str(p).upper() != "30S"]
     # 从小周期到大周期：上一级收笔要看下一级已经建好的笔
     computed = {}
     for res in sorted(periodBis.keys(), key=lambda r: intervalSecOf(r) or 0):
@@ -745,7 +771,7 @@ def structurePeriods(periodBis, barsByPeriod, tCut=None, mergedByPeriod=None,
             continue
         raw = barsByPeriod.get(res) or []
         tail = raw[-1] if raw else {}
-        lower = lowerResOf(res)
+        lower = lowerResOf(res, stroke_loaded)
         lb = computed.get(lower) if lower else None
         lbars = (barsByPeriod.get(lower) or []) if lower else []
         ltail = lbars[-1] if lbars else {}
@@ -767,7 +793,8 @@ def structurePeriods(periodBis, barsByPeriod, tCut=None, mergedByPeriod=None,
             ctx = buildStructureContext(bis, raw, intervalSecOf(res), tCut,
                                         (mergedByPeriod or {}).get(res), (fractalsByPeriod or {}).get(res),
                                         lowerStrokePack(res, computed, barsByPeriod,
-                                                        macdByPeriod, timesByPeriod),
+                                                        macdByPeriod, timesByPeriod,
+                                                        loaded=stroke_loaded),
                                         rawTimes=(timesByPeriod or {}).get(res),
                                         mergedTimes=(mergedTimesByPeriod or {}).get(res))
             if work_cache is not None:
@@ -2755,9 +2782,26 @@ def extendLastBiFrom(bisArr, bars, startIdx, endIdx=None):
     return bisArr
 
 
-def lowerResOf(res):
-    """逐级校准映射：15分钟←3分钟，1小时←15分钟，4小时←1小时，日线←4小时。"""
+def lowerResOf(res, loaded=None):
+    """逐级校准映射：15分钟←3分钟，1小时←15分钟，4小时←1小时，日线←4小时。
+
+    2026-10-23 双周期链：loaded（引擎已加载周期集合，可迭代）提供时改按数据驱动
+    推导——返回 loaded 中按 intervalSecOf 比 res 小的最近周期（链A 完整集下与旧
+    固定映射逐位一致，含 3→30S：30S 在 loaded 时自然成立；链B 240→30→5→1）。
+    loaded=None 走旧固定映射（历史子集回放/单链调用方/测试零变化）。"""
     s = str(res).upper()
+    if loaded is not None:
+        tgt = intervalSecOf(s)
+        if not tgt:
+            return None
+        best, bestSec = None, 0
+        for p in loaded:
+            sec = intervalSecOf(p)
+            if not sec or sec >= tgt:
+                continue
+            if best is None or sec > bestSec:
+                best, bestSec = p, sec
+        return best
     if s == "D" or s == "1D":
         return "240"
     if s == "240" or s == "4H":
@@ -2813,6 +2857,8 @@ def intervalSecOf(res):
     r = str(res).upper()
     if r.endswith("S") and r[:-1].isdigit():
         v = int(r[:-1])  # "30S" → 30（秒级）
+    elif r == "1":
+        v = 60
     elif r == "3":
         v = 180
     elif r == "5":
@@ -2839,9 +2885,12 @@ def intervalSecOf(res):
 
 
 _NEAR_DOUBLE_SWITCH_BY_SEC = {180: "nearDouble3", 900: "nearDouble15", 3600: "nearDouble60",
-                              14400: "nearDouble240", 86400: "nearDoubleD"}
+                              14400: "nearDouble240", 86400: "nearDoubleD",
+                              # 链B 周期档（2026-10-23）：默认关，参数页可开
+                              60: "nearDouble1", 300: "nearDouble5", 1800: "nearDouble30"}
 _WIDE_BAR_POINTS_BY_SEC = {180: "wideBarPoints3", 900: "wideBarPoints15", 3600: "wideBarPoints60",
-                           14400: "wideBarPoints240", 86400: "wideBarPointsD"}
+                           14400: "wideBarPoints240", 86400: "wideBarPointsD",
+                           60: "wideBarPoints1", 300: "wideBarPoints5", 1800: "wideBarPoints30"}
 
 
 def wideBarPointsOf(res):
@@ -2870,11 +2919,10 @@ def wideBarPointsOf(res):
 
 def nearDoubleOn(res):
     """该周期是否开启「近等双顶/双底平台取后顶/后底」（读 CHAN_CFG 每周期开关）。
-    res 接受周期码（'3'/'15'/'60'/'240'/'D'，含 1H/4H/1D 别名）或 barSec 秒数 int
-    （buildStructureContext 只有秒数）。五周期之外（'30S'/'5'/'30'/'W'/未知秒数/bool）
-    一律 False——沿用旧口径 intervalSecOf(res) or 0 >= 3600 的失败安全语义。
-    注意：旧口径对 W(604800) 会返回 True，此处收窄为 False；全链路（画笔/回测/对拍）
-    无 W 调用点，零实际影响。"""
+    res 接受周期码（'1'/'3'/'5'/'15'/'30'/'60'/'240'/'D'，含 1H/4H/1D 别名）或
+    barSec 秒数 int（buildStructureContext 只有秒数）。无档周期（'30S'/'W'/未知
+    秒数/bool）一律 False——沿用旧口径的失败安全语义。链B 周期（1/5/30）档位
+    键默认关（2026-10-23），开启走参数页。"""
     try:
         return _NEAR_DOUBLE_MEMO[res]
     except (KeyError, TypeError):

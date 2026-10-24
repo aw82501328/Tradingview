@@ -90,6 +90,21 @@ _LEGACY_CHAN_TO_ENTRY = set(ENTRY_CHAN_KEYS)
 # 改这些模块会拼合写回 CHAN_CFG，任务运行中禁止保存
 CHAN_CFG_MODULES = frozenset(("chan", "points", "entry"))
 
+# ---- 双周期链（2026-10-23）----
+# 链A=30S-3-15-60-240，链B=1-5-30-240。节点勾选=该周期作为开单周期（检测周期）；
+# 不勾=仅结构参考（仍加载：笔/买卖点/支阻照算，不在该周期开单，类似 D 的角色）。
+# 最细周期（链A 的 30S、链B 的 1）勾=加载参与（背驰下沉最深层）、不勾=不加载
+# （上一级自动失去检测周期资格——filterDetectPeriods 既有规则）。
+# D 不进链配置：引擎始终隐式加载作结构参考（regime/趋势锚），从不开单。
+CHAIN_A_NODES = ("240", "60", "15", "3", "30S")   # 30S=细层开关（仅回测可用，MT5 无 30S）
+CHAIN_B_NODES = ("240", "30", "5", "1")           # 1=细层开关
+CHAIN_DEFAULTS = {
+    "chainAOn": True,
+    "chainA": "60,15,3",    # 240 默认不勾（仅结构参考；检测周期=60/15）
+    "chainBOn": False,      # 默认关：未拉 1/5/30 周期数据时回测不因缺数据失败
+    "chainB": "1,5,30",
+}
+
 # schema：label/desc 前端展示用；type/min/max 由默认值类型与下表范围决定（校验用）。
 # 未列 min/max 的布尔键只做类型校验。
 PARAM_MODULES = {
@@ -263,6 +278,31 @@ PARAM_MODULES = {
                               "（如60→3直沉，markRes=3）；关=在本级判定", None, None),
         },
     },
+    "chain": {
+        "category": "strategy",
+        "title": "周期链",
+        "params": {
+            "chainAOn": ("链A总开关",
+                         "30秒-3分钟-15分钟-60分钟-4小时周期链；关闭后链A 不加载不产生信号。"
+                         "回测与实盘共用（实盘 MT5 无 30 秒行情，链A 勾选 30S 时实盘拒启）",
+                         None, None),
+            "chainA": ("链A开单周期",
+                       "勾选=该周期作为开单周期（检测周期）；不勾=仅结构参考（仍加载笔/买卖点/"
+                       "支阻，不在该周期开单）。30S 为细层开关：勾=加载 30 秒参与背驰下沉"
+                       "（仅回测可用），不勾=不加载（此时 3 分钟无下级、不作检测周期）",
+                       CHAIN_A_NODES, "multi"),
+            "chainBOn": ("链B总开关",
+                         "1分钟-5分钟-30分钟-4小时周期链；关闭后链B 不加载不产生信号。"
+                         "启用前须先在基础数据页拉取 1/5/30 周期K线（回测读本地存储，"
+                         "缺周期直接报错）",
+                         None, None),
+            "chainB": ("链B开单周期",
+                       "勾选=该周期作为开单周期（检测周期）；不勾=仅结构参考。1分钟为细层开关："
+                       "勾=加载 1 分钟参与背驰下沉，不勾=不加载（此时 5 分钟无下级、"
+                       "不作检测周期）。两链同时启用时各自独立引擎实例并行、持仓互不影响",
+                       CHAIN_B_NODES, "multi"),
+        },
+    },
     "plan": {
         "category": "strategy",
         "title": "交易计划",
@@ -420,6 +460,8 @@ def defaults_of(module, symbol=None):
                 "reboundAngleRef": trading_plan.REBOUND_ANGLE_REF}
     elif module == "fxma":
         base = dict(FXMA_DEFAULTS)
+    elif module == "chain":
+        base = dict(CHAIN_DEFAULTS)
     else:
         raise ValueError(f"未知参数模块：{module}")
     return base
@@ -492,12 +534,49 @@ def engine_module_params(pm):
            "trendRes": pm["plan"]["trendRes"],
            "exit_min_merged": ep["exit_min_merged"],
            "realtime_min_bars": ep["realtime_min_bars"],
-           "zs_exit_weak_ratio": ep["zs_exit_weak_ratio"]}
+           "zs_exit_weak_ratio": ep["zs_exit_weak_ratio"],
+           # 双周期链（2026-10-23）：整桶透传（引擎构造侧由 chain_specs 消费推导
+           # periods/open_res；进 module_params 供 journal/header 快照记录）
+           "chain": pm.get("chain") or dict(CHAIN_DEFAULTS)}
     # 出场方式开关/比例（2026-10-08；键名同名直通，缺键由引擎 EXIT_MODE_DEFAULTS 兜底）
     for k in mark_entry.EXIT_MODE_DEFAULTS:
         if k in ep:
             out[k] = ep[k]
     return out
+
+
+def chain_specs(pm):
+    """effective_all(symbol) → 启用链规格列表（回测双链循环/实盘链进程共用，
+    2026-10-23 双周期链）。
+
+    每条启用链返回 {"id": "A"|"B", "periods": 加载周期列表, "open_res": 开单周期集,
+    "detect": 有效检测周期列表}：
+    - periods = D（隐式结构参考头）+ 链全节点（未勾选的非最细节点仍加载=仅参考；
+      最细节点 30S/1 按勾选加载），按 intervalSecOf 从大到小排序；
+    - open_res = 勾选节点 ∩ 可开单节点（最细节点永不开单）；
+    - detect = detectPeriodsOf(periods, open_res, periods)（须有已加载下级 ∩ 开单勾选）。
+    两链全关 → []。
+    """
+    from .chan_core import intervalSecOf
+    from .mark_entry import detectPeriodsOf
+    ch = pm.get("chain") or dict(CHAIN_DEFAULTS)
+
+    def _spec(cid, nodes, finest, raw):
+        checked = {s.strip().upper() for s in str(raw or "").split(",") if s.strip()}
+        opens = [p for p in nodes if p != finest and p in checked]
+        loading = ["D"] + [p for p in nodes if p != finest]
+        if finest in checked:
+            loading.append(finest)
+        loading.sort(key=lambda r: -(intervalSecOf(r) or 0))
+        return {"id": cid, "periods": loading, "open_res": opens,
+                "detect": detectPeriodsOf(loading, opens, loading)}
+
+    specs = []
+    if ch.get("chainAOn", CHAIN_DEFAULTS["chainAOn"]):
+        specs.append(_spec("A", CHAIN_A_NODES, "30S", ch.get("chainA")))
+    if ch.get("chainBOn", CHAIN_DEFAULTS["chainBOn"]):
+        specs.append(_spec("B", CHAIN_B_NODES, "1", ch.get("chainB")))
+    return specs
 
 
 def fxma_engine_kwargs(pm, lots_override=None, **override):
@@ -1100,6 +1179,19 @@ def update(module, cfg, symbol=None):
                             for k in mark_entry.EXIT_MODE_ON_KEYS)):
             raise ValueError("出场方式至少启用一种（锁定盈利/支阻止损/保本止损/背驰周期够笔/"
                              "检测周期够笔/过高低点止盈/跟踪止盈）")
+        if module == "chain":
+            # 双周期链跨键校验：至少一条链启用；每条启用链的勾选须产生 ≥1 检测周期
+            # （链A 勾 3 须同时勾 30S——3 分钟需要 30 秒作下级；链B 勾 5 须同时勾 1）
+            eff = dict(CHAIN_DEFAULTS)
+            eff.update(merged)
+            specs = chain_specs({"chain": eff})
+            if not specs:
+                raise ValueError("两条周期链均未启用（链A/链B 至少开一条）")
+            for sp in specs:
+                if not sp["detect"]:
+                    raise ValueError(
+                        f"链{sp['id']} 勾选的开单周期未产生任何检测周期"
+                        f"（勾选 3 须同时勾 30S、勾选 5 须同时勾 1，且至少一个非最细周期被勾选）")
         merged = {k: v for k, v in merged.items()
                   if k in defaults and v != defaults[k]}
         by = dict(overrides.get(module) or {})

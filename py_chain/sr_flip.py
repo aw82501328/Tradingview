@@ -111,8 +111,10 @@ BOLL_LENGTH = 26
 BOLL_MULT = 2.0
 FIB_BUY_TYPES = ["2买", "类2买", "3买", "类3买", "4买", "类4买"]
 FIB_SELL_TYPES = ["2卖", "类2卖", "3卖", "类3卖", "4卖", "类4卖"]
-# 上级周期映射（现算买卖点的区间套用；D 及未收录周期无上级，走结构底分支）
-UPPER_OF = {"240": "D", "60": "240", "15": "60", "3": "15"}
+# 上级周期映射（现算买卖点的区间套用；D 及未收录周期无上级，走结构底分支）。
+# 链B 键（2026-10-23 双周期链）：30→240、5→30——与链A 键无冲突（同一引擎只算
+# 自己链上的级别，链A 引擎不算 30/5 级别支阻）。
+UPPER_OF = {"240": "D", "60": "240", "15": "60", "3": "15", "30": "240", "5": "30"}
 
 
 def _bis_fingerprint(bis):
@@ -124,11 +126,12 @@ def _bis_fingerprint(bis):
             last.get("endPrice"), last.get("type"), last.get("phase"),
             last.get("mergedCount"))
 
-# 级别大小顺序（从大到小），用于候选池排序与可见范围判断
-LEVEL_ORDER = ["1W", "W", "1D", "D", "240", "4H", "60", "1H", "15", "3"]
+# 级别大小顺序（从大到小），用于候选池排序与可见范围判断（30/5 为链B 级别，2026-10-23）
+LEVEL_ORDER = ["1W", "W", "1D", "D", "240", "4H", "60", "1H", "30", "15", "5", "3"]
 
 # 最少触及次数（按级别）：--min-touch 显式指定时全局覆盖
-_MIN_TOUCH_DEFAULT = {"D": 4, "240": 4, "60": 4, "15": 3, "3": 8}
+# 链B 级别默认（2026-10-23）：30 参照 60/240 档 4 次；5 参照 3 档 8 次（细级别噪声多）
+_MIN_TOUCH_DEFAULT = {"D": 4, "240": 4, "60": 4, "15": 3, "3": 8, "30": 4, "5": 8}
 
 
 def minTouchFor(res, override=None):
@@ -626,10 +629,12 @@ def buildManualCandidates(prices, bars, currentPrice):
 
 
 def periodNameOf(res):
-    """周期中文名（标注用）：240→4小时、60→1小时、15→15分钟、3→3分钟、D→日线。"""
+    """周期中文名（标注用）：240→4小时、60→1小时、30→30分钟、15→15分钟、5→5分钟、
+    3→3分钟、D→日线。"""
     r = str(res).upper()
     return {
-        "3": "3分钟", "15": "15分钟",
+        "1": "1分钟",
+        "3": "3分钟", "5": "5分钟", "15": "15分钟", "30": "30分钟",
         "60": "1小时", "1H": "1小时",
         "240": "4小时", "4H": "4小时",
         "1D": "日线", "D": "日线",
@@ -861,12 +866,12 @@ def _compute_srflip_zones(barsByPeriod, periods, manualLevels=None,
         if cands:
             combined[res] = cands
         zoneSelection[res] = sel
-    # 当前价格：最小有数据周期末收盘（与 levels 分支同口径）
+    # 当前价格：最小有数据周期末收盘（与 levels 分支同口径；数据驱动取最细，
+    # 链A 下仍为 3 优先，链B 取 1——2026-10-23 双周期链）
     currentPrice = None
-    for k in ("3", "15", "60", "240", "D"):
-        if k in lastCloseByRes:
-            currentPrice = lastCloseByRes[k]
-            break
+    if lastCloseByRes:
+        finest = min(lastCloseByRes, key=lambda r: intervalSecOf(r) or 0)
+        currentPrice = lastCloseByRes[finest]
     mergedOut = flatten_candidates(combined)
     # 就近选取上图（区间候选 price=远侧边界参与就近/距离上限；区间高 ≤0.8ATR，
     # 远近边界之差对选取与 maxDistAtr 过滤的影响可忽略，保持与 levels 同一函数）
@@ -1046,12 +1051,12 @@ def compute_srflip(periodBis, barsByPeriod, periods,
     # 每周期候选数量上限（数据层截断，仅密集区；fib/boll 评分语义不适用，豁免）
     allFlipsCapped = capPerPeriod(allFlips, maxPerPeriod, touchWeight, barsWeight)
 
-    # 当前价格：用最小有数据周期的最后一根K线收盘价（各周期收盘价接近，取最小周期最精确）
+    # 当前价格：用最小有数据周期的最后一根K线收盘价（各周期收盘价接近，取最小周期最精确；
+    # 数据驱动取最细——链A 下仍为 3 优先，链B 取 1，2026-10-23 双周期链）
     currentPrice = None
-    for k in ("3", "15", "60", "240", "D"):
-        if k in lastCloseByRes:
-            currentPrice = lastCloseByRes[k]
-            break
+    if lastCloseByRes:
+        finest = min(lastCloseByRes, key=lambda r: intervalSecOf(r) or 0)
+        currentPrice = lastCloseByRes[finest]
 
     # BOLL 布林带叠加层：独立于支阻位来源，人工周期照常生成（中轨按现价侧，
     # 需 currentPrice 已知后生成，逐周期独立三轨一组）

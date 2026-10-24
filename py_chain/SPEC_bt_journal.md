@@ -98,3 +98,11 @@ python -m py_chain.bt_query --json ...                   # 机器可读
 4. 性能：成对交替基准（off/on ×6 对，中位）**开销 +0.9%**（cProfile 实测日志代码
    占总耗时 ~1.5%，状态行采样每 3 拍后更低）。注意：本机偶发负载尖峰会使单对计时
    偏差达 ±20~45%，判定开销须用成对中位，不可信单对数字。
+
+## 双周期链命名（2026-10-23）
+
+链式回测的 journal_strategy 带链段：链A=`chanA`、链B=`chanB`（旧口径/单链仍为
+`chan`）——文件名 `bt_chanA_<symbol>_<stamp>.ndjson`、latest.json 键
+`chanA|<symbol>`、cleanup_old 分组与保留策略自动按链隔离（_parse_name 无需改动）。
+header.periods/fineRes 即该链加载集与最细周期（链B fine=1m）。信号/成交行无独立
+链字段（整份文件即一条链）；Web 信号表行带 chain 字段（A/B）与「链A/链B」角标。

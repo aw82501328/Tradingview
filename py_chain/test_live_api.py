@@ -37,7 +37,8 @@ class TestOverview(LiveApiBase):
     def _snapshot(self):
         d = live_api.overview()
         self.assertTrue(d["ok"])
-        self.assertEqual(len(d["strategies"]), len(module_registry.strategy_ids()))
+        # 双周期链（2026-10-23）：槽位=注册表策略 + 链B 虚拟槽位 chan_v1_b
+        self.assertEqual([s["strategy"] for s in d["strategies"]], live_api.live_slots())
         return next(s for s in d["strategies"] if s["strategy"] == "chan_v1")
 
     def test_lists_all_strategies_with_session(self):
@@ -194,8 +195,12 @@ class TestBootstrapWithoutTables(unittest.TestCase):
         d = live_api.overview()
         self.assertTrue(d["ok"])
         snaps = d["strategies"]
-        self.assertEqual([s["strategy"] for s in snaps],
-                         list(module_registry.strategy_ids()))
+        # 注册表策略 + 链B 虚拟槽位（2026-10-23 双周期链；链B 标题带后缀）
+        self.assertEqual([s["strategy"] for s in snaps], live_api.live_slots())
+        self.assertIn("chan_v1_b", [s["strategy"] for s in snaps])
+        chain_b = next(s for s in snaps if s["strategy"] == "chan_v1_b")
+        self.assertEqual(chain_b["strategy_title"], "缠论V1·链B")
+        self.assertEqual(chain_b["chain"], "B")
         for s in snaps:   # 无会话 → 全部离线占位
             self.assertFalse(s["online"])
             self.assertEqual(s["session"], {})
