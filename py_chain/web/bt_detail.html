@@ -791,7 +791,7 @@ function finishLocate(job) {
       : mk?.skipped ? `（${mk.skipped}，不画标记）`
       : mk ? `并标记 ${mk.drawn} 个` : '';
     const replayTxt = job.result.replay ? '（K线回放）' : '';
-    setBtDetailLocateMsg(`#${btDetailLabelOf(id)} 已定位${replayTxt}${markTxt} · ${job.result.symbol} · ${job.result.markRes} · ${fmtTime(job.result.time)}`);
+    setBtDetailLocateMsg(`#${btDetailLabelOf(id)} 已定位${replayTxt}${markTxt} · ${job.result.symbol} · ${job.result.res} · ${fmtTime(job.result.time)}`);
   } else {
     setBtDetailLocateMsg(`#${btDetailLabelOf(id)} 定位失败：${job.error || '未知错误'}`, true);
   }

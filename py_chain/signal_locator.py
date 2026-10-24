@@ -48,11 +48,11 @@ def validate_signal(row):
     stamp = row.get('time')
     if isinstance(stamp, bool) or not isinstance(stamp, (int, float)) or not math.isfinite(stamp) or stamp <= 0:
         raise ValueError('记录缺少有效信号时间，无法定位')
-    # 定位周期：背驰级别优先（chan_v1 画位 / fxma 并列背驰触发行）；为空回退检测
-    # 周期（fxma 条件组合路径行 markRes 为空，2026-10-09）；两者皆缺才无法定位
-    res = str(row.get('markRes') or row.get('periodX') or '')
+    # 定位周期：检测周期优先（2026-10-23 用户拍板：点击行定位停留在检测周期）；
+    # 为空回退背驰级别（旧记录快照可能缺 periodX）；两者皆缺才无法定位
+    res = str(row.get('periodX') or row.get('markRes') or '')
     if not re.fullmatch(r'(?:[1-9]\d*(?:S|D|W|M)?|D|W|M)', res):
-        raise ValueError('记录缺少有效背驰/检测周期，无法定位')
+        raise ValueError('记录缺少有效检测/背驰周期，无法定位')
     return row['symbol'].strip(), res, stamp
 
 
@@ -293,7 +293,7 @@ def _center_view(c, symbol, res, t_target, t_until):
       m.setTimeViewport(from,to);
       const range=ts.visibleBarsStrictRange();
       if(!range || bar.index<range.firstBar() || bar.index>range.lastBar())throw Error('目标K线未进入可视范围');
-      return {symbol:c.symbol(),markRes:String(c.resolution()),time:bar.value[0],
+      return {symbol:c.symbol(),res:String(c.resolution()),time:bar.value[0],
               index:bar.index,fromIndex:range.firstBar(),toIndex:range.lastBar(),
               until:uBar.value[0]};
     })()""".replace('TARGET', target))

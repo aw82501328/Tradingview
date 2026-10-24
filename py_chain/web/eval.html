@@ -395,8 +395,8 @@ async function locateSignalRow(row){
       if(!job||job.jobId!==jobId)continue;
       if(job.state==='running')continue;
       if(job.state!=='done')throw Error(job.error||'定位失败');
-      const res=job.result||{};
-      toast(`已定位 ${res.symbol||''} ${res.markRes||''} ${fmtT(res.time)}`.trim());
+      const out=job.result||{};
+      toast(`已定位 ${out.symbol||''} ${out.res||''} ${fmtT(out.time)}`.trim());
       return;
     }
     throw Error('定位超时');

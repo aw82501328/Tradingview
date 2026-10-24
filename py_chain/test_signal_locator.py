@@ -48,11 +48,20 @@ class SignalLocatorTests(unittest.TestCase):
     def test_bad_metadata_and_mode_never_touch_chart(self):
         with self.assertRaises(LookupError):
             self.manager.start('live', self.row['id'])
-        # markRes 为空 → 回退检测周期定位（fxma 条件组合路径行 markRes 空，2026-10-09）
-        symbol, res, stamp = locator.validate_signal({**self.row, 'markRes': ''})
+        # 定位周期检测周期优先（2026-10-23 用户拍板：定位停留在检测周期）：
+        # markRes='3'/periodX='15' → 定位 15；markRes 空（fxma 条件组合路径行，
+        # 2026-10-09）或非法都不影响，仍取检测周期
+        symbol, res, stamp = locator.validate_signal(self.row)
         self.assertEqual((symbol, res), ('OANDA:XAUUSD', '15'))
+        for changes in ({'markRes': ''}, {'markRes': 'bad'}, {'markRes': None}):
+            with self.subTest(changes=changes):
+                _, res, _ = locator.validate_signal({**self.row, **changes})
+                self.assertEqual(res, '15')
+        # periodX 缺失 → 回退背驰级别（旧记录快照兜底）
+        _, res, _ = locator.validate_signal({**self.row, 'periodX': ''})
+        self.assertEqual(res, '3')
         for changes in ({'symbol': None}, {'time': None}, {'time': float('nan')}, {'time': True},
-                        {'markRes': 'bad'},
+                        {'periodX': 'bad'},
                         {'markRes': '', 'periodX': ''},
                         {'markRes': None, 'periodX': None}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
@@ -120,13 +129,13 @@ class SignalLocatorTests(unittest.TestCase):
             None, None,
             {'bar': None, 'end': True, 'first': 1000},
             {'bar': {'time': 100, 'index': 9}, 'last': 100, 'barEnd': 280, 'end': True},
-            {'time': 100, 'index': 9, 'symbol': 'OANDA:XAUUSD', 'markRes': '30S'},
+            {'time': 100, 'index': 9, 'symbol': 'OANDA:XAUUSD', 'res': '30S'},
         ]
         with patch.object(locator, 'CDPClient') as cls:
             cls.return_value.__enter__.return_value = client
             with patch.object(locator, '_replay_to_signal') as jump:
                 with patch.object(locator, '_draw_after_locate', return_value={'drawn': 1, 'cleared': 0}) as draw:
-                    result = locator.locate_signal({**self.row, 'time': 110, 'markRes': '30S'})
+                    result = locator.locate_signal({**self.row, 'time': 110, 'periodX': '30S'})
         jump.assert_called_once()
         self.assertEqual(result['time'], 100)
         self.assertTrue(result['replay'])
@@ -141,7 +150,7 @@ class SignalLocatorTests(unittest.TestCase):
             None, None,
             {'bar': {'time': 100, 'index': 9}, 'last': 100, 'barEnd': 280},
             {'bar': {'time': 270, 'index': 20}, 'last': 270, 'barEnd': 300, 'end': True},
-            {'time': 270, 'index': 20, 'symbol': 'OANDA:XAUUSD', 'markRes': '3'},
+            {'time': 270, 'index': 20, 'symbol': 'OANDA:XAUUSD', 'res': '15'},
         ]
         row = {**self.row, 'time': 290}
         with patch.object(locator, 'CDPClient') as cls:
@@ -191,7 +200,7 @@ class SignalLocatorTests(unittest.TestCase):
             client = Mock()
             bar = {'bar': {'time': 100, 'index': 9}, 'last': 100, 'barEnd': 280}
             client.evaluate.side_effect = [None, None, bar, bar,
-                {'time': 100, 'index': 9, 'symbol': 'OANDA:XAUUSD', 'markRes': '3'}]
+                {'time': 100, 'index': 9, 'symbol': 'OANDA:XAUUSD', 'res': '15'}]
             return client
         colors = {'buy': '#123456'}
         with patch.object(locator, 'CDPClient') as cls:
@@ -219,12 +228,13 @@ class SignalLocatorTests(unittest.TestCase):
     def test_recent_bars_past_keep_window_replay_to_view_until(self):
         """近期行情末根晚于保留窗口：回放光标用 view_until，截掉后面直到现在的K线。"""
         client = Mock()
-        bar = {'bar': {'time': 100, 'index': 9}, 'last': 50000, 'barEnd': 280}
+        bar = {'bar': {'time': 100, 'index': 9}, 'last': 60000, 'barEnd': 280}
         client.evaluate.side_effect = [
             None, None, bar, bar,
-            {'time': 100, 'index': 9, 'symbol': 'OANDA:XAUUSD', 'markRes': '3'},
+            {'time': 100, 'index': 9, 'symbol': 'OANDA:XAUUSD', 'res': '15'},
         ]
-        view_until = locator._view_until(self.row, 100, '3')
+        # 定位周期=检测周期 periodX='15'（2026-10-23 起），保留根数按 15m 计
+        view_until = locator._view_until(self.row, 100, '15')
         with patch.object(locator, 'CDPClient') as cls:
             cls.return_value.__enter__.return_value = client
             with patch.object(locator, '_replay_to_signal') as jump:
@@ -232,7 +242,7 @@ class SignalLocatorTests(unittest.TestCase):
                     result = locator.locate_signal(self.row)
         jump.assert_called_once()
         self.assertEqual(jump.call_args.kwargs['until'], view_until)
-        self.assertGreater(50000, view_until)
+        self.assertGreater(60000, view_until)
         self.assertTrue(result['replay'])
         self.assertTrue(any('setTimeViewport' in str(call) for call in client.evaluate.call_args_list))
 
