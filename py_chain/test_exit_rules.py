@@ -21,7 +21,7 @@ _os.environ.setdefault("PY_CHAIN_BT_JOURNAL", "0")  # 引擎测试不落交易�
   - 跟踪止盈双参照（2026-10-09 exitTrailSrc；2026-10-11 detect 改结构点）：
     detect=检测周期已破前低/前高的有利方向笔起点（够笔未破前低/前高不算；
     破坏该起点记 trailStop）；mark=背驰周期信号流
-    同向3类点（wait3Buy/waitBuy/…，旧口径）；门控保本（2026-10-09）——beDone 前
+    同向3类点（3Buy/Buy/…，旧口径）；门控保本（2026-10-09）——beDone 前
     不接管止损/不提损，参照点自保本当拍起算不追溯
   - 最大止损硬上限兜底（2026-10-09）：止损类部分平仓 latch 后剩余手数由 maxLoss
     全平兜底（记 stopSr，永不 latch），单手亏损封顶最大止损
@@ -53,12 +53,12 @@ def make_pos(direction="short", signalTime=100, entryPrice=4450.0, stopRef=4463.
              beStop=4455.0, planDirection="空头空", lots=4, strategyKey=None):
     """构造持仓 dict（_fill_pending 产出的出场状态机字段子集）。
     2026-10-16 起顺势按 strategyKey 判定（计划方向口径取消）：planDirection 为
-    逆势（多头空/空头多）时 strategyKey 缺省配逆势键 wait1Sell，与直连映射一致。
+    逆势（多头空/空头多）时 strategyKey 缺省配逆势键 1Sell，与直连映射一致。
     2026-10-21 起缺省钉 exitTouchOn=False（本文件既有用例=收盘判定+下一开盘旧口径
     的回归，触价口径见 TestTouchExits；test_legacy_pos_defaults_open_all 会删掉
     exitCfg 以保留「无 exitCfg → 默认兜底」前提）。"""
     if strategyKey is None:
-        strategyKey = "wait2Sell" if planDirection in ("空头空", "多头多") else "wait1Sell"
+        strategyKey = "2Sell" if planDirection in ("空头空", "多头多") else "1Sell"
     return {"direction": direction, "signalTime": signalTime, "entryPrice": entryPrice,
             "stopRef": stopRef, "beStop": beStop, "planDirection": planDirection,
             "strategyKey": strategyKey, "lots": lots,
@@ -211,15 +211,15 @@ class TestTrendFollowingOf(unittest.TestCase):
         self.assertFalse(trend_following_of("空头多"))
 
     def test_strategy_key_fallback(self):
-        self.assertTrue(trend_following_of(None, "wait2Buy"))
-        self.assertTrue(trend_following_of(None, "waitSell"))
+        self.assertTrue(trend_following_of(None, "2Buy"))
+        self.assertTrue(trend_following_of(None, "Sell"))
         # 2026-09-25 键拆分：3买点/类2买点/3卖点/类2卖点 独立键，均为顺势
-        self.assertTrue(trend_following_of(None, "wait3Buy"))
-        self.assertTrue(trend_following_of(None, "waitLike2Buy"))
-        self.assertTrue(trend_following_of(None, "wait3Sell"))
-        self.assertTrue(trend_following_of(None, "waitLike2Sell"))
-        self.assertFalse(trend_following_of(None, "wait1Buy"))
-        self.assertFalse(trend_following_of(None, "wait1Sell"))
+        self.assertTrue(trend_following_of(None, "3Buy"))
+        self.assertTrue(trend_following_of(None, "Like2Buy"))
+        self.assertTrue(trend_following_of(None, "3Sell"))
+        self.assertTrue(trend_following_of(None, "Like2Sell"))
+        self.assertFalse(trend_following_of(None, "1Buy"))
+        self.assertFalse(trend_following_of(None, "1Sell"))
 
 
 class TestEnoughFavBars(unittest.TestCase):
@@ -610,7 +610,7 @@ class TestFillEntryBarSeed(unittest.TestCase):
                              stop_entry_bar_floor=kw.pop("floor", True))
         sig = {"direction": "long", "periodX": "60", "markRes": "15",
                "time": 880, "price": 94.0, "nearSr": 94.0, "realtime": True,
-               "strategyKey": "wait2Buy"}
+               "strategyKey": "2Buy"}
         trades, stats = [], {"suppressed": 0, "executed": 0}
         eng._fill_pending(trades, [sig], 95.0, kw.pop("nextTime", 1080), stats, collectT=880,
                           open_pos={})
@@ -649,8 +649,9 @@ class TestFillEntryBarSeed(unittest.TestCase):
 
 class TestStopBeMode(unittest.TestCase):
     """保本位模式（exitStopBeMode，2026-10-10；2026-10-12 三口径）：
-    entry（默认，0亏损）= 进场价（保本滑点不参与，滑点/ATR 系数均不生效）；
-    extreme = 成交K线极值±保本滑点（含成交 bar 缺失时 开盘价±滑点 兜底）；
+    2026-10-25 起默认 bi（此前默认 entry）；
+    entry = 进场价（0亏损，保本滑点不参与，滑点/ATR 系数均不生效）；
+    extreme = 成交K线极值±保本滑点（含成交 bar 缺失时 开盘价±滑点兜底）；
     bi = 笔端点±滑点（背驰周期首笔有利方向笔确认那拍 beStop=该笔起点±开仓时点
     快照滑点，成笔前无值——half 抢先置 beDone 时穿越暂回落支阻位）。"""
 
@@ -663,15 +664,16 @@ class TestStopBeMode(unittest.TestCase):
                              module_params=kw.pop("mp", None))
         sig = {"direction": "long", "periodX": "60", "markRes": "15",
                "time": 880, "price": 94.0, "nearSr": 94.0, "realtime": True,
-               "strategyKey": "wait2Buy"}
+               "strategyKey": "2Buy"}
         trades, stats = [], {"suppressed": 0, "executed": 0}
         eng._fill_pending(trades, [sig], 95.0, kw.pop("nextTime", 900), stats,
                           collectT=880, open_pos={})
         return trades[0]
 
     def test_extreme_default_uses_fill_bar_low(self):
-        # 默认 entry：beStop = 进场价 95；极值口径须显式指定
-        tr = self._fill()
+        # entry 口径（2026-10-25 前的默认，钉旧口径回归）：beStop = 进场价 95；
+        # 极值口径须显式指定
+        tr = self._fill(mp={"exitStopBeMode": "entry"})
         self.assertEqual(tr["beStop"], 95.0)
         self.assertIn("0亏损", tr["entryWhy"])
         tr2 = self._fill(mp={"exitStopBeMode": "extreme"})
@@ -1078,7 +1080,7 @@ class TestExitModes(unittest.TestCase):
         self.assertEqual(tr["pnl"], (4438 - 4450) * (-1) * 4)
 
     def test_trail_mark_mode_uses_signal_flow(self):
-        # mark 模式（旧口径）：背驰周期信号流 wait3Buy/waitBuy/… 同向3类点驱动；
+        # mark 模式（旧口径）：背驰周期信号流 3Buy/Buy/… 同向3类点驱动；
         # 同拍的检测周期点流不消费；门控保本——TP1 前的信号点不追溯
         pos = self.make(exitCfg=ecfg(exitTrailOn=True, exitTrailSlip=1.0,
                                      exitTrailSrc="mark", exitHalfOn=False,
@@ -1086,14 +1088,14 @@ class TestExitModes(unittest.TestCase):
         mark_bis = [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)]
         px_bis = [bi("up", 50, 300, 4440, 4450)]
         pre_sigs = [{"time": 200, "price": 4442.0, "direction": "short",
-                     "strategyKey": "wait3Sell"}]               # 门控前：不追溯
+                     "strategyKey": "3Sell"}]               # 门控前：不追溯
         advance_exit_decision(pos, 300, bar(300, 4440, 4445, 4435, 4441),
                               mark_bis, px_bis, T7, trail_sigs=pre_sigs)
         self.assertTrue(pos["beDone"])
         self.assertEqual(pos["stopRef"], 4463.0)
         sigs = [
-            {"time": 320, "price": 4442.0, "direction": "short", "strategyKey": "wait3Sell"},  # 4443 < 4463 上移
-            {"time": 350, "price": 4438.0, "direction": "short", "strategyKey": "wait2Sell"},  # 非3类忽略
+            {"time": 320, "price": 4442.0, "direction": "short", "strategyKey": "3Sell"},  # 4443 < 4463 上移
+            {"time": 350, "price": 4438.0, "direction": "short", "strategyKey": "2Sell"},  # 非3类忽略
         ]
         # 同拍检测周期有破前低的下跌结构，止损会收到 4436，mark 模式不消费
         px_bis = [bi("down", 50, 200, 4460, 4450),

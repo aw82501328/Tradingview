@@ -46,7 +46,7 @@ forming_break_ref/trend_following_of）：
     才算结构确认：trade#109 只有 9-28 20:15 高点 4171.42 的下跌破了前低，
     其后 4146/4140 未破前低不算；该高点到 9-29 22:15 才被破坏〕，
     mark=背驰周期信号流同向3类点〔旧口径
-    wait3Buy/waitBuy/…〕；门控保本——beDone 之前不接管止损、参照点自保本当拍
+    3Buy/Buy/…〕；门控保本——beDone 之前不接管止损、参照点自保本当拍
     起算不追溯，防入场时段参照点抢在「够笔→保本」之前提损）。比例 = 平剩余仓位百分比，
     每种方式一次性触发（部分平仓按方式 latch 防逐拍重触发）；
   - 最大止损硬上限兜底（2026-10-09）：止损类方式部分平仓 latch 关闭穿越判定后，
@@ -118,6 +118,7 @@ from .trading_plan import (compute_regime, trend_state_of,
                            TREND_REBOUND, REBOUND_NEAR_PTS, REBOUND_ANGLE_REF)
 from .mark_entry import (
     compute_entries, compute_period_points, stop_ref_of, sr_of_detect, sr_drop_fib_for_class1,
+    sr_side_levels,
     find_bi_event, filterDetectPeriods, detectPeriodsOf,
     trend_following_of, forming_break_ref, lastBiOk,
     enough_fav_bars, point_cls_of, _side_anchor, BUY_FAMILY, SELL_FAMILY,
@@ -794,7 +795,7 @@ def advance_exit_decision(pos, t, bar, mark_bis, px_bis, px_merged_times=None,
     # 参照双模式（2026-10-09，exitTrailSrc；2026-10-11 detect 改结构点）：
     # detect=检测周期已破前低/前高的有利方向笔起点（空头下跌笔高点 / 多头上涨笔
     # 低点，默认——够笔未破前低/前高不算结构；保本后价格破坏该结构点才出场）；
-    # mark=背驰周期信号流同向3类点（wait3Buy/waitBuy/…，含被同向互斥抑制的，旧口径）。
+    # mark=背驰周期信号流同向3类点（3Buy/Buy/…，含被同向互斥抑制的，旧口径）。
     # 两路都归一化为 [{time, price, key}] 后交给 trail_raise（只上移、水位只进不退）。
     # 门控保本（2026-10-09）：仅 beDone（TP1/half/halfMr 迁移）后执行；门控开启当拍
     # 把水位一次性推进到当拍——保本之前（含入场时段）的参照点不追溯，防刚进场就被
@@ -1124,6 +1125,10 @@ class BacktestEngine:
         self._entries = {}
         # 当下背驰去重：(periodX, strategyKey, markRes, 形成段起点时间)，每个形成段只发一次
         self._rt_fired = set()
+        # 同一点尝试计数（pointMaxAttempts，2026-10-25）：{(periodX, strategyKey, 锚点时间): 成交次数}
+        # ——成交建仓才计数（_fill_pending 递增，被同向互斥压掉的信号不消耗）；与 _rt_fired
+        # 不同，终局重置(_rearm_fired)不清此计数（同一点终生上限）；0=不限（检查闸关闭）
+        self._rt_attempts = {}
         # C-1 盘中合成K状态挂点（_rebuild_chain 每拍刷新，_collect_realtime 消费）
         self._synth_state = None
         # 批量重同步水位（fine 周期 cut 达到 last+RESYNC_EVERY 时全周期重同步）
@@ -1763,6 +1768,12 @@ class BacktestEngine:
                 "anchorWinBars": int(CHAN_CFG.get("anchorWinBars", 2) or 2),
                 "anchorWinPts": float(CHAN_CFG.get("anchorWinPts", 10.0) or 0.0),
                 "anchorWinTrailOn": bool(CHAN_CFG.get("anchorWinTrailOn", True)),
+                # 进场买卖点类别白名单（2026-10-24，同日二次口径=二类/类二拆强弱；
+                # 闸门直读 CHAN_CFG，header 只记口径）
+                "pointClasses": CHAN_CFG.get("pointClasses") or "1,2s,2w,2xs,2xw,3,3x,4,4x",
+                # 同一点最大尝试次数（2026-10-25：成交建仓才计数，用满即拒 point_attempt_max；
+                # 闸门直读 CHAN_CFG，header 只记口径；0=不限——不能写 or 2 兜底，0 是合法值）
+                "pointMaxAttempts": int(CHAN_CFG.get("pointMaxAttempts", 2)),
                 "exitMinMerged": self.exit_min_merged,
                 "exitCfg": dict(self.exit_cfg),
                 # 实际加载数据范围（诊断数据源截断：cards 说"跑到最新"但加载层少给数据时
@@ -2325,7 +2336,9 @@ class BacktestEngine:
         """M1 配套（CHAN_CFG.sinkFallbackRearm）：同向持仓终局后，重置该
         (periodX, strategyKey, markRes) 组合的当下背驰去重——同一形成段允许在
         上一单终局后再发一次信号（近等双底二底再进场场景：首单止损/保本离场后，
-        回退候选不至于被首单的 fired 键永久吞掉）。同向互斥持仓期间不重置。"""
+        回退候选不至于被首单的 fired 键永久吞掉）。同向互斥持仓期间不重置。
+        注意：只清段去重，不清同一点尝试计数 _rt_attempts（pointMaxAttempts
+        是成交次数的终生上限，终局重置不回血——否则与无限重进的旧口径等价）。"""
         if not CHAN_CFG.get("sinkFallbackRearm"):
             return
         x, k, m = tr.get("periodX"), tr.get("strategyKey"), tr.get("markRes")
@@ -2383,6 +2396,7 @@ class BacktestEngine:
                 atrViews,
                 self._points, srLevels, detectPeriods,
                 near=self.near, tCut=t, fired=self._rt_fired, firedIndex=self._rt_fired_idx,
+                attempts=self._rt_attempts,
                 periodTimes=self._times, periodMacdTimes=macdTViews,
                 periodMerged=mergedViews, periodBars=barViews,
                 divergeConfirm=self.diverge_confirm,
@@ -2477,9 +2491,10 @@ class BacktestEngine:
             slipFbEff = self.slip_fallback + self.slip_fallback_atr_k * mrAtr
             # 止损重选也只看检测周期的支阻位（与近支阻同一口径）；srcInfo 记录来源
             # （near_sr=信号近支阻沿用 / sr_pick=正确侧重选 / fallback=最大止损兜底）；
-            # 1类键（wait1Buy/wait1Sell）同闸门口径剔除 fib 位（2026-10-10）
-            srLevels = sr_drop_fib_for_class1(
-                sr_of_detect(srAll, s.get("periodX")), s.get("strategyKey"))
+            # 1类键（1Buy/1Sell）同闸门口径剔除 fib 位（2026-10-10）；
+            # fib/BOLL 按信号方向取侧（srSideGateOn，2026-10-25，同闸门口径）
+            srLevels = sr_side_levels(sr_drop_fib_for_class1(
+                sr_of_detect(srAll, s.get("periodX")), s.get("strategyKey")), d)
             srcInfo = {}
             stopRef = stop_ref_of(d, entryPrice, s.get("nearSr"), srLevels,
                                   slip_stop=self.slip_stop, slip_fallback=self.slip_fallback,
@@ -2582,6 +2597,7 @@ class BacktestEngine:
                 "nearSr": s.get("nearSr"),
                 "pointType": s.get("pointType"),        # 进场锚买卖点类型（2026-10-16 直连）
                 "pointStrong": s.get("pointStrong"),    # 2族强弱（None=未定型/非2族）
+                "anchorTime": s.get("anchorTime"),      # 锚点时间（尝试计数键第三元；确认制信号无此字段=None）
                 "trendDirection": s.get("trendDirection"),  # 顺势参考周期方向（2026-09-15）
                 "trendReason": s.get("trendReason"),        # 成因注记，如「4小时2买」
                 "fallback": s.get("fallback", False),   # M1 回退候选标记（透传自信号）
@@ -2622,6 +2638,11 @@ class BacktestEngine:
                 "exits": [],
             })
             stats["executed"] += 1
+            # 同一点尝试计数（pointMaxAttempts，2026-10-25）：成交建仓才计数——被同向
+            # 互斥压掉（上方 continue 路径）不消耗；确认制信号无 anchorTime → 键含 None，
+            # 仅作记录不参与当下制检查（确认制不查尝试上限）
+            _akey = (s.get("periodX"), s.get("strategyKey"), s.get("anchorTime"))
+            self._rt_attempts[_akey] = self._rt_attempts.get(_akey, 0) + 1
             if open_pos is not None:
                 open_pos[d] = trades[-1]
             if jr is not None and jr.enabled:

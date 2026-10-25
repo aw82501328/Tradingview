@@ -55,7 +55,7 @@ journal `bt_fxma_OANDA-XAUUSD_20261001_080514065` 为改前实录）：
 ## 缠论V1 对比（_probe_bt_dump 流程，run_id 20260927-225902-d997）
 
 改前/改后全量重放（18349 步）：**stats 与 trades 逐位完全一致**（18 信号、12 成交、
-6 压制，strategyKeys wait2Buy×14/waitBuy×2/wait3Buy×1/wait3Sell×1；仅 wall 耗时不同）。
+6 压制，strategyKeys 2Buy×14/Buy×2/3Buy×1/3Sell×1；仅 wall 耗时不同）。
 留档：根目录 `_bt_v1cmp_before.json` / `_bt_v1cmp_after.json`。与预判一致：缠论V1
 信号由 mark_entry 产生（不消费 find* 列表）、计划方向经 trend_direction 自行排序，
 本窗口内也无 matchAt 容差窗跨组多点命中。

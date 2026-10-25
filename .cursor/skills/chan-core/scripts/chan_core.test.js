@@ -1416,5 +1416,160 @@ describe("买卖点规则v2 二类/三类族（2026-10-14：锚后抬低 + 同�
   });
 });
 
+
+// ============================================================
+// 3/4族强弱 markThirdFourthStrong（2026-10-24 用户口径：点后同向腿背驰=弱；
+// 与 py_chain/test_third_fourth_strong.py 成对镜像）。
+// ============================================================
+describe("3/4族强弱 markThirdFourthStrong（2026-10-24）", () => {
+  const BAR = 3600;
+  const bi = (type, s, e, sp, ep) => ({ type, startTime: s, endTime: e, startPrice: sp, endPrice: ep });
+  const m = (t, macd, dif) => ({ time: t, macd, dif });
+  const BIS_BUY = [
+    bi("up", 0, BAR, 100, 110),          // R1（1买@0 后首根反弹腿）
+    bi("down", BAR, 2 * BAR, 110, 105),  // D1（终点=2买）
+    bi("up", 2 * BAR, 3 * BAR, 105, 112),   // R2
+    bi("down", 3 * BAR, 4 * BAR, 112, 108),  // D2（终点=3买）
+    bi("up", 4 * BAR, 5 * BAR, 108, 114),    // R3
+    bi("down", 5 * BAR, 6 * BAR, 114, 110),  // D3（终点=4买）
+  ];
+  const pts = (arr) => arr.map(([type, time]) => ({ type, time, price: 100 }));
+
+  test("弱3=R2对R1顶背驰（面积/DIF/极值柱衰竭）；R3对R2无衰竭→4买强", () => {
+    const macdArr = [m(0, 8.0, 5.0), ...[1, 2, 3, 4, 5, 6].map((i) => m(i * BAR, 0, 0))];
+    const ps = pts([["1买", 0], ["2买", 2 * BAR], ["3买", 4 * BAR], ["4买", 6 * BAR]]);
+    core.markThirdFourthStrong(ps, BIS_BUY, macdArr, BAR, false);
+    assert.equal(ps[2].strong, false);   // 弱3
+    assert.equal(ps[3].strong, true);    // 强4
+    assert.ok(!("strong" in ps[0]));     // 一类不标
+    assert.ok(!("strong" in ps[1]));     // 二类族归 secondFamilyV2
+  });
+
+  test("强3=R2全面强于R1；弱4=R3对R2衰竭（4族取(2族,3族)对）", () => {
+    const macdArr = [m(0, 8.0, 5.0), m(BAR, 0, 0), m(2 * BAR, 10.0, 6.0),
+                     m(3 * BAR, 0, 0), m(4 * BAR, 0, 0), m(5 * BAR, 0, 0), m(6 * BAR, 0, 0)];
+    const ps = pts([["1买", 0], ["2买", 2 * BAR], ["3买", 4 * BAR], ["4买", 6 * BAR]]);
+    core.markThirdFourthStrong(ps, BIS_BUY, macdArr, BAR, false);
+    assert.equal(ps[2].strong, true);
+    assert.equal(ps[3].strong, false);
+  });
+
+  test("判不出即强：缺前点 / 前点晚于全部笔 / macd 空", () => {
+    const macdArr = [m(0, 8.0, 5.0), m(2 * BAR, 0, 0), m(3 * BAR, 0, 0)];
+    let ps = pts([["2买", 2 * BAR], ["3买", 4 * BAR]]);   // 缺 1类
+    core.markThirdFourthStrong(ps, BIS_BUY, macdArr, BAR, false);
+    assert.equal(ps[1].strong, true);
+    ps = pts([["1买", 100 * BAR], ["2买", 101 * BAR], ["3买", 102 * BAR]]);  // 腿匹配不上
+    core.markThirdFourthStrong(ps, BIS_BUY, macdArr, BAR, false);
+    assert.equal(ps[2].strong, true);
+    ps = pts([["1买", 0], ["2买", 2 * BAR], ["3买", 4 * BAR]]);   // macd 空
+    core.markThirdFourthStrong(ps, BIS_BUY, [], BAR, false);
+    assert.equal(ps[2].strong, true);
+  });
+
+  test("卖侧镜像：点后首根下推腿底背驰（绿柱面积衰竭）→弱3卖", () => {
+    const bis = [
+      bi("down", 0, BAR, 110, 100),
+      bi("up", BAR, 2 * BAR, 100, 105),
+      bi("down", 2 * BAR, 3 * BAR, 105, 98),
+      bi("up", 3 * BAR, 4 * BAR, 98, 104),
+    ];
+    const macdArr = [m(0, -8.0, -5.0), m(BAR, 0, 0), m(2 * BAR, -7.0, -4.0), m(3 * BAR, 0, 0)];
+    const ps = pts([["1卖", 0], ["2卖", 2 * BAR], ["3卖", 4 * BAR]]);
+    core.markThirdFourthStrong(ps, bis, macdArr, BAR, true);
+    assert.equal(ps[2].strong, false);
+    const macdStrong = [m(0, -8.0, -5.0), m(BAR, 0, 0), m(2 * BAR, -9.0, -6.0), m(3 * BAR, 0, 0)];
+    const ps2 = pts([["1卖", 0], ["2卖", 2 * BAR], ["3卖", 4 * BAR]]);
+    core.markThirdFourthStrong(ps2, bis, macdStrong, BAR, true);
+    assert.equal(ps2[2].strong, true);
+  });
+
+  test("legAfterPoint：点后首根同向笔 / 无匹配 null", () => {
+    assert.equal(core.legAfterPoint(BIS_BUY, 0, "up", BAR), BIS_BUY[0]);
+    assert.equal(core.legAfterPoint(BIS_BUY, 2 * BAR, "up", BAR), BIS_BUY[2]);
+    assert.equal(core.legAfterPoint(BIS_BUY, 7 * BAR, "up", BAR), null);
+  });
+});
+
 // （旧口径用例：背驰闸/每锚序列/破锚价作废/无上级旧锚定 已随 2026-10-14 规则v2 移除，
 //  备份见 git 历史 6971db6）
+
+// 吸收成笔即标（absorbMarkFast，2026-10-25，与 py_chain/test_near_double.py
+// DeadTopAbsorbTests 镜像）：起点被上级笔端点锁定（区间套）不再阻断死顶/死底近等
+// 吸收——吸收只追加端点 k、锁定起点原位不动；k 与被吸收 f 锁定仍排除。真实案例
+// 60m 9-14 21:00 底（240m 端点被锁）→ 10:00 后顶 4317.63 吸收曾被拖到锁集变动。
+describe("吸收成笔即标（absorbMarkFast）", () => {
+  const fs = require("node:fs"), path = require("node:path"), zlib = require("node:zlib");
+  const FIX = JSON.parse(zlib.gunzipSync(fs.readFileSync(
+    path.resolve(__dirname, "../../../../py_chain/fixtures/dead_top_absorb_xauusd_20260915.json.gz"))));
+  const bars = FIX["60"];
+  const ts = s => Math.floor(new Date(`2026-${s}+08:00`).getTime() / 1000);
+  const START = ts("09-14T21:00:00"), END = ts("09-15T10:00:00");
+  const build = locked => {
+    const merged = core.mergeBars(core.markWickBars(bars));
+    return core.buildBi(core.findFractals(merged), merged,
+                        core.calcATR(bars, 14), core.calcMACD(bars), locked, true);
+  };
+  const hasUpAt = (bis, endT) => bis.some(b => b.startTime === START && b.type === "up" && b.endTime === endT);
+
+  test("起点锁定不再阻断吸收（默认开）；关=2026-10-22 旧口径", () => {
+    const base = build(null).find(b => b.startTime === START && b.type === "up");
+    assert.equal(base.endPrice, 4317.63);
+    const locks = [{ dir: "bottom", price: base.startPrice }]; // 上级(240m)端点锁住起点底
+    assert.ok(hasUpAt(build(locks), END), "默认 absorbMarkFast=true：起点锁定仍吸收成笔");
+    const saved = core.CHAN_CFG.absorbMarkFast;
+    core.CHAN_CFG.absorbMarkFast = false;
+    try {
+      assert.ok(!hasUpAt(build(locks), END), "旧口径：起点锁定即排除");
+    } finally {
+      core.CHAN_CFG.absorbMarkFast = saved;
+    }
+  });
+
+  test("k（后顶）锁定始终排除（不受 absorbMarkFast 影响）", () => {
+    assert.ok(!hasUpAt(build([{ dir: "top", price: 4317.63 }]), END));
+  });
+});
+
+describe("笔内极值守卫 innerExtremeGuardOn（2026-10-25，与 py_chain/chan_core.py 同步）", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const zlib = require("node:zlib");
+  const bars = JSON.parse(zlib.gunzipSync(fs.readFileSync(
+    path.resolve(__dirname, "../../../../py_chain/fixtures/inner_extreme_xauusd_20260904.json.gz"))));
+  // 北京 2026-09-04：09:00 顶 4487.55 / 12:00 底 4465.49 / 14:45 底 4460.155 / 15:45 顶 4490.90
+  const T0900 = 1788483600, T1200 = 1788494400, T1445 = 1788504300, T1545 = 1788507900;
+  const build = () => {
+    const trimmed = core.markWickBars(bars);
+    const merged = core.mergeBars(trimmed);
+    let bis = core.buildBi(core.findFractals(merged), merged,
+                           core.calcATR(bars, 14), core.calcMACD(bars), null, true, "15");
+    bis = core.fixBiExtremes(bis, merged) || bis;
+    return core.extendLastBi(bis, trimmed);
+  };
+
+  test("9-4 案：同型替换笔内藏 14:45 更低点 → 下跌笔终点落地 14:45@4460.155", () => {
+    const bis = build();
+    const down = bis.find(b => b.startTime === T0900 && b.type === "down");
+    assert.equal(down.endTime, T1445);
+    assert.ok(Math.abs(down.endPrice - 4460.155) < 1e-6, `endPrice=${down.endPrice}`);
+    const up = bis.find(b => b.startTime === T1445);
+    assert.equal(up.type, "up");
+    assert.equal(up.endTime, T1545);
+  });
+
+  test("关=逐位回退 2026-10-24 旧口径（终点 12:00@4465.49、上涨笔内藏更低点）", () => {
+    const saved = core.CHAN_CFG.innerExtremeGuardOn;
+    core.CHAN_CFG.innerExtremeGuardOn = false;
+    try {
+      const bis = build();
+      const down = bis.find(b => b.startTime === T0900 && b.type === "down");
+      assert.equal(down.endTime, T1200);
+      assert.ok(Math.abs(down.endPrice - 4465.49) < 1e-6, `endPrice=${down.endPrice}`);
+      const up = bis.find(b => b.startTime === T1200);
+      assert.equal(up.endTime, T1545);
+    } finally {
+      core.CHAN_CFG.innerExtremeGuardOn = saved;
+    }
+  });
+});

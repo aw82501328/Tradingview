@@ -36,13 +36,13 @@ def bi(type_, startTime, endTime, startPrice, endPrice):
 # 60m K线时间轴（3600s 一根）：bar idx = t // 3600
 TIMES60 = list(range(0, 40000, 3600))
 
-# 卖侧 fixture：末笔 up 终点 10800@108.0 挂 2卖 strong → wait2Sell（wantType=up 匹配）
+# 卖侧 fixture：末笔 up 终点 10800@108.0 挂 2卖 strong → 2Sell（wantType=up 匹配）
 BIS60_SELL = [
     bi("up", 0, 3600, 100, 110),
     bi("down", 3600, 7200, 110, 105),
     bi("up", 7200, 10800, 105, 108),
 ]
-# 买侧镜像：末笔 down 终点 10800@102.0 挂 2买 strong → wait2Buy（wantType=down 匹配）
+# 买侧镜像：末笔 down 终点 10800@102.0 挂 2买 strong → 2Buy（wantType=down 匹配）
 BIS60_BUY = [
     bi("down", 0, 3600, 110, 100),
     bi("up", 3600, 7200, 100, 105),
@@ -135,7 +135,7 @@ class TestRealtimeAnchorBarWindow(unittest.TestCase):
         # 锚 10800（bar 3）、触发拍与背驰点 11000（同 bar 3）→ 放行
         sigs, rejects = _run(BIS60_SELL, self.SELL_PT, tCut=11000, divTime=11000)
         self.assertEqual(len(sigs), 1)
-        self.assertEqual(sigs[0]["strategyKey"], "wait2Sell")
+        self.assertEqual(sigs[0]["strategyKey"], "2Sell")
         self.assertFalse(any(r["gate"] == "anchor_bar_window" for r in rejects))
 
     def test_second_bar_fires(self):
@@ -198,7 +198,7 @@ class TestRealtimeAnchorBarWindow(unittest.TestCase):
         self.assertTrue(any(r["gate"] == "anchor_bar_window" for r in rejects))
         sigs, rejects = _run(BIS60_BUY, self.BUY_PT, tCut=11000, divTime=11000)
         self.assertEqual(len(sigs), 1)
-        self.assertEqual(sigs[0]["strategyKey"], "wait2Buy")
+        self.assertEqual(sigs[0]["strategyKey"], "2Buy")
 
     def test_sell_pullback_from_high_rejected(self):
         # 主闸价距（卖侧）：窗口最高被反弹推到 120，当拍现价 108 已从高点回落 12 点
@@ -302,7 +302,7 @@ class TestRealtimeAnchorBarWindow(unittest.TestCase):
         sigs, rejects = _run(BIS60_BUY, self.BUY_PT, tCut=18600, divTime=18300,
                              periodBars={"3": FINE_NEWLOW_LATE}, divPrice=95.0)
         self.assertEqual(len(sigs), 1)
-        self.assertEqual(sigs[0]["strategyKey"], "wait2Buy")
+        self.assertEqual(sigs[0]["strategyKey"], "2Buy")
         self.assertFalse(any(r["gate"] == "anchor_bar_window" for r in rejects))
 
 
@@ -329,7 +329,7 @@ class TestConfirmAnchorBarWindow(unittest.TestCase):
         }
 
     def _eval(self, ctx, div):
-        strategy = {"key": "wait2Sell", "direction": "short", "label": "二卖",
+        strategy = {"key": "2Sell", "direction": "short", "label": "二卖",
                     "pointCls": "强二卖"}
         with mock.patch.object(me, "lastBiOk", return_value=True), \
                 mock.patch.object(me, "strategyExtraOk", return_value=None), \

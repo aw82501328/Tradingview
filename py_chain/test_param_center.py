@@ -366,10 +366,11 @@ class ParamCenterTests(unittest.TestCase):
                          chan_core.CHAN_CFG_DEFAULTS["macdZeroTol"])
 
     def test_chan_window_days_keys(self):
-        # 小周期绘制窗口（2026-10-02 参数化）：默认 15/30/3、范围 [1,365]、进 chan_cfg_effective
+        # 小周期绘制窗口（2026-10-02 参数化）：默认 15/50/3（15m 2026-10-25 起 50、此前 30）、
+        # 范围 [1,365]、进 chan_cfg_effective
         defaults = param_center.defaults_of("chan")
         self.assertEqual((defaults["windowDays3"], defaults["windowDays15"],
-                          defaults["windowDays30S"]), (15, 30, 3))
+                          defaults["windowDays30S"]), (15, 50, 3))
         self.assertEqual(param_center.normalize("chan", {"windowDays3": 45}),
                          {"windowDays3": 45})
         self.assertEqual(param_center.normalize("chan", {"windowDays15": "90"}),
@@ -379,7 +380,7 @@ class ParamCenterTests(unittest.TestCase):
                 param_center.normalize("chan", {"windowDays3": bad})
         cfg = param_center.chan_cfg_effective("XAUUSD")
         self.assertEqual((cfg["windowDays3"], cfg["windowDays15"],
-                          cfg["windowDays30S"]), (15, 30, 3))
+                          cfg["windowDays30S"]), (15, 50, 3))
         param_center.update("chan", {"windowDays3": 45, "windowDays15": 90}, symbol="XAUUSD")
         cfg = param_center.chan_cfg_effective("XAUUSD")
         self.assertEqual((cfg["windowDays3"], cfg["windowDays15"]), (45, 90))
@@ -549,7 +550,7 @@ class TestChainParams(unittest.TestCase):
         self.assertTrue(d["chainAOn"])
         self.assertEqual(d["chainA"], "60,15,3")     # 240 默认不勾（仅结构参考）
         self.assertFalse(d["chainBOn"])
-        self.assertEqual(d["chainB"], "1,5,30")
+        self.assertEqual(d["chainB"], "30,5,1")     # 2026-10-25 起默认取参数页顺序（集合同 1,5,30）
         self.assertEqual(param_center.PARAM_MODULES["chain"]["category"], "strategy")
         # choices 白名单：30S 只在链A、1 只在链B
         spec_a = param_center.PARAM_MODULES["chain"]["params"]["chainA"]
@@ -611,6 +612,136 @@ class TestChainParams(unittest.TestCase):
             "plan": {"trendRes": ""}, "points": {}})
         self.assertEqual(mp["chain"]["chainA"], "60,15,3")   # 缺桶回默认
         self.assertFalse(mp["chain"]["chainBOn"])
+
+
+class TestPointClassesParams(unittest.TestCase):
+    """买卖点类别白名单（2026-10-24 pointClasses，entry 桶 multi）：schema/默认/
+    校验/CHAN_CFG 生效往返（回测/实盘/图上标记进出场共用同一键）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._orig_file = param_center.PARAMS_FILE
+        param_center.PARAMS_FILE = str(Path(self.tmp.name) / "module_params.json")
+        chan_core.reset_cfg()
+
+    def tearDown(self):
+        chan_core.reset_cfg()
+        param_center.PARAMS_FILE = self._orig_file
+        self.tmp.cleanup()
+
+    def test_default_all_selected_in_schema(self):
+        # 2026-10-25 起默认五项（一类/强二类/强类二/强三类/强四类），此前默认 13 项全选；
+        # choices 仍 13 项全供（同日三次口径=三类/四类族也拆强弱）
+        self.assertEqual(param_center.defaults_of("entry")["pointClasses"],
+                         "1,2s,2xs,3s,4s")
+        schema = param_center.schema_of("entry")["pointClasses"]
+        self.assertEqual(schema["type"], "multi")
+        self.assertEqual(schema["choices"],
+                         ["1", "2s", "2w", "2xs", "2xw", "3s", "3w", "3xs", "3xw",
+                          "4s", "4w", "4xs", "4xw"])
+        self.assertEqual(schema["default"], "1,2s,2xs,3s,4s")
+        self.assertIn("pointClasses", param_center.ENTRY_CHAN_KEYS)
+        # 默认值单一来源=chan_core.CHAN_CFG_DEFAULTS（apply_cfg 只认已登记键）
+        self.assertEqual(chan_core.CHAN_CFG_DEFAULTS["pointClasses"],
+                         "1,2s,2xs,3s,4s")
+
+    def test_normalize_roundtrip_and_rejects(self):
+        self.assertEqual(param_center.normalize("entry", {"pointClasses": "3s,1,3s"}),
+                         {"pointClasses": "3s,1"})   # 去重保输入序
+        # 旧值迁移（同日上午 7 项/二次 9 项口径）：2→2s,2w；3→3s,3w；4x→4xs,4xw（保输入序）
+        self.assertEqual(param_center.normalize("entry", {"pointClasses": "2,3"}),
+                         {"pointClasses": "2s,2w,3s,3w"})
+        self.assertEqual(param_center.normalize("entry", {"pointClasses": "1,2x"}),
+                         {"pointClasses": "1,2xs,2xw"})
+        self.assertEqual(param_center.normalize("entry", {"pointClasses": "3,4x"}),
+                         {"pointClasses": "3s,3w,4xs,4xw"})
+        for bad in ("1,9", "", "买", 7):
+            with self.assertRaises(ValueError):
+                param_center.normalize("entry", {"pointClasses": bad})
+
+    def test_update_applies_to_chan_cfg(self):
+        # entry 属 CHAN_CFG 模块：保存即 apply_cfg 进程内生效（回测/实盘引擎读
+        # 全局 CHAN_CFG；导出 chan_cfg_<品种>.json 供 JS 标记端，存储重定向时跳过）
+        param_center.update("entry", {"pointClasses": "1,3s"})
+        self.assertEqual(chan_core.CHAN_CFG["pointClasses"], "1,3s")
+        self.assertEqual(param_center.chan_cfg_effective("XAUUSD")["pointClasses"], "1,3s")
+        # 改回默认=剔除覆盖 → 回到全选
+        param_center.update("entry",
+                            {"pointClasses": "1,2s,2w,2xs,2xw,3s,3w,3xs,3xw,4s,4w,4xs,4xw"})
+        self.assertEqual(chan_core.CHAN_CFG["pointClasses"],
+                         "1,2s,2w,2xs,2xw,3s,3w,3xs,3xw,4s,4w,4xs,4xw")
+
+
+class TestSrSideGateParam(unittest.TestCase):
+    """近支阻按方向取侧开关（2026-10-25 srSideGateOn，entry 桶布尔）：默认开/
+    CHAN_CFG 生效往返（引擎与 JS 标记端共用同一键）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._orig_file = param_center.PARAMS_FILE
+        param_center.PARAMS_FILE = str(Path(self.tmp.name) / "module_params.json")
+        chan_core.reset_cfg()
+
+    def tearDown(self):
+        chan_core.reset_cfg()
+        param_center.PARAMS_FILE = self._orig_file
+        self.tmp.cleanup()
+
+    def test_default_on_single_source(self):
+        self.assertTrue(param_center.defaults_of("entry")["srSideGateOn"])
+        schema = param_center.schema_of("entry")["srSideGateOn"]
+        self.assertEqual(schema["type"], "bool")
+        self.assertTrue(schema["default"])
+        self.assertIn("srSideGateOn", param_center.ENTRY_CHAN_KEYS)
+        self.assertIs(chan_core.CHAN_CFG_DEFAULTS["srSideGateOn"], True)
+
+    def test_update_applies_to_chan_cfg(self):
+        param_center.update("entry", {"srSideGateOn": False})
+        self.assertIs(chan_core.CHAN_CFG["srSideGateOn"], False)
+        self.assertIs(param_center.chan_cfg_effective("XAUUSD")["srSideGateOn"], False)
+        param_center.update("entry", {"srSideGateOn": True})   # 改回=剔除覆盖回默认开
+        self.assertIs(chan_core.CHAN_CFG["srSideGateOn"], True)
+
+
+class TestPointMaxAttemptsParams(unittest.TestCase):
+    """同一点最大尝试次数（2026-10-25 pointMaxAttempts，entry 桶 int 0~20 默认 2）：
+    默认单源/CHAN_CFG 生效往返/0=不限合法/范围与类型校验。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._orig_file = param_center.PARAMS_FILE
+        param_center.PARAMS_FILE = str(Path(self.tmp.name) / "module_params.json")
+        chan_core.reset_cfg()
+
+    def tearDown(self):
+        chan_core.reset_cfg()
+        param_center.PARAMS_FILE = self._orig_file
+        self.tmp.cleanup()
+
+    def test_default_single_source(self):
+        self.assertEqual(param_center.defaults_of("entry")["pointMaxAttempts"], 2)
+        schema = param_center.schema_of("entry")["pointMaxAttempts"]
+        self.assertEqual(schema["type"], "int")
+        self.assertEqual(schema["default"], 2)
+        self.assertEqual(schema["min"], 0)
+        self.assertEqual(schema["max"], 20)
+        self.assertIn("pointMaxAttempts", param_center.ENTRY_CHAN_KEYS)
+        self.assertEqual(chan_core.CHAN_CFG_DEFAULTS["pointMaxAttempts"], 2)
+
+    def test_update_applies_to_chan_cfg(self):
+        param_center.update("entry", {"pointMaxAttempts": 3})
+        self.assertEqual(chan_core.CHAN_CFG["pointMaxAttempts"], 3)
+        self.assertEqual(param_center.chan_cfg_effective("XAUUSD")["pointMaxAttempts"], 3)
+        param_center.update("entry", {"pointMaxAttempts": 2})   # 改回默认=剔除覆盖
+        self.assertEqual(chan_core.CHAN_CFG["pointMaxAttempts"], 2)
+
+    def test_zero_valid_and_range_checks(self):
+        # 0=不限（旧口径关闭开关）是合法值——引擎侧不能写 `or 2` 兜底（会把 0 吞成 2）
+        param_center.update("entry", {"pointMaxAttempts": 0})
+        self.assertEqual(chan_core.CHAN_CFG["pointMaxAttempts"], 0)
+        for bad in (2.5, 21, -1, True):
+            with self.assertRaises(ValueError):
+                param_center.normalize("entry", {"pointMaxAttempts": bad})
 
 
 if __name__ == "__main__":

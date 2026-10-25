@@ -47,6 +47,12 @@ const CHAN_CFG = {
   // 恢复为笔端点价/时。只改端点，不动合并结构与分型；关=旧行为。
   // 与 py_chain/chan_core.py CHAN_CFG.endInnerRecoverOn 同步。
   endInnerRecoverOn: true,
+  // 笔内极值守卫（2026-10-25，默认开，与 py_chain/chan_core.py CHAN_CFG.innerExtremeGuardOn
+  // 同步）：阶段二替换/顶替产生的新配对笔内藏着超近等容差（影线与实体双超 nearDoubleFixed）
+  // 的更极值时，落地该极值为端点（例：15m 2026-09-04 下跌笔终点 12:00@4465.49 内藏
+  // 14:45@4460.15 → 延伸到 14:45）。锁定端点（区间套优先）与跳空锁定笔不参与；
+  // 近等族实体容差内的取后不受影响。关=2026-10-24 旧口径逐位回退。
+  innerExtremeGuardOn: true,
   // 顶底分形不能包含（单根长K豁免）：该周期单根K线振幅（高-低）≥ 对应点数时，
   // 不参与分型终点侧三根的反向贯穿检查。按周期取值（wideBarPointsOf）；0=该周期不豁免。
   // wideBarOn=false 时所有周期一律不豁免（wideBarPointsOf 直接返回 0）。
@@ -67,6 +73,16 @@ const CHAN_CFG = {
   // 开=DIF > -macdZeroTol 才进；关=强二买不看 0 轴。
   // 与 py_chain/chan_core.py CHAN_CFG.strong2BuyMacdOn 同步。
   strong2BuyMacdOn: false,
+  // 进场买卖点类别白名单（2026-10-24，参数中心 entry 桶；同日三次口径=三类/四类族也拆
+  // 强弱；与 py_chain/chan_core.py CHAN_CFG.pointClasses 同步）：13 项=一类/强二类/弱二类/
+  // 强类二/弱类二/强三类/弱三类/强类三/弱类三/强四类/弱四类/强类四/弱类四，买卖两侧对称。
+  // 二类族强弱=1买后反弹过/未过前高（旧口径）；3/4族强弱（markThirdFourthStrong）=
+  // 点后同向腿背驰：弱3=2类后上推腿对1类后反弹腿顶背驰、弱4=3类后上推腿对2类后上推腿
+  // 背驰（卖侧镜像），判不出即强。浅过滤：锚点仍取全类型最新点，最新锚点类别未勾→
+  // 跳过不开单、不回溯更早的点。旧值 "2"/"2x"/"3"/"3x"/"4"/"4x" 由 mark_entry.js
+  // 运行期别名展开（2→2s+2w、3→3s+3w 等）。仅 mark_entry.js 进场链消费，核心算法闲置。
+  // 2026-10-25 起默认五项（一类/强二类/强类二/强三类/强四类），此前默认 13 项全选。
+  pointClasses: "1,2s,2xs,3s,4s",
   debug: false,   // 调试打印（buildBi / 买卖点识别过程）
   nearDoubleFixed: 2.0, // 近等双顶/双底固定容差（品种报价单位绝对价差，如黄金 2.0=2 美元）；
                         // thr = 该值（2026-10-02 起取消 ATR 项/价格比例项/15m双动能确认）。
@@ -91,6 +107,11 @@ const CHAN_CFG = {
   // nearDouble3/15/60/240/D 开启；60m 的 04:00 型案例还需 fractalSideRealWick）。
   // 与 py_chain/chan_core.py CHAN_CFG.nearDoubleShiftLocked 同步。
   nearDoubleShiftLocked: false,
+  // 吸收成笔即标（2026-10-25，与 py_chain/chan_core.py CHAN_CFG.absorbMarkFast 同步，
+  // 默认开）：死顶/死底近等吸收只追加端点 k，笔起点 last 原位不动——起点被区间套
+  // 锁定（上级笔端点）不再阻断吸收（k 与被吸收 f 锁定仍排除）。False=2026-10-22
+  // 旧口径（任一相关分型 locked 即排除）。
+  absorbMarkFast: true,
   // ---- 三处规则修复 + 跨级下沉（2026-09-26；与 py_chain/chan_core.py 对齐）----
   // anchorUndecidedSkip/anchorUndecidedMinBars 已淘汰（2026-10-10 提前入列：未定型点接管锚点、
   // 弱档先行路由；classifySecond 未定型哨兵保留、定型阈值固定 2 合并块）。
@@ -106,12 +127,17 @@ const CHAN_CFG = {
   anchorWinBars: 2,
   anchorWinPts: 10.0,
   anchorWinTrailOn: true,
+  // srSideGateOn（2026-10-25，与 py_chain/chan_core.py CHAN_CFG.srSideGateOn 同步）=
+  // 近支阻按方向取侧：做多只认 SUP（最近上涨笔回撤支撑/布林下轨与下侧中轨）、
+  // 做空只认 RES（最近下跌笔反弹阻力/布林上轨与上侧中轨）；密集区/人工位不过滤。
+  // mark_entry.js 进场闸门消费。
+  srSideGateOn: true,
   // ---- 小周期绘制/加载窗口（2026-10-02 参数化；与 py_chain/chan_core.py CHAN_CFG 同步）----
   // 由 chan-bi/mark-buy-sell/mark-entry 三脚本消费：DRAW_WINDOW_DAYS 改由此构造。
   // 3分钟/15分钟/30秒 只画（并只加载）最近 N 天；60m/240m/D 不限、从 --from 全量。
   // 值 0 = 该周期不限窗口（仅手动 --chan-cfg 可传 0；参数页 min=1）。
   windowDays3: 15,
-  windowDays15: 30,
+  windowDays15: 50,   // 2026-10-25 起默认 50（此前 30）
   windowDays30S: 3,
 };
 
@@ -593,8 +619,10 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, res =
   // last 与 k 同类型时，(last, k) 内比本笔起点 prev 更极端的反向价。
   // 比较含长影压平前的真低/真高：15m 2026-09-09 23:15 插针 4375.155 低于
   // 23:00 结构低 4380.39，底应落在 23:15。同价取更晚的一根。没有则 null。
-  const deeperOppositeBar = (prev, last, k) => {
-    const lo = last.mergedIdx + 1;
+  // loRef（2026-10-25 笔内极值落地用，与 py lo_ref 同步）：搜索下界改用该端点
+  // （默认 last）——被超越极值可能藏在 (ref, last) 段。方向仍由 last 决定。
+  const deeperOppositeBar = (prev, last, k, loRef) => {
+    const lo = (loRef || last).mergedIdx + 1;
     const hi = k.mergedIdx;
     if (lo >= hi) return null;
     const eps = 1e-9;
@@ -630,6 +658,137 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, res =
     if (gap === 3 && noMoreExtremeInside(a, b) && macdArr && macdArr.length) {
       const direction = a.type === "bottom" ? "up" : "down";
       return hasMacdCrossBetween(macdArr, merged, a.mergedIdx, b.mergedIdx, a.time, b.time, direction);
+    }
+    return false;
+  };
+
+  // ===== 笔内极值守卫（2026-10-25，与 py_chain/chan_core.py 同步；修复优先、拒绝死锁）=====
+  const innerGuardOn = () => CHAN_CFG.innerExtremeGuardOn !== false;
+
+  // 配对 (a, b) 笔内极值双侧结构校验：开区间内结构极值不得超越任一端点
+  // （noMoreExtremeInside 只护终点侧，这里补起点侧）。
+  const pairInnerClean = (a, b) => {
+    for (let i = a.mergedIdx + 1; i < b.mergedIdx; i++) {
+      const m = merged[i];
+      if (a.type === "top" && m.high > a.high) return false;
+      if (a.type === "bottom" && m.low < a.low) return false;
+      if (b.type === "bottom" && m.low < b.low) return false;
+      if (b.type === "top" && m.high > b.high) return false;
+    }
+    return true;
+  };
+
+  // 守卫钩子触发判据：影线差与实体差都超 nearDoubleFixed 才算真违例——近等族
+  // （平台取后/死顶死底吸收/反弹不成笔取后）按实体容差刻意取后者，实体容差内
+  // 不修（例：60m 2026-08-06 取后底 4229.875 vs 前底影线 4223.505，实体差 0.915；
+  // 9-4 案影线差 5.34、实体差 4.21 双超才修）。返回违例柱 idx 或 null。
+  const pairInnerViolationIdx = (a, b) => {
+    const thr = CHAN_CFG.nearDoubleFixed;
+    for (let i = a.mergedIdx + 1; i < b.mergedIdx; i++) {
+      const m = merged[i];
+      for (const ref of [a, b]) {
+        if (ref.type === "top") {
+          if (m.high <= ref.high + thr) continue;
+          const br = nearBodyPx(merged, ref.mergedIdx, true);
+          const bv = nearBodyPx(merged, i, true);
+          if (br != null && bv != null && bv - br <= thr) continue;
+          return i;
+        } else {
+          if (m.low >= ref.low - thr) continue;
+          const br = nearBodyPx(merged, ref.mergedIdx, false);
+          const bv = nearBodyPx(merged, i, false);
+          if (br != null && bv != null && br - bv <= thr) continue;
+          return i;
+        }
+      }
+    }
+    return null;
+  };
+
+  // push 起点侧落地用（2026-10-25，与 py _deeper_same_type_bar 同步）：
+  // (ref, k) 内比 ref 更极端的**同型**极值柱（push 场景 last/k 异型、bridge 与起点同型）。
+  const deeperSameTypeBar = (ref, k) => {
+    const lo = ref.mergedIdx + 1;
+    const hi = k.mergedIdx;
+    if (lo >= hi) return null;
+    const eps = 1e-9;
+    if (ref.type === "top") {
+      let bestI = -1, bestP = null, bestT = null;
+      for (let i = lo; i < hi; i++) {
+        const { p, t } = barExtremeHigh(merged[i]);
+        if (bestP === null || p >= bestP - eps) { bestI = i; bestP = p; bestT = t; }
+      }
+      if (bestP === null || bestP <= ref.high + eps) return null;
+      const m = merged[bestI];
+      return { mergedIdx: bestI, type: "top", high: bestP, low: m.low, time: bestT };
+    }
+    let bestI = -1, bestP = null, bestT = null;
+    for (let i = lo; i < hi; i++) {
+      const { p, t } = barExtremeLow(merged[i]);
+      if (bestP === null || p <= bestP + eps) { bestI = i; bestP = p; bestT = t; }
+    }
+    if (bestP === null || bestP >= ref.low - eps) return null;
+    const m = merged[bestI];
+    return { mergedIdx: bestI, type: "bottom", high: m.high, low: bestP, time: bestT };
+  };
+
+  // 笔内极值落地（同型替换 ref=result[-2] / push 起点侧 ref=last 两场景）：
+  // [..., below, bridge, k]，被超越端点及其上元素一并让位；锁定/跳空不参与。
+  const landInnerExtreme = (last, k, ref) => {
+    if (result.length < 2) return false;
+    if (ref === undefined) ref = result[result.length - 2];
+    if (result[result.length - 2].locked || last.locked || k.locked) return false;
+    if (result[result.length - 2].gapLocked || last.gapLocked) return false;
+    const refIdx = ref === last ? result.length - 1 : result.length - 2;
+    // push 场景（ref===last）：bridge 与起点同型（同型搜索）；同型替换场景走反向搜索。
+    const bridge = ref === last ? deeperSameTypeBar(ref, k) : deeperOppositeBar(ref, last, k, ref);
+    if (!bridge) return false;
+    if (!pairFormsBi(bridge, k) || !pairInnerClean(bridge, k)) return false;
+    const below = refIdx > 0 ? result[refIdx - 1] : null;
+    if (below) {
+      if (below.locked) return false;
+      if (!pairFormsBi(below, bridge) || !pairInnerClean(below, bridge)) return false;
+    }
+    if (CHAN_CFG.debug) {
+      const mid = bridge.type === "bottom" ? "底" : "顶";
+      const px = bridge.type === "bottom" ? bridge.low : bridge.high;
+      console.log(`[阶段二] 笔内极值落地: ${ref.type === "top" ? "顶" : "底"}@${ref.mergedIdx}(${ref.type === "top" ? ref.high : ref.low}) 侧藏更极值，落地 ${mid}@${bridge.mergedIdx}(${px}) 为端点，接入 ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}`);
+    }
+    result.splice(refIdx, result.length - refIdx, bridge, k);
+    return true;
+  };
+
+  // 跨类型顶替（result[-2]=k 族：作废/区间极值版/间隔不足顶替）的落地：
+  // anchor=result[-3]；起点侧 bridge 替换 anchor 为 [.., below, bridge, k]，
+  // 终点侧 bridge 替换 k 为 [.., anchor, bridge]。拆不开返回 false（维持原顶替）。
+  const landReplacePair = (k, anchor) => {
+    if (!anchor || result.length < 3) return false;
+    const last = result[result.length - 1];
+    if (anchor.locked || k.locked || last.locked || result[result.length - 2].locked) return false;
+    if (anchor.gapLocked || last.gapLocked) return false;
+    if (pairInnerViolationIdx(anchor, k) === null) return false;
+    let bridge = deeperOppositeBar(anchor, last, k, anchor);
+    if (bridge && pairFormsBi(bridge, k) && pairInnerClean(bridge, k)) {
+      const below = result.length >= 4 ? result[result.length - 4] : null;
+      if (!below || (!below.locked && pairFormsBi(below, bridge) && pairInnerClean(below, bridge))) {
+        if (CHAN_CFG.debug) {
+          const mid = bridge.type === "bottom" ? "底" : "顶";
+          const px = bridge.type === "bottom" ? bridge.low : bridge.high;
+          console.log(`[阶段二] 笔内极值落地(顶替起点侧): ${anchor.type === "top" ? "顶" : "底"}@${anchor.mergedIdx}(${anchor.type === "top" ? anchor.high : anchor.low}) 被 ${mid}@${bridge.mergedIdx}(${px}) 替换，接入 ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}`);
+        }
+        result.splice(result.length - 3, 3, bridge, k);
+        return true;
+      }
+    }
+    bridge = deeperOppositeBar(k, last, k, anchor);
+    if (bridge && pairFormsBi(anchor, bridge) && pairInnerClean(anchor, bridge)) {
+      if (CHAN_CFG.debug) {
+        const mid = bridge.type === "bottom" ? "底" : "顶";
+        const px = bridge.type === "bottom" ? bridge.low : bridge.high;
+        console.log(`[阶段二] 笔内极值落地(顶替终点侧): ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}(${k.type === "top" ? k.high : k.low}) 让位 ${mid}@${bridge.mergedIdx}(${px})`);
+      }
+      result.splice(result.length - 2, 2, bridge);
+      return true;
     }
     return false;
   };
@@ -723,11 +882,15 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, res =
   // f→k 无相接成笔 + 存在 ≥thr 真实回调；整笔重验 = 内部极值 ≤ k 极值 + thr 且
   // fractalRangeClear 严格通过。例：60m 2026-09-14 21:00 底 4253.64 → 09-15 00:00 顶
   // 4317.83（间隔仅 3 根被丢弃）→ 10:00 后顶 4317.63 差 0.20 被极值守卫忽略——
-  // 吸收后上涨笔 4253.64 → 4317.63 成笔。排除：任一相关分型 locked（区间套优先）。
+  // 吸收后上涨笔 4253.64 → 4317.63 成笔。排除：k/被吸收 f locked（区间套优先）；
+  // last 锁定 2026-10-25 起默认放行（absorbMarkFast，成笔即标——起点原位不动）。
   // 命中返回 true（调用方 push k 并打 nearDouble 单跳封顶）。周期门控 nearDouble。
   const deadNearAbsorb = (last, k) => {
     if (!nearDouble) return false;
-    if (k.locked || last.locked) return false;
+    if (k.locked) return false;
+    // 2026-10-25 吸收成笔即标（absorbMarkFast，默认开）：起点锁定不再阻断——
+    // 吸收只追加端点 k，锁定起点原位不动（批量无锁口径本就当场成笔）。
+    if (last.locked && CHAN_CFG.absorbMarkFast !== true) return false;
     const isTop = k.type === "top";
     const thr = CHAN_CFG.nearDoubleFixed;
     const loI = last.mergedIdx, hiI = k.mergedIdx;
@@ -857,6 +1020,13 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, res =
             continue;
           }
         }
+        // 笔内极值守卫①（2026-10-25，与 py 同步）：直接替换会令新配对 (prev, k)
+        // 笔内藏超容差更极值时，尝试落地被吞中间极值（landInnerExtreme）；
+        // 拆不开维持原直接替换——拒绝式拦截会死锁端点推进。
+        if (more && innerGuardOn() && result.length >= 2 &&
+            pairInnerViolationIdx(result[result.length - 2], k) !== null) {
+          if (landInnerExtreme(last, k)) continue;
+        }
         if (more) {
           if (last._shiftMid) {
             k._shiftAnchor = last._shiftAnchor;
@@ -933,12 +1103,22 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, res =
           ((k.type === "top" && k.high > prev2.high) || (k.type === "bottom" && k.low < prev2.low))) {
         if (CHAN_CFG.debug) console.log(`[阶段二] 前顶/前底作废: ${prev2.type === "top" ? "顶" : "底"}@${prev2.mergedIdx}(${prev2.type === "top" ? prev2.high : prev2.low}) 被 ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}(${k.type === "top" ? k.high : k.low}) 突破，k 顶替 prev2，移除中间 ${last.type === "top" ? "顶" : "底"}@${last.mergedIdx}`);
         if (prev2.macdCross === true) k.macdCross = true;
+        // 笔内极值守卫③（2026-10-25，与 py 同步）：顶替的新配对 (prev3, k) 笔内藏
+        // 超容差更极值时尝试落地修复；拆不开维持原顶替。
+        if (innerGuardOn() && landReplacePair(k, prev3)) continue;
         result[result.length - 2] = k;
         result.pop();
         continue;
       }
     }
     if (isValid(last, k) && (noMoreExtremeInside(last, k) || last.gapLocked) && (fractalRangeClear(last, k) || last.gapLocked)) {
+      // 笔内极值守卫②（push 起点侧，2026-10-25，与 py 同步）：noMoreExtremeInside
+      // 只护终点侧——起点侧藏超容差更极值时尝试以该极值替换起点再成笔；拆不开
+      // 维持原 push（拒绝会死锁）。跳空成笔（gapLocked）不参与。
+      if (innerGuardOn() && !last.gapLocked && !last.locked && !k.locked &&
+          pairInnerViolationIdx(last, k) !== null) {
+        if (landInnerExtreme(last, k, last)) continue;
+      }
       result.push(k);
     } else if (isValid(last, k)) {
       // 间隔足够但区间内存在更极端的点 或 分型范围未脱离：k 不能作为笔端点，
@@ -963,6 +1143,8 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, res =
             console.log(`[阶段二] 前顶/前底作废(区间极值): ${prev.type === "top" ? "顶" : "底"}@${prev.mergedIdx}(${prev.type === "top" ? prev.high : prev.low}) 被 ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}(${k.type === "top" ? k.high : k.low}) 突破，k 顶替 prev，移除中间 ${last.type === "top" ? "顶" : "底"}@${last.mergedIdx}`);
           }
           if (prev.macdCross === true) k.macdCross = true;
+          // 笔内极值守卫③（2026-10-25，与 py 同步）：区间极值版顶替的落地修复。
+          if (innerGuardOn() && landReplacePair(k, prev3)) continue;
           result[result.length - 2] = k;
           result.pop();
           continue;
@@ -1102,6 +1284,12 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, res =
               }
             }
             if (!last.locked && !prev.locked) {
+              // 笔内极值守卫③（2026-10-25，与 py 同步）：间隔不足顶替（脆弱笔/近等
+              // 取后/锁定落地共用出口）的新配对 (prev3, k) 笔内藏超容差更极值时尝试
+              // 落地修复（如 240m 2022-02-24 乌克兰尖峰顶 1974.485 被吞案）；拆不开
+              // 维持原顶替。
+              if (innerGuardOn() && result.length >= 3 &&
+                  landReplacePair(k, result[result.length - 3])) continue;
               if (k.locked && moreExtreme && prevLastValidBi && CHAN_CFG.debug) {
                 console.log(`[阶段二] 锁定端点落地: ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}(${k.type === "top" ? k.high : k.low}) 顶替已成笔的 ${prev.type === "top" ? "顶" : "底"}@${prev.mergedIdx}，去掉 ${last.type === "top" ? "顶" : "底"}@${last.mergedIdx}`);
               }
@@ -2348,6 +2536,64 @@ function thirdFamilyV2(bis, upperBis, zss, t3tol, isSell) {
 }
 
 /**
+ * 点后首根同向笔（2026-10-24 3/4 族强弱口径，与 PY _leg_after_point 镜像）：
+ * startTime >= t - tolSec 的最早 direction 笔。1类点是上级笔端点投影，其时间与
+ * 小级别笔起点可差一根K，容差 tolSec=一根 barSec 兜住；找不到返回 null
+ * （调用方按「判不出=强」处理）。
+ */
+function legAfterPoint(bis, t, direction, tolSec) {
+  let best = null;
+  for (const b of bis) {
+    if (b.type !== direction || (b.startTime || 0) < t - tolSec) continue;
+    if (best === null || b.startTime < best.startTime) best = b;
+  }
+  return best;
+}
+
+/**
+ * 3/4 族强弱标注（2026-10-24 用户口径，与 PY _mark_third_fourth_strong 镜像）：
+ * 弱3类 = 2类点后首根上推腿(R2) 对 1类点后首根反弹腿(R1) 顶背驰；
+ * 弱4类 = 3类点后首根上推腿(R3) 对 2类点后首根上推腿(R2) 顶背驰；
+ * 卖侧完全镜像（点后首根下推腿，底背驰）。推动腿动能逐段衰竭 → 弱。
+ * 前点=同侧更早最近点（3族取(1类,2族含类2)、4族取(2族含类2,3族含类3)）；
+ * refer=较早前点的腿、cur=较晚前点的腿，isBiDiverge 用本周期 macd。
+ * 前点/腿缺失或 macd 空 → 判不出=强。只写 3/4 族点的 strong。
+ */
+function markThirdFourthStrong(points, bis, macdArr, barSec, isSell) {
+  if (!points || !points.length) return;
+  const legDir = isSell ? "down" : "up";
+  const firstT = isSell ? "1卖" : "1买";
+  const secondTs = isSell ? ["2卖", "类2卖"] : ["2买", "类2买"];
+  const thirdTs = isSell ? ["3卖", "类3卖"] : ["3买", "类3买"];
+  const subjectTs = thirdTs.concat(isSell ? ["4卖", "类4卖"] : ["4买", "类4买"]);
+
+  const latestBefore = (types, t) => {
+    let best = null;
+    for (const q of points) {
+      if (types.includes(q.type) && q.time < t) {
+        if (best === null || q.time >= best.time) best = q;
+      }
+    }
+    return best;
+  };
+
+  for (const p of points) {
+    if (!subjectTs.includes(p.type)) continue;
+    const preds = (thirdTs.includes(p.type)
+      ? [latestBefore([firstT], p.time), latestBefore(secondTs, p.time)]
+      : [latestBefore(secondTs, p.time), latestBefore(thirdTs, p.time)]
+    ).filter((q) => q != null);
+    p.strong = true; // 判不出即强
+    if (preds.length < 2) continue;
+    preds.sort((a, b) => a.time - b.time);
+    const refLeg = legAfterPoint(bis, preds[0].time, legDir, barSec);
+    const curLeg = legAfterPoint(bis, preds[1].time, legDir, barSec);
+    if (refLeg == null || curLeg == null) continue;
+    p.strong = !isBiDiverge(curLeg, refLeg, macdArr);
+  }
+}
+
+/**
  * findBuyPoints/findSellPoints 的共享子计算上下文（2026-10-16 性能等价改造，与 PY 镜像）。
  * 两侧对相同入参分别重复计算的子结构（合格笔过滤/一类投影/方向开窗/上级分解中枢）
  * 在此一次构建、经 _ctx 参数复用；子结构均为纯函数结果且下游只读不写，
@@ -2401,6 +2647,7 @@ function findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol, 
     if (!allow(p.time) || firstTimes.has(p.time) || secondTimes.has(p.time)) continue;
     points.push(p);
   }
+  markThirdFourthStrong(points, bis, macdArr, barSec, false); // 3/4族强弱（2026-10-24）
   points.sort((a, b) => a.time - b.time);
   return points;
 }
@@ -2438,13 +2685,15 @@ function findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol, thirdZsTol,
     if (!allow(p.time) || firstTimes.has(p.time) || secondTimes.has(p.time)) continue;
     points.push(p);
   }
+  markThirdFourthStrong(points, bis, macdArr, barSec, true); // 3/4族强弱（2026-10-24）
   points.sort((a, b) => a.time - b.time);
   return points;
 }
 
 
-/** 每周期买卖点不分类（买+卖合并），只保留时间上最近 keep 个（现行主流程保留策略） */
-function keepRecentAll(points, keep = 10) {
+/** 每周期买卖点不分类（买+卖合并），只保留时间上最近 keep 个（现行主流程保留策略；
+ * 2026-10-25 起签名默认 100（此前 10），主流程均显式传 keep，此默认仅兜底） */
+function keepRecentAll(points, keep = 100) {
   const n = Math.max(1, Math.floor(keep) || 1);
   return [...points].sort((a, b) => b.time - a.time).slice(0, n).sort((a, b) => a.time - b.time);
 }
@@ -2763,6 +3012,8 @@ module.exports = {
   directionWindows,
   secondFamilyV2,
   thirdFamilyV2,
+  legAfterPoint,
+  markThirdFourthStrong,
   changedBiSpan,
   nestedDirtyPeriods,
   isSameAsUpperBi,

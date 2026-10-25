@@ -103,7 +103,9 @@ savedAt/格式/无关模块桶重写**不再算漂移**。守卫保护对象=重
 差异（截断 12 条）、持仓票号与处置路径（先在 MT5 平旧仓或 `--kill-close`，再
 `--accept-param-drift` 放行重建）。session 存档带 `config_fp` 明细供差异比对
 （旧存档无此键 → 显示「指纹口径变更」，无持仓时同样自动放行）。页面改手数走 kv
-不动 live_config，不触发本守卫。
+不动 live_config，不触发本守卫。entry 桶 2026-10-24 新增 `pointClasses`（买卖点
+类别白名单，默认全选=引擎行为不变、`ENGINE_LOGIC_VERSION` 不 bump）入指纹——部署后
+首次重启指纹即变属预期（无持仓自动放行；有持仓须一次 `--accept-param-drift`）。
 
 ## 4. 常见演练（模拟盘阶段至少各做一次）
 
@@ -168,7 +170,22 @@ Windows Server VPS（2C/4G/60G，伦敦机房低延迟）：装 Python 3.12 + MT
   （或任意配置里 `"chain": "B"`；`--chain B` 可临时覆盖）。
 - **指纹与漂移**：chain 模块属 chan_v1 param_modules → 两链进程的语义指纹都含整份
   链配置——改链B 勾选会同时变更链A 进程指纹（保守口径：有持仓拒启，需各自
-  --accept-param-drift 放行）。ENGINE_LOGIC_VERSION=20261023-dual-chain。
+  --accept-param-drift 放行）。ENGINE_LOGIC_VERSION=20261025-point-max-attempts
+  （2026-10-25：同一点最大尝试次数 pointMaxAttempts 默认 2——同一买卖点（同检测
+  周期+类别+锚点时间）终生最多实际开仓 2 次，成交建仓才计数（被同向互斥压掉
+  未成交的信号不消耗），用满即拒 point_attempt_max；终局重置只清段去重不清
+  尝试计数；0=不限（旧口径）。同日稍早：吸收成笔即标 absorbMarkFast + 合成K
+  参与笔/点重算 synthIntrabarPoints（20261025-absorb-synth-points）、近支阻按
+  方向取侧 srSideGateOn 默认开（20261025-sr-side-gate）——fib/BOLL 位按信号方向
+  收窄，做多只认 SUP（上涨笔回撤支撑/布林下轨与下侧中轨）、做空只认 RES
+  （下跌笔反弹阻力/布林上轨与上侧中轨），近支阻闸门与止损重选同池；
+  密集区/人工位不过滤。同日晚：当前生效配置固化为代码默认值（7 键：windowDays15/
+  divergeConfirm/pointClasses/keep/near/exitStopBeMode/chainB）——XAUUSD 有效参数
+  逐位不变 → 语义指纹不变、ENGINE_LOGIC_VERSION 不 bump、无需 --accept-param-drift
+  （其余四品种默认变化无实盘会话）。
+  前版 2026-10-24：3/4类族拆强弱——点后同向腿背驰=弱；白名单 pointClasses 9→13 项，
+  全部策略键去 wait 前缀、弱 3/4 锚点分流 3BuyBear/3SellBear/BuyBear/SellBear；
+  实盘信号 strategyKey 全量换名，重启即按新口径，有持仓须一次 --accept-param-drift）。
 - **风控**：每链实例上限独立计数；账户级跨 magic 守卫（positions(magic=0) 合计
   max_account_total_volume/max_account_positions）覆盖双链合计敞口。
 - **默认口径变化**：链A 240 默认不勾（不在 240 开单，检测=60/15）——与 2026-10-22

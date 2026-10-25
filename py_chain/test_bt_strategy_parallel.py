@@ -29,7 +29,7 @@ class BtStrategySignalLogTests(unittest.TestCase):
         _reset_mode_locks()
         self.log = webapp.SignalLog()
         self.base = {"symbol": "OANDA:XAUUSD", "time": 100, "periodX": "3",
-                     "direction": "long", "strategyKey": "waitBuy"}
+                     "direction": "long", "strategyKey": "Buy"}
 
     def test_two_strategies_two_rows_and_no_cross_fill(self):
         a = self.log.append_signal("backtest", dict(self.base), strategy="chan_v1")
@@ -41,7 +41,7 @@ class BtStrategySignalLogTests(unittest.TestCase):
         # 缠论V1 的成交只回填缠论行；fxma 行保持「信号」状态
         # （tr 与引擎成交字典同形：带 signalTime/periodX/direction/strategyKey）
         tr = {"symbol": "OANDA:XAUUSD", "signalTime": 100, "periodX": "3",
-              "direction": "long", "strategyKey": "waitBuy",
+              "direction": "long", "strategyKey": "Buy",
               "entryPrice": 2001, "entryTime": 110, "lots": 0.1, "pnl": 5}
         row = self.log.fill_trade("backtest", dict(tr), symbol="OANDA:XAUUSD",
                                   strategy="chan_v1")
@@ -96,12 +96,12 @@ class BtOpenPushbackTests(unittest.TestCase):
         app = _FakeApp()
         w = app.bt_workers["chan_v1"]
         w._on_signal({"time": 100, "symbol": self.SYM, "periodX": "15",
-                      "direction": "short", "strategyKey": "wait3Sell",
+                      "direction": "short", "strategyKey": "3Sell",
                       "price": 4172.8}, symbol=self.SYM)
         return app, w
 
     OPEN_TR = {"signalTime": 100, "periodX": "15", "direction": "short",
-               "strategyKey": "wait3Sell", "entryTime": 110, "entryPrice": 4172.5,
+               "strategyKey": "3Sell", "entryTime": 110, "entryPrice": 4172.5,
                "lots": 4, "state": "open", "pnl": 91.0,
                "exits": [{"type": "trailStop", "lots": 1.0}]}
 

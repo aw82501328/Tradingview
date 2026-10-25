@@ -3,7 +3,7 @@
 pointStrategyOf 点类型+strong 直映射（1类直接档统一、二买族强弱二分、3类/类3类4类分流）、
 point_cls_of 2族强弱档派生、_side_anchor/side_candidates 最近笔端点双侧锚
 （原 trading_plan.predictPlan.matchSide 平移）、
-mark_entry.strategyExtraOk wait2BuyBear/wait2SellBear 抬低/压低条件。
+mark_entry.strategyExtraOk 2BuyBear/2SellBear 抬低/压低条件。
 原 strategyOf 三档路由/classifySecond 四态/entryStrategyOf 文案映射随计划策略行删除（历史用例移除）。"""
 import unittest
 
@@ -28,50 +28,60 @@ def pt(type_, time, price, strong="__unset__"):
 
 class PointStrategyOfTests(unittest.TestCase):
     def test_first_class_direct_entry(self):
-        # 1类直接档（用户确认 2026-10-16）：形成中与已确认统一走 wait1Buy/wait1Sell
-        for type_, key, direction in (("1买", "wait1Buy", "long"), ("1卖", "wait1Sell", "short")):
+        # 1类直接档（用户确认 2026-10-16）：形成中与已确认统一走 1Buy/1Sell
+        for type_, key, direction in (("1买", "1Buy", "long"), ("1卖", "1Sell", "short")):
             out = mark_entry.pointStrategyOf(pt(type_, 20, 95.0))
             self.assertEqual((out["key"], out["direction"]), (key, direction))
             self.assertIsNone(out["pointCls"])  # 非2族无强弱档
 
     def test_second_family_strong_weak_split(self):
-        # 2买/类2买：strong=True → wait2Buy；False/None（未定型弱先行）→ wait2BuyBear
+        # 2买/类2买：strong=True → 2Buy；False/None（未定型弱先行）→ 2BuyBear
         for type_ in ("2买", "类2买"):
             out = mark_entry.pointStrategyOf(pt(type_, 20, 95.0, strong=True))
-            self.assertEqual((out["key"], out["direction"]), ("wait2Buy", "long"))
+            self.assertEqual((out["key"], out["direction"]), ("2Buy", "long"))
             self.assertEqual(out["pointCls"], "强" + ("二买" if type_ == "2买" else "类2买"))
             for strong in (False, None):
                 out = mark_entry.pointStrategyOf(pt(type_, 20, 95.0, strong=strong))
-                self.assertEqual((out["key"], out["direction"]), ("wait2BuyBear", "long"))
+                self.assertEqual((out["key"], out["direction"]), ("2BuyBear", "long"))
                 self.assertEqual(out["pointCls"], "弱" + ("二买" if type_ == "2买" else "类2买"))
         # 卖侧镜像
         for type_ in ("2卖", "类2卖"):
             out = mark_entry.pointStrategyOf(pt(type_, 20, 95.0, strong=True))
-            self.assertEqual((out["key"], out["direction"]), ("wait2Sell", "short"))
+            self.assertEqual((out["key"], out["direction"]), ("2Sell", "short"))
             out = mark_entry.pointStrategyOf(pt(type_, 20, 95.0, strong=False))
-            self.assertEqual((out["key"], out["direction"]), ("wait2SellBear", "short"))
+            self.assertEqual((out["key"], out["direction"]), ("2SellBear", "short"))
 
     def test_third_family(self):
-        # 3买→wait3Buy、3卖→wait3Sell；类3/4族→waitBuy/waitSell（新买/卖点）
+        # 3/4族拆强弱（2026-10-24）：强→3Buy/3Sell/Buy/Sell、弱→3BuyBear/3SellBear/
+        # BuyBear/SellBear；pt() 默认不带 strong=按弱
+        out = mark_entry.pointStrategyOf(pt("3买", 20, 95.0, strong=True))
+        self.assertEqual((out["key"], out["direction"]), ("3Buy", "long"))
         out = mark_entry.pointStrategyOf(pt("3买", 20, 95.0))
-        self.assertEqual((out["key"], out["direction"]), ("wait3Buy", "long"))
-        out = mark_entry.pointStrategyOf(pt("3卖", 20, 95.0))
-        self.assertEqual((out["key"], out["direction"]), ("wait3Sell", "short"))
+        self.assertEqual((out["key"], out["direction"]), ("3BuyBear", "long"))
+        out = mark_entry.pointStrategyOf(pt("3卖", 20, 95.0, strong=True))
+        self.assertEqual((out["key"], out["direction"]), ("3Sell", "short"))
+        out = mark_entry.pointStrategyOf(pt("3卖", 20, 95.0, strong=False))
+        self.assertEqual((out["key"], out["direction"]), ("3SellBear", "short"))
         for type_ in ("类3买", "4买", "类4买"):
-            out = mark_entry.pointStrategyOf(pt(type_, 20, 95.0))
-            self.assertEqual((out["key"], out["direction"]), ("waitBuy", "long"))
+            out = mark_entry.pointStrategyOf(pt(type_, 20, 95.0, strong=True))
+            self.assertEqual((out["key"], out["direction"]), ("Buy", "long"))
+            out = mark_entry.pointStrategyOf(pt(type_, 20, 95.0, strong=False))
+            self.assertEqual((out["key"], out["direction"]), ("BuyBear", "long"))
         for type_ in ("类3卖", "4卖", "类4卖"):
-            out = mark_entry.pointStrategyOf(pt(type_, 20, 95.0))
-            self.assertEqual((out["key"], out["direction"]), ("waitSell", "short"))
+            out = mark_entry.pointStrategyOf(pt(type_, 20, 95.0, strong=True))
+            self.assertEqual((out["key"], out["direction"]), ("Sell", "short"))
+            out = mark_entry.pointStrategyOf(pt(type_, 20, 95.0, strong=False))
+            self.assertEqual((out["key"], out["direction"]), ("SellBear", "short"))
 
     def test_unknown_type_returns_none(self):
         self.assertIsNone(mark_entry.pointStrategyOf(pt("观望", 20, 95.0)))
         self.assertIsNone(mark_entry.pointStrategyOf(pt("", 20, 95.0)))
 
     def test_point_cls_of_non_second_family(self):
-        # 无 strong 字段的点（1类/3类族）不产生强弱档
+        # 1类无 strong 不产生强弱档；3/4族带 strong 产生强弱档（2026-10-24 起）
         self.assertIsNone(mark_entry.point_cls_of(pt("1买", 20, 95.0)))
-        self.assertIsNone(mark_entry.point_cls_of(pt("3买", 20, 95.0)))
+        self.assertIsNone(mark_entry.point_cls_of(pt("3买", 20, 95.0)))  # 无 strong 键
+        self.assertEqual(mark_entry.point_cls_of(pt("3买", 20, 95.0, strong=True)), "强三买")
         # 有 strong 字段的 2族才派生
         self.assertEqual(mark_entry.point_cls_of(pt("2卖", 20, 95.0, strong=True)), "强二卖")
         self.assertEqual(mark_entry.point_cls_of(pt("类2卖", 20, 95.0, strong=None)), "弱类2卖")
@@ -123,27 +133,27 @@ class SideAnchorTests(unittest.TestCase):
 
 
 class StrategyExtraOkTests(unittest.TestCase):
-    """wait2BuyBear/wait2SellBear 专属条件（2026-10-09）：抬低/压低——
+    """2BuyBear/2SellBear 专属条件（2026-10-09）：抬低/压低——
     末下跌（上涨）笔终点不破（不过）前一根同向笔终点；其余键沿用既有口径。"""
 
-    def test_wait2_buy_bear_requires_higher_low(self):
+    def test_2buy_bear_requires_higher_low(self):
         # 抬低：末 down 笔终点 96 > 前 down 笔终点 92 → 通过；破前低 98 < 92？构造两例
         higher = [bi("down", 0, 10, 120, 92), bi("up", 10, 20, 92, 110),
                   bi("down", 20, 30, 110, 96)]
-        self.assertIsNone(mark_entry.strategyExtraOk("wait2BuyBear", higher, [], [], 3600))
+        self.assertIsNone(mark_entry.strategyExtraOk("2BuyBear", higher, [], [], 3600))
         broke = [bi("down", 0, 10, 120, 92), bi("up", 10, 20, 92, 110),
                  bi("down", 20, 30, 110, 90)]
-        self.assertEqual(mark_entry.strategyExtraOk("wait2BuyBear", broke, [], [], 3600),
+        self.assertEqual(mark_entry.strategyExtraOk("2BuyBear", broke, [], [], 3600),
                          "回调破前低，非抬低2买")
 
-    def test_wait2_sell_bear_requires_lower_high(self):
+    def test_2sell_bear_requires_lower_high(self):
         # 压低：末 up 笔终点 108 < 前 up 笔终点 115 → 通过；过前高 118 → 拒
         lower = [bi("up", 0, 10, 92, 115), bi("down", 10, 20, 115, 100),
                  bi("up", 20, 30, 100, 108)]
-        self.assertIsNone(mark_entry.strategyExtraOk("wait2SellBear", lower, [], [], 3600))
+        self.assertIsNone(mark_entry.strategyExtraOk("2SellBear", lower, [], [], 3600))
         broke = [bi("up", 0, 10, 92, 115), bi("down", 10, 20, 115, 100),
                  bi("up", 20, 30, 100, 118)]
-        self.assertEqual(mark_entry.strategyExtraOk("wait2SellBear", broke, [], [], 3600),
+        self.assertEqual(mark_entry.strategyExtraOk("2SellBear", broke, [], [], 3600),
                          "反弹过前高，非压低2卖")
 
 

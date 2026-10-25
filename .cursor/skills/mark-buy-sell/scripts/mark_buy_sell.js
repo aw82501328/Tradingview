@@ -11,7 +11,7 @@
  *   --periods=...       要标记的周期列表（逗号分隔，默认 D,240,60,15,3）
  *   --dry               只计算不绘图
  *   --debug             打印锚定过程、标记列表等调试信息
- *   --keep=10           每周期保留的标记总数（不分类，买+卖合并后按时间取最近 N 个）
+ *   --keep=100          每周期保留的标记总数（不分类，买+卖合并后按时间取最近 N 个；2026-10-25 起默认 100）
  *   --class2-zs-tol=0   类2买/类2卖允许越过中枢边界的绝对点数（0=严格）
  *   --third-zs-tol=0    3买/类3买/3卖/类3卖允许进入中枢的绝对点数（0=严格）
  */
@@ -98,8 +98,8 @@ if (m) {
 }
 const PERIODS = getStrArg("periods", "D,240,60,15,3")
   .split(",").map(s => s.trim()).filter(Boolean);
-// 每周期保留的标记总数（默认 10，不分类：买+卖合并后只保留时间上最近 N 个，减少图上标记数量）
-const KEEP = Math.max(1, parseInt(getStrArg("keep", "10"), 10) || 10);
+// 每周期保留的标记总数（2026-10-25 起默认 100、此前 10；不分类：买+卖合并后只保留时间上最近 N 个，减少图上标记数量）
+const KEEP = Math.max(1, parseInt(getStrArg("keep", "100"), 10) || 100);
 const CLASS2_ZS_TOL = Math.max(0, parseFloat(getArg("class2-zs-tol", 0)) || 0);
 const THIRD_ZS_TOL = Math.max(0, parseFloat(getArg("third-zs-tol", 0)) || 0);
 
@@ -506,7 +506,7 @@ function onlyThisInterval(res) {
 
     // 大级别笔变化时，从该周期起按区间套重算更小周期（2026-10-14 规则v2 起为笔区间粒度：
     // 脏区间 t0 之前沿用上次标记、之后取新算，见下方 marks 合并）；未变的大级别整体沿用
-    const LOGIC_V = "20261022-dead-neardouble-absorb"; // 死顶/死底近等吸收进 buildBi（前顶间隔不足被丢弃时近等后顶吸收为端点，笔结构变化）（逻辑变更必须升版使状态作废全量重算）
+    const LOGIC_V = "20261025-inner-extrem-guard"; // 笔内极值守卫（innerExtremeGuardOn：同型替换/push起点/顶替族新配对笔内藏超近等容差更极值时落地为端点，如15m 9-4下跌笔终点12:00内藏14:45@4460.15→延伸到14:45）+absorbMarkFast沿袭（逻辑变更必须升版使状态作废全量重算）
     const statePath = path.join(CACHE_DIR, `buysell_${String(SYMBOL).replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
     const fpOf = (bis) => (bis || []).map(b => [b.type, b.startTime, b.endTime, b.startPrice, b.endPrice]);
     let prevState = null;
@@ -581,14 +581,17 @@ function onlyThisInterval(res) {
       // 汇总标记：把时间吸附到本周期bar边界；rawTime/rawPrice 保存未吸附的原始点位（区间套合并与状态持久化用）
       // 二买族标签（2026-10-14 规则v2）：type 不变，图表显示 强二买/弱二买/强类2买…
       // （strong=null 未定型 → 弱先行，反弹完成后重算改判）；与 py_chain/mark_buy_sell.py _family_label 同步。
-      const FAMILY_LABEL = { "2买": "二买", "类2买": "类2买", "2卖": "二卖", "类2卖": "类2卖" };
+      // 2026-10-24 起 3/4 族也有 strong（点后同向腿背驰=弱）：标签加强/弱前缀
+      const FAMILY_LABEL = { "2买": "二买", "类2买": "类2买", "2卖": "二卖", "类2卖": "类2卖",
+                             "3买": "三买", "类3买": "类3买", "3卖": "三卖", "类3卖": "类3卖",
+                             "4买": "四买", "类4买": "类4买", "4卖": "四卖", "类4卖": "类4卖" };
       const familyLabel = p => ("strong" in p && FAMILY_LABEL[p.type])
         ? (p.strong ? "强" : "弱") + FAMILY_LABEL[p.type] : p.type;
       const marks = [];
       const offset = Math.max(atr * 0.5, 0.05);
       // 区间套动态更新（2026-10-14 规则v2·笔区间粒度）：大级别笔变化经 nestedDirtyPeriods
       // 级联到全部更小周期（dirtyMap[res] 为并集 span）——脏区间 t0 之前的旧标记沿用上次
-      // 结果、之后取本次新算；每周期保留截断（--keep=N，默认 10）在合并后的完整列表上做，
+      // 结果、之后取本次新算；每周期保留截断（--keep=N，默认 100）在合并后的完整列表上做，
       // 避免跨边界截断丢点。全量（span.t0=-Infinity）时 prevKept 为空、行为与整表重算一致。
       const dirtySpan = dirtyMap[res];
       const spanMerge = !!(stateOk && savedMarks[res] && dirtySpan && dirtySpan.t0 > -Infinity);

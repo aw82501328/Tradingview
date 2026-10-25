@@ -63,11 +63,13 @@ ZS_DEFAULTS = {
 CHAN_BI_KEYS = (
     "gapFilter", "wickMarkOn", "wickRatio", "wickMinLen", "wickMinRange", "fractalSideRealWick",
     "endInnerRecoverOn",
+    "innerExtremeGuardOn",
     "wideBarOn",
     "wideBarPointsD", "wideBarPoints240", "wideBarPoints60", "wideBarPoints15", "wideBarPoints3",
     "nearDoubleFixed",
     "nearDouble3", "nearDouble15", "nearDouble60", "nearDouble240", "nearDoubleD",
     "nearDoubleShiftLocked",
+    "absorbMarkFast",
     "synthIntrabarBars", "pointEnoughForming",
     "windowDays3", "windowDays15", "windowDays30S",
 )
@@ -75,14 +77,20 @@ CHAN_BI_KEYS = (
 # class2ZsTol 已停用（类2买/类2卖「同一个中枢」改按时间归属，find* 签名保留兼容）
 POINTS_CHAN_KEYS = ("divergeDurRatio",)
 ENTRY_CHAN_KEYS = (
-    "sinkFallback", "sinkFallbackRearm",
+    "sinkFallback", "sinkFallbackRearm", "pointMaxAttempts",
     "macdDivergeBodyOn", "macdDivergeTol",
     "expectBiEnough", "expectBiMinBars", "divergeConfirm", "macdZeroTol",
-    "strong2BuyMacdOn",
+    "strong2BuyMacdOn", "pointClasses",
     "entryMacdShrink", "stopEntryBarFloor",
     "anchorWinBars", "anchorWinPts", "anchorWinTrailOn",
-    "divergeReferByZs", "sinkSkipLevel",
+    "divergeReferByZs", "sinkSkipLevel", "srSideGateOn",
 )
+# pointClasses 旧值别名（2026-10-24 同日三次口径：三类/四类族也拆强弱 3s/3w/…/4xw；
+# 二次口径曾拆二类/类二 2s/2w/2xs/2xw）。normalize 保存时迁移；mark_entry 运行期
+# 也认旧值（已导出 chan_cfg json/回测快照零迁移）。
+POINT_CLASSES_LEGACY = {"2": ("2s", "2w"), "2x": ("2xs", "2xw"),
+                        "3": ("3s", "3w"), "3x": ("3xs", "3xw"),
+                        "4": ("4s", "4w"), "4x": ("4xs", "4xw")}
 # 旧 module_params.json 把上述键都写在 modules.chan 下；读入时迁到 points/entry
 _LEGACY_CHAN_TO_POINTS = set(POINTS_CHAN_KEYS)
 _LEGACY_CHAN_TO_ENTRY = set(ENTRY_CHAN_KEYS)
@@ -102,7 +110,7 @@ CHAIN_DEFAULTS = {
     "chainAOn": True,
     "chainA": "60,15,3",    # 240 默认不勾（仅结构参考；检测周期=60/15）
     "chainBOn": False,      # 默认关：未拉 1/5/30 周期数据时回测不因缺数据失败
-    "chainB": "1,5,30",
+    "chainB": "30,5,1",     # 与 "1,5,30" 集合相同；2026-10-25 起默认取用户参数页顺序
 }
 
 # schema：label/desc 前端展示用；type/min/max 由默认值类型与下表范围决定（校验用）。
@@ -134,6 +142,14 @@ PARAM_MODULES = {
                                   "价/时（笔端点=笔区间真实极值）；只改端点，不动合并结构与分型。"
                                   "关闭后只认终点分型中心及其后的极值",
                                   None, None),
+            "innerExtremeGuardOn": ("笔内极值守卫",
+                                    "阶段二替换/顶替产生的新配对笔内藏着超近等容差（影线与实体双超）"
+                                    "的更极值时，落地该极值为端点（五处挂钩：同型更极端替换/push起点侧/"
+                                    "前顶前底作废/区间极值版/间隔不足顶替；例：15m 2026-09-04 下跌笔"
+                                    "终点 12:00@4465.49 内藏 14:45@4460.15 → 延伸到 14:45）。锁定端点"
+                                    "（区间套优先）与跳空锁定笔不参与；近等族实体容差内的取后不受影响。"
+                                    "关闭=2026-10-24 旧口径逐位回退",
+                                    None, None),
             "wideBarOn": ("单根长K豁免开关",
                           "「顶底分形不能包含」单根长K豁免总开关。关闭后所有周期一律不豁免"
                           "（各周期点数不再生效）", None, None),
@@ -170,6 +186,11 @@ PARAM_MODULES = {
                                       "平台取后（闸门照常：影线/实体比较、差≤容差、回调够深、"
                                       "无相接成笔），需对应周期近等双顶开关开启；开启后下级端点"
                                       "可能不再与上级端点重合。默认关", None, None),
+            "absorbMarkFast": ("吸收成笔即标",
+                               "开=死顶/死底近等吸收只追加端点、笔起点原位不动，起点被区间套"
+                               "锁定（上级笔端点）不再阻断吸收——笔当场成立、2买/2卖点即时"
+                               "可标（k 与被吸收分型锁定仍排除）；关=旧口径（起点锁定即排除，"
+                               "标记要等锁集变动）。默认开", None, None),
             "synthIntrabarBars": ("盘中合成K（15m/1h/4h）",
                                   "回测每拍用3分钟已收K聚合15m/1h/4h进行中K（O=bin首开、"
                                   "H/L=运行极值、C=最新收）临时注入链路，高周期结构盘中即见"
@@ -230,7 +251,7 @@ PARAM_MODULES = {
             "slip_be_atr_k": ("保本滑点ATR系数", "有效保本滑点 = 保本滑点 + 该值×ATR(14,背驰周期)；0=关闭", 0.0, 10.0),
             "exit_min_merged": ("出场成笔预期门槛", "形成段合并后 ≥ 该值根K视为够笔（检测/背驰周期够笔触发；过高低点止盈不用此门槛）", 2, 50),
             "realtime_min_bars": ("当下制够笔K线数", "检测周期形成段从起点所在合并块起达到该块数才评估（含起点；默认5）", 1, 100),
-            "zs_exit_weak_ratio": ("出中枢力度衰减比例", "离开笔幅度 < 进入笔幅度×该值 视为力度变弱（wait1买/卖条件）", 0.1, 5.0),
+            "zs_exit_weak_ratio": ("出中枢力度衰减比例", "离开笔幅度 < 进入笔幅度×该值 视为力度变弱（1Buy/1Sell 条件）", 0.1, 5.0),
             # 出场方式（2026-10-08 可配置化：开关+平仓比例；至少启用一种，update 跨键校验）
             # 平仓比例基数=总仓位（初始开仓手数），非剩余仓位：手数=⌊总手数×比例%⌋
             # 整数（不足1手平1手），100=全平
@@ -252,23 +273,47 @@ PARAM_MODULES = {
             "exitExpectOn": ("出场预期口径（严进宽出）", "开=检测/背驰周期够笔认「向有利方向走出5块合并K」（锚点=末笔终点块与进场块较晚者）、过高低点认「当根收盘K极值越过前一同向笔端点」，均不等确认笔；关=等确认笔。进场侧结构判定不受影响", None, None),
             "exitTrailOn": ("跟踪止盈", "保本迁移（TP1/够笔类置保本位）之后才接管：参照点出现→止损一次性上移到点价∓跟踪止盈滑点（只上移，保本前的参照点不追溯）；上移后的止损被穿越 → 离场记跟踪止盈；保本之前穿越只认支阻/最大止损。参照由「跟踪止盈参照」选择", None, None),
             "exitTrailPct": ("跟踪止盈平仓比例", "触发时平总仓位（初始手数）的百分比；100=全平。部分平仓 latch 后剩余手数由最大止损硬上限兜底全平（记支阻止损）", 1, 100),
-            "exitTrailSrc": ("跟踪止盈参照", "detect=检测周期已破前低/前高的有利方向笔起点（空头=破前低的下跌笔高点，多头=破前高的上涨笔低点；够笔未破前低/前高不算；保本后价格破坏该结构点记跟踪止盈）；mark=背驰周期信号流同向3类点（wait3Buy/waitBuy/…）", ("detect", "mark"), None),
+            "exitTrailSrc": ("跟踪止盈参照", "detect=检测周期已破前低/前高的有利方向笔起点（空头=破前低的下跌笔高点，多头=破前高的上涨笔低点；够笔未破前低/前高不算；保本后价格破坏该结构点记跟踪止盈）；mark=背驰周期信号流同向3类点（3Buy/Buy/…）", ("detect", "mark"), None),
             "exitTrailSlip": ("跟踪止盈滑点", "止损上移到参照点价后向不利侧偏移的点数（同 fxma tpTrailSlipPts；仅跟踪止盈启用时生效）", 0.0, 100.0),
             "exitTouchOn": ("价格线触价成交", "仅缠论V1。开=价格线类出场（支阻止损/保本/跟踪止盈/最大止损兜底/锁定盈利）盘中触及线价即在触发根按线价即时成交（同根多线被穿按线位从高到低逐线成交；实盘按同一候选源把第一条会全平的线挂成券商SL）；关=收盘判定+下一根开盘成交（旧口径）。够笔/过高低点等结构类出场不受影响", None, None),
             "sinkFallback": ("M1下沉链回退", "下沉停止级无候选时沿链向上一级重评", None, None),
-            "sinkFallbackRearm": ("M1终局后重置去重", "同向持仓终局后重置段去重（同段可再进一次）", None, None),
+            "sinkFallbackRearm": ("M1终局后重置去重", "同向持仓终局后重置段去重（同段可再进一次）；不清同一点尝试计数", None, None),
+            "pointMaxAttempts": ("同一点最大尝试次数",
+                                 "同一买卖点（同检测周期+类别+锚点时间）终生最多实际开仓次数："
+                                 "成交建仓才计数（被同向互斥压掉未成交的信号不消耗次数），"
+                                 "用满后该点不再布防触发（拒绝码 point_attempt_max）；"
+                                 "终局重置只清段去重、不清此计数；0=不限（旧口径）；"
+                                 "默认2=初始一次+重试一次",
+                                 0, 20),
             "macdDivergeBodyOn": ("MACD背驰容差", "与容差同一张卡，在进场闸门。开=影线未过时再比笔端点K实体（默认开）；关=只比影线", None, None),
             "macdDivergeTol": ("背驰容差", "MACD背驰固定容差（绝对价差，点）。影线或实体未严格更极端时，价差落在 0 到该值内算近等。0=不放宽。开关关着仍用于影线", 0.0, 100.0),
             "expectBiEnough": ("M4预期够笔", "允许预期段在合并K线够笔后进场；结构预期本身在普通分型确认后立即参与", None, None),
             "expectBiMinBars": ("M4够笔K线数", "预期够笔的本级合并K线块数门槛（含起点所在块）", 1, 100),
-            "divergeConfirm": ("M4背驰确认后成交", "开启=分型右邻K收盘后的下一根开盘成交（默认当下）", None, None),
+            "divergeConfirm": ("M4背驰确认后成交", "开启=分型右邻K收盘后的下一根开盘成交；关闭=当下成交（2026-10-25 起默认开，此前默认关）", None, None),
             "entryMacdShrink": ("进场MACD柱缩闸", "开启=背驰级别上一根已收K线柱状体(|MACD|)较前一根缩小才出信号（确认背驰且柱缩，下一根开盘进场）", None, None),
             "stopEntryBarFloor": ("进场K线止损下限", "开启=止损至少在进场背驰周期K线极值外侧加滑点处（运行中外推、收盘冻结，与支阻位止损取更宽者）", None, None),
             "anchorWinBars": ("锚点窗口K线数", "锚点（买卖点）所在检测周期K线起 N 根内允许触发——当拍与背驰点所在K都须落窗；1=旧单K规则（2026-10-21 重定义）", 1, 10),
             "anchorWinPts": ("锚点窗口距极值点数", "触发价（当拍现价与背驰点价）距窗口极值（买侧最低/卖侧最高=锚点价与窗口内实际极值取小/大）的最大点数；0=不限价距只看时间窗", 0.0, 1000.0),
             "anchorWinTrailOn": ("锚点窗口随新极值重开", "开启=窗口内创新高/新低时时间窗锚K=窗口极值所在K线（连续新高不产生新压低2卖锚时窗口不再卡死，9-8 12:00 案例）；关闭=固定锚K起算（2026-10-21 口径）。价距基准两口径均随极值漂移", None, None),
+            "srSideGateOn": ("fib/BOLL按方向取侧",
+                             "近支阻闸门与止损参考只认信号同侧的 fib/BOLL 位：做多取 SUP"
+                             "（最近上涨笔回撤支撑/布林下轨与下侧中轨）、做空取 RES"
+                             "（最近下跌笔反弹阻力/布林上轨与上侧中轨）；密集区与人工位"
+                             "不按侧过滤。关闭=两侧皆可命中（旧口径，2026-10-25 前）",
+                             None, None),
             "macdZeroTol": ("黄白线容差", "强2类买卖点黄白线容差：开闸后强二买 DIF > -该值才进（0=严格 0 轴）。1买/2卖的 0 轴判定仍用该值", 0.0, 100.0),
             "strong2BuyMacdOn": ("强2类买卖点黄白线", "与容差同一张卡，在进场闸门。开=强二买开单要求 DIF 高于 -容差；关=强二买不看黄白线（默认）", None, None),
+            "pointClasses": ("买卖点类别",
+                             "勾选=该类买卖点可作进场锚点开单（买卖两侧对称：勾「强三类」=强3买+强3卖）。"
+                             "强弱全族拆分：二类族=1买后反弹过/未过前高；3/4族=点后同向腿背驰"
+                             "（弱3=2类后上推腿对1类后反弹腿背驰、弱4=3类后上推腿对2类后上推腿"
+                             "背驰，卖侧镜像，判不出即强）。强→2Buy/3Buy/Buy 等基础键、"
+                             "弱→2BuyBear/3BuyBear/BuyBear 等 Bear 键。"
+                             "不勾=最新锚点为该类时本拍跳过不开单、不回溯更早的点"
+                             "（浅过滤，锚点选取本身不变）。默认五项 1/2s/2xs/3s/4s"
+                             "（2026-10-25 起；此前默认全选）",
+                             ("1", "2s", "2w", "2xs", "2xw", "3s", "3w", "3xs", "3xw",
+                              "4s", "4w", "4xs", "4xw"), "multi"),
             "divergeReferByZs": ("背驰参照按中枢",
                                  "背驰参照笔=入中枢段（跳过当前段之前中枢内部/之后的同向笔，"
                                  "背驰=入中枢段vs出中枢段，中枢内部振荡段不参与比较）；"
@@ -675,6 +720,10 @@ def normalize(module, cfg):
         dv = defaults[key]
         if _is_multi(module, key):
             choices = PARAM_MODULES[module]["params"][key][2]
+            if key == "pointClasses" and isinstance(value, str):
+                # 旧值迁移（POINT_CLASSES_LEGACY）：2→2s,2w；2x→2xs,2xw（保输入序）
+                value = ",".join(i for s in value.split(",")
+                                 for i in POINT_CLASSES_LEGACY.get(s.strip(), (s.strip(),)))
             out[key] = _parse_multi_str(value, choices, key)
             continue
         typ = _type_of(dv)

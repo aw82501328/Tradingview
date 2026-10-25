@@ -160,6 +160,7 @@
 
 <div class="card" id="stats-card">
   <h2><span>存储汇总</span><span class="btn-row">
+    <select id="stats-symbol" style="width:auto;min-width:150px;" title="按品种筛选；选中具体品种后「更新到当前」只更新该品种"></select>
     <button id="btn-update-all" class="start" title="所有已存品种的全部已存周期，从各自末根增量拉取到最新（auto 模式，逐品种顺序执行）">更新到当前</button>
     <button id="btn-stats">刷新</button>
   </span></h2>
@@ -379,16 +380,38 @@ async function loadStats() {
     symbol: sym.symbol, updated_at: sym.updated_at, periods: sym.periods}));
   refreshQuerySelectors();
   refreshFetchSymbol();
+  refreshStatsFilter();
+  renderStats();
+}
+// 品种筛选下拉：「全部品种」+ 已入库品种；保留当前选中，选中品种已不存在（如删除后）回退全部
+function refreshStatsFilter() {
+  const symbols = storesData.map(s => s.symbol);
+  const cur = $('stats-symbol').value;
+  const keep = (!cur || symbols.includes(cur)) ? cur : '';
+  $('stats-symbol').innerHTML = '<option value="">全部品种</option>' +
+    symbols.map(x => `<option value="${x}">${x}</option>`).join('');
+  $('stats-symbol').value = keep;
+}
+// 按当前筛选渲染汇总表与 tiles（数据源 storesData，与 /api/data/stats 响应同构；筛选即时重渲不重新请求）
+function renderStats() {
+  const filter = $('stats-symbol').value;
+  $('btn-update-all').title = filter
+    ? `${filter} 的全部已存周期，从各自末根增量拉取到最新（auto 模式）`
+    : '所有已存品种的全部已存周期，从各自末根增量拉取到最新（auto 模式，逐品种顺序执行）';
   const allFirst = [], allLast = [];
+  let totalBars = 0, symCount = 0;
   const rows = [];
   const mn = () => allFirst.length ? fmtTime(Math.min(...allFirst)) : '—';
   const mx = () => allLast.length ? fmtTime(Math.max(...allLast)) : '—';
   const ord = r => { const n = parseInt(r, 10); return isNaN(n) ? 1e9 : n; };
-  for (const sym of (s.symbols || [])) {
+  for (const sym of storesData) {
+    if (filter && sym.symbol !== filter) continue;
+    symCount += 1;
     const resList = Object.keys(sym.periods || {}).sort((a, b) => ord(b) - ord(a));
     for (const res of resList) {
       const p = sym.periods[res];
       allFirst.push(p.first); allLast.push(p.last);
+      totalBars += p.count || 0;
       rows.push(`<tr>
         <td>${sym.symbol}</td>
         <td class="link" data-q="${sym.symbol}|${res}" title="点击查询明细">${res}</td>
@@ -410,8 +433,8 @@ async function loadStats() {
     }
   }
   $('stats-tiles').innerHTML = `
-    <div class="tile"><div class="caption">品种</div><div class="value">${s.symbol_count || 0}</div></div>
-    <div class="tile"><div class="caption">总K线数</div><div class="value">${(s.total_bars || 0).toLocaleString()}</div></div>
+    <div class="tile"><div class="caption">品种</div><div class="value">${symCount}</div></div>
+    <div class="tile"><div class="caption">总K线数</div><div class="value">${totalBars.toLocaleString()}</div></div>
     <div class="tile"><div class="caption">最早</div><div class="value">${mn()}<small> UTC+8</small></div></div>
     <div class="tile"><div class="caption">最新</div><div class="value">${mx()}<small> UTC+8</small></div></div>`;
   $('stats-body').innerHTML = rows.join('') ||
@@ -447,14 +470,16 @@ async function loadStats() {
     };
   });
 }
+$('stats-symbol').onchange = renderStats;
 $('btn-stats').onclick = () => loadStats();
 
-// ---------- 更新到当前：全部已存品种的全部已存周期 → 末根增量拉到最新 ----------
+// ---------- 更新到当前：已存品种（跟随品种筛选）的全部已存周期 → 末根增量拉到最新 ----------
 $('btn-update-all').onclick = async () => {
   if (fetchQueueRunning || $('btn-fetch').disabled) { alert('当前有拉取进行中，请等待完成'); return; }
+  const sel = $('stats-symbol').value;
   // 各品种：全部已存周期一次拉；from 取各周期末根最早者再回退一天（末根在形成中的也被重刷，upsert 冲突取新值）
   const plan = storesData
-    .filter(s => Object.keys(s.periods || {}).length)
+    .filter(s => (!sel || s.symbol === sel) && Object.keys(s.periods || {}).length)
     .map(s => {
       const lasts = Object.values(s.periods).map(p => p.last).filter(Boolean);
       return lasts.length ? {

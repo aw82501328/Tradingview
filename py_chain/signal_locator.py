@@ -99,7 +99,8 @@ def _replay_to_signal(c, stamp, deadline, res=None, until=None):
 
 
 def _row_for_mark(row, bar_time, last_time=None):
-    """锚点钉到已定位K线开盘；回放窗口之外的出场不画（画了也是空锚）。"""
+    """锚点时间=开单（信号）时间，画标记时按二分解析到所在K线；回放窗口之外
+    的出场不画（画了也是空锚）。"""
     out = dict(row)
     out['time'] = int(bar_time)
     if last_time is None:
@@ -425,6 +426,10 @@ def locate_signal(row, cfg=None, timeout=360, colors=None, after_bars=DEFAULT_AF
             raise CDPError('历史数据加载超时（360秒），无法定位信号K线')
         # Re-read and locate within one evaluation, as loading can reindex all bars.
         result = _center_view(c, symbol, res, stamp, view_until)
+        # 报出的时间用信号（开单）时间，与列表「信号时间」列一致：定位周期仍是
+        # 检测周期，开单时间可落在bar中段（2026-10-25 用户拍板）；画标记按该
+        # 时间二分解析回所在bar，箭头落点不变
+        result['time'] = int(stamp)
         # 视口已居中：同一 CDP 会话内画该行的单行标记（替换语义，见
         # marks.draw_single_mark）。失败不否定定位本身，只把错误带回 result['mark']。
         if jumped:

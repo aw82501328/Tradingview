@@ -48,19 +48,19 @@
 
 | 最近买卖点锚 | 策略标识 key | direction | 箭头 |
 |------|------|------|------|
-| 1买（形成中与已确认统一，直接档） | `wait1Buy` | long | 向上红箭头 |
-| 1卖（形成中与已确认统一，直接档） | `wait1Sell` | short | 向下绿箭头 |
-| 2买 / 类2买 + strong=true | `wait2Buy` | long | 向上红箭头 |
-| 2买 / 类2买 + strong=false/null（未定型弱先行） | `wait2BuyBear`（抬低回调） | long | 向上红箭头 |
-| 2卖 / 类2卖 + strong=true | `wait2Sell` | short | 向下绿箭头 |
-| 2卖 / 类2卖 + strong=false/null | `wait2SellBear`（压低反弹） | short | 向下绿箭头 |
-| 3买 | `wait3Buy` | long | 向上红箭头 |
-| 3卖 | `wait3Sell` | short | 向下绿箭头 |
-| 类3买 / 4买 / 类4买 | `waitBuy`（新买点） | long | 向上红箭头 |
-| 类3卖 / 4卖 / 类4卖 | `waitSell`（新卖点） | short | 向下绿箭头 |
+| 1买（形成中与已确认统一，直接档） | `1Buy` | long | 向上红箭头 |
+| 1卖（形成中与已确认统一，直接档） | `1Sell` | short | 向下绿箭头 |
+| 2买 / 类2买 + strong=true | `2Buy` | long | 向上红箭头 |
+| 2买 / 类2买 + strong=false/null（未定型弱先行） | `2BuyBear`（抬低回调） | long | 向上红箭头 |
+| 2卖 / 类2卖 + strong=true | `2Sell` | short | 向下绿箭头 |
+| 2卖 / 类2卖 + strong=false/null | `2SellBear`（压低反弹） | short | 向下绿箭头 |
+| 3买 | `3Buy` | long | 向上红箭头 |
+| 3卖 | `3Sell` | short | 向下绿箭头 |
+| 类3买 / 4买 / 类4买 | `Buy`（新买点） | long | 向上红箭头 |
+| 类3卖 / 4卖 / 类4卖 | `Sell`（新卖点） | short | 向下绿箭头 |
 | 双侧均无锚 | 无 | — | 不触发（no_point） |
 
-> 2026-10-16 直连变更：交易计划三档路由/未定型滚动翻档/跨侧兜底（如弱2买转等一卖）已删除，按点类型同名直映射；1类点统一走直接档 wait1Buy/wait1Sell（原「已收笔1买→等回调做2买」口径废除）；`waitLike2Buy`/`waitLike2Sell` 键保留但无映射入口（eval 比对兼容）。二买族强弱=chan-core 点上的 `strong` 字段（首段未走完按弱先行，过前高后滚动翻强）。
+> 2026-10-16 直连变更：交易计划三档路由/未定型滚动翻档/跨侧兜底（如弱2买转等一卖）已删除，按点类型同名直映射；1类点统一走直接档 1Buy/1Sell（原「已收笔1买→等回调做2买」口径废除）；`Like2Buy`/`Like2Sell` 键保留但无映射入口（eval 比对兼容）。二买族强弱=chan-core 点上的 `strong` 字段（首段未走完按弱先行，过前高后滚动翻强）。
 
 ### 2.2 进场条件（evaluateEntry，全部同时满足）
 
@@ -74,20 +74,22 @@
    - **虚拟形成笔**：P 晚于 X 末段端点且 X 级无精确端点笔时（如近等双顶平台：X 顶已过、后续反向结构未确认为笔——图表最终结构经「近等双顶取后顶」并入同一笔），以「末段端点 → P」开放段作容器参与展开计数；
    - `evaluateEntry` 的回退次新循环不变——过滤后所见候选已全部下沉合法，**不会把高级别候选替换成跨级 3m/30S 微点**（案例 A/B 类错归属由此消除：2026-09-01 60m 反弹笔内 15m 五笔结构归属 15 而非 3；2026-09-04 15:48 同笔顶不再出信号）。
    > **当下背驰模式（`py_chain` 回测已实现，JS 端暂未实现）**：`signal_mode="realtime"` 时条件②改为 `realtimeLowerDiverge`（同样走下沉链，只在停止级产候选）——低级别**形成中段**（引擎增量状态的最后一笔，已延伸到当下极值）创新低/新高 + 当拍 MACD 对比弱于参照笔即出信号，**不等反向笔确认**（交易是基于当下的预测）；条件①改为「检测周期形成中回调段方向匹配 + 段长 ≥5 根K线」（否则单笔回调场景当下信号永不触发）；条件③不变。去重按段起点（每个形成段只发一次）。详见 `py_chain/SPEC.md` §1 信号模式。
-3. **在支阻位附近** `nearSr`：背驰点价与 `srflip.merged` 任一支阻位价差 ≤ `near`（**绝对价差**，默认 10；2026-09-13 起 ×ATR 语义改为直接输入，与滑点同单位）。
+3. **在支阻位附近** `nearSr`：背驰点价与 `srflip.merged` 任一支阻位价差 ≤ `near`（**绝对价差**，默认 10；2026-09-13 起 ×ATR 语义改为直接输入，与滑点同单位）。**fib/BOLL 按方向取侧（2026-10-25 `srSideGateOn` 默认开，`srSideLevels` 与 py `sr_side_levels` 同口径）**：做多只认 SUP（最近上涨笔回撤支撑/布林下轨与下侧中轨）、做空只认 RES（最近下跌笔反弹阻力/布林上轨与上侧中轨）；密集区/人工位不按侧过滤；止损重选同池；关闭=旧口径两侧皆可命中。已知 JS 缺口：JS 支阻池 fib 仍为「最新非一类点」点锚定口径（py 引擎 2026-09-26 起末段口径）且无 1 类豁免镜像——取侧过滤两口径通用（fib/boll 候选恒带 type）。
 4. **锚点窗口（2026-10-18 用户规则、2026-10-21 重定义参数化、2026-10-22 trailing 重开，两侧已实现）**：大周期某根K线满足买卖点条件（锚点所在K线）→ 去小周期找背驰限**锚K起 `anchorWinBars` 根检测周期K内**（默认 2、旧口径=1；锚K之前仍拒），且触发价距窗口极值 ≤ `anchorWinPts` 点（0=不限；极值=锚点价与窗口内实际极值取小/大，买侧最低/卖侧最高）。确认制 `evaluateEntry`：背驰点所在K（`c.point.time` 经 `coverBarIndex` 覆盖查找）须落窗且背驰点价距极值达标，`barTimesAll` 须用**未过滤全量K线**（`periodData[res].bars` 已滤进行中K线，会误判到前一根；锚K进行中时其极值由锚点价兜底）；当下制 `evaluateRealtimeEntries` 另要求触发拍 `tCut` 也在窗内、当拍现价距极值达标（闸 `anchor_bar_window`，次级保险再校验背驰极值K线+价距防陈旧）。**无永久闩锁**——锚随新高/新低漂移或新点形成时每拍按当前锚现算，新锚所在K线自动重开窗。**trailing 重开（`anchorWinTrailOn` 默认开，与 py 同口径）**：窗口内创新高/新低时时间窗锚K=窗口极值所在K（扫描取极值同时记 argmax 所在K；False=固定锚K 2026-10-21 口径）——连续新高不可能产生新压低2卖锚，固定锚K会把极值处的触发卡死（2026-09-08 12:00 案例）。bars=1+pts=0 完整复现旧单K规则（trailing 开启时仅当窗口内无新极值成立）；2026-10-21 起全部回测基线不可比（2026-10-22 再次不可比）。
+
+> **同一点最大尝试次数（`pointMaxAttempts`，2026-10-25，仅 py 引擎）**：同一买卖点（检测周期+类别+锚点时间）终生最多实际开仓 N 次（默认 2、0=不限=旧口径）——成交建仓才计数（被同向互斥压掉未成交的信号不消耗），用满即拒 `point_attempt_max`，终局重置（`sinkFallbackRearm`）只清段去重不清此计数。**JS 标记层不实现**：单次快照评估无 fired/rearm 状态机，键经 `--chan-cfg` 传入闲置无害——图上进场标记不受影响，仅回测/实盘开单受约束（锚点被新点替换/笔延伸出新锚点时间=新点新预算）。
 
 各策略专属条件：
 
 | key | 专属条件 |
 |------|------|
-| `wait2Sell` | `brokePrevLow`（下跌段破前底）+ `macdBelowZero`（MACD 下0轴后反弹不过0轴） |
-| `wait2Buy` | `brokePrevHigh`（上涨段过前高）+ `macdAboveZero`（MACD 上0轴后回调不破0轴） |
-| `wait1Sell` | `brokePrevHigh`（够笔且过高点）+ `zsExitWeak(..., "short")`（出中枢力度变弱，离开笔为 up） |
-| `wait1Buy` | `brokePrevLow`（够笔且过低点）+ `zsExitWeak(..., "long")`（出中枢力度变弱，离开笔为 down） |
-| `wait2BuyBear` | 抬低：`brokePrevLow` 为 **false**（末下跌笔终点不破前一根下跌笔终点；破前低属1买语义不买，2026-10-09） |
-| `wait2SellBear` | 压低：`brokePrevHigh` 为 **false**（末上涨笔终点不过前一根上涨笔终点） |
-| `waitBuy` / `waitSell` / `wait3Buy` / `wait3Sell` / `waitLike2Buy` / `waitLike2Sell` | （仅公共条件） |
+| `2Sell` | `brokePrevLow`（下跌段破前底）+ `macdBelowZero`（MACD 下0轴后反弹不过0轴） |
+| `2Buy` | `brokePrevHigh`（上涨段过前高）+ `macdAboveZero`（MACD 上0轴后回调不破0轴） |
+| `1Sell` | `brokePrevHigh`（够笔且过高点）+ `zsExitWeak(..., "short")`（出中枢力度变弱，离开笔为 up） |
+| `1Buy` | `brokePrevLow`（够笔且过低点）+ `zsExitWeak(..., "long")`（出中枢力度变弱，离开笔为 down） |
+| `2BuyBear` | 抬低：`brokePrevLow` 为 **false**（末下跌笔终点不破前一根下跌笔终点；破前低属1买语义不买，2026-10-09） |
+| `2SellBear` | 压低：`brokePrevHigh` 为 **false**（末上涨笔终点不过前一根上涨笔终点） |
+| `Buy` / `Sell` / `3Buy` / `3Sell` / `Like2Buy` / `Like2Sell` | （仅公共条件） |
 
 ### 2.3 关键量定义
 
@@ -114,19 +116,19 @@
 | 检测周期够笔 `half`（原「够笔止盈」） | periodX 首个有利方向、**合并后 ≥5 根K且有成笔预期**的形成段（`favSeg5Time`） | 按比例平仓（默认 50%；下一开盘成交），剩余止损移至 beStop（不要求保本先触发） | 黄 `↓/↑` |
 | 过高低点止盈 `close` | **顺势**：periodX 进场后**有利方向**笔破前高/前低（`findBiEvent(..., fav, breakPrev)`）；**逆势**（多头空/空头多）：periodX 首个有利方向形成段（合并后 ≥5 根K成笔预期） | 按比例平仓（默认 100% 终局；下一开盘成交） | 黄 `↓/↑` |
 | 保本止损 `stopBe` | 保本触发后盘中破坏 **beStop**（short `high > beStop` / long `low < beStop`） | 按比例平仓（默认 100% 终局；跳空按开盘价成交） | 黄 `↓/↑` |
-| 跟踪止盈上移 `trailRaise` | （仅跟踪止盈启用；**门控保本 2026-10-09，成对 py 引擎**：`be`（TP1/half/halfMr 置保本位）之前不执行，门控开启当拍水位一次性推进到当拍——保本前的参照点不追溯）信号流出现**同向 3类买卖点**（`wait3Buy/waitBuy/wait3Sell/waitSell`，含被互斥抑制的）→ 止损一次性上移至 点价∓跟踪止盈滑点（只上移；水位只进不退） | 状态迁移（下一拍生效） | 仅落盘 |
+| 跟踪止盈上移 `trailRaise` | （仅跟踪止盈启用；**门控保本 2026-10-09，成对 py 引擎**：`be`（TP1/half/halfMr 置保本位）之前不执行，门控开启当拍水位一次性推进到当拍——保本前的参照点不追溯）信号流出现**同向 3类买卖点**（`3Buy/Buy/3Sell/Sell`，含被互斥抑制的）→ 止损一次性上移至 点价∓跟踪止盈滑点（只上移；水位只进不退） | 状态迁移（下一拍生效） | 仅落盘 |
 | 跟踪止盈 `trailStop` | 上移后的止损位被盘中穿越（仅保本后） | 按比例平仓（默认 100% 终局） | 黄 `↓/↑` |
 | 仍持仓 `stillOpen` | 数据末尾未终局 | `state:'open'` | 无 |
 
 被关闭的方式触发时不离场（位计算与状态迁移照旧维护）；跟踪止盈接管后有效止损 = beStop 与上移后 stopRef 的更紧者。**门控保本 + 最大止损兜底（2026-10-09，成对 py）**：生命周期顺序 = 未保本只有支阻止损（含最大止损夹紧），保本迁移后跟踪止盈才允许接管（beDone 前穿越只记 `stopSr`、参照点不提损不追溯）；止损类部分平仓 latch 关闭穿越判定后，剩余手数由 maxLoss 兜底全平——保证每手最大亏损 ≤ 有效兜底滑点（2026-08-19 XAUUSD 空单案例：入场时段参照点抢先提损 + latch 裸扛 121 点）。
 
-**止损位**（`stopRefOf`，方向感知，**永不为 null**）：short 取进场价**上方**最近支阻位（阻力）+ 有效止损滑点、long 取**下方**最近（支撑）− 有效止损滑点；信号自带 `nearSr`（进场校验按绝对价差最近命中，不分上下方）已在正确侧则直接沿用（± 有效滑点），否则从 `srLevels` 重选正确侧最近位（**进场判定逻辑不变**）。**无正确侧位 → 兜底止损 = 进场价 ± 有效兜底滑点**（不再有「不设止损」仓位）。**有效滑点 = 固定值 + ATR系数 × ATR(14, 背驰周期 markRes)**（2026-09-19；系数默认 0=关闭，窗口固定 14 内部实现，WEB 参数中心各滑点行内配置）。
+**止损位**（`stopRefOf`，方向感知，**永不为 null**）：short 取进场价**上方**最近支阻位（阻力）+ 有效止损滑点、long 取**下方**最近（支撑）− 有效止损滑点；信号自带 `nearSr`（进场校验按绝对价差最近命中，不分上下方）已在正确侧则直接沿用（± 有效滑点），否则从 `srLevels` 重选正确侧最近位（**进场判定逻辑不变**；重选池与闸门同口径——fib/BOLL 按方向取侧 `srSideGateOn`，2026-10-25，主循环 `stopRefOf(s, srSideLevels(srOfDetect(...)))`）。**无正确侧位 → 兜底止损 = 进场价 ± 有效兜底滑点**（不再有「不设止损」仓位）。**有效滑点 = 固定值 + ATR系数 × ATR(14, 背驰周期 markRes)**（2026-09-19；系数默认 0=关闭，窗口固定 14 内部实现，WEB 参数中心各滑点行内配置）。
 
 **保本止损位 beStop** = 进场K线极值 ± 有效保本滑点（short: high+ / long: low−；ATR 分量同上）。JS 取 `sig.time` 对应 markRes bar 的极值；py 引擎取成交那根 fine bar 的极值（run() 批量路径该 bar 当拍未收盘，存在 ≤1 根 fine bar 的微前视；step_to 实时路径无前视——研究口径可接受）。
 
 **合并后 ≥5 根K且有成笔预期**（TP2 条件；2026-10-10 起逆势 TP3 改破前一同向笔端点参照，不再用此门槛）：检测周期形成段自段起点合并块起 **≥5 块**（chan_core `isValid` 的 gap≥4 成笔门槛同口径）。JS 用 `favSeg5Time`（`mergeStep` 回放记录每块诞生时间，触发 = 段内第 5 块诞生 bar，成交 = 其后第一根 markRes bar 开盘）；py 引擎用 `enough_fav_bars`（增量 `_merged_times` 计数，锚点=末笔延伸终点块与进场块较晚者）。**已知近似差异**：形成段达 5 后若被最终笔结构吸收（未成笔），py 引擎当下已触发、JS hindsight 不触发。
 
-**顺势 / 逆势**（出场分支标签）：2026-10-16 起按 `strategyKey` 判定（原「计划方向」口径随计划策略行取消）——**顺势** = `wait2Buy`/`waitBuy`/`wait3Buy`/`waitLike2Buy` 及卖侧对称；**逆势** = `wait1Buy`/`wait1Sell`（一买卖直接档）与 `wait2BuyBear`/`wait2SellBear`（弱二买卖）。过高低点止盈不分顺势逆势（破前一同向笔端点，2026-10-10 与 py 引擎同步；旧「形成段 ≥5 根 K 快速离场」废除）。
+**顺势 / 逆势**（出场分支标签）：2026-10-16 起按 `strategyKey` 判定（原「计划方向」口径随计划策略行取消）——**顺势** = `2Buy`/`Buy`/`3Buy`/`Like2Buy` 及卖侧对称；**逆势** = `1Buy`/`1Sell`（一买卖直接档）与 `2BuyBear`/`2SellBear`（弱二买卖）。过高低点止盈不分顺势逆势（破前一同向笔端点，2026-10-10 与 py 引擎同步；旧「形成段 ≥5 根 K 快速离场」废除）。
 
 **结算：手数与盈亏**：手数 `--lots` 默认 4（JS 端仅落盘记录，不算盈亏）。平仓盈亏按部分平仓事件逐笔手数结算 + 剩余手数按终局价（默认比例下 = 原 0.5×半平价 + 0.5×终局价 加权口径）；未触发部分平仓则 =（终局价 − 进场价）× 方向 × 手数。已在 Web 控制台显示。
 
@@ -188,7 +190,7 @@
   "slipFallbackAtrK": 0,
   "slipBe": 3,
   "slipBeAtrK": 0,
-  "periods": { "15": [{ "periodX": "60", "time": 1724908800, "price": 4631.98, "direction": "short", "strategyKey": "wait2Sell", "nearSr": 4640.1, "pointType": "2卖", "pointStrong": true, "color": "#089981",
+  "periods": { "15": [{ "periodX": "60", "time": 1724908800, "price": 4631.98, "direction": "short", "strategyKey": "2Sell", "nearSr": 4640.1, "pointType": "2卖", "pointStrong": true, "color": "#089981",
                          "stopRef": 4643.1, "beStop": 4636.5, "state": "closed",
                          "exits": [{ "type": "breakeven", "time": 1724913000, "price": 4620.5 },
                                     { "type": "stopBe", "time": 1724918000, "price": 4636.5 }] }] }

@@ -177,8 +177,22 @@ def provisional_sl(direction, bid, ask, near_sr, slip=DEFAULT_SLIP_STOP,
 # 近等后顶/后底吸收其为笔端点，nearDoubleOn 周期笔结构变化，回测基线不可比）、
 # 双周期链（2026-10-23：链A 30S-3-15-60-240 / 链B 1-5-30-240 各自独立引擎实例并行，
 # 节点勾选=开单周期、不勾=仅结构参考；默认口径变化——240 默认不勾、链A 默认检测
-# 60/15，全部 chan 回测基线不可比，持仓重启须 --accept-param-drift）。
-ENGINE_LOGIC_VERSION = "20261023-dual-chain"
+# 60/15，全部 chan 回测基线不可比，持仓重启须 --accept-param-drift）、
+# 三类/四类族拆强弱+策略键去 wait 前缀（2026-10-24：3/4 类点 strong=点后同向腿
+# 背驰（弱3=2类后上推腿对1类后反弹腿、弱4=3类后上推腿对2类后上推腿，判不出即强），
+# 白名单 9→13 项；全部 strategyKey 换名（wait1Buy→1Buy 等）、弱 3/4 锚点分流
+# Bear 键（3BuyBear/3SellBear/BuyBear/SellBear）——回测基线不可比，持仓重启须
+# --accept-param-drift）、
+# 近支阻按方向取侧（2026-10-25：srSideGateOn 默认开——fib/BOLL 位按信号方向收窄，
+# 做多只认 SUP（上涨笔回撤支撑/布林下轨与下侧中轨）、做空只认 RES（下跌笔反弹
+# 阻力/布林上轨与上侧中轨），闸门与止损重选同池；密集区/人工位不过滤——
+# 回测基线不可比，持仓重启须 --accept-param-drift）、
+# 同一点最大尝试次数（2026-10-25：pointMaxAttempts 默认 2——同一买卖点（同检测
+# 周期+类别+锚点时间）终生最多实际开仓 2 次，成交建仓才计数（被同向互斥压掉未
+# 成交的信号不消耗），用满即拒 point_attempt_max；sinkFallbackRearm 终局重置只清
+# 段去重不清尝试计数；0=不限（旧口径）；仅当下模式——回测基线不可比，持仓重启
+# 须 --accept-param-drift）。
+ENGINE_LOGIC_VERSION = "20261025-inner-extrem-guard"
 
 
 def ns_strategy(cfg):

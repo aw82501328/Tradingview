@@ -77,7 +77,7 @@ const getStrArg = (name, def) => {
   return a ? a.split("=")[1] : def;
 };
 // 靠近支阻位阈值（×当前周期ATR）
-const NEAR = Math.max(parseFloat(getArg("near", 30)) || 30, 0.01);  // 绝对价差（2026-09-13 起不乘 ATR；2026-10-10 缺省 30，与 py NEAR 对齐）
+const NEAR = Math.max(parseFloat(getArg("near", 10)) || 10, 0.01);  // 绝对价差（2026-09-13 起不乘 ATR；2026-10-25 缺省 10，与 py NEAR 对齐；此前缺省 30）
 // ---- 出场参数（2026-09-09 出场阶梯重构；与 py_chain / CLI / Web 回测界面同名，绝对价格单位） ----
 // 进场手数（仅落盘记录；盈亏口径 = 价格差 × 方向 × 手数，JS 端不算盈亏）
 const LOTS = Math.max(1, Math.round(getArg("lots", 4) || 4));
@@ -106,9 +106,10 @@ const boolArg = (name, def) => {
   return !(v === "0" || v.toLowerCase() === "false");
 };
 const EXIT_CFG = {
-  // 保本位模式（extreme|entry|bi；默认 entry=0亏损。2026-10-12 前本脚本恒按 extreme
-  // 计算，与 py 默认 entry 存在漂移——本次三口径同步消除）
-  beMode: getStrArg("exit-stop-be-mode", "entry"),
+  // 保本位模式（extreme|entry|bi；2026-10-25 起默认 bi=笔端点±滑点，与 py 同步；
+  // 此前默认 entry=0亏损。2026-10-12 前本脚本恒按 extreme 计算，与 py 默认 entry
+  // 存在漂移——当时三口径同步消除）
+  beMode: getStrArg("exit-stop-be-mode", "bi"),
   stopSrOn: boolArg("exit-stop-sr-on", true),
   stopSrPct: getArg("exit-stop-sr-pct", 100) || 100,
   stopBeOn: boolArg("exit-stop-be-on", true),
@@ -124,8 +125,9 @@ const EXIT_CFG = {
   trailSlip: getArg("exit-trail-slip", 1.0),
 };
 // 跟踪止盈参照信号集合：同向 3类买卖点（py_chain EXIT_TRAIL_REF_KEYS 同名；
-// wait3Buy/wait3Sell=3买/3卖，waitBuy/waitSell=新买/卖点=3类点强档）
-const EXIT_TRAIL_REF_KEYS = new Set(["wait3Buy", "waitBuy", "wait3Sell", "waitSell"]);
+// 3Buy/3Sell=3买/3卖，Buy/Sell=类3/4/类4 强档；弱档 Bear 键不进——照抄 2BuyBear
+// 先例，2026-10-24 3/4 族拆强弱后的弱档信号不作跟踪参照）
+const EXIT_TRAIL_REF_KEYS = new Set(["3Buy", "Buy", "3Sell", "Sell"]);
 // 参数中心（WEB 参数配置页）整体覆盖；未知键在 JS 侧闲置无害
 const CHAN_CFG_JSON = getStrArg("chan-cfg", "");
 if (CHAN_CFG_JSON) {
@@ -133,10 +135,10 @@ if (CHAN_CFG_JSON) {
   catch (e) { console.log("警告: --chan-cfg JSON 解析失败，忽略该参数"); }
 }
 // 顺势判定键集合（2026-10-16 起唯一口径：计划方向已取消，按 strategyKey 判定；
-// waitLike2Buy/waitLike2Sell 已无映射入口，保留仅为集合完整性）
+// Like2Buy/Like2Sell 已无映射入口，保留仅为集合完整性）
 const TREND_PLAN_DIRS = new Set(["多头多", "空头空"]);
-const TREND_STRATEGY_KEYS = new Set(["wait2Buy", "waitBuy", "wait3Buy", "waitLike2Buy",
-  "wait2Sell", "waitSell", "wait3Sell", "waitLike2Sell"]);
+const TREND_STRATEGY_KEYS = new Set(["2Buy", "Buy", "3Buy", "Like2Buy",
+  "2Sell", "Sell", "3Sell", "Like2Sell"]);
 const FROM_DATE = getStrArg("from", "");
 let FROM_TS = null;
 {
@@ -455,11 +457,63 @@ function sinkChainConfirm(periodData, X, pTime, pDir, chain) {
 // 买/卖点族（与原 trading_plan.predictPlan 双侧锚同族划分）
 const BUY_FAMILY = ["1买", "2买", "类2买", "3买", "类3买", "4买", "类4买"];
 const SELL_FAMILY = ["1卖", "2卖", "类2卖", "3卖", "类3卖", "4卖", "类4卖"];
-const FAMILY_CLS = { "2买": "二买", "类2买": "类2买", "2卖": "二卖", "类2卖": "类2卖" };
+const FAMILY_CLS = { "2买": "二买", "类2买": "类2买", "2卖": "二卖", "类2卖": "类2卖",
+                     "3买": "三买", "类3买": "类3买", "3卖": "三卖", "类3卖": "类3卖",
+                     "4买": "四买", "类4买": "类4买", "4卖": "四卖", "类4卖": "类4卖" };
+
+// 进场买卖点类别白名单（2026-10-24，CHAN_CFG.pointClasses，与 py_chain/mark_entry.py
+// _point_class_of/_selected_classes 镜像；同日三次口径=三类/四类族也拆强弱）：类别 13 项
+// 1/2s/2w/2xs/2xw/3s/3w/3xs/3xw/4s/4w/4xs/4xw=一类/强二类/弱二类/强类二/弱类二/强三类/
+// 弱三类/强类三/弱类三/强四类/弱四类/强类四/弱类四，买卖两侧对称（勾「强三类」=强3买+强3卖）。
+// 强弱判定与 pointStrategyOf 同判：真值=强、false/null 按弱（二类族 null=未定型弱先行；
+// 3/4族由 chan_core.js markThirdFourthStrong 写入——点后同向腿背驰=弱，判不出即强）。
+// 浅过滤：锚点选取（sideCandidates）不变，最新锚点类别未勾→本拍跳过不开单、
+// 不回溯更早的点。旧值 "2"/"2x"/"3"/"3x"/"4"/"4x" 运行期别名展开。
+const TYPE_CLASS = {
+  "1买": "1", "1卖": "1",
+  "2买": "2", "2卖": "2",
+  "类2买": "2x", "类2卖": "2x",
+  "3买": "3", "3卖": "3",
+  "类3买": "3x", "类3卖": "3x",
+  "4买": "4", "4卖": "4",
+  "类4买": "4x", "类4卖": "4x",
+};
+const ALL_CLASSES = new Set(["1", "2s", "2w", "2xs", "2xw",
+                             "3s", "3w", "3xs", "3xw", "4s", "4w", "4xs", "4xw"]);
+const CLASS_ALIASES = { "2": ["2s", "2w"], "2x": ["2xs", "2xw"],
+                        "3": ["3s", "3w"], "3x": ["3xs", "3xw"],
+                        "4": ["4s", "4w"], "4x": ["4xs", "4xw"] };
+let _selMemo = { raw: null, sel: ALL_CLASSES };
+
+function pointClassOf(point) {
+  // 二类/三类/四类族按 strong 分 s/w（与 pointStrategyOf 强弱同判）；未知类型 undefined
+  // （闸按放行处理，由 no_strategy_map 兜底）
+  const cls = TYPE_CLASS[point.type];
+  if (cls === "2" || cls === "2x" || cls === "3" || cls === "3x" || cls === "4" || cls === "4x") {
+    return cls + (point.strong ? "s" : "w");
+  }
+  return cls;
+}
+
+function selectedPointClasses() {
+  // 空串/全无效 fail-open=全选（--chan-cfg 坏值不弄丢全部信号；参数中心保存已校验）；
+  // 旧值 "2"/"2x"/"3"/"3x"/"4"/"4x" 别名展开（已导出 chan_cfg json/回测快照零迁移可用）
+  const raw = String(core.CHAN_CFG.pointClasses ?? "1,2s,2w,2xs,2xw,3s,3w,3xs,3xw,4s,4w,4xs,4xw");
+  if (_selMemo.raw === raw) return _selMemo.sel;
+  const parsed = new Set();
+  for (const s of raw.split(",").map(s => s.trim())) {
+    if (ALL_CLASSES.has(s)) parsed.add(s);
+    else for (const a of (CLASS_ALIASES[s] || [])) parsed.add(a);
+  }
+  const sel = parsed.size ? parsed : ALL_CLASSES;
+  _selMemo = { raw, sel };
+  return sel;
+}
 
 /**
- * 2族强弱档（原 trading_plan cls_of 的 strong 二分）：强二买/弱二买/强类2买…；
- * strong=null（首段未走完）按弱先行；非2族（1类/3类族）返回 null。
+ * 2/3/4 族强弱档（原 trading_plan cls_of 的 strong 二分，2026-10-24 起 3/4 族也有
+ * strong）：强二买/弱二买/强类2买…/强三买/弱三买/强类3买…/强四买/弱四买…；
+ * strong=null（2族首段未走完）按弱先行；1类无 strong 返回 null。
  */
 function pointClsOf(point) {
   if ("strong" in point && FAMILY_CLS[point.type]) {
@@ -471,33 +525,46 @@ function pointClsOf(point) {
 /**
  * 买卖点 type+strong → 进场策略键直映射（用户规则，2026-10-16；替代原
  * entryStrategyOf(计划文案)——计划层 strategyOf 三档路由/未定型滚动翻档/
- * 跨侧 fallback/形成中1类特殊分支均已取消）：
- *   1买→wait1Buy、1卖→wait1Sell（直接档：形成中与已确认统一，点本身即信号）；
- *   2买/类2买 strong→wait2Buy、弱/未定型→wait2BuyBear（卖侧镜像）；
- *   3买→wait3Buy、3卖→wait3Sell；类3买/4买/类4买→waitBuy、卖侧→waitSell。
- * waitLike2Buy/waitLike2Sell 无映射入口（键定义与校验保留，eval 比对兼容）。
+ * 跨侧 fallback/形成中1类特殊分支均已取消。2026-10-24 起：①策略键全部去
+ * wait 前缀；②3/4 族拆强弱——弱走同位 Bear 键（同构二类族 2Buy/2BuyBear））：
+ *   1买→1Buy、1卖→1Sell（直接档：形成中与已确认统一，点本身即信号）；
+ *   2买/类2买 strong→2Buy、弱/未定型→2BuyBear（卖侧镜像）；
+ *   3买 强→3Buy、弱→3BuyBear；3卖 强→3Sell、弱→3SellBear；
+ *   类3买/4买/类4买 强→Buy、弱→BuyBear；卖侧→Sell/SellBear。
+ * Like2Buy/Like2Sell 无映射入口（键定义与校验保留，eval 比对兼容）。
  * @param {object} point chan_core 买卖点 { type, time, price, strong? }
  * @returns {null|{key:string, direction:string, label:string, pointCls:string|null}}
  */
 function pointStrategyOf(point) {
   const t = point.type;
+  const strong = !!point.strong;
   let row;
-  if (t === "1买") row = { key: "wait1Buy", direction: "long", label: "等待一买" };
-  else if (t === "1卖") row = { key: "wait1Sell", direction: "short", label: "等待一卖" };
+  if (t === "1买") row = { key: "1Buy", direction: "long", label: "等待一买" };
+  else if (t === "1卖") row = { key: "1Sell", direction: "short", label: "等待一卖" };
   else if (t === "2买" || t === "类2买") {
-    row = point.strong
-      ? { key: "wait2Buy", direction: "long", label: "等待回调后做2买" }
-      : { key: "wait2BuyBear", direction: "long", label: "等待低点附近的2买" };
+    row = strong
+      ? { key: "2Buy", direction: "long", label: "等待回调后做2买" }
+      : { key: "2BuyBear", direction: "long", label: "等待低点附近的2买" };
   } else if (t === "2卖" || t === "类2卖") {
-    row = point.strong
-      ? { key: "wait2Sell", direction: "short", label: "等待反弹后做2卖" }
-      : { key: "wait2SellBear", direction: "short", label: "等待高点附近的2卖" };
-  } else if (t === "3买") row = { key: "wait3Buy", direction: "long", label: "等待回调后3买点" };
-  else if (t === "3卖") row = { key: "wait3Sell", direction: "short", label: "等待反弹后3卖点" };
-  else if (t === "类3买" || t === "4买" || t === "类4买") {
-    row = { key: "waitBuy", direction: "long", label: "等待回调后买点" };
+    row = strong
+      ? { key: "2Sell", direction: "short", label: "等待反弹后做2卖" }
+      : { key: "2SellBear", direction: "short", label: "等待高点附近的2卖" };
+  } else if (t === "3买") {
+    row = strong
+      ? { key: "3Buy", direction: "long", label: "等待回调后3买点" }
+      : { key: "3BuyBear", direction: "long", label: "等待低点附近的3买点" };
+  } else if (t === "3卖") {
+    row = strong
+      ? { key: "3Sell", direction: "short", label: "等待反弹后3卖点" }
+      : { key: "3SellBear", direction: "short", label: "等待高点附近的3卖点" };
+  } else if (t === "类3买" || t === "4买" || t === "类4买") {
+    row = strong
+      ? { key: "Buy", direction: "long", label: "等待回调后买点" }
+      : { key: "BuyBear", direction: "long", label: "等待低点附近的买点" };
   } else if (t === "类3卖" || t === "4卖" || t === "类4卖") {
-    row = { key: "waitSell", direction: "short", label: "等待反弹后卖点" };
+    row = strong
+      ? { key: "Sell", direction: "short", label: "等待反弹后卖点" }
+      : { key: "SellBear", direction: "short", label: "等待高点附近的卖点" };
   } else {
     return null;
   }
@@ -627,7 +694,7 @@ function computePeriodPoints(periodData, periods) {
 }
 
 // ============================================================
-// 进场策略的条件判定（纯函数，可单测；2026-09-25 起 10 键，专属条件仅 wait1/wait2 系有）
+// 进场策略的条件判定（纯函数，可单测；2026-09-25 起 10 键，专属条件仅 1类/2类键有）
 // ============================================================
 
 /**
@@ -792,6 +859,23 @@ function srOfDetect(srLevels, res) {
 }
 
 /**
+ * fib/BOLL 位按信号方向取侧（srSideGateOn，2026-10-25，与 py_chain/mark_entry.py
+ * sr_side_levels 同口径）：做多只认 SUP（最近上涨笔回撤支撑/布林下轨与下侧中轨）、
+ * 做空只认 RES（最近下跌笔反弹阻力/布林上轨与上侧中轨）；密集区/人工位不按侧过滤。
+ * 开关关（false）= 原样返回（旧口径，两侧皆可命中）。
+ * 注：JS 侧支阻池 fib 仍是「最新非一类点」点锚定口径（py 引擎 2026-09-26 起末段口径），
+ * 且无 1 类豁免镜像——两处既有缺口，取侧过滤本身两口径通用（fib/boll 候选恒带 type）。
+ * @param {Array} srLevels  支阻位列表
+ * @param {string} direction "long"|"short"
+ * @returns {Array}
+ */
+function srSideLevels(srLevels, direction) {
+  if (core.CHAN_CFG.srSideGateOn === false || !srLevels || srLevels.length === 0) return srLevels;
+  const keep = direction === "long" ? "SUP" : "RES";
+  return srLevels.filter(sr => !(sr && (sr.fib || sr.boll) && sr.type !== keep));
+}
+
+/**
  * 在支阻位附近：背驰点价与任一 srLevels 支阻位价差 ≤ nearTol。
  * 调用方须先用 srOfDetect 收成检测周期。
  * @param {number} price     背驰点价格
@@ -845,11 +929,11 @@ function evaluateEntry(ctx, strategy) {
 
   // 2. 各策略专属条件
   switch (key) {
-    case "wait2Sell":
+    case "2Sell":
       if (!brokePrevLow(bis)) return { ok: false, reason: "下跌段未破前底" };
       if (!macdBelowZero(macdArr)) return { ok: false, reason: "MACD 未下0轴或反弹过0轴" };
       break;
-    case "wait2Buy":
+    case "2Buy":
       // 强二买：取消过前高；0轴看 strong2BuyMacdOn，默认关。1买保持过前高 + 0轴。
       if (ctx.pointCls === "强二买") {
         if (core.CHAN_CFG.strong2BuyMacdOn) {
@@ -862,29 +946,29 @@ function evaluateEntry(ctx, strategy) {
       if (!brokePrevHigh(bis)) return { ok: false, reason: "上涨段未过前高" };
       if (!macdAboveZero(macdArr)) return { ok: false, reason: "MACD 未上0轴或回调破0轴" };
       break;
-    case "wait1Sell":
+    case "1Sell":
       if (!brokePrevHigh(bis)) return { ok: false, reason: "未够笔且过高点" };
       if (!zsExitWeak(bis, upperBis, macdArr, barSec, ZS_WEAK_RATIO, "short")) return { ok: false, reason: "出中枢力度未变弱" };
       break;
-    case "wait1Buy":
+    case "1Buy":
       if (!brokePrevLow(bis)) return { ok: false, reason: "未够笔且过低点" };
       if (!zsExitWeak(bis, upperBis, macdArr, barSec, ZS_WEAK_RATIO, "long")) return { ok: false, reason: "出中枢力度未变弱" };
       break;
-    case "wait2BuyBear":
+    case "2BuyBear":
       // 空头结构2买（2026-10-09 弱档原始点分流）：只买抬低回调——末下跌笔终点
       // 不破前一根下跌笔终点；破前低属1买语义，由 空头多/等一买 档负责。
       if (brokePrevLow(bis)) return { ok: false, reason: "回调破前低，非抬低2买" };
       break;
-    case "wait2SellBear":
+    case "2SellBear":
       // 多头结构2卖（对称）：只卖压低反弹——末上涨笔终点不过前一根上涨笔终点。
       if (brokePrevHigh(bis)) return { ok: false, reason: "反弹过前高，非压低2卖" };
       break;
-    case "waitBuy":
-    case "waitSell":
-    case "wait3Buy":
-    case "wait3Sell":
-    case "waitLike2Buy":
-    case "waitLike2Sell":
+    case "Buy":
+    case "Sell":
+    case "3Buy":
+    case "3Sell":
+    case "Like2Buy":
+    case "Like2Sell":
       break; // 仅需够笔 + 以下级别背驰 + 支阻位附近（无专属条件）
   }
 
@@ -927,7 +1011,8 @@ function evaluateEntry(ctx, strategy) {
   }
 
   const nearTol = near; // 绝对价差（2026-09-13 起不乘 ATR）
-  const srX = srOfDetect(srLevels, res); // 只认检测周期，不跨周期
+  // fib/BOLL 按信号方向取侧（srSideGateOn 默认开，2026-10-25，与 py 闸门同口径）
+  const srX = srSideLevels(srOfDetect(srLevels, res), direction); // 只认检测周期，不跨周期
   for (const c of cands) {
     const near = nearSr(c.point.price, srX, nearTol);
     if (near) return { ok: true, markRes: c.res, point: c.point, nearSr: near.sr.price };
@@ -1017,8 +1102,8 @@ function findBiEvent(bis, fromT, type, requirePostStart, breakPrev) {
 
 /**
  * 顺势/逆势判定（TP2 平一半 / TP3 分支门槛）：2026-10-16 起交易计划 direction 已取消，
- * 恒按 strategyKey 判定（wait2Buy/waitBuy/wait3Buy/waitLike2Buy 及卖侧对称 → 顺势；
- * wait1Buy/wait1Sell/wait2BuyBear/wait2SellBear → 逆势）。planDirection 形参保留仅为
+ * 恒按 strategyKey 判定（2Buy/Buy/3Buy/Like2Buy 及卖侧对称 → 顺势；
+ * 1Buy/1Sell/2BuyBear/2SellBear → 逆势）。planDirection 形参保留仅为
  * 兼容旧调用方，传入即忽略。与 py_chain.mark_entry.trend_following_of 对齐。
  */
 function trendFollowingOf(planDirection, strategyKey) {
@@ -1716,6 +1801,12 @@ async function main() {
         chain: RES_CHAIN,   // 周期链上下文（2026-10-23：下沉链数据驱动推导）
       };
       for (const point of cands) {
+        const pclazz = pointClassOf(point);
+        if (pclazz !== undefined && !selectedPointClasses().has(pclazz)) {
+          console.log(`
+[周期 ${res}] 买卖点「${point.type}」类别（${pclazz}）未勾选，跳过（不回溯更早的点）`);
+          continue;
+        }
         const strategy = pointStrategyOf(point);
         if (!strategy) {
           console.log(`
@@ -1786,9 +1877,11 @@ async function main() {
         console.log(`[互斥] ${toT(s.time)} ${s.direction === "long" ? "做多" : "做空"}（检测周期 ${s.periodX}）被过滤：同向仓 ${toT(held.sig.time)}（${held.sig.periodX}）持仓中`);
         continue;
       }
-      // 止损参考位带 ATR 分量（2026-09-19）：ATR 取背驰周期 markRes 的 ATR(14)
+      // 止损参考位带 ATR 分量（2026-09-19）：ATR 取背驰周期 markRes 的 ATR(14)；
+      // fib/BOLL 按信号方向取侧（srSideGateOn，与闸门同口径，py backtest sr_pick 同步）
       const mrAtr = (periodData[s.markRes] && periodData[s.markRes].atr) || 0;
-      s.stopRef = stopRefOf(s, srOfDetect(srLevels, s.periodX), SLIP_STOP, SLIP_FALLBACK, mrAtr);
+      s.stopRef = stopRefOf(s, srSideLevels(srOfDetect(srLevels, s.periodX), s.direction),
+                            SLIP_STOP, SLIP_FALLBACK, mrAtr);
       // 跟踪止盈参照点流：同 markRes 全量信号（含被互斥抑制的；simulatePosition 内
       // 再过滤 同向+3类点+晚于信号时间），与引擎 allSignals 口径一致
       const sim = simulatePosition(
@@ -2130,6 +2223,9 @@ module.exports = {
   // 买卖点直映射与条件判定（2026-10-16 起替代 entryStrategyOf 计划文案映射）
   pointStrategyOf,
   pointClsOf,
+  TYPE_CLASS,
+  pointClassOf,
+  selectedPointClasses,
   sideAnchor,
   sideCandidates,
   coverBarIndex,
@@ -2141,6 +2237,7 @@ module.exports = {
   macdAboveZero,
   zsExitWeak,
   srOfDetect,
+  srSideLevels,
   nearSr,
   evaluateEntry,
   // 出场

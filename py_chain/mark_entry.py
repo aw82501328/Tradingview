@@ -38,8 +38,9 @@ BUY_COLOR = "#F23645"
 SELL_COLOR = "#089981"
 
 # 靠近支阻位阈值（绝对价差，不乘 ATR；2026-09-13 起 ×ATR 语义改为直接输入，
-# 与三个滑点同单位——工作台/回测界面/JS CLI 同参同名同默认）
-NEAR = 30.0
+# 与三个滑点同单位——工作台/回测界面/JS CLI 同参同名同默认；2026-10-25 起默认 10，
+# 此前 30）
+NEAR = 10.0
 
 # ---- 出场参数（2026-09-09 出场阶梯重构；与 mark_entry.js / CLI / Web 回测界面同名） ----
 # 进场手数（盈亏 = 价格差 × 方向 × lots × 合约乘数；2026-09-23 起统一 MT4/MT5 口径：
@@ -101,10 +102,11 @@ EXIT_MIN_MERGED = 5
 # 出中枢力度衰减比例：离开笔 span < 进入笔 span × ratio 即力度变弱（参数中心可调）
 ZS_EXIT_WEAK_RATIO = 1.0
 # 顺势判定键集合（2026-10-16 起唯一口径：计划方向已取消，按 strategyKey 判定；
-# waitLike2Buy/waitLike2Sell 已无映射入口，保留仅为集合完整性）
+# Like2Buy/Like2Sell 已无映射入口，保留仅为集合完整性。2026-10-24 起策略键全部
+# 去 wait 前缀；弱档 Bear 键不进本集合（照抄 2BuyBear 先例——弱档非顺势档））
 TREND_PLAN_DIRS = {"多头多", "空头空"}
-TREND_STRATEGY_KEYS = {"wait2Buy", "waitBuy", "wait3Buy", "waitLike2Buy",
-                       "wait2Sell", "waitSell", "wait3Sell", "waitLike2Sell"}
+TREND_STRATEGY_KEYS = {"2Buy", "Buy", "3Buy", "Like2Buy",
+                       "2Sell", "Sell", "3Sell", "Like2Sell"}
 
 # ---- 出场方式配置（2026-10-08 出场方式可配置化；2026-10-10 跟踪止盈默认开、
 # 过高低点止盈默认平 25%，与当时黄金参数页生效值对齐） ----
@@ -117,10 +119,11 @@ EXIT_STOP_BE_ON = True     # 保本止损：TP1 保本迁移后保本位 beStop 
 EXIT_STOP_BE_PCT = 100.0
 # 保本位模式（2026-10-10 双口径；2026-10-12 三口径）：extreme=进场成交K线极值±保本
 # 滑点（原行为——beStop 天然在进场价亏一侧，被打到至少亏滑点+进场K线逆向波幅）；
-# entry=0亏损（默认，2026-10-10 黄金参数页生效值：beStop=进场价，保本滑点不参与；
+# entry=0亏损（2026-10-10 黄金参数页生效值：beStop=进场价，保本滑点不参与；
 # 穿越后下一开盘成交，跳空仍可能略有出入）；bi=笔端点±滑点（2026-10-12：背驰周期
 # 首笔有利方向笔确认当拍 beStop=该笔起点±保本滑点，成笔前无值——引擎惰性落位）
-EXIT_STOP_BE_MODE = "entry"
+# 2026-10-25 起默认 bi（此前默认 entry）
+EXIT_STOP_BE_MODE = "bi"
 EXIT_HALF_MR_ON = False    # 背驰周期够笔（2026-10-08 拆分）：背驰周期首笔有利方向笔完成
                            # （同 TP1 保本事件源，不限顺势）→ 平指定比例，剩余止损移保本位；
                            # 默认关 = 旧基线可比
@@ -144,9 +147,10 @@ EXIT_TRAIL_SLIP = 1.0      # 跟踪止盈滑点（点）：止损上移到参照
 #   trade#109：15m 3卖 18:00 @ 4157.98 不是结构；其后只有 20:15 高点 4171.42
 #   的下跌破了前低，4146/4140 未破前低不算；4171.42 到 9-29 22:15 才被破坏。
 # - mark=背驰周期信号流（旧口径）：markRes 信号流中同向 3类买卖点
-#   （wait3Buy/waitBuy/wait3Sell/waitSell，含被同向互斥抑制的）。
+#   （3Buy/Buy/3Sell/Sell，含被同向互斥抑制的；弱档 Bear 键不进——照抄 2BuyBear
+#   先例，2026-10-24 3/4 族拆强弱后的弱档信号不作跟踪参照）。
 EXIT_TRAIL_SRC = "detect"
-EXIT_TRAIL_REF_KEYS = {"wait3Buy", "waitBuy", "wait3Sell", "waitSell"}
+EXIT_TRAIL_REF_KEYS = {"3Buy", "Buy", "3Sell", "Sell"}
 EXIT_EXPECT_ON = True      # 出场预期口径（严进宽出，2026-10-09）：检测周期够笔/顺势过
                            # 高低点用形成段预期触发（合并K够块即够笔、当根收盘K极值越过
                            # 前一同向笔端点即过前高），不等确认笔；False=确认笔旧口径。
@@ -233,7 +237,7 @@ def pickDivergeRefer(bis, cur, barSec, parentBi=None):
             # 中枢内部/之后的段不参与比较 → 优先回退到入中枢段；但若入中枢段与
             # 候选段反向（或已被容器边界截断），ZS 回退会一路推到容器外作废——
             # 2026-10-10 用户口径修正：此时退回容器内最近合格同向段作参照
-            # （如 60m wait2BuyBear 10-8 16:00 案例：出中枢末段 vs 中枢构成大段）。
+            # （如 60m 2BuyBear 10-8 16:00 案例：出中枢末段 vs 中枢构成大段）。
             fallback = cand  # 保留最外侧（容器起点侧）合格同向段——通常即进中枢大段
             continue
         return cand
@@ -653,12 +657,72 @@ def sinkChainConfirm(periodData, X, pTime, pDir, chain=None):
 # 买/卖点族（与原 trading_plan.predictPlan 双侧锚同族划分）
 BUY_FAMILY = ("1买", "2买", "类2买", "3买", "类3买", "4买", "类4买")
 SELL_FAMILY = ("1卖", "2卖", "类2卖", "3卖", "类3卖", "4卖", "类4卖")
-_FAMILY_CLS = {"2买": "二买", "类2买": "类2买", "2卖": "二卖", "类2卖": "类2卖"}
+_FAMILY_CLS = {"2买": "二买", "类2买": "类2买", "2卖": "二卖", "类2卖": "类2卖",
+               "3买": "三买", "类3买": "类3买", "3卖": "三卖", "类3卖": "类3卖",
+               "4买": "四买", "类4买": "类4买", "4卖": "四卖", "类4卖": "类4卖"}
+
+# 进场买卖点类别白名单（2026-10-24，CHAN_CFG.pointClasses，参数中心 entry 桶；
+# 同日三次口径=三类/四类族也拆强弱）：类别 13 项 1/2s/2w/2xs/2xw/3s/3w/3xs/3xw/
+# 4s/4w/4xs/4xw=一类/强二类/弱二类/强类二/弱类二/强三类/弱三类/强类三/弱类三/
+# 强四类/弱四类/强类四/弱类四，买卖两侧对称（勾「强三类」=强3买+强3卖）。
+# 强弱判定与 pointStrategyOf 同判：真值=强、False/None 按弱（二类族 None=未定型
+# 弱先行；3/4族由 chan_core._mark_third_fourth_strong 写入——点后同向腿背驰=弱，
+# 判不出即强）。浅过滤：锚点选取（side_candidates）不变，最新锚点类别未勾→本拍
+# 跳过不开单、不回溯更早的点（最新点代表当前市场状态，被未勾类型占住时观望）。
+_TYPE_CLASS = {
+    "1买": "1", "1卖": "1",
+    "2买": "2", "2卖": "2",
+    "类2买": "2x", "类2卖": "2x",
+    "3买": "3", "3卖": "3",
+    "类3买": "3x", "类3卖": "3x",
+    "4买": "4", "4卖": "4",
+    "类4买": "4x", "类4卖": "4x",
+}
+_ALL_CLASSES = frozenset(("1", "2s", "2w", "2xs", "2xw",
+                          "3s", "3w", "3xs", "3xw", "4s", "4w", "4xs", "4xw"))
+# 旧值别名（2026-10-24 上午 9 项口径与更早 7 项口径）：运行期展开，
+# 已导出 chan_cfg json/回测快照零迁移可用
+_CLASS_ALIASES = {"2": ("2s", "2w"), "2x": ("2xs", "2xw"),
+                  "3": ("3s", "3w"), "3x": ("3xs", "3xw"),
+                  "4": ("4s", "4w"), "4x": ("4xs", "4xw")}
+_SEL_MEMO = (None, _ALL_CLASSES)  # (原字符串, 解析结果) 单值缓存（apply_cfg 后按新串重算）
+
+
+def _point_class_of(point):
+    """买卖点 → 类别串（二类/三类/四类族按 strong 分 s/w，与 pointStrategyOf 强弱同判）。
+    非 family 类型/缺 strong 键返回基础类别；未知类型返回 None（闸按放行处理，
+    由 no_strategy_map 兜底）。"""
+    cls = _TYPE_CLASS.get(point.get("type"))
+    if cls in ("2", "2x", "3", "3x", "4", "4x"):
+        return cls + ("s" if point.get("strong") else "w")
+    return cls
+
+
+def _selected_classes():
+    """CHAN_CFG.pointClasses 逗号串 → 类别 frozenset（旧值 "2"/"2x" 别名展开）。
+    无效项忽略；空/全无效 fail-open=全选（参数中心保存时已校验至少一项，
+    手传 --chan-cfg 坏值时不弄丢全部信号）。"""
+    global _SEL_MEMO
+    raw = CHAN_CFG.get("pointClasses") or ""
+    if _SEL_MEMO[0] == raw:
+        return _SEL_MEMO[1]
+    sel = set()
+    for s in (t.strip() for t in str(raw).split(",")):
+        if s in _ALL_CLASSES:
+            sel.add(s)
+        else:
+            sel.update(_CLASS_ALIASES.get(s, ()))
+    if not sel:
+        sel = set(_ALL_CLASSES)
+    out = frozenset(sel)
+    _SEL_MEMO = (raw, out)
+    return out
 
 
 def point_cls_of(point):
-    """2族强弱档（原 trading_plan.cls_of 的 strong 二分）：强二买/弱二买/强类2买…；
-    strong=None（首段未走完）按弱先行；非2族（1类/3类族）返回 None。"""
+    """2/3/4 族强弱档（原 trading_plan.cls_of 的 strong 二分，2026-10-24 起 3/4 族
+    也有 strong）：强二买/弱二买/强类2买…/强三买/弱三买/强类3买…/强四买/弱四买…；
+    strong=None（2族首段未走完）按弱先行；1类无 strong 返回 None。"""
     if "strong" in point and point["type"] in _FAMILY_CLS:
         return ("强" if point.get("strong") else "弱") + _FAMILY_CLS[point["type"]]
     return None
@@ -667,34 +731,39 @@ def point_cls_of(point):
 def pointStrategyOf(point):
     """买卖点 type+strong → 进场策略键直映射（用户规则，2026-10-16；替代原
     entryStrategyOf(计划文案)——计划层 strategyOf 三档路由/未定型滚动翻档/
-    跨侧 fallback/形成中1类特殊分支均已取消）：
-      1买→wait1Buy、1卖→wait1Sell（直接档：形成中与已确认统一，点本身即信号）；
-      2买/类2买 strong→wait2Buy、弱/未定型→wait2BuyBear（卖侧镜像）；
-      3买→wait3Buy、3卖→wait3Sell；类3买/4买/类4买→waitBuy、卖侧→waitSell。
-    waitLike2Buy/waitLike2Sell 无映射入口（键定义与 strategyExtraOk 校验保留，
+    跨侧 fallback/形成中1类特殊分支均已取消。2026-10-24 起：①策略键全部去
+    wait 前缀；②3/4 族拆强弱——弱走同位 Bear 键（同构二类族 2Buy/2BuyBear））：
+      1买→1Buy、1卖→1Sell（直接档：形成中与已确认统一，点本身即信号）；
+      2买/类2买 强→2Buy、弱/未定型→2BuyBear（卖侧镜像）；
+      3买 强→3Buy、弱→3BuyBear；3卖 强→3Sell、弱→3SellBear；
+      类3买/4买/类4买 强→Buy、弱→BuyBear；类3卖/4卖/类4卖 强→Sell、弱→SellBear。
+    Like2Buy/Like2Sell 无映射入口（键定义与 strategyExtraOk 校验保留，
     eval 比对兼容）。
     @returns None 或 { key, direction, label, pointCls }"""
     t_ = point.get("type")
+    strong = bool(point.get("strong"))
     if t_ == "1买":
-        row = {"key": "wait1Buy", "direction": "long", "label": "等待一买"}
+        row = {"key": "1Buy", "direction": "long", "label": "等待一买"}
     elif t_ == "1卖":
-        row = {"key": "wait1Sell", "direction": "short", "label": "等待一卖"}
+        row = {"key": "1Sell", "direction": "short", "label": "等待一卖"}
     elif t_ in ("2买", "类2买"):
-        row = ({"key": "wait2Buy", "direction": "long", "label": "等待回调后做2买"}
-               if point.get("strong")
-               else {"key": "wait2BuyBear", "direction": "long", "label": "等待低点附近的2买"})
+        row = ({"key": "2Buy", "direction": "long", "label": "等待回调后做2买"} if strong
+               else {"key": "2BuyBear", "direction": "long", "label": "等待低点附近的2买"})
     elif t_ in ("2卖", "类2卖"):
-        row = ({"key": "wait2Sell", "direction": "short", "label": "等待反弹后做2卖"}
-               if point.get("strong")
-               else {"key": "wait2SellBear", "direction": "short", "label": "等待高点附近的2卖"})
+        row = ({"key": "2Sell", "direction": "short", "label": "等待反弹后做2卖"} if strong
+               else {"key": "2SellBear", "direction": "short", "label": "等待高点附近的2卖"})
     elif t_ == "3买":
-        row = {"key": "wait3Buy", "direction": "long", "label": "等待回调后3买点"}
+        row = ({"key": "3Buy", "direction": "long", "label": "等待回调后3买点"} if strong
+               else {"key": "3BuyBear", "direction": "long", "label": "等待低点附近的3买点"})
     elif t_ == "3卖":
-        row = {"key": "wait3Sell", "direction": "short", "label": "等待反弹后3卖点"}
+        row = ({"key": "3Sell", "direction": "short", "label": "等待反弹后3卖点"} if strong
+               else {"key": "3SellBear", "direction": "short", "label": "等待高点附近的3卖点"})
     elif t_ in ("类3买", "4买", "类4买"):
-        row = {"key": "waitBuy", "direction": "long", "label": "等待回调后买点"}
+        row = ({"key": "Buy", "direction": "long", "label": "等待回调后买点"} if strong
+               else {"key": "BuyBear", "direction": "long", "label": "等待低点附近的买点"})
     elif t_ in ("类3卖", "4卖", "类4卖"):
-        row = {"key": "waitSell", "direction": "short", "label": "等待反弹后卖点"}
+        row = ({"key": "Sell", "direction": "short", "label": "等待反弹后卖点"} if strong
+               else {"key": "SellBear", "direction": "short", "label": "等待高点附近的卖点"})
     else:
         return None
     row["pointCls"] = point_cls_of(point)
@@ -827,7 +896,7 @@ def compute_period_points(periodBis, periods, periodMacd=None, work_cache=None,
 
 # ============================================================
 # 进场策略的条件判定（纯函数；2026-09-25 起 10 键 + 2026-10-09 弱档分流 2 键 = 12 键，
-# 专属条件 wait1/wait2 系 + wait2BuyBear/wait2SellBear 抬低/压低）
+# 专属条件 1类/2类键 + 2BuyBear/2SellBear 抬低/压低）
 # ============================================================
 
 
@@ -905,7 +974,7 @@ def zsExitWeak(bis, upperBis, macdArr, barSec, ratio=1.0, wantDir="short"):
     """出中枢的力度变弱（buildZSByUpper 取最后一个中枢）：
     离开中枢的笔相对进入中枢的笔 isBiDiverge 为 true，或离开笔 span < 进入笔 span × ratio。
 
-    性能：realtime 每根 fine 收盘可能反复进入 wait1Buy/wait1Sell；按笔快照缓存
+    性能：realtime 每根 fine 收盘可能反复进入 1Buy/1Sell；按笔快照缓存
     buildZSByUpper 结果（末笔延伸即失效），输出与未缓存路径逐位一致。"""
     zss = _zs_by_upper_cached(bis, upperBis, barSec)
     if not zss:
@@ -1019,16 +1088,16 @@ def sr_of_detect(srLevels, res):
             if isinstance(sr, dict) and str(sr.get("level")) == key]
 
 
-# 1类买卖点策略键（wait1Buy=空头结构等一买 / wait1Sell=多头结构等一卖）：
+# 1类买卖点策略键（1Buy=空头结构等一买 / 1Sell=多头结构等一卖）：
 # 黄金分割支阻对其不生效（2026-10-10）。fib 位由非一类买卖点锚定派生（sr_flip
 # FIB_BUY_TYPES/FIB_SELL_TYPES 白名单，与 fxma fibNearOn「仅2/3类点判定，1类点
 # 豁免」同语义）：1类点创新低/高时旧摆动段的回撤档不再有支撑/压力语义——不参与
 # 「支阻位附近」闸门，也不参与止损重选（backtest sr_pick 同口径剔除）。
-CLASS1_STRATEGY_KEYS = ("wait1Buy", "wait1Sell")
+CLASS1_STRATEGY_KEYS = ("1Buy", "1Sell")
 
 
 def sr_drop_fib_for_class1(srLevels, strategyKey):
-    """1类策略（wait1Buy/wait1Sell）的支阻池剔除黄金分割候选；其余键原样返回。
+    """1类策略（1Buy/1Sell）的支阻池剔除黄金分割候选；其余键原样返回。
 
     fib 候选带 fib=True 标记（srcType 恒 "fib"，该标记永不清理）；非1类键或空池
     直接返回原列表（零拷贝）。"""
@@ -1036,6 +1105,24 @@ def sr_drop_fib_for_class1(srLevels, strategyKey):
         return srLevels
     return [sr for sr in srLevels
             if not (isinstance(sr, dict) and sr.get("fib"))]
+
+
+def sr_side_levels(srLevels, direction):
+    """fib/BOLL 位按信号方向取侧（CHAN_CFG.srSideGateOn，2026-10-25 用户规则）。
+
+    做多只认 SUP（最近上涨笔回撤支撑/布林下轨与下侧中轨）、做空只认 RES（最近
+    下跌笔反弹阻力/布林上轨与上侧中轨）——另一侧的 fib/BOLL 不参与「支阻位附近」
+    闸门与止损重选（backtest sr_pick 同口径）。密集区与人工位不按侧过滤；zones
+    模式池无 fib/boll 天然 no-op；开关关或空池原样返回（零拷贝，旧口径）。
+
+    动机：9-4 04:15 60m 2Buy@4470.55 命中下跌笔 0.382 反弹位 4485.98——买侧参照
+    应为前上涨笔 4282.625→4510.93 的回撤位（最近 4423.72 距 46.8 > near 30）。"""
+    if not CHAN_CFG.get("srSideGateOn", True) or not srLevels:
+        return srLevels
+    keepType = "SUP" if direction == "long" else "RES"
+    return [sr for sr in srLevels
+            if not (isinstance(sr, dict) and (sr.get("fib") or sr.get("boll"))
+                    and sr.get("type") != keepType)]
 
 
 def nearSr(price, srLevels, nearTol):
@@ -1122,12 +1209,12 @@ def strategyExtraOk(key, bis, upperBis, macdArr, barSec, zs_exit_weak_ratio=ZS_E
     zs_exit_weak_ratio：出中枢力度衰减比例（参数中心可调，默认 ZS_EXIT_WEAK_RATIO）。
     point_cls：计划锚点档位（强二买/1买等同文案「等待回调后做2买」，开单条件按档区分）。
     @returns None（全部通过）或 失败原因字符串"""
-    if key == "wait2Sell":
+    if key == "2Sell":
         if not brokePrevLow(bis):
             return "下跌段未破前底"
         if not macdBelowZero(macdArr):
             return "MACD 未下0轴或反弹过0轴"
-    elif key == "wait2Buy":
+    elif key == "2Buy":
         # 强二买（2026-10-12）：取消过前高；0 轴改为 strong2BuyMacdOn，默认关。
         # 1买及其他仍走原两道（过前高 + DIF > -macdZeroTol）。
         if point_cls == "强二买":
@@ -1138,26 +1225,26 @@ def strategyExtraOk(key, bis, upperBis, macdArr, barSec, zs_exit_weak_ratio=ZS_E
                 return "上涨段未过前高"
             if not macdAboveZero(macdArr):
                 return "MACD 未上0轴或回调破0轴"
-    elif key == "wait1Sell":
+    elif key == "1Sell":
         if not brokePrevHigh(bis):
             return "未够笔且过高点"
         if not zsExitWeak(bis, upperBis, macdArr, barSec, zs_exit_weak_ratio, "short"):
             return "出中枢力度未变弱"
-    elif key == "wait1Buy":
+    elif key == "1Buy":
         if not brokePrevLow(bis):
             return "未够笔且过低点"
         if not zsExitWeak(bis, upperBis, macdArr, barSec, zs_exit_weak_ratio, "long"):
             return "出中枢力度未变弱"
-    elif key == "wait2BuyBear":
+    elif key == "2BuyBear":
         # 空头结构2买（2026-10-09 弱档原始点分流）：只买抬低回调——末下跌笔终点
         # 不破前一根下跌笔终点；破前低属1买语义，由 空头多/等一买 档负责。
         if brokePrevLow(bis):
             return "回调破前低，非抬低2买"
-    elif key == "wait2SellBear":
+    elif key == "2SellBear":
         # 多头结构2卖（对称）：只卖压低反弹——末上涨笔终点不过前一根上涨笔终点。
         if brokePrevHigh(bis):
             return "反弹过前高，非压低2卖"
-    # waitBuy / waitSell / wait3Buy / wait3Sell / waitLike2Buy / waitLike2Sell：
+    # Buy / Sell / 3Buy / 3Sell / Like2Buy / Like2Sell：
     # 仅需够笔 + 以下级别背驰 + 支阻位附近（无专属条件）
     return None
 
@@ -1177,8 +1264,10 @@ def evaluateEntry(ctx, strategy):
     near = ctx.get("near", NEAR)
     key = strategy["key"]
     direction = strategy["direction"]
-    # 1类键（wait1Buy/wait1Sell）豁免黄金分割支阻（闸门口径，2026-10-10）
-    srLevels = sr_drop_fib_for_class1(sr_of_detect(ctx.get("srLevels"), res), key)
+    # 1类键（1Buy/1Sell）豁免黄金分割支阻（闸门口径，2026-10-10）；
+    # fib/BOLL 按信号方向取侧（srSideGateOn，2026-10-25）
+    srLevels = sr_side_levels(
+        sr_drop_fib_for_class1(sr_of_detect(ctx.get("srLevels"), res), key), direction)
     periodData = ctx.get("periodData")
     wantType = "up" if direction == "short" else "down"  # 空头等反弹(up)，多头等回调(down)
     divergeDir = direction  # 空头→顶背驰(short)，多头→底背驰(long)
@@ -1400,7 +1489,6 @@ def realtimeLowerDiverge(periodData, X, wantDir, tCut,
                           divergeConfirm=None, expectBiEnabled=None,
                           entryMacdShrink=None, reasons_out=None, chain=None):
     """当下背驰（区间套下沉版，每根 fine 收盘调用）。
-
     形成中段 = 笔列表最后一笔——回测引擎的增量状态已用 extendLastBiFrom
     把它延伸到最新极值（endTime/endPrice = 当下极值），天然就是"正在走的这段"。
 
@@ -1487,7 +1575,7 @@ def realtimeLowerDiverge(periodData, X, wantDir, tCut,
 
 
 def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLevels,
-                            detectPeriods, near=NEAR, tCut=None, fired=None,
+                            detectPeriods, near=NEAR, tCut=None, fired=None, attempts=None,
                             periodTimes=None, periodMacdTimes=None, divergeConfirm=None,
                             expectBiEnabled=None, realtimeMinBars=None,
                             zsExitWeakRatio=None, trend_res=None, trend_state=None,
@@ -1514,6 +1602,11 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
 
     @param tCut              当前时刻（fine 收盘时间）；None 时取各周期数据末尾
     @param fired             去重集合（调用方跨拍持有，原地更新）
+    @param attempts          可选：同一点尝试计数 {(periodX, strategyKey, 锚点时间): 成交次数}
+                             （调用方跨拍持有；CHAN_CFG.pointMaxAttempts>0 且非 None 时启用检查——
+                             计数 ≥ 上限的锚点本拍拒绝 point_attempt_max，不再布防触发）。
+                             计数在成交建仓处递增（backtest._fill_pending，被同向互斥压掉的
+                             信号不消耗），本函数只读不写；None=不启用（旧口径）。
     @param firedIndex        可选：{(periodX, strategyKey, segStart)} 索引（fired 的 O(1)
                              预检视图，由调用方与 fired 同步维护；None 时回退 any() 线性扫描）
     @param periodTimes       各周期K线时间数组 { res: [times] }（二分用，可选）
@@ -1544,10 +1637,14 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
                              None=旧固定映射（历史子集回放零变化）。
     @returns 新信号列表（flat），每项含 { periodX, markRes, time, price, direction,
              strategyKey, strategyLabel, signalNote, nearSr, pointType, pointStrong,
-             realtime:True, segStart, fallback?, nearEqual?, expectBi,
+             anchorTime, realtime:True, segStart, fallback?, nearEqual?, expectBi,
              trendDirection?, trendReason? }
     """
     fired = fired if fired is not None else set()
+    # 同一点最大尝试次数（2026-10-25）：0=不限（旧口径）。注意不能写 `or 2` 兜底——
+    # 0 是合法值（不限），or 会把 0 吞成默认 2
+    _pma = CHAN_CFG.get("pointMaxAttempts", 2)
+    attempt_cap = 2 if _pma is None else int(_pma)
     # 出场参数（参数中心可调；None → 模块常量默认）
     min_bars = realtimeMinBars if realtimeMinBars is not None else REALTIME_MIN_BARS
     zs_ratio = zsExitWeakRatio if zsExitWeakRatio is not None else ZS_EXIT_WEAK_RATIO
@@ -1614,6 +1711,12 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
             _rej("no_point", ctx={})
             continue
         for point in cands:
+            pclazz = _point_class_of(point)
+            if pclazz is not None and pclazz not in _selected_classes():
+                _rej("point_class_not_selected",
+                     ctx={"pointType": point.get("type"), "pointClass": pclazz,
+                          "classes": ",".join(sorted(_selected_classes()))})
+                continue  # 类别未勾：本拍跳过不开单、不回溯更早的点（浅过滤）
             strategy = pointStrategyOf(point)
             if strategy is None:
                 _rej("no_strategy_map", ctx={"pointType": point.get("type")})
@@ -1685,6 +1788,20 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
                                       "price": nowPx, "winExt": winRef,
                                       "dist": round(dist, 4)})
                             continue
+            # ⓪½ 同一点尝试次数上限（pointMaxAttempts，2026-10-25）：成交建仓计数
+            # （backtest._fill_pending 递增，被同向互斥压掉的信号不消耗）达上限的锚点
+            # 不再布防触发。放在锚点窗口之后：窗外锚照旧报 anchor_bar_window（过期
+            # 故事），窗内且次数用满才报本闸（预算故事）；计数跨终局保留（rearm 只清
+            # 段去重不清计数——同一点终生上限）
+            if attempts is not None and attempt_cap > 0:
+                _akey = (X, key, point.get("time"))
+                if attempts.get(_akey, 0) >= attempt_cap:
+                    _rej("point_attempt_max", skey=key,
+                         ctx={"pointType": point.get("type"),
+                              "anchorTime": point.get("time"),
+                              "attempts": attempts.get(_akey, 0),
+                              "max": attempt_cap})
+                    continue
             # ① 够笔（当下制）：最后一笔=形成中段，方向匹配 + 段长门槛；
             #    预期够笔（expectBiEnabled，页面可选默认开）：末笔方向不符（回调/反弹的反向段
             #    尚未确认为笔）但末笔端点后已走出 ≥ expectBiMinBars 根本级K线 → 视为回调/反弹中，
@@ -1740,8 +1857,11 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
             # 导致后续检测周期 nearTol 变 dict（float<=dict 崩溃，2026-09-13 修复）
             # 支阻只取检测周期 X，背驰级别的价位不参与靠近判定
             nearTol = near  # 绝对价差（不乘 ATR，恒 > 0）
-            # 1类键（wait1Buy/wait1Sell）豁免黄金分割支阻（同确认制闸门口径，2026-10-10）
-            srX = sr_drop_fib_for_class1(sr_of_detect(srLevels, X), key)
+            # 1类键（1Buy/1Sell）豁免黄金分割支阻（同确认制闸门口径，2026-10-10）；
+            # fib/BOLL 按信号方向取侧（srSideGateOn，2026-10-25）——拒绝 ctx 的
+            # nearest_sr 随过滤后池走，dist=距最近同侧位
+            srX = sr_side_levels(
+                sr_drop_fib_for_class1(sr_of_detect(srLevels, X), key), direction)
             rsn = [] if on_reject is not None else None
             cands = realtimeLowerDiverge(periodData, X, direction, tCut,
                                          periodTimes=periodTimes or {},
@@ -1809,6 +1929,7 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
                     "nearSr": hit["sr"]["price"],
                     "pointType": point.get("type"),
                     "pointStrong": point.get("strong"),
+                    "anchorTime": point.get("time"),  # 锚点时间（尝试计数键第三元+诊断）
                     "realtime": True,
                     "segStart": c["segStart"],
                     "fallback": bool(c.get("fallback", False)),   # M1 回退候选（非停止级命中）
@@ -1960,6 +2081,9 @@ def compute_entries(periodBis, barsByPeriod, periodPoints, srLevels, detectPerio
             "chain": res_chain,
         }
         for point in cands:
+            pclazz = _point_class_of(point)
+            if pclazz is not None and pclazz not in _selected_classes():
+                continue  # 类别未勾：本拍跳过不开单、不回溯更早的点（浅过滤，同 realtime 路径）
             strategy = pointStrategyOf(point)
             if strategy is None:
                 continue
@@ -2063,8 +2187,8 @@ def stop_ref_of(direction, entry_price, near_sr, sr_levels,
 def trend_following_of(plan_direction, strategy_key=None):
     """顺势/逆势判定（TP2 平一半 / TP3 分支门槛）：
     2026-10-16 起交易计划 direction 已取消，恒按 strategy_key 判定
-    （wait2Buy/waitBuy/wait3Buy/waitLike2Buy 及卖侧对称 → 顺势；
-    wait1Buy/wait1Sell/wait2BuyBear/wait2SellBear → 逆势）。
+    （2Buy/Buy/3Buy/Like2Buy 及卖侧对称 → 顺势；
+    1Buy/1Sell/2BuyBear/2SellBear → 逆势）。
     plan_direction 形参保留仅为兼容旧调用方，传入即忽略。
     """
     if strategy_key is None and plan_direction:

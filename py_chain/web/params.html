@@ -292,23 +292,26 @@ const LOGIC_BODY = `
 <h4>表3 · 买卖点 → 进场策略键直映射（2026-10-16 买卖点直连；计划文案中转取消）</h4>
 <table class="ltable" id="t3">
 <tr><th>最近买卖点锚</th><th>附带条件</th><th>方向</th><th>进场键</th></tr>
-<tr><td>1买</td><td>形成中与已确认统一（点本身即信号，破前低+离开中枢力度弱）</td><td>做多</td><td>wait1Buy</td></tr>
-<tr><td>1卖</td><td>形成中与已确认统一（点本身即信号，破前高+离开中枢力度弱）</td><td>做空</td><td>wait1Sell</td></tr>
-<tr><td>2买 / 类2买</td><td>强：买点所在下跌笔的前一笔上涨已走完，高点过了再前一笔上涨的高点</td><td>做多</td><td>wait2Buy</td></tr>
-<tr><td>2买 / 类2买</td><td>弱，或还没定（上涨没走完，或走完了但没过前高）</td><td>做多</td><td>wait2BuyBear</td></tr>
-<tr><td>2卖 / 类2卖</td><td>强：卖点所在上涨笔的前一笔下跌已走完，低点跌破再前一笔下跌的低点</td><td>做空</td><td>wait2Sell</td></tr>
-<tr><td>2卖 / 类2卖</td><td>弱，或还没定（下跌没走完，或走完了但没破前低）</td><td>做空</td><td>wait2SellBear</td></tr>
-<tr><td>3买</td><td>—</td><td>做多</td><td>wait3Buy</td></tr>
-<tr><td>3卖</td><td>—</td><td>做空</td><td>wait3Sell</td></tr>
-<tr><td>类3买 / 4买 / 类4买</td><td>—</td><td>做多</td><td>waitBuy</td></tr>
-<tr><td>类3卖 / 4卖 / 类4卖</td><td>—</td><td>做空</td><td>waitSell</td></tr>
+<tr><td>1买</td><td>形成中与已确认统一（点本身即信号，破前低+离开中枢力度弱）</td><td>做多</td><td>1Buy</td></tr>
+<tr><td>1卖</td><td>形成中与已确认统一（点本身即信号，破前高+离开中枢力度弱）</td><td>做空</td><td>1Sell</td></tr>
+<tr><td>2买 / 类2买</td><td>强：买点所在下跌笔的前一笔上涨已走完，高点过了再前一笔上涨的高点</td><td>做多</td><td>2Buy</td></tr>
+<tr><td>2买 / 类2买</td><td>弱，或还没定（上涨没走完，或走完了但没过前高）</td><td>做多</td><td>2BuyBear</td></tr>
+<tr><td>2卖 / 类2卖</td><td>强：卖点所在上涨笔的前一笔下跌已走完，低点跌破再前一笔下跌的低点</td><td>做空</td><td>2Sell</td></tr>
+<tr><td>2卖 / 类2卖</td><td>弱，或还没定（下跌没走完，或走完了但没破前低）</td><td>做空</td><td>2SellBear</td></tr>
+<tr><td>3买</td><td>强（2类后上推腿对1类后反弹腿无背驰）</td><td>做多</td><td>3Buy</td></tr>
+<tr><td>3买</td><td>弱（2类后上推腿对1类后反弹腿顶背驰）</td><td>做多</td><td>3BuyBear</td></tr>
+<tr><td>3卖</td><td>强 / 弱（2类后下推腿对1类后下推腿无背驰 / 底背驰）</td><td>做空</td><td>3Sell / 3SellBear</td></tr>
+<tr><td>类3买 / 4买 / 类4买</td><td>强（点后上推腿无背驰）</td><td>做多</td><td>Buy</td></tr>
+<tr><td>类3买 / 4买 / 类4买</td><td>弱（点后上推腿背驰）</td><td>做多</td><td>BuyBear</td></tr>
+<tr><td>类3卖 / 4卖 / 类4卖</td><td>强 / 弱（点后下推腿无背驰 / 背驰）</td><td>做空</td><td>Sell / SellBear</td></tr>
 </table>
-<p class="lnote">1类点 2026-10-16 起统一走直接档 wait1Buy/wait1Sell（此前已收笔1买→等回调做2买、仅形成中走直接档的口径废除）。原计划层三档路由/未定型滚动翻档/跨侧兜底（如弱2买转等一卖）已删除；waitLike2Buy/waitLike2Sell 键保留但无映射入口。</p>
-<p class="lnote">二买族（2买/类2买、2卖/类2卖）按点上的强弱二分：强走 wait2Buy/wait2Sell（强二买不再要求过前高，0 轴闸看「强二买0轴闸」参数），弱和未定走 wait2BuyBear/wait2SellBear（抬低/压低回调，不抄破前低/前高）。买点前那笔上涨一旦走完并且过高，会从弱翻成强；卖侧镜像。</p>
+<p class="lnote">1类点 2026-10-16 起统一走直接档 1Buy/1Sell（此前已收笔1买→等回调做2买、仅形成中走直接档的口径废除）。原计划层三档路由/未定型滚动翻档/跨侧兜底（如弱2买转等一卖）已删除；Like2Buy/Like2Sell 键保留但无映射入口。</p>
+<p class="lnote">二买族（2买/类2买、2卖/类2卖）按点上的强弱二分：强走 2Buy/2Sell（强二买不再要求过前高，0 轴闸看「强二买0轴闸」参数），弱和未定走 2BuyBear/2SellBear（抬低/压低回调，不抄破前低/前高）。买点前那笔上涨一旦走完并且过高，会从弱翻成强；卖侧镜像。</p>
+<p class="lnote">三/四类族 2026-10-24 起也拆强弱：弱=点后同向腿背驰（弱3=2类后上推腿对1类后反弹腿、弱4=3类后上推腿对2类后上推腿，卖侧镜像；判不出即强），弱走 3BuyBear/3SellBear/BuyBear/SellBear。</p>
 <p class="lnote"><b>强弱怎么判</b>（只对二买族，卖侧镜像）：看买点所在下跌笔紧挨着的前一笔上涨，拿它的高点和再往前一笔上涨的高点比。已走完且更高＝强；已走完但没更高＝弱；还在走，或前面没有可比较的上涨笔＝先按弱。这是价格比较，不看 MACD。</p>
 <p class="lnote">买卖两侧各自向前找最新买点、最新卖点，两侧并行独立评估，多空可以各有一笔持仓。</p>
 <p class="lnote"><b>定了进场键之后</b>还要过进出场条件（笔够不够、低级别有没有背驰、离支阻位近不近、键自己的专属条件）才发信号。回测/监控记录里的「策略」显示的就是键名。以上口径回测/实盘/监控引擎与工作台分析页（JS）一致。rangeRes 关闭时无震荡闸，各周期直接走买卖点。</p>
-<p class="lnote llast"><b>顺势/逆势</b>（出场阶梯分支用）：wait2Buy/waitBuy/wait3Buy 及卖侧镜像＝顺势；wait1Buy/wait1Sell（一买卖直接档）与 wait2BuyBear/wait2SellBear（弱二买卖）＝逆势。按进场键判定（原「计划方向」口径随计划策略行取消）。</p>`;
+<p class="lnote llast"><b>顺势/逆势</b>（出场阶梯分支用）：2Buy/Buy/3Buy 及卖侧镜像＝顺势；1Buy/1Sell（一买卖直接档）与 2BuyBear/2SellBear（弱二买卖）＝逆势。按进场键判定（原「计划方向」口径随计划策略行取消）。</p>`;
 
 const DIA_MAIN = `flowchart LR
     REF["参考周期（{RANGE_REF}）<br/>判震荡"]
@@ -503,7 +506,7 @@ function switchTab(name) {
 const CHOICE_LABELS = { trendRes: { '': '关闭', '240': '4小时', 'D': '日线' },
                         rangeRes: { '': '关闭', '240': '4小时', 'D': '日线' },
                         entryRes: { '30S': '30秒(仅回测)', '3': '3分钟', '15': '15分钟', '60': '1小时' },
-                        pointClasses: { '1': '一类买卖点', '2': '二类买卖点', '2x': '类二买卖点', '3': '三类买卖点', '3x': '类三买卖点' },
+                        pointClasses: { '1': '一类买卖点', '2': '二类买卖点', '2s': '强二类买卖点', '2w': '弱二类买卖点', '2x': '类二买卖点', '2xs': '强类二买卖点', '2xw': '弱类二买卖点', '3': '三类买卖点', '3s': '强三类买卖点', '3w': '弱三类买卖点', '3x': '类三买卖点', '3xs': '强类三买卖点', '3xw': '弱类三买卖点', '4': '四类买卖点', '4s': '强四类买卖点', '4w': '弱四类买卖点', '4x': '类四买卖点', '4xs': '强类四买卖点', '4xw': '弱类四买卖点' },
                         maType: { 'SMA': '简单均线SMA', 'EMA': '指数均线EMA' },
                         fibLevels: { '0.236': '回撤23.6%', '0.382': '回撤38.2%', '0.5': '回撤50%', '0.618': '回撤61.8%', '0.786': '回撤78.6%' },
                         sameBarPriority: { 'stop': '止损优先(保守)', 'tp': '止盈优先' },
@@ -535,6 +538,7 @@ const BREAK_BEFORE_KEYS = new Set();
 // __STRONG2_MACD__ = 强2类买卖点黄白线（开关 strong2BuyMacdOn + 容差 macdZeroTol 同一张卡）
 // __MACD_DIVERGE__ = MACD背驰容差（开关 macdDivergeBodyOn + 容差 macdDivergeTol 同一张卡）
 const ENTRY_GROUPS = [
+  ['买卖点类别（勾选=该类可开单，买卖两侧对称；全族按强弱拆分——二类族=1买后反弹过/未过前高，3/4族=点后同向腿背驰（弱3=2类后上推腿对1类后反弹腿、弱4=3类后上推腿对2类后上推腿，判不出即强）；最新锚点为未勾类别时跳过·不回溯更早的点；2026-10-25 起默认五项 1/强二/强类二/强三/强四类，此前默认全选）', ['pointClasses']],
   ['支阻', ['near']],
   ['手数', ['lots']],
   ['滑点（ATR系数内嵌各行；跟踪止盈滑点随其开关置灰）', ['slip_stop', 'slip_fallback', 'slip_be', 'exitTrailSlip']],
@@ -543,7 +547,7 @@ const ENTRY_GROUPS = [
   ['进场扩展（M1/M4）', ['sinkFallback', 'sinkFallbackRearm',
                        'expectBiEnough', 'expectBiMinBars', 'divergeConfirm']],
   ['进场闸门', ['__STRONG2_MACD__', '__MACD_DIVERGE__', 'entryMacdShrink', 'stopEntryBarFloor',
-              'anchorWinBars', 'anchorWinPts', 'anchorWinTrailOn']],
+              'anchorWinBars', 'anchorWinPts', 'anchorWinTrailOn', 'srSideGateOn', 'pointMaxAttempts']],
   ['规则修复（07-07 06:30 案例锚点）', ['divergeReferByZs', 'sinkSkipLevel']],
 ];
 
@@ -571,8 +575,8 @@ function trailSrcHtml(m) {
     + `</select> 平仓 `;
 }
 // 保本位模式（三口径）：并入保本止损卡内联下拉（不单独成行；同跟踪止盈参照模式），
-// extreme=成交K线极值±保本滑点，entry=0亏损（进场价，默认），bi=笔端点±滑点
-// （背驰周期首笔有利方向笔起点±保本滑点，成笔前无值）
+// extreme=成交K线极值±保本滑点，entry=0亏损（进场价；2026-10-25 前默认），
+// bi=笔端点±滑点（背驰周期首笔有利方向笔起点±保本滑点，成笔前无值；2026-10-25 起默认）
 function beModeHtml(m) {
   const spec = m.schema.exitStopBeMode;
   if (!spec) return '';

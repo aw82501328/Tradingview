@@ -401,6 +401,40 @@ class DeadTopAbsorbTests(unittest.TestCase):
         # 只关新规则 → 后顶 4317.63 不再是任何笔端点（旧行为：极值守卫忽略）
         self.assertFalse(any(b['endTime'] == end for b in self._build(patch_off=True)))
 
+    def _build_locked(self, locks, fast=True):
+        bars = self.FIX['60']
+        merged = c.mergeBars(c.markWickBars(bars))
+        try:
+            c.apply_cfg({'absorbMarkFast': fast})
+            return c.buildBi(c.findFractals(merged), merged, c.calcATR(bars, 14),
+                             c.calcMACD(bars), locks, True)
+        finally:
+            c.reset_cfg()
+
+    def test_absorb_mark_fast_locked_start(self):
+        """吸收成笔即标（2026-10-25）：起点被上级笔端点锁定（区间套）不再阻断吸收——
+        吸收只追加端点，锁定起点原位不动。真实案例：9-14 21:00 底=240m 端点被锁，
+        增量/重同步路径 12:00 可成的笔被拖到 17:06 锁集变动（批量无锁口径当场成笔）。"""
+        start, end = self._ts('09-14T21:00:00'), self._ts('09-15T10:00:00')
+        base_up = next(b for b in self._build() if b['startTime'] == start and b['type'] == 'up')
+        locks = [{"dir": "bottom", "price": base_up['startPrice']}]  # 240m 端点锁住起点底
+        fast = self._build_locked(locks, fast=True)
+        self.assertTrue(any(b['startTime'] == start and b['type'] == 'up'
+                            and b['endTime'] == end and b['endPrice'] == 4317.63
+                            for b in fast))
+        # 开关关 = 2026-10-22 旧口径：起点锁定即排除（增量引擎旧行为）
+        old = self._build_locked(locks, fast=False)
+        self.assertFalse(any(b['startTime'] == start and b['type'] == 'up'
+                             and b['endTime'] == end for b in old))
+
+    def test_absorb_k_locked_still_excluded(self):
+        """k（被追加的后顶）锁定始终排除（区间套优先不受 absorbMarkFast 影响）。"""
+        start, end = self._ts('09-14T21:00:00'), self._ts('09-15T10:00:00')
+        locks = [{"dir": "top", "price": 4317.63}]
+        bis = self._build_locked(locks, fast=True)
+        self.assertFalse(any(b['startTime'] == start and b['type'] == 'up'
+                             and b['endTime'] == end for b in bis))
+
     # 合成场景（小时K，无包含、无长影压平干扰）：P(125) ↓ B(100) ↗2根 T1(111·间隔
     # 不足死顶) ↘ 浅回调底(104·实体 107.5 与 B 实体 104.5 差 3.0>thr 不平台后移)
     # ↗ T2(109.5·实体 109 与 T1 实体 110 差 1.0≤thr) ↘ B3(97)。T1 影线 111 ≤

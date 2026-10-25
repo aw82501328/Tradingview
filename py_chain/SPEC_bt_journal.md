@@ -42,7 +42,12 @@ fxma 专属闸门；`anchor_bar_window`=锚点窗口外——触发/背驰点须
 2026-10-22 起 anchorWinTrailOn 默认开=窗口内创新高/新低时时间窗锚K随极值所在K重开，
 reject ctx 增 effAnchorTime/extTime/extPrice），
 ctx 含 pointType/anchorTime/nowBarTime（时间窗）或 markRes/divergeTime（次级时间窗），
-价距拒绝行另含 price/winExt/dist（当拍现价或背驰点价/窗口极值/距离）；`fx_prov_invalidated`=pred2 预判点消失——收复前低/前高、结构重算或真点
+价距拒绝行另含 price/winExt/dist（当拍现价或背驰点价/窗口极值/距离）；
+`point_attempt_max`=同一点尝试次数已满（`pointMaxAttempts`，2026-10-25）——同一买卖点
+（检测周期+类别+锚点时间）实际开仓次数达上限后该锚点不再布防触发（成交建仓才计数，
+被同向互斥压掉未成交的信号不消耗；终局重置 sinkFallbackRearm 只清段去重不清此计数），
+ctx 含 pointType/anchorTime/attempts/max，header 记 pointMaxAttempts 口径；
+`fx_prov_invalidated`=pred2 预判点消失——收复前低/前高、结构重算或真点
 接管，ctx 含 provTime/provPrice/dSegStart，2026-10-09）。**拒绝行存结构化数字，中文渲染
 统一在 bt_query**（写侧零格式化开销）。fxma state 行的买卖点类型带「预判」前缀
 （如「预判2卖」）= pred2 提前入列的未确认点承担尾点（判定/去重仍用原标签）。
@@ -106,3 +111,11 @@ python -m py_chain.bt_query --json ...                   # 机器可读
 `chanA|<symbol>`、cleanup_old 分组与保留策略自动按链隔离（_parse_name 无需改动）。
 header.periods/fineRes 即该链加载集与最细周期（链B fine=1m）。信号/成交行无独立
 链字段（整份文件即一条链）；Web 信号表行带 chain 字段（A/B）与「链A/链B」角标。
+
+## 笔结构与基线（2026-10-25 笔内极值守卫）
+
+`innerExtremeGuardOn`（默认开，参数中心 chan 桶）改变笔端点选择：替换/顶替的新配对
+笔内藏超近等容差更极值时落地为端点（如 15m 2026-09-04 下跌笔终点 12:00@4465.49 →
+14:45@4460.155）。journal 行格式不变，但**全部历史 journal 的成交/信号不可比**（笔结构
+是地基）；实盘 ENGINE_LOGIC_VERSION=20261025-inner-extrem-guard（持仓重启需
+--accept-param-drift）。详见 chan-core SPEC §2.4.2-1b 与 py_chain/SPEC.md 同名节。

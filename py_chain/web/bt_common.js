@@ -25,9 +25,10 @@ function signalDirectionName(r) {
   // 新记录无该字段，按 strategyKey 固定对应关系显示（直连后唯一口径）。
   const directions = ['多头多', '空头空', '多头空', '空头多'];
   if (directions.includes(r.planDirection)) return r.planDirection;
-  return {wait2Buy:'多头多',waitBuy:'多头多',wait3Buy:'多头多',waitLike2Buy:'多头多',
-    wait2Sell:'空头空',waitSell:'空头空',wait3Sell:'空头空',waitLike2Sell:'空头空',
-    wait1Sell:'多头空',wait1Buy:'空头多',wait2BuyBear:'空头多',wait2SellBear:'多头空'}[r.strategyKey] || '-';
+  return {'2Buy':'多头多','Buy':'多头多','3Buy':'多头多','Like2Buy':'多头多',
+    '2Sell':'空头空','Sell':'空头空','3Sell':'空头空','Like2Sell':'空头空',
+    '1Sell':'多头空','1Buy':'空头多','2BuyBear':'空头多','2SellBear':'多头空',
+    '3BuyBear':'空头多','3SellBear':'多头空','BuyBear':'空头多','SellBear':'多头空'}[r.strategyKey] || '-';
 }
 
 // 信号候选角标（SPEC_divergence_fallback）：回退/近等/预期够笔口径标记

@@ -651,18 +651,18 @@ class TestEntryFiltering(unittest.TestCase):
       - 参考周期及以上被剔出检测周期（即使无周期数据也结构性剔除）
       - trend_dir 与策略方向相反 → 不产生信号；一致 → 信号附 trend 字段
       - trend_res=""（关闭）→ 无剔除、不过滤、无 trend 字段
-    2026-10-16 起候选来源为 periodPoints 买卖点（2卖 strong→wait2Sell 空头锚）。
+    2026-10-16 起候选来源为 periodPoints 买卖点（2卖 strong→2Sell 空头锚）。
     """
 
     def _entries_with(self, trend_res, trend_state, detect_res="60"):
-        """构造检测周期一笔空头锚（2卖 strong 挂末笔端点 → wait2Sell），收集输出。"""
+        """构造检测周期一笔空头锚（2卖 strong 挂末笔端点 → 2Sell），收集输出。"""
         bis60 = [
             bi("up", 0, 3600, 100, 110),
             bi("down", 3600, 7200, 110, 105),
             bi("up", 7200, 10800, 105, 108),
         ]
         periodBis = {"240": bottom_fixture_bis(), "60": bis60, "15": bis60, "3": bis60}
-        # 末笔端点 (10800, 108.0) 上挂 2卖 strong → wait2Sell（做空）
+        # 末笔端点 (10800, 108.0) 上挂 2卖 strong → 2Sell（做空）
         points = {detect_res: {"buy": [],
                                "sell": [{"type": "2卖", "time": 10800, "price": 108.0,
                                          "strong": True}]}}
@@ -695,7 +695,7 @@ class TestEntryFiltering(unittest.TestCase):
         # 信号携带买卖点锚字段（2026-10-16 直连）
         self.assertEqual(sigs[0]["pointType"], "2卖")
         self.assertTrue(sigs[0]["pointStrong"])
-        self.assertEqual(sigs[0]["strategyKey"], "wait2Sell")
+        self.assertEqual(sigs[0]["strategyKey"], "2Sell")
         # 参考周期判多 → 空头信号被滤
         sigs = self._entries_with("240", {"dir": "long", "reason": "4小时2买", "res": "240"})
         self.assertEqual(sigs, [])

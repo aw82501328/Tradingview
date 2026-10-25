@@ -137,9 +137,10 @@ class SignalLocatorTests(unittest.TestCase):
                 with patch.object(locator, '_draw_after_locate', return_value={'drawn': 1, 'cleared': 0}) as draw:
                     result = locator.locate_signal({**self.row, 'time': 110, 'periodX': '30S'})
         jump.assert_called_once()
-        self.assertEqual(result['time'], 100)
+        # 报出时间=开单（信号）时间 110，不再是定位bar开盘 100（2026-10-25 口径）
+        self.assertEqual(result['time'], 110)
         self.assertTrue(result['replay'])
-        self.assertEqual(draw.call_args.args[2], 100)
+        self.assertEqual(draw.call_args.args[2], 110)
         self.assertEqual(draw.call_args.kwargs.get('last_time'), 100)
         self.assertTrue(any('setTimeViewport' in str(call) for call in client.evaluate.call_args_list))
 
@@ -160,10 +161,11 @@ class SignalLocatorTests(unittest.TestCase):
                     result = locator.locate_signal(row)
         jump.assert_called_once()
         draw.assert_called_once()
-        self.assertEqual(result['time'], 270)
+        # 报出时间=开单（信号）时间 290，不再是定位bar开盘 270
+        self.assertEqual(result['time'], 290)
         self.assertTrue(result['replay'])
         self.assertEqual(result['mark']['drawn'], 2)
-        self.assertEqual(draw.call_args.args[2], 270)
+        self.assertEqual(draw.call_args.args[2], 290)
         self.assertEqual(draw.call_args.kwargs.get('last_time'), 270)
 
     def test_timestamp_inside_latest_candle_and_unavailable_gap(self):
@@ -187,7 +189,9 @@ class SignalLocatorTests(unittest.TestCase):
             with patch.object(locator, '_replay_to_signal') as jump:
                 with patch.object(locator, '_draw_after_locate', return_value={'drawn': 2, 'cleared': 1}) as draw:
                     result = locator.locate_signal({**self.row, 'time': 110})
-        self.assertEqual(result['time'], 100)
+        # 信号时间 110 落在开盘 100 的bar中段：报开单时间 110（与列表「信号时间」列
+        # 一致），画标记按 110 二分解析回该bar，锚点不变
+        self.assertEqual(result['time'], 110)
         self.assertEqual(result['mark']['drawn'], 2)
         self.assertTrue(result['replay'])
         draw.assert_called_once()

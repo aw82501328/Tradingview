@@ -87,4 +87,29 @@ assert.ok(!h2.includes('data-k="chainA" data-multi value="15" checked'), '链A 1
 assert.ok(h2.includes('data-k="chainB" data-multi value="240" checked'), '链B 240 应勾选');
 assert.ok(!h2.includes('data-k="chainB" data-multi value="5" checked'), '链B 5 应不勾');
 
+// ④ 标记进出场·买卖点类别多选（2026-10-24 pointClasses；同日二次口径=二类/类二
+//    拆强弱 2s/2w/2xs/2xw）：分组注册 + multi 复选框渲染（rowHtml 直调，9 类别、
+//    默认全选勾、覆盖态按逗号串勾选）
+const entryGroups = vm.runInContext('ENTRY_GROUPS', ctx);
+assert.ok(entryGroups[0][1].includes('pointClasses'), 'entry 首组应含 pointClasses');
+assert.ok(entryGroups[0][0].includes('买卖点类别'), '首组标题应为买卖点类别');
+const pcLabels = vm.runInContext('CHOICE_LABELS', ctx).pointClasses;
+for (const c of ['1', '2s', '2w', '2xs', '2xw', '3', '3x', '4', '4x']) {
+  assert.ok(pcLabels[c], `类别标签缺 ${c}`);
+}
+assert.ok(pcLabels['2'] && pcLabels['2x'], 'fxma 共用的 2/2x 标签应保留');
+const PC_CHOICES = ['1', '2s', '2w', '2xs', '2xw', '3', '3x', '4', '4x'];
+const pcDefault = PC_CHOICES.join(',');
+const pcSchema = { label: '买卖点类别', desc: 'd', type: 'multi',
+                   default: pcDefault, choices: PC_CHOICES };
+const pcRow = vm.runInContext('rowHtml', ctx)('pointClasses', pcSchema, pcDefault, false, null);
+for (const c of PC_CHOICES) {
+  assert.ok(pcRow.includes(`data-k="pointClasses" data-multi value="${c}" checked`),
+    `默认全选应勾 ${c}`);
+}
+const pcRow2 = vm.runInContext('rowHtml', ctx)('pointClasses', pcSchema, '1,2s', true, null);
+assert.ok(pcRow2.includes('value="1" checked') && pcRow2.includes('value="2s" checked'),
+  '覆盖态 1,2s 应勾');
+assert.ok(!pcRow2.includes('value="2w" checked'), '覆盖态 2w 应不勾');
+
 console.log('test_chain_view.cjs: 全部断言通过');

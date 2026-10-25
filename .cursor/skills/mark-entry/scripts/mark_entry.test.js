@@ -13,6 +13,8 @@ const {
   findDivergePoints, lowerDiverge, levelsBelow, sinkChainConfirm,
   stopRefOf, findBiEvent, trendFollowingOf, favSeg5Time, simulatePosition,
   pointStrategyOf, sideCandidates, evaluateEntry, coverBarIndex,
+  TYPE_CLASS, pointClassOf, selectedPointClasses,
+  srSideLevels,
 } = require("./mark_entry.js");
 
 const bi = (type, startTime, endTime, startPrice, endPrice) => ({
@@ -181,7 +183,7 @@ describe("evaluateEntry 锚点窗口（确认制）", () => {
     "15": { bis: B15M, bars: [], macdArr: [], atr: 0 },
     "3": { bis: B3M, bars: [], macdArr: M3, atr: 0 },
   };
-  const strategy = { key: "waitSell", direction: "short", label: "等待反弹后卖点", pointCls: null };
+  const strategy = { key: "Sell", direction: "short", label: "等待反弹后卖点", pointCls: null };
   const baseCtx = (anchorTime, anchorPrice = 4461.7, pd = periodData) => ({
     res: "15", bis: B15M, upperBis: null, macdArr: [], atr: 0, barSec: 900,
     near: 30, srLevels: [{ price: 4462, level: "15" }], periodData: pd,
@@ -274,6 +276,97 @@ describe("evaluateEntry 锚点窗口（确认制）", () => {
     const res = evaluateEntry(baseCtx(undefined), strategy);
     assert.equal(res.ok, true);
   });
+
+  // ---- fib/BOLL 按方向取侧（srSideGateOn 默认开，2026-10-25；与 py_chain
+  //      test_sr_zone.TestSrSideGate 对齐）：背驰点 4461.7，支阻位同价 4462 ----
+  const srCtx = (srLevels) => ({
+    res: "15", bis: B15M, upperBis: null, macdArr: [], atr: 0, barSec: 900,
+    near: 30, srLevels, periodData,
+    barTimesAll: { "15": TIMES15 },
+    anchorPoint: { type: "4卖", time: 83000, price: 4461.7 },
+  });
+
+  test("空头：fib SUP 近位被剔 → 拒绝；fib RES 同价 → 放行", () => {
+    const sup = { price: 4462, level: "15", fib: true, ratio: 0.382, type: "SUP" };
+    const res = { price: 4462, level: "15", fib: true, ratio: 0.382, type: "RES" };
+    const rej = evaluateEntry(srCtx([sup]), strategy);
+    assert.equal(rej.ok, false);
+    assert.ok(rej.reason.includes("支阻位"));
+    const ok = evaluateEntry(srCtx([res]), strategy);
+    assert.equal(ok.ok, true);
+    assert.equal(ok.nearSr, 4462);
+  });
+
+  test("boll 中轨按现价侧定 type：short 只认 RES 轨", () => {
+    const midSup = { price: 4462, level: "15", boll: "mid", type: "SUP" };
+    const upperRes = { price: 4462, level: "15", boll: "upper", type: "RES" };
+    assert.equal(evaluateEntry(srCtx([midSup]), strategy).ok, false);
+    assert.equal(evaluateEntry(srCtx([upperRes]), strategy).ok, true);
+  });
+
+  test("密集区（无 fib/boll 标记）不按侧过滤 → SUP 型密集区空头仍可命中", () => {
+    const cluster = { price: 4462, level: "15", type: "SUP", touchCount: 3 };
+    assert.equal(evaluateEntry(srCtx([cluster]), strategy).ok, true);
+  });
+
+  test("开关关=旧口径：fib SUP 近位恢复命中", () => {
+    const saved = core.CHAN_CFG.srSideGateOn;
+    core.CHAN_CFG.srSideGateOn = false;
+    try {
+      const sup = { price: 4462, level: "15", fib: true, ratio: 0.382, type: "SUP" };
+      assert.equal(evaluateEntry(srCtx([sup]), strategy).ok, true);
+    } finally {
+      core.CHAN_CFG.srSideGateOn = saved;
+    }
+  });
+});
+
+describe("srSideLevels 取侧过滤（与 py sr_side_levels 对齐）", () => {
+  const POOL = [
+    { price: 4485.98, level: "60", fib: true, type: "RES" },
+    { price: 4423.72, level: "60", fib: true, type: "SUP" },
+    { price: 4491.0, level: "60", boll: "upper", type: "RES" },
+    { price: 4400.0, level: "60", boll: "lower", type: "SUP" },
+    { price: 4460.0, level: "60", type: "RES", touchCount: 3 },
+    { price: 4470.0, level: "60", type: "SUP", manual: true },
+  ];
+  const prices = (arr) => arr.map(sr => sr.price);
+
+  test("long 只留 SUP 侧 fib/boll（密集区/人工位不动）", () => {
+    assert.deepEqual(prices(srSideLevels(POOL, "long")),
+                     [4423.72, 4400.0, 4460.0, 4470.0]);
+  });
+
+  test("short 对称", () => {
+    assert.deepEqual(prices(srSideLevels(POOL, "short")),
+                     [4485.98, 4491.0, 4460.0, 4470.0]);
+  });
+
+  test("开关关=原数组原样返回（零拷贝）", () => {
+    const saved = core.CHAN_CFG.srSideGateOn;
+    core.CHAN_CFG.srSideGateOn = false;
+    try {
+      assert.equal(srSideLevels(POOL, "long"), POOL);
+    } finally {
+      core.CHAN_CFG.srSideGateOn = saved;
+    }
+  });
+
+  test("止损重选同口径：long 下方更近的 RES fib 被剔，取更远 SUP fib", () => {
+    const resFibBelow = { price: 4446, level: "60", fib: true, type: "RES" };
+    const supFib = { price: 4444, level: "60", fib: true, type: "SUP" };
+    const sig = { direction: "long", price: 4450 };
+    // maxLoss=4450−10=4440 不夹（4441/4443 均高于兜底）
+    assert.equal(stopRefOf(sig, srSideLevels([resFibBelow, supFib], "long")),
+                 4444 - 3);
+    const saved = core.CHAN_CFG.srSideGateOn;
+    core.CHAN_CFG.srSideGateOn = false;
+    try {
+      assert.equal(stopRefOf(sig, [resFibBelow, supFib]), 4446 - 3);   // 旧口径
+    } finally {
+      core.CHAN_CFG.srSideGateOn = saved;
+    }
+  });
 });
 
 // ============================================================
@@ -320,24 +413,31 @@ describe("出场规则：stopRefOf（支阻位±滑点/最大止损）", () => {
 });
 
 describe("pointStrategyOf：买卖点 type+strong → 进场 key 直映射（2026-10-16 直连）", () => {
-  test("1类直接档统一（形成中与已确认同档）+ 二买族强弱二分 + 3/类3类4族分流", () => {
+  test("1类直接档统一 + 二买族强弱二分 + 3/4族强弱分流 Bear 键（2026-10-24）", () => {
     const cases = [
-      [{ type: "1买", time: 1, price: 1 }, "wait1Buy", "long"],
-      [{ type: "1卖", time: 1, price: 1 }, "wait1Sell", "short"],
-      [{ type: "2买", time: 1, price: 1, strong: true }, "wait2Buy", "long"],
-      [{ type: "类2买", time: 1, price: 1, strong: true }, "wait2Buy", "long"],
-      [{ type: "2买", time: 1, price: 1, strong: false }, "wait2BuyBear", "long"],
-      [{ type: "类2买", time: 1, price: 1, strong: null }, "wait2BuyBear", "long"],   // 未定型弱先行
-      [{ type: "2卖", time: 1, price: 1, strong: true }, "wait2Sell", "short"],
-      [{ type: "类2卖", time: 1, price: 1, strong: false }, "wait2SellBear", "short"],
-      [{ type: "3买", time: 1, price: 1 }, "wait3Buy", "long"],
-      [{ type: "3卖", time: 1, price: 1 }, "wait3Sell", "short"],
-      [{ type: "类3买", time: 1, price: 1 }, "waitBuy", "long"],
-      [{ type: "4买", time: 1, price: 1 }, "waitBuy", "long"],
-      [{ type: "类4买", time: 1, price: 1 }, "waitBuy", "long"],
-      [{ type: "类3卖", time: 1, price: 1 }, "waitSell", "short"],
-      [{ type: "4卖", time: 1, price: 1 }, "waitSell", "short"],
-      [{ type: "类4卖", time: 1, price: 1 }, "waitSell", "short"],
+      [{ type: "1买", time: 1, price: 1 }, "1Buy", "long"],
+      [{ type: "1卖", time: 1, price: 1 }, "1Sell", "short"],
+      [{ type: "2买", time: 1, price: 1, strong: true }, "2Buy", "long"],
+      [{ type: "类2买", time: 1, price: 1, strong: true }, "2Buy", "long"],
+      [{ type: "2买", time: 1, price: 1, strong: false }, "2BuyBear", "long"],
+      [{ type: "类2买", time: 1, price: 1, strong: null }, "2BuyBear", "long"],   // 未定型弱先行
+      [{ type: "2卖", time: 1, price: 1, strong: true }, "2Sell", "short"],
+      [{ type: "类2卖", time: 1, price: 1, strong: false }, "2SellBear", "short"],
+      [{ type: "3买", time: 1, price: 1, strong: true }, "3Buy", "long"],
+      [{ type: "3买", time: 1, price: 1, strong: false }, "3BuyBear", "long"],
+      [{ type: "3买", time: 1, price: 1 }, "3BuyBear", "long"],   // strong 缺失按弱（同判）
+      [{ type: "3卖", time: 1, price: 1, strong: true }, "3Sell", "short"],
+      [{ type: "3卖", time: 1, price: 1, strong: false }, "3SellBear", "short"],
+      [{ type: "类3买", time: 1, price: 1, strong: true }, "Buy", "long"],
+      [{ type: "类3买", time: 1, price: 1, strong: false }, "BuyBear", "long"],
+      [{ type: "4买", time: 1, price: 1, strong: true }, "Buy", "long"],
+      [{ type: "4买", time: 1, price: 1, strong: false }, "BuyBear", "long"],
+      [{ type: "类4买", time: 1, price: 1, strong: false }, "BuyBear", "long"],
+      [{ type: "类3卖", time: 1, price: 1, strong: true }, "Sell", "short"],
+      [{ type: "类3卖", time: 1, price: 1, strong: false }, "SellBear", "short"],
+      [{ type: "4卖", time: 1, price: 1, strong: true }, "Sell", "short"],
+      [{ type: "4卖", time: 1, price: 1, strong: false }, "SellBear", "short"],
+      [{ type: "类4卖", time: 1, price: 1, strong: false }, "SellBear", "short"],
     ];
     for (const [point, key, direction] of cases) {
       const s = pointStrategyOf(point);
@@ -347,13 +447,15 @@ describe("pointStrategyOf：买卖点 type+strong → 进场 key 直映射（202
     }
   });
 
-  test("pointCls：2族由 strong 派生（强二买/弱类2买…），非2族为 null", () => {
+  test("pointCls：2/3/4族由 strong 派生（强二买/弱三买…），1类为 null", () => {
     assert.equal(pointStrategyOf({ type: "2买", time: 1, price: 1, strong: true }).pointCls, "强二买");
     assert.equal(pointStrategyOf({ type: "类2买", time: 1, price: 1, strong: false }).pointCls, "弱类2买");
+    assert.equal(pointStrategyOf({ type: "3买", time: 1, price: 1, strong: false }).pointCls, "弱三买");
+    assert.equal(pointStrategyOf({ type: "类4卖", time: 1, price: 1, strong: true }).pointCls, "强类4卖");
     assert.equal(pointStrategyOf({ type: "1买", time: 1, price: 1 }).pointCls, null);
   });
 
-  test("未知类型 → null（waitLike2Buy/waitLike2Sell 无映射入口）", () => {
+  test("未知类型 → null（Like2Buy/Like2Sell 无映射入口）", () => {
     assert.equal(pointStrategyOf({ type: "观望", time: 1, price: 1 }), null);
     assert.equal(pointStrategyOf({ type: "", time: 1, price: 1 }), null);
   });
@@ -371,14 +473,95 @@ describe("pointStrategyOf：买卖点 type+strong → 进场 key 直映射（202
   });
 });
 
+// ============================================================
+// 进场买卖点类别白名单（2026-10-24 CHAN_CFG.pointClasses；同日三次口径=三类/四类
+// 族也拆强弱；与 py_chain test_point_classes.py 成对镜像）。浅过滤：锚点选取不变，
+// 最新锚点类别未勾→评估循环跳过；默认全选 13 项。
+// ============================================================
+describe("买卖点类别白名单 pointClasses", () => {
+  const core = require("../../chan-core/scripts/chan_core.js");
+  const ALL = new Set(["1", "2s", "2w", "2xs", "2xw", "3s", "3w", "3xs", "3xw",
+                        "4s", "4w", "4xs", "4xw"]);
+
+  test("TYPE_CLASS：14 类型买卖对称全覆盖（基础映射，二类族强弱由 pointClassOf 分档）", () => {
+    assert.equal(Object.keys(TYPE_CLASS).length, 14);
+    for (const [t, c] of Object.entries(TYPE_CLASS)) {
+      assert.equal(t.endsWith("买") || t.endsWith("卖"), true);
+    }
+    assert.equal(TYPE_CLASS["2卖"], "2");
+    assert.equal(TYPE_CLASS["类4买"], "4x");
+  });
+
+  test("pointClassOf：2/3/4族强弱分档（真值=强、缺失/null=弱）、1类原样、未知 undefined", () => {
+    assert.equal(pointClassOf({ type: "2买", strong: true }), "2s");
+    assert.equal(pointClassOf({ type: "2买", strong: false }), "2w");
+    assert.equal(pointClassOf({ type: "2买" }), "2w");            // 未定型按弱
+    assert.equal(pointClassOf({ type: "2买", strong: null }), "2w");
+    assert.equal(pointClassOf({ type: "类2卖", strong: 1 }), "2xs");
+    assert.equal(pointClassOf({ type: "类2卖" }), "2xw");
+    // 3/4 族同拆（2026-10-24 三次口径；strong 由 markThirdFourthStrong 写入）
+    assert.equal(pointClassOf({ type: "3买", strong: true }), "3s");
+    assert.equal(pointClassOf({ type: "3买", strong: false }), "3w");
+    assert.equal(pointClassOf({ type: "3买" }), "3w");
+    assert.equal(pointClassOf({ type: "类3买", strong: 1 }), "3xs");
+    assert.equal(pointClassOf({ type: "4卖", strong: false }), "4w");
+    assert.equal(pointClassOf({ type: "类4卖", strong: true }), "4xs");
+    assert.equal(pointClassOf({ type: "类4卖" }), "4xw");
+    assert.equal(pointClassOf({ type: "1买" }), "1");
+    assert.equal(pointClassOf({ type: "类4" }), undefined);
+  });
+
+  test("selectedPointClasses：默认全选 / 子集解析 / 旧值别名 / 空串坏值 fail-open / 换串重算", () => {
+    const saved = core.CHAN_CFG.pointClasses;
+    try {
+      delete core.CHAN_CFG.pointClasses;   // 旧 chan_cfg JSON 未导出该键 → 默认全选
+      assert.deepEqual(selectedPointClasses(), ALL);
+      core.CHAN_CFG.pointClasses = "1,3s";
+      assert.deepEqual(selectedPointClasses(), new Set(["1", "3s"]));
+      core.CHAN_CFG.pointClasses = "2,3";   // 旧值别名：2→2s+2w、3→3s+3w（零迁移可用）
+      assert.deepEqual(selectedPointClasses(), new Set(["2s", "2w", "3s", "3w"]));
+      core.CHAN_CFG.pointClasses = "1,2x";  // 旧值别名：2x→2xs+2xw
+      assert.deepEqual(selectedPointClasses(), new Set(["1", "2xs", "2xw"]));
+      core.CHAN_CFG.pointClasses = "3,4x";  // 旧值别名：3→3s+3w、4x→4xs+4xw
+      assert.deepEqual(selectedPointClasses(), new Set(["3s", "3w", "4xs", "4xw"]));
+      core.CHAN_CFG.pointClasses = "";
+      assert.deepEqual(selectedPointClasses(), ALL);   // fail-open：不弄丢全部信号
+      core.CHAN_CFG.pointClasses = "9,zz";
+      assert.deepEqual(selectedPointClasses(), ALL);
+      core.CHAN_CFG.pointClasses = "2s";
+      assert.deepEqual(selectedPointClasses(), new Set(["2s"]));   // memo 换串重算
+    } finally {
+      core.CHAN_CFG.pointClasses = saved;
+    }
+  });
+
+  test("浅过滤：sideCandidates 不按勾选过滤（锚点选取不变，闸在评估循环）", () => {
+    const bis = [
+      { type: "up", startTime: 0, endTime: 60, startPrice: 100, endPrice: 110 },
+      { type: "down", startTime: 60, endTime: 120, startPrice: 110, endPrice: 95 },
+    ];
+    const points = { buy: [{ type: "2买", time: 120, price: 95, strong: true }], sell: [] };
+    const saved = core.CHAN_CFG.pointClasses;
+    try {
+      core.CHAN_CFG.pointClasses = "1,3s";   // 强二类未勾
+      const cands = sideCandidates(bis, points, 0, 180);
+      assert.deepEqual(cands.map(c => c.type), ["2买"]);   // 锚点照常取 2买（不回溯）
+      assert.equal(pointClassOf(cands[0]), "2s");
+      assert.equal(selectedPointClasses().has("2s"), false); // 评估循环将跳过它
+    } finally {
+      core.CHAN_CFG.pointClasses = saved;
+    }
+  });
+});
+
 describe("出场规则：trendFollowingOf / favSeg5Time", () => {
   test("顺势判定：按 strategyKey（2026-10-16 起唯一口径）；planDirection 仅 strategyKey 缺省时兼容", () => {
     assert.equal(trendFollowingOf("多头多"), true);
     assert.equal(trendFollowingOf("空头空"), true);
     assert.equal(trendFollowingOf("多头空"), false);
     assert.equal(trendFollowingOf("空头多"), false);
-    assert.equal(trendFollowingOf(null, "wait2Buy"), true);
-    assert.equal(trendFollowingOf(null, "wait1Sell"), false);
+    assert.equal(trendFollowingOf(null, "2Buy"), true);
+    assert.equal(trendFollowingOf(null, "1Sell"), false);
   });
 
   test("favSeg5Time：段内第 5 块合并K诞生时间（成对 py forming_seg_ready 五块就绪）", () => {
@@ -404,7 +587,7 @@ describe("出场规则：trendFollowingOf / favSeg5Time", () => {
 
 describe("出场规则：simulatePosition（出场状态机）", () => {
   const SIG = (over) => Object.assign(
-    { direction: "short", time: 100, price: 4450, strategyKey: "wait2Sell", planDirection: "空头空" }, over);
+    { direction: "short", time: 100, price: 4450, strategyKey: "2Sell", planDirection: "空头空" }, over);
   // markRes K线：进场K线 @100（high 4452 → beStop = 4455）
   const MR_BARS = [
     bar(100, 4450, 4452, 4448, 4451),
@@ -439,10 +622,11 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
     assert.equal(sim0.beStop, 4455);
   });
 
-  test("beMode=entry（默认）：beStop=进场价 4450，保本出场=0亏损口径（成对 py TestStopBeMode）", () => {
+  test("beMode=entry：beStop=进场价 4450，保本出场=0亏损口径（成对 py TestStopBeMode；"
+      + "2026-10-25 起默认 bi，entry 口径显式指定）", () => {
     const mr = { bis: [bi("up", 0, 100, 4440, 4450), bi("down", 100, 200, 4450, 4430)], bars: MR_BARS };
     const px = { bis: [bi("up", 50, 300, 4440, 4450)], bars: altBars([0, 100, 200, 300, 400]) };
-    const sim = simulatePosition(SIG(), 4463, mr, px); // 默认 EXIT_CFG.beMode=entry
+    const sim = simulatePosition(SIG(), 4463, mr, px, { exitCfg: { beMode: "entry" } });
     assert.equal(sim.beStop, 4450);
     // bar200：TP1 迁移当拍 high 4451 > 4450 即打保本；跳空按开盘 max(4450,4450)=4450
     assert.deepEqual(sim.events.map(e => e.type), ["breakeven", "stopBe"]);
@@ -542,8 +726,8 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
     const px = { bars: altBars([0, 100, 200, 300, 400, 500, 600, 700, 800]),
                  bis: [bi("down", 0, 50, 4460, 4440), bi("up", 50, 150, 4440, 4450),
                        bi("down", 150, 700, 4450, 4430)] };
-    // 2026-10-16 起按 strategyKey 判定（wait1Sell=逆势；旧 planDirection 口径已取消）
-    const sim = simulatePosition(SIG({ planDirection: "多头空", strategyKey: "wait1Sell" }), 4463, mr, px,
+    // 2026-10-16 起按 strategyKey 判定（1Sell=逆势；旧 planDirection 口径已取消）
+    const sim = simulatePosition(SIG({ planDirection: "多头空", strategyKey: "1Sell" }), 4463, mr, px,
                                  { exitCfg: { closePct: 100 } });
     assert.deepEqual(sim.events.map(e => e.type), ["close"]); // tp3a=700 → 下一开盘 800 全平
     assert.equal(sim.events[0].time, 800);
@@ -666,8 +850,8 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
                  ] };
     const px = { bis: [bi("up", 50, 300, 4440, 4450)], bars: altBars([0, 100, 200, 300, 400]) };
     const sigs = [
-      { time: 150, price: 4440, direction: "short", strategyKey: "wait3Sell" }, // 门控前：不追溯
-      { time: 250, price: 4442, direction: "short", strategyKey: "wait3Sell" }, // 4443 < beStop 4455 上移
+      { time: 150, price: 4440, direction: "short", strategyKey: "3Sell" }, // 门控前：不追溯
+      { time: 250, price: 4442, direction: "short", strategyKey: "3Sell" }, // 4443 < beStop 4455 上移
     ];
     const sim = simulatePosition(SIG(), 4463, mr, px,
                                  { exitCfg: { beMode: "extreme", trailOn: true, trailSlip: 1 },
@@ -689,7 +873,7 @@ describe("出场规则：simulatePosition（出场状态机）", () => {
                    bar(500, 4455, 4461, 4450, 4459),
                  ] };
     const px = { bis: [bi("up", 50, 300, 4440, 4450)], bars: altBars([0, 100, 200, 300, 400, 500]) };
-    const sigs = [{ time: 250, price: 4444, direction: "short", strategyKey: "wait3Sell" }];
+    const sigs = [{ time: 250, price: 4444, direction: "short", strategyKey: "3Sell" }];
     const sim = simulatePosition(SIG(), 4463, mr, px,
                                  { exitCfg: { beMode: "extreme", trailOn: true, trailSlip: 1, trailPct: 25 },
                                    trailSigs: sigs });

@@ -63,6 +63,14 @@ CHAN_CFG = {
     # 落在 21:00 4082.42）恢复为笔端点价/时。只改端点，不动合并结构与分型；关=恢复
     # 「中心及之后」旧行为。买卖点口径随之变化（该类低点不再按抬高结构标 2买）。
     "endInnerRecoverOn": True,
+    # 笔内极值守卫（2026-10-25，默认开）：笔端点必须是笔区间真实极值——阶段二任何
+    # 替换/顶替产生的新配对不得在笔内藏更极值。四处挂钩：①同型更极端直接替换前，
+    # 新配对 (prev, k) 违例时落地被吞中间极值为端点（_land_inner_extreme，例：15m
+    # 2026-09-04 12:00 底 4465.49 → 15:45 顶 4490.90 上涨笔内藏 14:45 底 4460.15，
+    # 落地后下跌笔延伸到 14:45）；②前顶/前底作废、③区间极值版作废的新配对 (prev3, k)
+    # 双侧干净才放行；④间隔不足分支 result[-2]=k 顶替与回溯替换保护同守卫。False=全部
+    # 关闭，逐位回退 2026-10-22 口径（近等族实体容差/跳空/锁定端点语义不受影响）。
+    "innerExtremeGuardOn": True,
     # 顶底分形不能包含（单根长K豁免）：该周期单根K线振幅（高-低）≥ 对应点数时，
     # 不参与分型终点侧三根的反向贯穿检查（证据为实体极值 bodyTop/bodyBottom，
     # 影线刺穿不算，2026-10-01 起）。按周期取值（wideBarPointsOf）；0=该周期不豁免。
@@ -116,11 +124,21 @@ CHAN_CFG = {
     # 全周期统一，各周期还需 nearDouble3/15/60/240/D 开启；60m 的 04:00 型案例还需
     # fractalSideRealWick（邻侧压平影线不再误杀分型）。
     "nearDoubleShiftLocked": False,
+    # 吸收成笔即标（2026-10-25，默认开）：死顶/死底近等吸收只追加端点 k，笔起点 last
+    # 原位不动——起点被区间套锁定（上级笔端点）不再阻断吸收（k 与被吸收 f 锁定仍排除）。
+    # 动机 60m 2026-09-15 案例：9-14 21:00 底=240m 端点被锁，10:00 后顶 4317.63 吸收
+    # 从 12:00（批量无锁口径当场成笔）被拖到 17:06 锁集变动才补上，2卖标记与开单窗口
+    # （锚K起 anchorWinBars 根）全部错过。False=2026-10-22 旧口径（last 锁定即排除）。
+    "absorbMarkFast": True,
     # ---- 进场背驰「近等双底二底」扩展（SPEC_divergence_fallback，2026-09-11）----
     # 全量回测对比（XAUUSD 7-20~9-11）：baseline PF 1.78/+483 → M1+rearm PF 2.19/+863，
     # 8-7 08:45 型二底由回退候选捕获（+280.5）；代价为再进场磨损簇（8-14 四连小止损 -68）。
     "sinkFallback": True,        # M1 下沉链回退：停止级无候选时沿链向上一级（仍 < 检测周期）重评
     "sinkFallbackRearm": True,   # M1 配套：同向持仓终局后重置该 (periodX,strategyKey,markRes) 段去重
+    "pointMaxAttempts": 2,       # 同一买卖点最大尝试次数（2026-10-25）：点身份=(periodX,strategyKey,
+                                  # 锚点时间)，成交建仓才计数（互斥压掉不消耗），用满即拒
+                                  # （mark_entry point_attempt_max）；rearm 终局重置只清段去重、
+                                  # 不清此计数（终生上限）；0=不限（旧口径）；默认 2=初始+重试一次
     "macdDivergeBodyOn": True,   # MACD背驰容差开关（2026-10-12）：开=影线未过再比笔端点K实体（默认）；
                                   # 关=只比影线。容差见 macdDivergeTol
     "macdDivergeTol": 0.0,       # MACD背驰固定容差（绝对价差，点）。未严格更极端时价差 ∈ [0, 该值]
@@ -130,7 +148,7 @@ CHAN_CFG = {
                                   # 确认——分型需右邻收盘，固有 1 根本级K线滞后，如 8-6 10:00 顶
                                   # 的下跌笔到 21:00 才可见、23:00 才成笔）
     "expectBiMinBars": 5,        # 预期够笔的K线数门槛（本级原始K线数）
-    "divergeConfirm": False,     # M4 背驰进场时机（回测页面可选，默认当下）：True=极值K线
+    "divergeConfirm": True,      # M4 背驰进场时机（回测页面可选，2026-10-25 起默认确认）：True=极值K线
                                   # 右邻K收盘（分型可见最早时刻的代理）后的下一根 fine 开盘成交
     "entryMacdShrink": True,     # 进场MACD柱缩闸（2026-09-23）：背驰级别最近两根已收K线的
                                   # 柱状体（|macd|）变小才出信号——动能仍在放大时不进场；
@@ -155,6 +173,27 @@ CHAN_CFG = {
     "strong2BuyMacdOn": False,   # 强二买开单 0 轴闸（2026-10-12）：开=DIF > -macdZeroTol 才进；
                                   # 默认关=强二买不看 0 轴。过前高闸对强二买取消（1买的
                                   # 等待回调后做2买仍保留过前高与 0 轴）
+    "pointClasses": "1,2s,2xs,3s,4s",  # 进场买卖点类别白名单（2026-10-25 起默认=一类/强二类/
+                                  # 强类二/强三类/强四类五项；此前默认 13 项全选）
+                                  # （2026-10-24，参数中心 entry 桶；同日三次口径=三类/四类族也拆
+                                  # 强弱）：13 项=一类/强二类/弱二类/强类二/弱类二/强三类/弱三类/
+                                  # 强类三/弱类三/强四类/弱四类/强类四/弱类四，买卖两侧对称。
+                                  # 二类族强弱=1买后反弹过/未过前高（旧口径）；3/4族强弱
+                                  # （_mark_third_fourth_strong）=点后同向腿背驰：弱3=2类后上推腿
+                                  # 对1类后反弹腿顶背驰、弱4=3类后上推腿对2类后上推腿背驰
+                                  # （卖侧镜像），判不出即强。键路由：强→2Buy/2Sell/3Buy/3Sell/
+                                  # Buy/Sell、弱→*Bear（2026-10-24 起策略键去 wait 前缀）。
+                                  # 浅过滤：锚点仍取全类型最新点，最新锚点类别未勾→本拍跳过
+                                  # 不开单、不回溯更早的点。旧值 "2"/"2x"/"3"/"3x"/"4"/"4x"
+                                  # 由 mark_entry 运行期别名展开（2→2s+2w、3→3s+3w 等）。
+                                  # 仅 mark_entry 进场链消费（买卖点标记/收笔不读），核心算法闲置
+    "srSideGateOn": True,       # 近支阻按方向取侧（2026-10-25）：fib/BOLL 位按信号方向收窄——
+                                  # 做多只认 SUP（最近上涨笔回撤支撑/布林下轨与下侧中轨）、做空
+                                  # 只认 RES（最近下跌笔反弹阻力/布林上轨与上侧中轨）；密集区
+                                  # 与人工位不按侧过滤。动机：9-4 04:15 60m 2Buy@4470.55 命中
+                                  # 下跌笔 0.382 反弹位 4485.98——买侧参照应为前上涨笔
+                                  # 4282.625→4510.93 的回撤位（最近 4423.72 距 46.8>near 30，
+                                  # 该信号按新口径被拒）。False=两侧皆可命中（旧口径）
     # ---- 三处规则修复（2026-09-26 用户逐条确认；详见 plan/三处规则修复）----
     # anchorUndecidedSkip/anchorUndecidedMinBars（A 开关）已于 2026-10-10 淘汰；
     # strategyOf/classifySecond（计划层三档路由/四态分类）已于 2026-10-16 随交易计划
@@ -174,7 +213,7 @@ CHAN_CFG = {
     # 动机：避免小周期从起始日期全量画笔过密，及 3m 为覆盖起始日期加载数月历史超时。
     # 值 0 = 该周期不限窗口（仅手动 --chan-cfg 可传 0；参数页 min=1）。
     "windowDays3": 15,
-    "windowDays15": 30,
+    "windowDays15": 50,     # 2026-10-25 起默认 50（此前 30）
     "windowDays30S": 3,
     # 链B 小周期绘制/加载窗口（2026-10-23）：按每日K线密度递进（1m≈1440根/日=5天，
     # 5m≈288根/日=20天，30m≈48根/日=60天；60m 及以上不限）。Python 引擎不读，仅 JS 消费。
@@ -1299,11 +1338,18 @@ def _deadNearAbsorb(ctx, last, head, k):
     仍成立）且 fractalRangeClear 严格通过。
     例：60m 2026-09-14 21:00 底 4253.64 → 09-15 00:00 顶 4317.83（间隔仅 3 根
     被丢弃）→ 10:00 后顶 4317.63 差 0.20 被极值守卫忽略——吸收后上涨笔
-    4253.64 → 4317.63 成笔。排除：任一相关分型 locked（区间套优先）。
+    4253.64 → 4317.63 成笔。排除：k/被吸收 f locked（区间套优先）；last 锁定
+    2026-10-25 起默认放行（absorbMarkFast，成笔即标——起点原位不动）。
     周期门控 ctx.nearDouble（nearDoubleOn(res)，60/240/D）。"""
     if not ctx.nearDouble:
         return None
-    if k.get("locked", False) or last.get("locked", False):
+    if k.get("locked", False):
+        return None
+    # 2026-10-25 吸收成笔即标（absorbMarkFast，默认开）：last（笔起点）锁定不再阻断
+    # ——吸收只追加端点 k，锁定的起点原位不动（区间套要的下级复现上级端点不受影响）；
+    # 批量无锁口径本就当场成笔，起点锁排除只是增量/重同步侧的过度保守。False 恢复
+    # 2026-10-22 旧口径（任一相关分型 locked 即排除）。
+    if last.get("locked", False) and not CHAN_CFG.get("absorbMarkFast", True):
         return None
     is_top = k["type"] == "top"
     thr = CHAN_CFG["nearDoubleFixed"]
@@ -1456,14 +1502,16 @@ def _bar_extreme_high(m):
     return p, t
 
 
-def _deeper_opposite_bar(ctx, prev, last, k):
+def _deeper_opposite_bar(ctx, prev, last, k, lo_ref=None):
     """last 与 k 同类型时，找 (last, k) 内比本笔起点 prev 更极端的反向价。
 
     顶与顶之间的低点若低于起点底，这段已不是同一笔上涨；底对称。
     比较含长影压平前的真低/真高（_origLow/_wickHigh）：15m 2026-09-09 23:15
     插针 4375.155 低于 23:00 结构低 4380.39，底应落在 23:15。
-    返回落在该极值合并K上的合成分型，没有则 None。同价取更晚的一根。"""
-    lo = last["mergedIdx"] + 1
+    返回落在该极值合并K上的合成分型，没有则 None。同价取更晚的一根。
+    lo_ref（2026-10-25 笔内极值落地用）：搜索下界改用该端点（默认 last）——
+    被超越极值可能藏在 (ref, last) 段，只搜 (last, k) 会漏。方向仍由 last 决定。"""
+    lo = (lo_ref or last)["mergedIdx"] + 1
     hi = k["mergedIdx"]
     if lo >= hi:
         return None
@@ -1525,6 +1573,191 @@ def _bridge_same_type_extreme(ctx, head, last, k):
     return _stkCons(k, _stkCons(bridge, head))
 
 
+def _pair_inner_clean(ctx, a, b):
+    """配对 (a, b) 笔内极值双侧结构校验（innerExtremeGuardOn 家族共用）。
+
+    开区间 (a.mergedIdx, b.mergedIdx) 内的合并K线结构极值不得超越任一端点：
+    a 型端（起点侧）不得被更极端超越、b 型端（终点侧）同 noMoreExtremeInside。
+    noMoreExtremeInside 只护终点侧——阶段二替换产生「起点后藏着比起点更极端」
+    的违例全靠本函数起点侧兜住（例：15m 2026-09-04 上涨笔起点 12:00 底 4465.49
+    之后藏着 14:45 底 4460.155）。"""
+    for i in range(a["mergedIdx"] + 1, b["mergedIdx"]):
+        m = ctx.merged[i]
+        if a["type"] == "top" and m["high"] > a["high"]:
+            return False
+        if a["type"] == "bottom" and m["low"] < a["low"]:
+            return False
+        if b["type"] == "bottom" and m["low"] < b["low"]:
+            return False
+        if b["type"] == "top" and m["high"] > b["high"]:
+            return False
+    return True
+
+
+def _pair_inner_violation_idx(ctx, a, b):
+    """配对 (a, b) 笔内第一个「超近等容差」的更极值柱（守卫钩子触发判据）。
+
+    与严格结构校验 _pair_inner_clean 的区别：近等族规则（平台取后/死顶死底
+    吸收/反弹不成笔取后）按实体价 ≤ nearDoubleFixed 容差**刻意**把端点放在
+    非绝对极值上（例：60m 2026-08-06 近等取后底 4229.875，前底影线低点
+    4223.505、实体差 0.915——设计如此，修复会打架近等语义）。故只有影线差
+    **与**实体差都超容差才算真违例（与审计校验器口径一致；9-4 案影线差 5.34、
+    实体差 4.21 双超）。返回违例柱 mergedIdx，无则 None。"""
+    thr = CHAN_CFG["nearDoubleFixed"]
+    for i in range(a["mergedIdx"] + 1, b["mergedIdx"]):
+        m = ctx.merged[i]
+        for ref in (a, b):
+            if ref["type"] == "top":
+                if m["high"] <= ref["high"] + thr:
+                    continue
+                br = _nearBodyPx(ctx.merged, ref["mergedIdx"], True)
+                bv = _nearBodyPx(ctx.merged, i, True)
+                if br is not None and bv is not None and (bv - br) <= thr:
+                    continue  # 实体容差内——近等族语义
+                return i
+            else:
+                if m["low"] >= ref["low"] - thr:
+                    continue
+                br = _nearBodyPx(ctx.merged, ref["mergedIdx"], False)
+                bv = _nearBodyPx(ctx.merged, i, False)
+                if br is not None and bv is not None and (br - bv) <= thr:
+                    continue
+                return i
+    return None
+
+
+def _deeper_same_type_bar(ctx, ref, k):
+    """push 起点侧落地用（2026-10-25）：(ref, k) 内比 ref 更极端的**同型**极值柱。
+
+    与 _deeper_opposite_bar 互补：同型替换场景 last/k 同型、bridge 反型；push 场景
+    last/k 异型、bridge 与被超越起点 ref 同型。含长影真极值、同价取更晚，同口径。"""
+    lo, hi = ref["mergedIdx"] + 1, k["mergedIdx"]
+    if lo >= hi:
+        return None
+    merged, eps = ctx.merged, 1e-9
+    if ref["type"] == "top":
+        best_i, best_p, best_t = None, None, None
+        for i in range(lo, hi):
+            p, t = _bar_extreme_high(merged[i])
+            if best_p is None or p >= best_p - eps:
+                best_i, best_p, best_t = i, p, t
+        if best_p is None or best_p <= ref["high"] + eps:
+            return None
+        m = merged[best_i]
+        return {"mergedIdx": best_i, "type": "top", "high": best_p, "low": m["low"],
+                "time": best_t}
+    best_i, best_p, best_t = None, None, None
+    for i in range(lo, hi):
+        p, t = _bar_extreme_low(merged[i])
+        if best_p is None or p <= best_p + eps:
+            best_i, best_p, best_t = i, p, t
+    if best_p is None or best_p >= ref["low"] - eps:
+        return None
+    m = merged[best_i]
+    return {"mergedIdx": best_i, "type": "bottom", "high": m["high"], "low": best_p,
+            "time": best_t}
+
+
+def _land_inner_extreme(ctx, head, last, k, ref=None):
+    """笔内极值落地（2026-10-25，innerExtremeGuardOn 默认开；修复优先、拒绝死锁）。
+
+    两个调用场景，被超越端点 ref 不同：
+    ① 同型更极端直接替换（biStep 同型分支）：直接替换 result[-1]=k 会让新配对
+       (prev, k) 笔内藏比 prev 更极端的反向极值——prev（起点）受「恰好成笔+回调
+       非浅」等保护拦下更极端分型、随后 k 同型替换 last 时被丢分型的极值被永久
+       吞进 prev 起步的笔。ref=prev（默认），bridge 于 (last, k) 区间找比 prev
+       更极端的反向极值（例：15m 2026-09-04 09:00 顶 4487.55 → 12:00 底 4465.49
+       + 12:00→15:45 顶 4490.90 内藏 14:45 底 4460.155，落地后下跌笔延伸到
+       14:45@4460.155 + 上涨笔 14:45→15:45）。
+    ② push 起点侧（biStep 异类型成笔分支）：noMoreExtremeInside 只护终点侧，
+       (last, k) 开区间藏着比 last 更极端的反向极值时（例：240m 2022-02-24
+       乌克兰尖峰顶 1974.485 被间隔不足丢弃后，下跌笔起点停在 22-02-22 1914.32），
+       ref=last，bridge 于 (last, k) 区间找比 last 更极端者替换起点。
+
+    落地形态相同：[.., below, last] + k → [.., below, bridge, k]（被超越端点及其后
+    栈顶一并让位）。条件：bridge 与 k 成笔且双侧干净；bridge 与 below（场景①为
+    prev3=head[1][1][0]、场景②为 head[1][0]）成笔且双侧干净（below 不存在时跳过）。
+    锁定端点（区间套优先）与跳空锁定笔不参与。任一条件不满足返回 None，调用方
+    维持旧行为（直接替换/直接 push）——绝不拒绝式拦截。"""
+    if _stkLen(head) < 2:
+        return None
+    if head[1][0].get("locked", False) or last.get("locked", False) or k.get("locked", False):
+        return None
+    if head[1][0].get("gapLocked", False) or last.get("gapLocked", False):
+        return None
+    ref = head[1][0] if ref is None else ref
+    below = head[1] if ref is last else head[1][1]
+    # push 场景（ref is last）：last/k 异型，bridge 与起点同型——用同型搜索；
+    # 同型替换场景（ref=prev）：last/k 同型，bridge 反型——用既有反向搜索。
+    if ref is last:
+        bridge = _deeper_same_type_bar(ctx, ref, k)
+    else:
+        bridge = _deeper_opposite_bar(ctx, ref, last, k, lo_ref=ref)
+    if bridge is None:
+        return None
+    if not _pair_forms_bi(ctx, bridge, k) or not _pair_inner_clean(ctx, bridge, k):
+        return None
+    if below is not None:
+        if below[0].get("locked", False):
+            return None
+        if not _pair_forms_bi(ctx, below[0], bridge) or not _pair_inner_clean(ctx, below[0], bridge):
+            return None
+    if CHAN_CFG["debug"]:
+        kind = "顶" if k["type"] == "top" else "底"
+        mid = "底" if bridge["type"] == "bottom" else "顶"
+        px = bridge["low"] if bridge["type"] == "bottom" else bridge["high"]
+        print(f"[阶段二] 笔内极值落地: {'顶' if ref['type']=='top' else '底'}@{ref['mergedIdx']}"
+              f"({ref['high'] if ref['type']=='top' else ref['low']}) 侧藏更极值，落地 {mid}@{bridge['mergedIdx']}"
+              f"({px}) 为端点，接入 {kind}@{k['mergedIdx']}")
+    return _stkCons(k, _stkCons(bridge, below))
+
+
+def _land_replace_pair(ctx, head, k, anchor):
+    """跨类型顶替（result[-2]=k 族：前顶/前底作废、区间极值版、间隔不足顶替）的
+    笔内极值落地（2026-10-25，innerExtremeGuardOn 默认开；修复优先）。
+
+    顶替产生的新配对 (anchor, k)（anchor=result[-3]）笔内藏更极值时两种修复：
+    ①起点侧（anchor 被超越）：bridge 替换 anchor 落地为 [.., below(anchor), bridge, k]；
+    ②终点侧（k 被超越）：bridge 替换 k 落地为 [.., anchor, bridge]（bridge=区间内
+    比 k 更极端者，例：3m 2020-03-09 12:48 低 1657.62 被吞后下跌笔终点停在
+    14:03@1663.05，bridge 即 12:48 极值）。两形态都要求新配对成笔（_pair_forms_bi
+    全套）且双侧干净；anchor 之下的挂接笔同样校验。任一条件不满足返回 None，
+    调用方维持原顶替（旧行为）。锁定端点与跳空锁定笔不参与。"""
+    if anchor is None or k is None or head is None or _stkLen(head) < 3:
+        return None
+    if anchor.get("locked", False) or k.get("locked", False) \
+            or head[0].get("locked", False) or head[1][0].get("locked", False):
+        return None
+    if anchor.get("gapLocked", False) or head[0].get("gapLocked", False):
+        return None
+    if _pair_inner_violation_idx(ctx, anchor, k) is None:
+        return None  # 无超容差违例（近等族语义内），维持原顶替
+    # ① 起点侧：anchor 被超越 → bridge 替换 anchor
+    bridge = _deeper_opposite_bar(ctx, anchor, head[0], k, lo_ref=anchor)
+    if bridge is not None and _pair_forms_bi(ctx, bridge, k) and _pair_inner_clean(ctx, bridge, k):
+        below = head[1][1][1]
+        if below is None or (not below[0].get("locked", False)
+                             and _pair_forms_bi(ctx, below[0], bridge)
+                             and _pair_inner_clean(ctx, below[0], bridge)):
+            if CHAN_CFG["debug"]:
+                mid = "底" if bridge["type"] == "bottom" else "顶"
+                px = bridge["low"] if bridge["type"] == "bottom" else bridge["high"]
+                print(f"[阶段二] 笔内极值落地(顶替起点侧): {'顶' if anchor['type']=='top' else '底'}@{anchor['mergedIdx']}"
+                      f"({anchor['high'] if anchor['type']=='top' else anchor['low']}) 被 {mid}@{bridge['mergedIdx']}"
+                      f"({px}) 替换，接入 {'顶' if k['type']=='top' else '底'}@{k['mergedIdx']}")
+            return _stkCons(k, _stkCons(bridge, below))
+    # ② 终点侧：k 被超越 → bridge 替换 k
+    bridge = _deeper_opposite_bar(ctx, k, head[0], k, lo_ref=anchor)
+    if bridge is not None and _pair_forms_bi(ctx, anchor, bridge) and _pair_inner_clean(ctx, anchor, bridge):
+        if CHAN_CFG["debug"]:
+            mid = "底" if bridge["type"] == "bottom" else "顶"
+            px = bridge["low"] if bridge["type"] == "bottom" else bridge["high"]
+            print(f"[阶段二] 笔内极值落地(顶替终点侧): {'顶' if k['type']=='top' else '底'}@{k['mergedIdx']}"
+                  f"({k['high'] if k['type']=='top' else k['low']}) 让位 {mid}@{bridge['mergedIdx']}({px})")
+        return _stkCons(bridge, head[1][1])
+    return None
+
+
 def biStep(ctx, head, k):
     """阶段二单步（回溯替换）：把分型 k 并入不可变结果栈 head，返回新 head。
     规则体与原 buildBi 阶段二逐行一致；result[-n] 栈操作映射见 _stkCons 注释。
@@ -1557,6 +1790,15 @@ def biStep(ctx, head, k):
             bridged = _bridge_same_type_extreme(ctx, head, last, k)
             if bridged is not None:
                 return bridged
+            # 笔内极值守卫①（2026-10-25）：直接替换会令新配对 (prev, k) 笔内藏更极值
+            # 时，尝试落地被吞中间极值为端点（见 _land_inner_extreme）；拆不开则维持原
+            # 直接替换（旧行为）——拒绝式拦截会死锁端点推进（后续成笔/替换连锁被拒，
+            # 最终巨型笔吞掉一切），违例笔留给后续结构自然重组。
+            if more and CHAN_CFG.get("innerExtremeGuardOn", True) and _stkLen(head) >= 2 \
+                    and _pair_inner_violation_idx(ctx, head[1][0], k) is not None:
+                landed = _land_inner_extreme(ctx, head, last, k)
+                if landed is not None:
+                    return landed
             if more:
                 if last.get("_shiftMid") is not None:
                     k["_shiftAnchor"] = last.get("_shiftAnchor")
@@ -1630,9 +1872,27 @@ def biStep(ctx, head, k):
                 print(f"[阶段二] 前顶/前底作废: {prev2['mergedIdx']} 被 {k['mergedIdx']} 突破")
             if prev2.get("macdCross", False) is True:
                 k["macdCross"] = True
+            # 笔内极值守卫③（2026-10-25）：顶替的新配对 (prev3, k) 笔内藏更极值时
+            # 尝试落地修复（_land_replace_pair）；拆不开维持原顶替。
+            if CHAN_CFG.get("innerExtremeGuardOn", True):
+                landed = _land_replace_pair(ctx, head, k, prev3)
+                if landed is not None:
+                    return landed
             return _stkCons(k, head[1][1])            # result[-2] = k; pop()
     if ctx.isValid(last, k) and (ctx.noMoreExtremeInside(last, k) or last.get("gapLocked", False)) and \
        (ctx.fractalRangeClear(last, k) or last.get("gapLocked", False)):
+        # 笔内极值守卫②（push 路径，2026-10-25）：noMoreExtremeInside 只护终点侧——
+        # (last, k) 开区间藏着比 last（起点）更极端的反向极值时（例：240m 2022-02-24
+        # 乌克兰尖峰顶 1974.485 被间隔不足丢弃后，下跌笔起点停在 22-02-22 的 1914.32），
+        # 尝试以该极值替换 last 为起点再成笔（_land_inner_extreme, ref=last，拆开
+        # [.., prev, last] + k 为 [.., prev, bridge, k]）；拆不开维持原 push（旧行为，
+        # 拒绝会死锁）。跳空成笔（gapLocked）走跳空语义不参与。
+        if CHAN_CFG.get("innerExtremeGuardOn", True) and not last.get("gapLocked", False) \
+                and not last.get("locked", False) and not k.get("locked", False) \
+                and _pair_inner_violation_idx(ctx, last, k) is not None:
+            landed = _land_inner_extreme(ctx, head, last, k, ref=last)
+            if landed is not None:
+                return landed
         return _stkCons(k, head)                      # result.append(k)
     elif ctx.isValid(last, k):
         # 前顶/前底作废（区间极值版，2026-10-09）：k 间隔足够但未通过成笔判据（笔内极值
@@ -1665,6 +1925,11 @@ def biStep(ctx, head, k):
                           f"{'顶' if last['type']=='top' else '底'}@{last['mergedIdx']}")
                 if prev.get("macdCross", False) is True:
                     k["macdCross"] = True
+                # 笔内极值守卫③（2026-10-25）：同上，区间极值版顶替的落地修复。
+                if CHAN_CFG.get("innerExtremeGuardOn", True):
+                    landed = _land_replace_pair(ctx, head, k, prev3)
+                    if landed is not None:
+                        return landed
                 return _stkCons(k, head[1][1])        # result[-2] = k; pop()
         # 死顶/死底近等吸收（2026-10-22，详见 _deadNearAbsorb docstring）：双顶/双底的
         # 前一个顶/底自身不成笔（间隔不足）时，与其近等的后顶/后底吸收它作为笔端点。
@@ -1806,6 +2071,14 @@ def biStep(ctx, head, k):
                                       f"{'顶' if prev3['type']=='top' else '底'}@{prev3['mergedIdx']} 更极端，保留 last 为端点，作废 prev，暂不接入 k")
                             return _stkCons(last, head[1][1][1])   # result[-3]=last; pop(); pop()
                     if not last.get("locked", False) and not prev.get("locked", False):
+                        # 笔内极值守卫③（2026-10-25）：间隔不足顶替（脆弱笔/近等取后/
+                        # 锁定落地共用出口）的新配对 (prev3, k) 笔内藏更极值时尝试落地
+                        # 修复（_land_replace_pair，如 240m 2022-02-24 乌克兰尖峰顶
+                        # 1974.485 被吞案）；拆不开维持原顶替。
+                        if CHAN_CFG.get("innerExtremeGuardOn", True) and _stkLen(head) >= 3:
+                            landed = _land_replace_pair(ctx, head, k, head[1][1][0])
+                            if landed is not None:
+                                return landed
                         if k.get("locked", False) and moreExtreme and prev_last_valid_bi and CHAN_CFG["debug"]:
                             print(f"[阶段二] 锁定端点落地: {'顶' if k['type']=='top' else '底'}@{k['mergedIdx']}"
                                   f"({k['high'] if k['type']=='top' else k['low']}) 顶替已成笔的 "
@@ -3335,6 +3608,69 @@ def _third_family_v2(bis, upper_bis, zss, t3tol, is_sell):
     return dedup
 
 
+def _leg_after_point(bis, t, direction, tol_sec):
+    """点后首根同向笔（2026-10-24 3/4 族强弱口径）：startTime >= t - tol_sec 的
+    最早 direction 笔。1类点是上级笔端点在小级别的投影，其时间与小级别笔起点可差
+    一根K（_lower_vertex_of 校准常态为对齐），容差 tol_sec=一根 barSec 兜住；
+    找不到返回 None（调用方按「判不出=强」处理）。"""
+    best = None
+    for b in bis:
+        if b["type"] != direction or (b["startTime"] or 0) < t - tol_sec:
+            continue
+        if best is None or b["startTime"] < best["startTime"]:
+            best = b
+    return best
+
+
+def _mark_third_fourth_strong(points, bis, macd_arr, bar_sec, is_sell):
+    """3/4 族强弱标注（2026-10-24 用户口径，与 JS chan_core.js markThirdFourthStrong 镜像）：
+    弱3类 = 2类点后首根上推腿(R2) 对 1类点后首根反弹腿(R1) 顶背驰；
+    弱4类 = 3类点后首根上推腿(R3) 对 2类点后首根上推腿(R2) 顶背驰；
+    卖侧完全镜像（点后首根下推腿，底背驰）。语义：推动腿动能逐段衰竭 → 踩在衰竭
+    趋势上的 3/4 类点为弱。
+    前点=同侧更早最近点（3族取(1类, 2族含类2)、4族取(2族含类2, 3族含类3)）；
+    refer=较早前点的腿、cur=较晚前点的腿，isBiDiverge 用本周期 macd（三判据+
+    divergeDurRatio 时长闸）。前点/腿缺失或 macd 空 → 判不出=强（「出现了背驰
+    即为弱」的逆否）。只写 3/4 族点的 strong；纯函数于当前合格笔视图，与二类族
+    strong 同重算口径。work_cache 键不含 macd 安全：腿窗口落在 append-only macd
+    的冻结历史段，条目落定后不再变化。"""
+    if not points:
+        return
+    leg_dir = "down" if is_sell else "up"
+    first_t = "1卖" if is_sell else "1买"
+    second_ts = ("2卖", "类2卖") if is_sell else ("2买", "类2买")
+    third_ts = ("3卖", "类3卖") if is_sell else ("3买", "类3买")
+    subject_ts = third_ts + (("4卖", "类4卖") if is_sell else ("4买", "类4买"))
+
+    def _latest_before(types, t):
+        best = None
+        for q in points:
+            if q["type"] in types and q["time"] < t:
+                if best is None or q["time"] >= best["time"]:
+                    best = q
+        return best
+
+    for p in points:
+        if p["type"] not in subject_ts:
+            continue
+        if p["type"] in third_ts:
+            preds = [_latest_before((first_t,), p["time"]),
+                     _latest_before(second_ts, p["time"])]
+        else:
+            preds = [_latest_before(second_ts, p["time"]),
+                     _latest_before(third_ts, p["time"])]
+        preds = [q for q in preds if q is not None]
+        p["strong"] = True  # 判不出即强
+        if len(preds) < 2:
+            continue
+        preds.sort(key=lambda q: q["time"])
+        ref_leg = _leg_after_point(bis, preds[0]["time"], leg_dir, bar_sec)
+        cur_leg = _leg_after_point(bis, preds[1]["time"], leg_dir, bar_sec)
+        if ref_leg is None or cur_leg is None:
+            continue
+        p["strong"] = not isBiDiverge(cur_leg, ref_leg, macd_arr)
+
+
 def _lower_vertex_of(lower_bis, t, p, bar_sec, is_top, lo=None, hi=None, verts=None):
     """大级别笔端点落到本级顶点（一类点必须落在小级别）。
 
@@ -3634,6 +3970,7 @@ def findBuyPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0.
         if not allow(p["time"]) or p["time"] in first_times or p["time"] in second_times:
             continue
         points.append(p)
+    _mark_third_fourth_strong(points, bis, macdArr, barSec, False)  # 3/4族强弱（2026-10-24）
     points.sort(key=lambda p: p["time"])  # 时间升序稳定排序；同刻优先级 一类 > 二类族 > 三类族
     return points
 
@@ -3672,12 +4009,15 @@ def findSellPoints(bis, upperBis, macdArr, barSec, class2ZsTol=0.0, thirdZsTol=0
         if not allow(p["time"]) or p["time"] in first_times or p["time"] in second_times:
             continue
         points.append(p)
+    _mark_third_fourth_strong(points, bis, macdArr, barSec, True)  # 3/4族强弱（2026-10-24）
     points.sort(key=lambda p: p["time"])
     return points
 
 
-def keepRecentAll(points, keep=10):
-    """每周期买卖点不分类（买+卖合并），只保留时间上最近 keep 个（与 JS 版 keepRecentAll 对齐）。"""
+def keepRecentAll(points, keep=100):
+    """每周期买卖点不分类（买+卖合并），只保留时间上最近 keep 个（与 JS 版 keepRecentAll
+    对齐；2026-10-25 起签名默认随 mark_buy_sell.KEEP 固化为 100，此前 10——主流程
+    均显式传 keep=KEEP，此默认仅兜底）。"""
     n = max(1, int(keep) or 1)
     pts = sorted(points, key=lambda p: p["time"], reverse=True)[:n]
     return sorted(pts, key=lambda p: p["time"])

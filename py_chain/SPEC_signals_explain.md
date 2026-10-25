@@ -59,7 +59,8 @@
 - 仅 import `labels` + `chan_core.fmtT`（stdlib；不 import backtest/webapp，保启动快）。
 - CLI：`python -m py_chain.explain_signal [--id N | --latest | 模糊时间串如 "9-5 02:00" | --list] [--json]`。
 - 读 `signals.ndjson` 折叠 `{op,row}` 按 id（后写覆盖；末行损坏容忍忽略）。按 status 渲染中文段落：
-  - 表头：行号/模式/方向/周期/策略 label/背驰级别/信号时间·价/近支阻/状态；
+  - 表头：行号/模式/方向/周期/策略 label/背驰级别/信号时间·价/近支阻/状态
+    （近支阻=进场闸门命中位；2026-10-25 起 fib/BOLL 按信号方向取侧——做多 SUP/做空 RES，密集区/人工位两侧，关闭开关=旧口径两侧皆可命中）；
   - `信号`/`同向过滤` → signalNote + suppressedWhy（旧数据行缺 label 时用 STRATEGY_LABELS 按 key 兜底反查）；
   - `持仓中`/`已平仓` → entryWhy，逐条出场事件 `- {fmtT} {EXIT_LABELS[e.type]} @ 价：{e.why}`，终局附 exitWhy + pnl。
 - 文件缺失/过旧 → 提示"先跑 webapp 回测（表格行号即 id），或 curl http://127.0.0.1:8000/api/signals"。

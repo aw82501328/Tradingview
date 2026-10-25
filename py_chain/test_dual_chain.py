@@ -149,7 +149,7 @@ class SignalLogChainTests(unittest.TestCase):
         from .webapp import SignalLog
         sl = SignalLog()
         base = {"strategy": "chan_v1", "symbol": "X", "time": 100, "periodX": "240",
-                "direction": "long", "strategyKey": "wait2Buy"}
+                "direction": "long", "strategyKey": "2Buy"}
         r1 = sl.append_signal("backtest", dict(base, chain="A"))
         r2 = sl.append_signal("backtest", dict(base, chain="B"))
         self.assertIsNotNone(r1)

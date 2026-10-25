@@ -58,7 +58,7 @@ class TestEngineContractMult(unittest.TestCase):
         """成交一笔合成信号（confirm 口径：nextOpen 成交），返回 trade dict。"""
         trades = []
         pending = [{"direction": "short", "time": 60, "periodX": "3", "markRes": "3",
-                    "strategyKey": "wait2Sell", "price": 100.0, "nearSr": None}]
+                    "strategyKey": "2Sell", "price": 100.0, "nearSr": None}]
         eng._fill_pending(trades, pending, nextOpen=101.0, nextTime=120,
                           stats={"executed": 0, "suppressed": 0})
         self.assertEqual(len(trades), 1)

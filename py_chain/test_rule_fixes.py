@@ -77,7 +77,7 @@ class DivergeReferZsTests(unittest.TestCase):
     def test_on_even_zs_without_same_dir_entering(self):
         # 偶数笔中枢（b1 反向）：无同向入中枢段 → 2026-10-10 用户口径修正：
         # 回退取容器内最外侧合格同向段（中枢构成大段）作参照，不再返回 None
-        # （60m wait2BuyBear 10-8 案例：入中枢大段被 buildZS 吸收为构成笔、
+        # （60m 2BuyBear 10-8 案例：入中枢大段被 buildZS 吸收为构成笔、
         #   进入笔成反向段，ZS 回退被推出容器 → 原判 no_refer 一次比较都没做）。
         bis = [
             _bi("down", 0, 30, 12.0, 9.0),

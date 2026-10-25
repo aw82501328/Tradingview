@@ -3,7 +3,7 @@
 
 核心不变量（restart 不变性）：任意拍中断 → 重启重放恢复 → 最终 trades 与连续运行
 逐字段一致、动作序列一致。窗口 OANDA:XAUUSD 2026-06-01~06-15（3 笔成交，含
-wait2Buy/stopBe/waitSell/close，覆盖进场/SL对齐/保本改单/终局平仓）。
+2Buy/stopBe/Sell/close，覆盖进场/SL对齐/保本改单/终局平仓）。
 
 运行：py -3.12 -m unittest py_chain.test_live_trader（无需 MT5 终端，约 2~3 分钟）。
 """

@@ -1,6 +1,6 @@
 ---
 name: mark-entry
-description: Mark entry signals (进出场) on the TradingView Desktop chart via CDP. Since 2026-10-16 consumes chan-core buy/sell points directly (same source as mark-buy-sell marks; no longer reads plan_<symbol>.json) — each detection timeframe takes the latest buy-side and sell-side anchors on recent stroke endpoints, maps point type + strong flag to one of 12 entry strategies via pointStrategyOf (1买→wait1Buy direct entry, 2买/类2买 strong→wait2Buy / weak→wait2BuyBear, 3买→wait3Buy, 类3/4族→waitBuy; sell side mirrored), validates that strategy's entry conditions (enough strokes / breaking previous low-high / MACD zero axis / weaker momentum leaving ZhongShu / lower-timeframe divergence / near S/R level), and marks buy/sell arrows on the divergence timeframe. Long = up red arrow, short = down green arrow. Optional 震荡 gate (--range-res, off by default, from trading-plan computeRegime) and 顺势 filter (--trend-res, off by default). Also simulates exits per position (stop = intrabar break of the direction-aware S/R reference; TP1 breakeven after divergence-TF stroke completes; TP2 half-close after detection-TF stroke completes; TP3 full close on detection-TF breaking prior low/high) with same-direction mutual exclusion, marking exits as yellow arrows (title EXIT_<divergence TF>).
+description: Mark entry signals (进出场) on the TradingView Desktop chart via CDP. Since 2026-10-16 consumes chan-core buy/sell points directly (same source as mark-buy-sell marks; no longer reads plan_<symbol>.json) — each detection timeframe takes the latest buy-side and sell-side anchors on recent stroke endpoints, maps point type + strong flag to one of 12 entry strategies via pointStrategyOf (1买→1Buy direct entry, 2买/类2买 strong→2Buy / weak→2BuyBear, 3买→3Buy, 类3/4族→Buy; sell side mirrored), validates that strategy's entry conditions (enough strokes / breaking previous low-high / MACD zero axis / weaker momentum leaving ZhongShu / lower-timeframe divergence / near S/R level), and marks buy/sell arrows on the divergence timeframe. Long = up red arrow, short = down green arrow. Optional 震荡 gate (--range-res, off by default, from trading-plan computeRegime) and 顺势 filter (--trend-res, off by default). Also simulates exits per position (stop = intrabar break of the direction-aware S/R reference; TP1 breakeven after divergence-TF stroke completes; TP2 half-close after detection-TF stroke completes; TP3 full close on detection-TF breaking prior low/high) with same-direction mutual exclusion, marking exits as yellow arrows (title EXIT_<divergence TF>).
 disable-model-invocation: true
 ---
 
@@ -68,7 +68,7 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 | `--slip-be-atr-k=K` | 保本滑点ATR系数（同上口径） | `0` |
 | `--exit-min-merged=N` | 出场成笔预期门槛（形成段合并后 ≥N 根K；WEB 参数中心「进出场」模块同名透传） | `5` |
 | `--zs-weak-ratio=K` | 出中枢力度衰减比例（离开笔幅度 < 进入笔×K 视为变弱；WEB 参数中心同名透传） | `1.0` |
-| `--chan-cfg=<json>` | 缠论核心 CHAN_CFG 整体覆盖（WEB 参数中心透传，未知键闲置无害） | 不覆盖 |
+| `--chan-cfg=<json>` | 缠论核心 CHAN_CFG 整体覆盖（WEB 参数中心透传，未知键闲置无害）。含 `pointClasses` 买卖点类别白名单（2026-10-24：最新锚点类别未勾→跳过不开单、不回溯；2026-10-25 起默认五项 1/2s/2xs/3s/4s、此前默认全选；13 项全族拆强弱，旧值 2/2x/3/3x/4/4x 别名展开）。`pointMaxAttempts` 同一点最大尝试次数（2026-10-25，默认 2、0=不限）**仅回测/实盘引擎生效**（成交建仓才计数，用满即拒；终局重置不清计数）——标记层单次快照评估无 fired/rearm 状态机，该键传入闲置无害、图上标记不受影响 | 不覆盖 |
 | `--dry` | 只计算不绘图 | 关闭 |
 | `--trend-res=R` | 顺势参考周期：`240`=4小时 / `D`=日线 / `off`=关闭（默认）。参考周期及以上不作检测周期；其方向与信号方向相反时跳过（规则见 trading-plan SPEC §5 与 WEB 参数页「交易计划」页签） | `off` |
 | `--range-res=R` | 震荡判定参考周期：`240`/`D`/`off`（默认）。参考周期及以上不作检测周期（只作锚）；参考周期 regime 震荡/笔不足 → 更低周期观望（trading-plan `computeRegime`，与引擎震荡闸同口径） | `off` |
@@ -103,19 +103,23 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 
 | 最近买卖点锚 | 进场策略（key） | 方向 | 箭头 |
 |------|------|------|------|
-| 1买（形成中与已确认统一，直接档） | 等待一买（wait1Buy） | 多头 | 向上红箭头 |
-| 1卖（形成中与已确认统一，直接档） | 等待一卖（wait1Sell） | 空头 | 向下绿箭头 |
-| 2买 / 类2买 + strong=true | 等待回调后做2买（wait2Buy） | 多头 | 向上红箭头 |
-| 2买 / 类2买 + strong=false/null（未定型弱先行） | 等待低点附近的2买（wait2BuyBear，抬低回调） | 多头 | 向上红箭头 |
-| 2卖 / 类2卖 + strong=true | 等待反弹后做2卖（wait2Sell） | 空头 | 向下绿箭头 |
-| 2卖 / 类2卖 + strong=false/null | 等待高点附近的2卖（wait2SellBear，压低反弹） | 空头 | 向下绿箭头 |
-| 3买 | 等待回调后3买点（wait3Buy） | 多头 | 向上红箭头 |
-| 3卖 | 等待反弹后3卖点（wait3Sell） | 空头 | 向下绿箭头 |
-| 类3买 / 4买 / 类4买 | 等待回调后买点（waitBuy，新买点） | 多头 | 向上红箭头 |
-| 类3卖 / 4卖 / 类4卖 | 等待反弹后卖点（waitSell，新卖点） | 空头 | 向下绿箭头 |
+| 1买（形成中与已确认统一，直接档） | 等待一买（1Buy） | 多头 | 向上红箭头 |
+| 1卖（形成中与已确认统一，直接档） | 等待一卖（1Sell） | 空头 | 向下绿箭头 |
+| 2买 / 类2买 + strong=true | 等待回调后做2买（2Buy） | 多头 | 向上红箭头 |
+| 2买 / 类2买 + strong=false/null（未定型弱先行） | 等待低点附近的2买（2BuyBear，抬低回调） | 多头 | 向上红箭头 |
+| 2卖 / 类2卖 + strong=true | 等待反弹后做2卖（2Sell） | 空头 | 向下绿箭头 |
+| 2卖 / 类2卖 + strong=false/null | 等待高点附近的2卖（2SellBear，压低反弹） | 空头 | 向下绿箭头 |
+| 3买 + strong=true（点后上推腿无背驰） | 等待回调后3买点（3Buy） | 多头 | 向上红箭头 |
+| 3买 + strong=false（2类后上推腿对1类后反弹腿背驰） | 等待低点附近的3买点（3BuyBear） | 多头 | 向上红箭头 |
+| 3卖 + strong=true | 等待反弹后3卖点（3Sell） | 空头 | 向下绿箭头 |
+| 3卖 + strong=false（2类后下推腿对1类后下推腿背驰） | 等待高点附近的3卖点（3SellBear） | 空头 | 向下绿箭头 |
+| 类3买 / 4买 / 类4买 + strong=true | 等待回调后买点（Buy，新买点） | 多头 | 向上红箭头 |
+| 类3买 / 4买 / 类4买 + strong=false | 等待低点附近的买点（BuyBear） | 多头 | 向上红箭头 |
+| 类3卖 / 4卖 / 类4卖 + strong=true | 等待反弹后卖点（Sell，新卖点） | 空头 | 向下绿箭头 |
+| 类3卖 / 4卖 / 类4卖 + strong=false | 等待高点附近的卖点（SellBear） | 空头 | 向下绿箭头 |
 | 最近笔端点均无买卖点锚 | 不触发（双侧无锚） | — | — |
 
-> 2026-10-16 直连变更：①交易计划三档路由/未定型滚动翻档/跨侧兜底（如弱2买转等一卖）已删除，按点类型**同名直映射**；②1类点统一走直接档 wait1Buy/wait1Sell（此前已收笔1买→等回调做2买、仅形成中走直接档的口径废除）；③waitLike2Buy/waitLike2Sell 键保留但无映射入口（eval 比对兼容）。
+> 2026-10-16 直连变更：①交易计划三档路由/未定型滚动翻档/跨侧兜底（如弱2买转等一卖）已删除，按点类型**同名直映射**；②1类点统一走直接档 1Buy/1Sell（此前已收笔1买→等回调做2买、仅形成中走直接档的口径废除）；③Like2Buy/Like2Sell 键保留但无映射入口（eval 比对兼容）。
 > 买卖双侧并行独立评估，多空可同时持仓（2026-10-10 口径保留）。二买族强弱=点上的 `strong` 字段（首段上涨/下跌未走完按弱先行，过前高后滚动翻强——chan-core 规则，两侧一致）。
 
 ## 12 种进场策略的条件（全部需同时满足）
@@ -125,7 +129,7 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 1. **够笔**：最后一笔方向符合预期（空头→最后一笔为 up「反弹够笔」、多头→最后一笔为 down「回调够笔」）；
 2. **以下级别出现背驰**：在所有更低周期（如 60 的更低级别为 15/3）中，存在方向匹配的背驰点（做多→底背驰、做空→顶背驰），取**时间最新**的背驰点；
 3. **锚点窗口（2026-10-18 用户规则、2026-10-21 重定义参数化、2026-10-22 trailing 重开）**：大周期某根K线满足买卖点条件（锚点所在K线）→ 去小周期找背驰限**锚K起 N 根检测周期K内**（`anchorWinBars` 默认 2、旧口径=1）——背驰点与触发拍所在K都须落窗（拒绝闸 `anchor_bar_window`），且触发价距**窗口极值** ≤ `anchorWinPts` 点（0=不限；极值=锚点价与窗口内实际极值取小/大，买侧最低/卖侧最高）。**无永久闩锁**：锚随新高/新低漂移或新点形成时，每拍按当前锚现算——新锚所在K线自动重开窗（旧锚窗口失败后价格涨过/跌破、重新满足卖点/买点条件时仍会再次触发）；**trailing 重开（`anchorWinTrailOn` 默认开）**：窗口内创新高/新低时时间窗锚K=窗口极值所在K（False=固定锚K旧口径）——连续新高不产生新压低2卖锚，固定锚K会把极值处的触发卡死；
-4. **在支阻位附近**：背驰点价与任一支阻位（`srflip.merged`）价差 ≤ `--near`（绝对价差，默认 10，不乘 ATR）。
+4. **在支阻位附近**：背驰点价与任一支阻位（`srflip.merged`）价差 ≤ `--near`（绝对价差，默认 10，不乘 ATR）。**fib/BOLL 按方向取侧（2026-10-25 `srSideGateOn` 默认开，与 py 引擎同口径）**：做多只认 SUP（最近上涨笔回撤支撑/布林下轨与下侧中轨）、做空只认 RES（最近下跌笔反弹阻力/布林上轨与上侧中轨），另一侧 fib/BOLL 不参与闸门与止损参考（`srSideLevels`，密集区/人工位不按侧过滤；关闭=旧口径两侧皆可命中）。
 
 **各策略专属条件**：
 
@@ -162,7 +166,7 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 | 4 | **止损 stopSr** | 背驰级别K线盘中破坏止损位（short `high>` 位 / long `low<` 位；跳空按开盘价成交） | 全平终局，黄 `↓/↑` |
 | — | **保本止损 stopBe** | 保本触发后盘中破坏 **beStop**（跳空按开盘价成交） | 全平终局，黄 `↓/↑` |
 
-- **顺势 / 逆势**（出场阶梯分支用，2026-10-16 起按 strategyKey 判定）：**顺势** = wait2Buy/waitBuy/wait3Buy 及卖侧镜像 wait2Sell/waitSell/wait3Sell；**逆势** = wait1Buy/wait1Sell（一买卖直接档）与 wait2BuyBear/wait2SellBear（弱二买卖）。原「计划方向 ∈ {多头多, 空头空}」口径随计划策略行取消。
+- **顺势 / 逆势**（出场阶梯分支用，2026-10-16 起按 strategyKey 判定）：**顺势** = 2Buy/Buy/3Buy 及卖侧镜像 2Sell/Sell/3Sell；**逆势** = 1Buy/1Sell（一买卖直接档）与 2BuyBear/2SellBear（弱二买卖）。原「计划方向 ∈ {多头多, 空头空}」口径随计划策略行取消。
 - **止损位**（`stopRefOf`，方向感知）：short 取进场价**上方**最近支阻位 + 有效止损滑点、long 取**下方**最近 − 有效止损滑点；信号自带 `nearSr` 已在正确侧则直接沿用（± 有效滑点）。**无正确侧位 → 兜底 = 进场价 ± 有效兜底滑点**（止损位永不为 null，不再有「不设止损」仓位）。**有效滑点 = 固定值 + ATR系数 × ATR(14, 背驰周期 markRes)**（系数默认 0=关闭，WEB 参数中心各滑点行内配置）。
 - **保本止损位 beStop** = 进场K线极值 ± 有效保本滑点（short: high+ / long: low−；ATR 分量同上）。
 - **合并后 ≥5 根K成笔预期**：检测周期形成段自段起点合并块起 ≥5 块（chan_core `isValid` gap≥4 同口径），触发 bar = 计数首次达 5 的已收盘K线、成交 = 下一开盘。已知近似差异：形成段达 5 后被最终笔结构吸收时，py 引擎当下已触发、JS hindsight 不触发。

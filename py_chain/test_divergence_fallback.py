@@ -282,19 +282,19 @@ class TestRearm(unittest.TestCase):
     def test_rearm_resets_matching_triple_only(self):
         CHAN_CFG["sinkFallbackRearm"] = True
         eng = self._engine()
-        eng._rt_fired = {("60", "waitBuy", "15", 1000), ("60", "waitBuy", "15", 2000),
-                         ("60", "waitBuy", "3", 3000), ("15", "waitSell", "3", 4000)}
-        eng._rearm_fired({"periodX": "60", "strategyKey": "waitBuy", "markRes": "15"})
+        eng._rt_fired = {("60", "Buy", "15", 1000), ("60", "Buy", "15", 2000),
+                         ("60", "Buy", "3", 3000), ("15", "Sell", "3", 4000)}
+        eng._rearm_fired({"periodX": "60", "strategyKey": "Buy", "markRes": "15"})
         self.assertEqual(eng._rt_fired,
-                         {("60", "waitBuy", "3", 3000), ("15", "waitSell", "3", 4000)})
+                         {("60", "Buy", "3", 3000), ("15", "Sell", "3", 4000)})
         CHAN_CFG["sinkFallbackRearm"] = False
 
     def test_rearm_disabled_keeps_fired(self):
         CHAN_CFG["sinkFallbackRearm"] = False
         eng = self._engine()
-        fired = {("60", "waitBuy", "15", 1000)}
+        fired = {("60", "Buy", "15", 1000)}
         eng._rt_fired = set(fired)
-        eng._rearm_fired({"periodX": "60", "strategyKey": "waitBuy", "markRes": "15"})
+        eng._rearm_fired({"periodX": "60", "strategyKey": "Buy", "markRes": "15"})
         self.assertEqual(eng._rt_fired, fired)
 
 

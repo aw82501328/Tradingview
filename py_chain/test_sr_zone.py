@@ -23,8 +23,10 @@ import unittest
 
 from py_chain import sr_zone
 from py_chain.sr_flip import compute_srflip
+from py_chain import chan_core
 from py_chain.mark_entry import (near_zone, nearSr, stop_ref_of,
-                                 sr_of_detect, sr_drop_fib_for_class1)
+                                 sr_of_detect, sr_drop_fib_for_class1,
+                                 sr_side_levels)
 
 
 def bar(t, h, l, c, o=None):
@@ -320,12 +322,12 @@ class TestNearZoneGate(unittest.TestCase):
 
 
 class TestClass1FibExempt(unittest.TestCase):
-    """1类策略（wait1Buy/wait1Sell）豁免黄金分割支阻（2026-10-10）：
+    """1类策略（1Buy/1Sell）豁免黄金分割支阻（2026-10-10）：
     fib 位由非一类买卖点锚定派生，对 1类点不参与「支阻位附近」闸门与止损重选
     ——与 fxma fibNearOn「仅2/3类点判定，1类点豁免」同语义。点位候选本身仍只查
     |价差| ≤ near、不分上下方（旧口径不变）。"""
 
-    # 复刻实测场景（bt_chan XAUUSD 10-5：wait1Buy 多头被上方 fib 0.5 回撤位放行、
+    # 复刻实测场景（bt_chan XAUUSD 10-5：1Buy 多头被上方 fib 0.5 回撤位放行、
     # 止损侧无位可依走最大止损兜底，-34.24）
     FIB_ABOVE = {"price": 4141.34, "level": "60", "fib": True, "ratio": 0.5,
                  "type": "RES", "srcType": "fib"}
@@ -338,22 +340,22 @@ class TestClass1FibExempt(unittest.TestCase):
     def test_drop_fib_only_for_class1_keys(self):
         pool = [self.FIB_ABOVE, self.FIB_BELOW, self.ZONE_SUP, self.MANUAL_BELOW]
         # 1类键剔 fib（密集区/人工位保留）；其余键/空池原样返回（同一列表对象，零拷贝）
-        for key in ("wait1Buy", "wait1Sell"):
+        for key in ("1Buy", "1Sell"):
             kept = sr_drop_fib_for_class1(pool, key)
             self.assertEqual(kept, [self.ZONE_SUP, self.MANUAL_BELOW])
-        for key in ("wait2Buy", "waitBuy", "wait3Sell", "wait2BuyBear", None):
+        for key in ("2Buy", "Buy", "3Sell", "2BuyBear", None):
             self.assertIs(sr_drop_fib_for_class1(pool, key), pool)
         empty = []
-        self.assertIs(sr_drop_fib_for_class1(empty, "wait1Buy"), empty)
+        self.assertIs(sr_drop_fib_for_class1(empty, "1Buy"), empty)
 
-    def test_wait1buy_gate_ignores_fib_levels(self):
+    def test_1buy_gate_ignores_fib_levels(self):
         # 场景复刻：只选黄金分割、fib 位在信号价上方约 18 点、near=30——
         # 点位候选旧口径（|4141.34-4123.355|=17.99 ≤ 30，不分上下方）会命中；
-        # wait1Buy 剔 fib 后池空 → 「以下级别背驰点均远离支阻位」拒绝
+        # 1Buy 剔 fib 后池空 → 「以下级别背驰点均远离支阻位」拒绝
         sig_price, nearTol = 4123.355, 30.0
         fib_only = sr_of_detect([self.FIB_ABOVE], "60")
         self.assertIsNotNone(near_zone(sig_price, fib_only, "long", nearTol))
-        kept = sr_drop_fib_for_class1(fib_only, "wait1Buy")
+        kept = sr_drop_fib_for_class1(fib_only, "1Buy")
         self.assertEqual(kept, [])
         self.assertIsNone(near_zone(sig_price, kept, "long", nearTol))
         # 下方 fib（支撑侧、距 5.4）对非1类键多头仍放行（豁免只针对1类键）
@@ -361,13 +363,13 @@ class TestClass1FibExempt(unittest.TestCase):
         self.assertIsNotNone(hit)
         self.assertEqual(hit["sr"]["price"], 4118.0)
 
-    def test_wait1buy_stop_repick_ignores_fib(self):
+    def test_1buy_stop_repick_ignores_fib(self):
         # 止损重选同口径：1类键剔 fib 后正确侧无位 → 最大止损兜底（进场价−fallback）
         entry, slip_fb = 4136.505, 10.0
         fib_stop = {"price": 4131.0, "level": "60", "fib": True, "ratio": 0.618,
                     "type": "SUP", "srcType": "fib"}
         pool = sr_drop_fib_for_class1(
-            sr_of_detect([self.FIB_ABOVE, fib_stop], "60"), "wait1Buy")
+            sr_of_detect([self.FIB_ABOVE, fib_stop], "60"), "1Buy")
         src = {}
         ref = stop_ref_of("long", entry, None, pool, slip_stop=3.0,
                           slip_fallback=slip_fb, source_out=src)
@@ -381,6 +383,116 @@ class TestClass1FibExempt(unittest.TestCase):
         self.assertEqual(ref2, 4131.0 - 3.0)
         self.assertEqual(src2["src"], "sr_pick")
         self.assertEqual(src2["srPrice"], 4131.0)
+
+
+class TestSrSideGate(unittest.TestCase):
+    """fib/BOLL 按信号方向取侧（srSideGateOn 默认开，2026-10-25）：
+    做多只认 SUP（上涨笔回撤支撑/布林下轨与下侧中轨）、做空只认 RES；密集区/
+    人工位不按侧过滤；闸门与止损重选同池（backtest sr_pick 同口径）。动机：
+    9-4 04:15 60m 2Buy@4470.55 命中下跌笔 0.382 反弹位 4485.98（距 15.4）——
+    买侧最近 4423.72 距 46.8 > near 30，新口径该信号被拒。"""
+
+    # 复刻 9-4 04:15 实测池（bt_chanA 20261024_2240 信号拍 60 级 fib 六位）
+    FIB_RES = {"price": 4485.97516, "level": "60", "fib": True, "ratio": 0.382,
+               "type": "RES", "srcType": "fib"}          # 下跌笔 0.382 反弹位（最近）
+    FIB_RES2 = {"price": 4490.74, "level": "60", "fib": True, "ratio": 0.5,
+                "type": "RES", "srcType": "fib"}
+    FIB_SUP = {"price": 4423.71749, "level": "60", "fib": True, "ratio": 0.382,
+               "type": "SUP", "srcType": "fib"}          # 上涨笔 0.382 回撤位
+    BOLL_UP = {"price": 4491.0, "level": "60", "boll": "upper", "type": "RES",
+               "srcType": "boll"}
+    BOLL_LOW = {"price": 4400.0, "level": "60", "boll": "lower", "type": "SUP",
+                "srcType": "boll"}
+    CLUSTER = {"price": 4460.0, "level": "60", "type": "RES", "touchCount": 3,
+               "srcType": "cluster"}
+    MANUAL = {"price": 4470.0, "level": "60", "type": "SUP", "manual": True,
+              "srcType": "manual"}
+
+    def setUp(self):
+        self._old = chan_core.CHAN_CFG.get("srSideGateOn")
+        chan_core.CHAN_CFG["srSideGateOn"] = True
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self._old is None:
+            chan_core.CHAN_CFG.pop("srSideGateOn", None)
+        else:
+            chan_core.CHAN_CFG["srSideGateOn"] = self._old
+
+    def test_long_keeps_sup_drops_res(self):
+        pool = [self.FIB_RES, self.FIB_RES2, self.FIB_SUP,
+                self.BOLL_UP, self.BOLL_LOW, self.CLUSTER, self.MANUAL]
+        kept = sr_side_levels(pool, "long")
+        self.assertEqual([k["price"] for k in kept],
+                         [4423.71749, 4400.0, 4460.0, 4470.0])
+
+    def test_short_symmetric(self):
+        pool = [self.FIB_RES, self.FIB_SUP, self.BOLL_UP, self.BOLL_LOW,
+                self.CLUSTER, self.MANUAL]
+        kept = sr_side_levels(pool, "short")
+        self.assertEqual([k["price"] for k in kept],
+                         [4485.97516, 4491.0, 4460.0, 4470.0])
+
+    def test_gate_long_rejects_nearest_res_fib(self):
+        # 9-4 案例复刻：旧口径最近命中=RES fib 4485.98（距 15.4）；新口径买侧池最近
+        # SUP 4423.72 距 46.8 > near 30 → 拒绝（该信号按新口径消失）
+        sig_price, nearTol = 4470.55, 30.0
+        pool = sr_side_levels(
+            sr_of_detect([self.FIB_RES, self.FIB_RES2, self.FIB_SUP], "60"), "long")
+        self.assertIsNotNone(near_zone(sig_price, [self.FIB_RES], "long", nearTol))  # 旧口径会命中
+        self.assertIsNone(near_zone(sig_price, pool, "long", nearTol))              # 新口径拒绝
+        # 空头对称：4485.98 对 short 是同侧位 → 放行
+        short_pool = sr_side_levels(
+            sr_of_detect([self.FIB_RES, self.FIB_SUP], "60"), "short")
+        hit = near_zone(sig_price, short_pool, "short", nearTol)
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["sr"]["price"], 4485.97516)
+
+    def test_gate_boll_side(self):
+        # boll 上轨 RES 不放行多头、下轨 SUP 放行（距都在 near 内的反例）
+        pool_up = sr_side_levels([self.BOLL_UP], "long")
+        self.assertEqual(pool_up, [])
+        pool_low = sr_side_levels([self.BOLL_LOW], "long")
+        hit = near_zone(4408.0, pool_low, "long", 10.0)
+        self.assertIsNotNone(hit)
+
+    def test_cluster_and_manual_not_filtered(self):
+        # 密集区 RES/人工位 SUP 对多头都不按侧剔除（用户拍板范围=fib/BOLL）
+        kept = sr_side_levels([self.CLUSTER, self.MANUAL], "long")
+        self.assertEqual(kept, [self.CLUSTER, self.MANUAL])
+
+    def test_off_restores_old_behavior(self):
+        chan_core.CHAN_CFG["srSideGateOn"] = False
+        pool = [self.FIB_RES, self.FIB_SUP]
+        self.assertIs(sr_side_levels(pool, "long"), pool)   # 零拷贝原样返回
+        hit = near_zone(4470.55, pool, "long", 30.0)
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["sr"]["price"], 4485.97516)    # 旧口径：RES fib 可命中
+
+    def test_class1_compose(self):
+        # 1类键先剔全部 fib，侧过滤再剔反向 boll——互不冲突
+        pool = [self.FIB_SUP, self.FIB_RES, self.BOLL_LOW, self.BOLL_UP, self.CLUSTER]
+        kept = sr_side_levels(sr_drop_fib_for_class1(pool, "1Buy"), "long")
+        self.assertEqual([k["price"] for k in kept], [4400.0, 4460.0])
+
+    def test_stop_ref_same_side_pool(self):
+        # 止损重选同口径：long 下方更近的 RES fib（被剔）不再成为止损线，取更远 SUP fib
+        entry, slip_stop, slip_fb = 4430.0, 3.0, 10.0
+        res_fib_below = {"price": 4428.0, "level": "60", "fib": True,
+                         "type": "RES", "srcType": "fib"}   # 下跌笔反弹位恰在下方
+        pool = sr_side_levels([res_fib_below, self.FIB_SUP], "long")
+        src = {}
+        ref = stop_ref_of("long", entry, None, pool, slip_stop=slip_stop,
+                          slip_fallback=slip_fb, source_out=src)
+        self.assertEqual(ref, 4423.71749 - slip_stop)
+        self.assertEqual(src["src"], "sr_pick")
+        # 开关关：下方最近位（RES fib）参与止损（旧口径）
+        chan_core.CHAN_CFG["srSideGateOn"] = False
+        src2 = {}
+        ref2 = stop_ref_of("long", entry, None, [res_fib_below, self.FIB_SUP],
+                           slip_stop=slip_stop, slip_fallback=slip_fb, source_out=src2)
+        self.assertEqual(ref2, 4428.0 - slip_stop)
+        self.assertEqual(src2["srPrice"], 4428.0)
 
 
 if __name__ == "__main__":

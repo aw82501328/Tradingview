@@ -23,7 +23,7 @@ def _pos(**kw):
     （触价口径的 why 见 test_exit_rules.TestTouchExits）。"""
     from py_chain.mark_entry import EXIT_MODE_DEFAULTS
     base = {
-        "tradeNo": 1, "direction": "short", "strategyKey": "wait2Sell",
+        "tradeNo": 1, "direction": "short", "strategyKey": "2Sell",
         "planDirection": "空头空", "markRes": "3", "periodX": "15",
         "signalTime": 1000, "entryTime": 1100, "entryPrice": 100.0,
         "stopRef": 103.0, "stopSource": "测试支阻位 103.00+止损滑点 3.00",
@@ -99,8 +99,8 @@ class TestJournalWrite(unittest.TestCase):
 
     def test_signal_id_backfill(self):
         jr = self._jr()
-        s1 = {"time": 1, "periodX": "60", "strategyKey": "wait2Buy"}
-        s2 = {"time": 2, "periodX": "15", "strategyKey": "wait1Sell"}
+        s1 = {"time": 1, "periodX": "60", "strategyKey": "2Buy"}
+        s2 = {"time": 2, "periodX": "15", "strategyKey": "1Sell"}
         jr.signal(s1)
         jr.signal(s2)
         jr.close()
@@ -187,11 +187,11 @@ class TestQueryFold(unittest.TestCase):
                        register=False)
         jr.header({"periods": ["60", "15", "3"], "fillMode": "confirm", "lots": 4})
         s = {"time": 1700000000, "periodX": "60", "markRes": "15", "direction": "short",
-             "strategyKey": "wait2Sell", "price": 100.0, "nearSr": 100.5,
+             "strategyKey": "2Sell", "price": 100.0, "nearSr": 100.5,
              "segStart": 1699990000, "signalNote": "等待反弹后做2卖｜近支阻位 100.50"}
         jr.signal(s)
         jr.fill({"tradeNo": 1, "journalId": 1, "entryTime": 1700000100,
-                 "entryPrice": 100.2, "direction": "short", "strategyKey": "wait2Sell",
+                 "entryPrice": 100.2, "direction": "short", "strategyKey": "2Sell",
                  "periodX": "60", "markRes": "15", "fillMode": "confirm",
                  "signalTime": 1700000000, "signalPrice": 100.0,
                  "stopRef": 103.0, "beStop": 97.0, "maxLoss": 110.0,
@@ -202,7 +202,7 @@ class TestQueryFold(unittest.TestCase):
                       "exitTime": 1700000200, "exitPrice": 103.0, "pnl": -11.2,
                       "exitWhy": "stopSr 触发：…", "entryTime": 1700000100,
                       "entryPrice": 100.2, "direction": "short"})
-        jr.reject(1699999000, "near_sr_fail", "60", 1699990000, "wait2Sell",
+        jr.reject(1699999000, "near_sr_fail", "60", 1699990000, "2Sell",
                   price=100.0, srPrice=111.0, dist=11.0, near=10.0, markRes="15")
         jr.state(1699999000, "60", {"rangeGate": False, "rangeReason": "",
                                     "buyPt": "1买", "sellPt": "2卖",
@@ -210,7 +210,7 @@ class TestQueryFold(unittest.TestCase):
                                     "trendReason": "", "segStart": 1699990000,
                                     "segType": "up", "segForming": True,
                                     "segEnd": 1699999000, "segEndPrice": 100.0})
-        jr.suppressed(1700000300, {"strategyKey": "wait2Buy", "periodX": "15",
+        jr.suppressed(1700000300, {"strategyKey": "2Buy", "periodX": "15",
                                    "time": 1700000300, "price": 99.0,
                                    "direction": "long"},
                       why="同向互斥：已有做空持仓单 #1")

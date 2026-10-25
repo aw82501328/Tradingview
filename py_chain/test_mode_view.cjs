@@ -31,17 +31,17 @@ if(!el('btn-start-bt-chan_v1').disabled||!el('btn-start-bt-fxma_v1').disabled)th
 assert.equal(node('count').textContent,'筛选 1 / 共 2 条');
 // 策略/方向多选过滤：按 strategyKey 与 方向列口径（planDirection；旧记录回退策略映射）过滤
 vm.runInContext(`
-sigRows=[{id:1,mode:'backtest',status:'已平仓',pnl:10,strategyKey:'waitSell',planDirection:'空头空'},
-  {id:2,mode:'backtest',status:'已平仓',pnl:20,strategyKey:'waitBuy',planDirection:'多头多'},
-  {id:3,mode:'backtest',status:'已平仓',pnl:30,strategyKey:'wait1Sell',planDirection:null}];
-sigFilterValues = n => n==='strategy' ? ['waitSell','wait1Sell'] : [];
+sigRows=[{id:1,mode:'backtest',status:'已平仓',pnl:10,strategyKey:'Sell',planDirection:'空头空'},
+  {id:2,mode:'backtest',status:'已平仓',pnl:20,strategyKey:'Buy',planDirection:'多头多'},
+  {id:3,mode:'backtest',status:'已平仓',pnl:30,strategyKey:'1Sell',planDirection:null}];
+sigFilterValues = n => n==='strategy' ? ['Sell','1Sell'] : [];
 if(filteredRows().length!==2)throw Error('strategy filter');
 sigFilterValues = n => n==='direction' ? ['多头多'] : [];
 if(filteredRows().length!==1||filteredRows()[0].id!==2)throw Error('direction filter');
 sigFilterValues = n => n==='direction' ? ['空头空'] : [];
 if(filteredRows().length!==1||filteredRows()[0].id!==1)throw Error('direction filter excludes other fallbacks');
 sigFilterValues = n => n==='direction' ? ['多头空'] : [];
-if(filteredRows().length!==1||!filteredRows().some(r=>r.id===3))throw Error('direction fallback (wait1Sell→多头空)');
+if(filteredRows().length!==1||!filteredRows().some(r=>r.id===3))throw Error('direction fallback (1Sell→多头空)');
 `,ctx);
 // 多策略并行：行按策略TAB隔离（旧行无 strategy 字段回落缠论V1）；切换 TAB 后各自可见
 vm.runInContext(`
@@ -76,10 +76,10 @@ if(el('card-bt-fxma_v1').hidden||el('record-signals').hidden)throw Error('backte
 // 键集命中的行（含其分批出场续行）标 in-case 类
 vm.runInContext(`
 sigFilterValues = n => [];
-sigRows=[{id:21,mode:'backtest',status:'已平仓',pnl:10,symbol:'OANDA:XAUUSD',time:1750000000,periodX:'15',direction:'long',strategyKey:'wait2Buy'},
-  {id:22,mode:'backtest',status:'已平仓',pnl:-5,symbol:'OANDA:XAUUSD',time:1750000600,periodX:'15',direction:'short',strategyKey:'wait2Sell'}];
+sigRows=[{id:21,mode:'backtest',status:'已平仓',pnl:10,symbol:'OANDA:XAUUSD',time:1750000000,periodX:'15',direction:'long',strategyKey:'2Buy'},
+  {id:22,mode:'backtest',status:'已平仓',pnl:-5,symbol:'OANDA:XAUUSD',time:1750000600,periodX:'15',direction:'short',strategyKey:'2Sell'}];
 curBtTab='chan_v1';   // 上一块停在 fxma_v1 TAB：行无 strategy 回落 chan_v1，先切回再渲染
-if(btCaseKeyOf(sigRows[0])!=='live|backtest|OANDA:XAUUSD|1750000000|15|long|wait2Buy')throw Error('case key format');
+if(btCaseKeyOf(sigRows[0])!=='live|backtest|OANDA:XAUUSD|1750000000|15|long|2Buy')throw Error('case key format');
 btCaseKeys=new Set([btCaseKeyOf(sigRows[0])]);
 renderTable();
 `,ctx);

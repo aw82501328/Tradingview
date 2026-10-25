@@ -18,7 +18,7 @@ from py_chain.bt_runs import (
 def row(status, pnl=None, exitType=None, exits=None, exitTime=1100, entryPrice=4201.0, lots=4,
         mult=None):
     return {"id": 1, "mode": "backtest", "symbol": "OANDA:XAUUSD", "time": 1000,
-            "direction": "long", "periodX": "15", "strategyKey": "waitBuy",
+            "direction": "long", "periodX": "15", "strategyKey": "Buy",
             "markRes": "15", "price": 4200.0, "nearSr": 4210.0,
             "fallback": False, "nearEqual": False, "expectBi": False,
             "status": status, "entryTime": 1010, "entryPrice": entryPrice,

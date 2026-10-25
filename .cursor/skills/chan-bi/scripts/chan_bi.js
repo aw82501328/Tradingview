@@ -385,7 +385,11 @@ function unionIntervalVisibility(resList) {
           returnByValue: true, awaitPromise: true, timeout: 10000,
         });
         const v = r.result.value;
-        if (v.res === targetRes && v.len > 0) {
+        // TV Desktop 3.4.1（2026-10-25 实测）把 setResolution("D") 规范化为实际周期
+        // "1D"（"240"/"60"/"15" 不变）——严格字符串比较会永不命中、每周期白等满
+        // 40×500ms 才继续。与绘制处 :1414 同用 normRes 归一化（normRes 定义在
+        // 本函数之后、调用发生在其后，闭包引用安全）。
+        if (normRes(v.res) === normRes(targetRes) && v.len > 0) {
           if (v.len === lastLen) break; // 数据稳定
           lastLen = v.len;
         }

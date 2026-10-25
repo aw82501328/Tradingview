@@ -17,7 +17,7 @@ from py_chain.bt_errors import BtErrorStore, derive_source_key
 
 def sample_row(**over):
     r = {"id": 7, "mode": "backtest", "symbol": "OANDA:XAUUSD", "time": 1000,
-         "direction": "long", "periodX": "15", "strategyKey": "waitBuy",
+         "direction": "long", "periodX": "15", "strategyKey": "Buy",
          "markRes": "15", "price": 4200.0, "nearSr": 4210.0,
          "status": "已平仓", "entryTime": 1010, "entryPrice": 4201.0,
          "lots": 4, "pnl": 12.0, "exits": []}
@@ -31,14 +31,14 @@ class TestDeriveSourceKey(unittest.TestCase):
         # 与 SignalLog._row_key 同口径的六字段内容键
         self.assertEqual(
             derive_source_key("live", sample_row()),
-            "live|backtest|OANDA:XAUUSD|1000|15|long|waitBuy")
+            "live|backtest|OANDA:XAUUSD|1000|15|long|Buy")
 
     def test_live_none_fields_render_empty(self):
         k1 = derive_source_key("live", sample_row(nearSr=None))
-        self.assertEqual(k1, "live|backtest|OANDA:XAUUSD|1000|15|long|waitBuy")
+        self.assertEqual(k1, "live|backtest|OANDA:XAUUSD|1000|15|long|Buy")
         # 行内多余字段（nearSr 等）不进键；None 的键字段渲染空串
         k2 = derive_source_key("live", sample_row(mode=None))
-        self.assertEqual(k2, "live||OANDA:XAUUSD|1000|15|long|waitBuy")
+        self.assertEqual(k2, "live||OANDA:XAUUSD|1000|15|long|Buy")
 
     def test_live_missing_time_raises(self):
         with self.assertRaises(ValueError):
