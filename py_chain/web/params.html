@@ -688,32 +688,6 @@ function applyExitModeDim() {
   }
 }
 
-// 近等双顶规则更新句：卡片说明里用黄字标出（悬停 title 仍是纯文本）
-const PNEW_OPEN = '末根不等顶分型确认即可后移；';
-const PNEW_FIXED = '总容差=该值；先影线后实体：后实体不低于前实体直接后移，更低则差≤该值才后移。';
-const PNEW_BY_KEY = {
-  nearDoubleFixed: PNEW_FIXED,
-  nearDouble3: PNEW_OPEN,
-  nearDouble15: PNEW_OPEN,
-  nearDouble60: PNEW_OPEN,
-  nearDouble240: PNEW_OPEN,
-  nearDoubleD: PNEW_OPEN,
-};
-function descPlain(key, desc) {
-  const mark = PNEW_BY_KEY[key];
-  if (!mark) return desc || '';
-  // 旧说明两句写在一起时，按卡片只留该留的那句
-  const text = (desc || '').replace(PNEW_OPEN, '').replace(PNEW_FIXED, '');
-  return text + mark;
-}
-function descHtml(key, desc) {
-  const mark = PNEW_BY_KEY[key];
-  if (!mark) return desc || '';
-  const text = descPlain(key, desc);
-  const i = text.lastIndexOf(mark);
-  return text.slice(0, i) + '<span class="pnew">' + mark + '</span>' + text.slice(i + mark.length);
-}
-
 function rowHtml(key, spec, value, isMod, embed) {
   const defText = spec.type === 'bool' ? (spec.default ? '默认开' : '默认关')
     : (spec.type === 'str' || spec.type === 'multi') ? `默认 ${choiceLabel(key, spec.default)}`
@@ -741,7 +715,7 @@ function rowHtml(key, spec, value, isMod, embed) {
     : '';
   return `<div class="prow ${isMod ? 'mod' : ''} ${BREAK_BEFORE_KEYS.has(key) ? 'break-before' : ''}" title="${spec.desc}">
     <span class="pname"><span class="plabel">${spec.label}<span class="badge">已修改</span></span>
-    <span class="pdef">${defText} · ${descHtml(key, spec.desc)}</span></span>${control}${embedHtml}</div>`;
+    <span class="pdef">${defText} · ${spec.desc || ''}</span></span>${control}${embedHtml}</div>`;
 }
 
 // 单个参数卡（含滑点行内嵌 ATR 系数；badge 在固定值或系数任一被改时亮）
@@ -798,7 +772,7 @@ const CHAIN_GROUPS = [
 ];
 function chainRowsHtml(m) {
   const grouped = new Set(CHAIN_GROUPS.flatMap(([, keys]) => keys));
-  return `<div class="pgroup">勾选语义：勾=该周期作为开单周期；不勾=仅结构参考（笔/买卖点/支阻照算，不在该周期开单）。30秒/1分钟为细层开关（勾=加载）。日线不进链、始终隐式加载作参考。两条链同时启用时各自独立引擎并行、持仓互不影响；链B 默认关。</div>`
+  return `<div class="pgroup">勾选语义：勾=该周期作为开单周期；不勾=仅结构参考（笔/买卖点照算，不在该周期开单）。30秒/1分钟为细层开关（勾=加载）。日线不进链、始终隐式加载作参考。支阻只算检测周期（2026-10-26 起：开单周期勾选∩有已加载下级；背驰下沉与结构参考级别不算支阻，近支阻闸门/止损挂线池随之收窄）。两条链同时启用时各自独立引擎并行、持仓互不影响；链B 默认关。</div>`
     + CHAIN_GROUPS.map(([title, keys]) => `<div class="pgroup">${title}</div>`
       + keys.filter(k => m.schema[k]).map(k => paramRow(m, k)).join('')).join('')
     + Object.keys(m.schema).filter(k => !grouped.has(k)).map(k => paramRow(m, k)).join('');
@@ -929,6 +903,46 @@ function wideBarRowHtml(m) {
     </span></div>`;
 }
 
+// 画笔：「近等双顶/双底」一张卡片：容差 + 各周期开关（大→小，与单根长K豁免序一致）
+// + 取后让位锁定/吸收成笔即标两行为开关（悬停 title 来自各自 schema desc）
+const NEAR_DOUBLE_MASTER = 'nearDoubleFixed';
+const NEAR_DOUBLE_PERIODS = [
+  ['nearDoubleD', '日线'],
+  ['nearDouble240', '4小时'],
+  ['nearDouble60', '1小时'],
+  ['nearDouble15', '15分钟'],
+  ['nearDouble3', '3分钟'],
+];
+const NEAR_DOUBLE_EXTRAS = [
+  ['nearDoubleShiftLocked', '取后让位锁定'],
+  ['absorbMarkFast', '吸收成笔即标'],
+];
+const NEAR_DOUBLE_KEYS = new Set([NEAR_DOUBLE_MASTER,
+  ...NEAR_DOUBLE_PERIODS.map(([k]) => k), ...NEAR_DOUBLE_EXTRAS.map(([k]) => k)]);
+
+function nearDoubleRowHtml(m) {
+  const tol = m.schema[NEAR_DOUBLE_MASTER];
+  const isMod = [...NEAR_DOUBLE_KEYS].some(k => m.overrides[k] !== undefined);
+  const desc = '先影线后实体：后顶/后底实体不低于前实体直接后移，更低则差≤容差才后移；'
+    + '两顶间无相接成笔且回调≥容差，同一对只取后一次';
+  const defText = `容差默认 ${tol.default} · `
+    + NEAR_DOUBLE_PERIODS.map(([k, name]) => `${name}默认${m.schema[k].default ? '开' : '关'}`).join(' · ')
+    + ` · ${NEAR_DOUBLE_EXTRAS.map(([k]) => m.schema[k].label).join('/')}默认关/开`;
+  const periodCbs = NEAR_DOUBLE_PERIODS.map(([k, name]) =>
+    `<label title="${m.schema[k].desc}"><input type="checkbox" data-k="${k}" ${m.effective[k] ? 'checked' : ''}>${name}</label>`).join('');
+  const extraCbs = NEAR_DOUBLE_EXTRAS.map(([k, name]) =>
+    `<label title="${m.schema[k].desc}"><input type="checkbox" data-k="${k}" ${m.effective[k] ? 'checked' : ''}>${name}</label>`).join('');
+  const maxAttr = tol.max != null ? ` max="${tol.max}"` : '';
+  return `<div class="prow span-all ${isMod ? 'mod' : ''}" title="${tol.desc}">
+    <span class="pname"><span class="plabel">近等双顶/双底（平台取后顶/后底）<span class="badge">已修改</span></span>
+    <span class="pdef">${defText} · ${desc}</span></span>
+    <span class="period-fields">
+      <label>容差<input type="number" step="any" min="${tol.min}"${maxAttr} data-k="${NEAR_DOUBLE_MASTER}" value="${m.effective[NEAR_DOUBLE_MASTER]}" aria-label="近等双顶容差"></label>
+      ${periodCbs}
+      ${extraCbs}
+    </span></div>`;
+}
+
 // 画笔：「小周期绘制窗口」一张卡片内放各周期天数（无总开关，改值即生效）
 const WINDOW_DAYS_PERIODS = [
   ['windowDays3', '3分钟'],
@@ -953,8 +967,7 @@ function windowDaysRowHtml(m) {
     <span class="period-fields">${fields}</span></div>`;
 }
 
-// 画笔页：小周期绘制窗口置顶；长影线/单根长K豁免各并成一张开关卡；近等双顶区上方加分组横线
-const NEAR_DOUBLE_GROUP_KEY = 'nearDoubleFixed';
+// 画笔页：小周期绘制窗口置顶；长影线/单根长K豁免/近等双顶各并成一张开关卡
 // 隐藏不展示的画笔参数（2026-10-02）：仅 UI 不出卡片，schema/保存/生效链路保留
 const CHAN_HIDDEN_KEYS = new Set(['fractalSideRealWick']);
 function chanRowsHtml(m) {
@@ -972,9 +985,11 @@ function chanRowsHtml(m) {
     }
     if (WIDE_BAR_KEYS.has(key)) continue;  // 已并入「单根长K豁免」卡
     if (WINDOW_DAYS_KEYS.has(key)) continue;  // 已置顶「小周期绘制窗口」卡
-    if (key === NEAR_DOUBLE_GROUP_KEY) {
-      html += '<div class="pgroup">近等双顶/双底（平台取后顶/后底）</div>';
+    if (key === NEAR_DOUBLE_MASTER) {
+      html += nearDoubleRowHtml(m);
+      continue;
     }
+    if (NEAR_DOUBLE_KEYS.has(key)) continue;  // 已并入「近等双顶/双底」卡
     html += paramRow(m, key);
   }
   return html;
@@ -1145,7 +1160,7 @@ function renderModule(name) {
     zs: '画中枢按当前品种：各周期是否绘制、以及每周期只保留最近几个中枢。',
     entry: '标记进出场按当前品种：近支阻、手数、滑点、出场判定、出场方式（开关+平仓比例，至少启用一种；锁定盈利优先级最高，门槛点数和锁定盈利比例都可配；够笔止盈拆背驰周期/检测周期两源，同一张卡）、进场扩展与闸门。进场扩展写入该品种 CHAN_CFG。「当下制够笔K线数」仅回测/监控引擎。有效滑点 = 固定值 + ATR系数×ATR(14)。手数口径：1手=0.01标准手，开/平仓手数恒整数。比例 = 触发时平总仓位（初始手数）百分比（⌊总手数×比例%⌋、不足1手平1手；每种方式一次性触发，部分平仓后剩余由其它方式了结）。锁定盈利的比例不是手数：最大盈利超过门槛后，回撤到只剩该比例的盈利就全平剩余。跟踪止盈同强分型均线V1（同向3类/类3类买卖点→止损上移，只上移；保本迁移后才接管、保本前参照点不追溯，部分平仓后剩余由最大止损硬上限兜底）。有任务运行中时会拒绝保存。',
     plan: '交易计划按当前品种分 2 类：震荡（参考周期闸门 rangeRes——关闭=默认，无震荡闸直接走买卖点；开启时 A 横盘/B 中枢内只给参考周期算结果，判震荡则更低周期观望）/ 顺势（参考周期 trendRes + 方向相位判定）。2026-10-16 起开单链路直连买卖点（买卖点→进场键见「进出场」页签图解表3），策略路由参数已下架。工作台/回测/实盘/监控同源读取。有任务运行中时会拒绝保存。',
-    chain: '周期链按当前品种（2026-10-23 双周期链）：链A=30秒-3分钟-15分钟-60分钟-4小时、链B=1分钟-5分钟-30分钟-4小时，各自独立引擎实例并行（回测同一任务内两链顺序跑、持仓/信号/交易日志按链隔离；实盘每链独立进程+独立 magic）。勾选=该周期作为开单周期（检测周期）；不勾=仅结构参考（仍加载笔/买卖点/支阻）。30秒（仅回测可用，MT5 无 30 秒行情）与 1 分钟为细层开关：勾=加载参与背驰下沉；不勾则上一级（3分钟/5分钟）无下级、不作检测周期。日线始终隐式加载作结构参考。链B 启用前须在基础数据页拉取 1/5/30 周期K线。240 默认不勾=只在 60/15（链B 为 30/5）开单。改链配置会变更实盘语义指纹：有持仓重启须 --accept-param-drift。',
+    chain: '周期链按当前品种（2026-10-23 双周期链）：链A=30秒-3分钟-15分钟-60分钟-4小时、链B=1分钟-5分钟-30分钟-4小时，各自独立引擎实例并行（回测同一任务内两链顺序跑、持仓/信号/交易日志按链隔离；实盘每链独立进程+独立 magic）。勾选=该周期作为开单周期（检测周期）；不勾=仅结构参考（仍加载笔/买卖点；支阻自 2026-10-26 起只算检测周期，见上方勾选语义说明）。30秒（仅回测可用，MT5 无 30 秒行情）与 1 分钟为细层开关：勾=加载参与背驰下沉；不勾则上一级（3分钟/5分钟）无下级、不作检测周期。日线始终隐式加载作结构参考。链B 启用前须在基础数据页拉取 1/5/30 周期K线。240 默认不勾=只在 60/15（链B 为 30/5）开单。改链配置会变更实盘语义指纹：有持仓重启须 --accept-param-drift。',
     fxmaBase: '强分型均线V1·基本参数（按当前品种）：进出场周期/买卖点类别/点有效期/止损止盈/同根双触/同向互斥/默认手数/上级周期同向/预判2买卖/黄金分割附近。止盈方式三卡单选：固定点数（满仓一笔触价全平）/ 结构组合（每笔半仓、同向容量最多两笔且同一粗类 1/2/3 持仓期间不叠加、该类平仓后可再开——1/2类一半到前一点位主动止盈+另一半走3/4类点提损跟踪，3类只主动止盈）。点有效期=根数+价距双约束（同卡配置）。上级周期同向与黄金分割附近均为独立硬门槛（开启即必须通过才触发，不参与条件组合计票；黄金分割仅2/3类点判定、1类豁免，未通过该点不触发）。预判2买卖=只修点可见性（确认下跌/上涨笔破前低/前高后反弹/回调够笔即预判2卖/2买提前入列，闸门链全部照旧；锚随反弹延伸漂移、收复前低/前高判死、真点同锚接管）——开启后预判点比真点多，信号集变化大。',
     fxmaEntry: '强分型均线V1·进场条件（按当前品种）：次级别背驰与条件组合互斥——启用背驰=背驰为唯一触发条件（通过即触发，不过则等待，强分型/均线分离/收盘站线与条件满足数完全不参与，相关行变灰；黄金分割/上级同向在「基本参数」页签，若开启仍作为硬门槛拦一道）；关闭背驰=条件组合（三选N）：均线分离/收盘站线/强分型各设「启用+必选/可选」，各类买卖点设条件满足数，必选不通过该类点不触发、启用条件中通过数≥生效N 才触发（必选通过也计票；生效N=min(N,启用条件数)；三条件全停=点出现即触发）。次级别背驰=缠论V1同源区间套下沉链（次级别/次次级别由结构自动归属，点锚定·粘性窗口；3分钟周期须30秒级别已加载）。开关关闭时子参数变灰（数值仍随表单保存，只是不参与判定）。',
   }[name] || '';

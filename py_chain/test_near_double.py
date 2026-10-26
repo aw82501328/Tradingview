@@ -253,19 +253,22 @@ class NearDoubleReboundTests(unittest.TestCase):
 
     def test_rebound_takes_later_top(self):
         start, old_t, new_t = (self._ts(x) for x in ('09-18T11:00:00', '09-18T15:00:00', '09-19T01:00:00'))
+        # 隔离守卫（与镜像用例同款）：端点内部极值恢复会把该上涨笔端点进一步上移到
+        # 9-18 17:00 被包含合并吞掉的上影真高 4398.2——本用例只验近等后顶取后本身。
+        iso = {'endInnerRecoverOn': False}
         # 默认（nearDoubleRebound=True + nearDoubleOn('60')）：端点后移到后顶
-        up = next(b for b in self._build() if b['startTime'] == start)
+        up = next(b for b in self._build(cfg=iso) if b['startTime'] == start)
         self.assertEqual((up['endTime'], up['endPrice']), (new_t, 4397.045))
-        self.assertEqual(next(b for b in self._build() if b['startTime'] == new_t)['endPrice'], 4322.81)
+        self.assertEqual(next(b for b in self._build(cfg=iso) if b['startTime'] == new_t)['endPrice'], 4322.81)
         # 关 nearDoubleRebound 且无锁定 → 旧行为：端点停在前顶 4399.67
-        up = next(b for b in self._build(cfg={'nearDoubleRebound': False}) if b['startTime'] == start)
+        up = next(b for b in self._build(cfg={'nearDoubleRebound': False, **iso}) if b['startTime'] == start)
         self.assertEqual((up['endTime'], up['endPrice']), (old_t, 4399.67))
         # 关 nearDoubleRebound 但 k 为上级锁定端点（如 240 层已后移的 4397.045）→ 区间套落地不受开关限制
         up = next(b for b in self._build(locked=[{'dir': 'top', 'price': 4397.045}],
-                                         cfg={'nearDoubleRebound': False}) if b['startTime'] == start)
+                                         cfg={'nearDoubleRebound': False, **iso}) if b['startTime'] == start)
         self.assertEqual((up['endTime'], up['endPrice']), (new_t, 4397.045))
         # 无锁定且非近等周期（模拟 15m 口径）→ 不后移
-        up = next(b for b in self._build(near_double=False) if b['startTime'] == start)
+        up = next(b for b in self._build(near_double=False, cfg=iso) if b['startTime'] == start)
         self.assertEqual((up['endTime'], up['endPrice']), (old_t, 4399.67))
 
     def test_rebound_mirrors_for_double_bottom(self):
@@ -492,6 +495,61 @@ class DeadTopAbsorbTests(unittest.TestCase):
         bis = self._syn(ohlc=ohlc)
         self.assertEqual([(b['type'], b['startPrice'], b['endPrice']) for b in bis],
                          [('down', 125.0, 97.0)])
+
+
+class PlatShiftRestoreTests(unittest.TestCase):
+    """平台回退起点重估（2026-10-26）：回退接入的终点被更极端同型分型替换 =
+    回退理由（只有原锚能接上）消失，笔起点复位到被丢弃的取后端点。
+
+    真实案例：XAUUSD 15m 2026-09-01 22:15 顶 4375.695 → 近等取后 9-2 00:00 顶
+    4374.79（实体差 2.62）→ 00:30 底间隔不足触发回退（锚 22:15）→ 更深底
+    替换 00:30 后起点重估 00:00，下跌笔 00:00 → 9-2 11:30 4282.625。"""
+
+    FIX = json.loads(gzip.decompress(
+        Path(__file__).with_name('fixtures').joinpath('plat_restore_xauusd_20260901.json.gz').read_bytes()))
+
+    def _ts(self, s):
+        return int(datetime.datetime.fromisoformat(f'2026-{s}+08:00').timestamp())
+
+    def _build(self, bars=None, locked=None):
+        bars = self.FIX['15'] if bars is None else bars
+        trimmed = c.markWickBars(bars)
+        merged = c.mergeBars(trimmed)
+        bis = c.buildBi(c.findFractals(merged), merged, c.calcATR(bars, 14),
+                        c.calcMACD(bars), locked, True, '15')
+        return c.extendLastBi(c.fixBiExtremes(bis, merged) or bis, trimmed)
+
+    def test_real_window_restores_start(self):
+        t0 = self._ts('09-02T00:00:00')
+        bis = self._build()
+        up = next(b for b in bis if b['endTime'] == t0)
+        self.assertEqual((up['type'], up['endPrice']), ('up', 4374.79))
+        down = next(b for b in bis if b['startTime'] == t0)
+        self.assertEqual((down['type'], down['endTime'], down['endPrice']),
+                         ('down', self._ts('09-02T11:30:00'), 4282.625))
+        # 旧口径（重估关闭）：取后 00:00 仍被 00:30 回退，起点停在 22:15
+        orig = c._plat_shift_restore
+        c._plat_shift_restore = lambda ctx, head, k: None
+        try:
+            old = next(b for b in self._build() if b['endPrice'] == 4282.625)
+            self.assertEqual(old['startTime'], self._ts('09-01T22:15:00'))
+        finally:
+            c._plat_shift_restore = orig
+
+    def test_no_replace_keeps_anchor(self):
+        # 截断到 00:45：00:30 不被更深底替换 → 回退产物 22:15→00:30 维持（旧语义）
+        cut = self._ts('09-02T00:45:00')
+        bars = [b for b in self.FIX['15'] if b['time'] <= cut]
+        bis = self._build(bars)
+        down = next(b for b in bis if b['endPrice'] == 4347.09)
+        self.assertEqual(down['startTime'], self._ts('09-01T22:15:00'))
+        self.assertFalse(any(b['startTime'] == self._ts('09-02T00:00:00') for b in bis))
+
+    def test_locked_anchor_blocks_restore(self):
+        # 锚（回退端点 22:15）被上级锁定 → 重估排除，起点保持 22:15
+        bis = self._build(locked=[{'dir': 'top', 'price': 4375.695}])
+        down = next(b for b in bis if b['endPrice'] == 4282.625)
+        self.assertEqual(down['startTime'], self._ts('09-01T22:15:00'))
 
 
 if __name__ == '__main__':

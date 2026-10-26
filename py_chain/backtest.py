@@ -2227,8 +2227,17 @@ class BacktestEngine:
                     if arrays is not None and res in core_set
                 }
             srKw.update(self.sr_kwargs)  # 预设 kwargs（含 manualLevels）优先于独立形参
+            # 支阻只算检测周期（2026-10-26 用户口径：支阻判断只发生在检测周期——
+            # detectPeriodsOf=开单周期勾选∩有已加载下级，背驰下沉级别（如链A 的 3m）
+            # 与结构参考级别（D/240 不勾）不贡献支阻线→近支阻闸门与止损挂线池随之收窄；
+            # open_res=None=旧口径 core 全键，历史方案重放行为不变。保持 core 顺序）。
+            if self.open_res is not None:
+                _detect = set(detectPeriodsOf(self.periods, self.open_res, self.res_chain))
+                sr_core = [r for r in core if r in _detect] or core
+            else:
+                sr_core = core
             try:
-                self._sr = compute_srflip(periodBis, barsByPeriod, core,
+                self._sr = compute_srflip(periodBis, barsByPeriod, sr_core,
                                           periodAtrsIn=periodAtr, periodMacdIn=periodMacd,
                                           work_cache=self._chain_work_cache, **srKw)
             except Exception:

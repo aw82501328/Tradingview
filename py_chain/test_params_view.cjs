@@ -33,11 +33,14 @@ vm.runInContext(script, ctx);
 
 // 假模块数据（schema/effective/overrides 三件套，形状同 /api/params）
 const schema = {
+  exitLockOn: { label: '锁定盈利', desc: 'd', default: true },
+  exitLockPct: { label: '锁定盈利平仓比例', desc: 'd', min: 1, max: 100, default: 100 },
+  exitLockPts: { label: '锁定盈利门槛', desc: 'd', min: 0, max: 10000, default: 10 },
   exitStopBeOn: { label: '保本止损', desc: 'd', default: true },
   exitStopBePct: { label: '保本止损平仓比例', desc: 'd', min: 1, max: 100, default: 100 },
   exitStopBeMode: {
     label: '保本位模式', desc: '保本位=…', default: 'extreme',
-    choices: ['extreme', 'entry'],
+    choices: ['extreme', 'entry', 'bi'],
   },
   exitTrailOn: { label: '跟踪止盈', desc: 'd', default: false },
   exitTrailPct: { label: '跟踪止盈平仓比例', desc: 'd', min: 1, max: 100, default: 100 },
@@ -63,7 +66,8 @@ assert.ok(h.includes('data-k="exitStopBeMode"'), 'stopBe 卡缺 exitStopBeMode �
 const sel = h.match(/<select data-k="exitStopBeMode"[\s\S]*?<\/select>/)[0];
 assert.ok(sel.includes('value="extreme" selected'), 'extreme 应选中');
 assert.ok(sel.includes('value="entry"') && !sel.includes('value="entry" selected'), 'entry 应存在且未选中');
-assert.ok(sel.includes('0亏损(进场价)') && sel.includes('当前(极值±滑点)'), '选项展示名缺失');
+assert.ok(sel.includes('0亏损(进场价)') && sel.includes('极值±滑点') && sel.includes('笔端点±滑点'),
+  '三口径选项展示名缺失');
 
 // ② 覆盖为 entry：entry 选中 + 卡片亮「已修改」徽章（isMod 含 exitStopBeMode override）
 h = vm.runInContext('exitModeRowsHtml', ctx)(mk({
@@ -87,6 +91,65 @@ const standalone = [...rows.matchAll(/<span class="plabel">(保本位模式|跟�
 assert.equal(standalone.length, 0, '内嵌下拉不应再渲染独立参数行');
 
 // ④ choiceLabel 展示名兜底：未知值原样展示
-assert.equal(vm.runInContext('choiceLabel', ctx)('exitStopBeMode', 'extreme'), '当前(极值±滑点)');
+assert.equal(vm.runInContext('choiceLabel', ctx)('exitStopBeMode', 'extreme'), '极值±滑点');
 assert.equal(vm.runInContext('choiceLabel', ctx)('exitStopBeMode', 'x'), 'x');
-console.log('params.html 保本位模式卡渲染冒烟 OK');
+
+// ⑤ 近等双顶整合卡（2026-10-26）：容差+5周期开关+两行为开关并一张卡；
+//    chanRowsHtml 不再输出近等分组横线，近等键只渲染一次（卡内）
+const chanSchema = (() => {
+  const bool = (label, dflt) => ({ label, desc: label, default: dflt });
+  const num = (label, dflt, min, max) => ({ label, desc: label, default: dflt, min, max });
+  return {
+    gapFilter: num('跳空成笔阈值', 0.5, 0, 5),
+    wickMarkOn: bool('长影线修复', true),
+    wickRatio: num('长影线比例阈值', 0.6, 0, 1),
+    wickMinLen: num('长影线长度下限', 0.5, 0, 500),
+    wickMinRange: num('长影线最小价差', 15, 0, 500),
+    fractalSideRealWick: bool('分型邻侧影线真实价', true),
+    endInnerRecoverOn: bool('端点内部极值恢复', true),
+    innerExtremeGuardOn: bool('笔内极值守卫', true),
+    wideBarOn: bool('单根长K豁免开关', true),
+    wideBarPointsD: num('日线', 0, 0, 500),
+    wideBarPoints240: num('4小时', 0, 0, 500),
+    wideBarPoints60: num('1小时', 0, 0, 500),
+    wideBarPoints15: num('15分钟', 0, 0, 500),
+    wideBarPoints3: num('3分钟', 0, 0, 500),
+    nearDoubleFixed: num('近等双顶固定容差', 2.0, 0.0, null),
+    nearDoubleD: bool('近等双顶·日线', true),
+    nearDouble240: bool('近等双顶·4小时', true),
+    nearDouble60: bool('近等双顶·1小时', true),
+    nearDouble15: bool('近等双顶·15分钟', true),
+    nearDouble3: bool('近等双顶·3分钟', true),
+    nearDoubleShiftLocked: bool('近等取后让位锁定', false),
+    absorbMarkFast: bool('吸收成笔即标', true),
+    synthIntrabarBars: bool('盘中合成K', true),
+    pointEnoughForming: bool('够笔即出点', true),
+    windowDays3: num('3分钟', 20, 1, 365),
+    windowDays15: num('15分钟', 50, 1, 365),
+    windowDays30S: num('30秒', 10, 1, 365),
+  };
+})();
+const mkChan = (ovr = {}) => ({
+  schema: chanSchema,
+  effective: Object.fromEntries(Object.entries(chanSchema).map(([k, s]) => [k, s.default])),
+  overrides: ovr,
+});
+let nd = vm.runInContext('nearDoubleRowHtml', ctx)(mkChan());
+assert.ok(nd.includes('prow span-all'), '近等卡应占满一行');
+assert.ok(nd.includes('近等双顶/双底（平台取后顶/后底）'), '近等卡标题缺失');
+assert.ok(nd.includes('data-k="nearDoubleFixed"') && nd.includes('aria-label="近等双顶容差"'), '容差输入缺失');
+for (const k of ['nearDoubleD', 'nearDouble240', 'nearDouble60', 'nearDouble15', 'nearDouble3',
+                 'nearDoubleShiftLocked', 'absorbMarkFast']) {
+  assert.ok(nd.includes(`data-k="${k}"`), `近等卡缺 ${k} 控件`);
+}
+assert.ok(!nd.includes(' mod'), '默认无 override 不应亮已修改徽章');
+nd = vm.runInContext('nearDoubleRowHtml', ctx)(mkChan({ nearDouble3: false }));
+assert.ok(nd.includes('prow span-all mod'), 'nearDouble3 覆盖应点亮已修改徽章');
+const chanRows = vm.runInContext('chanRowsHtml', ctx)(mkChan());
+assert.ok(!chanRows.includes('>近等双顶/双底（平台取后顶/后底）</div>'), '近等分组横线应移除');
+assert.ok(!chanRows.includes('>近等双顶·3分钟<span class="badge">'), '近等周期开关不应再独立成行');
+for (const k of ['nearDoubleFixed', 'nearDouble3', 'nearDoubleShiftLocked', 'absorbMarkFast']) {
+  const n = (chanRows.match(new RegExp(`data-k="${k}"`, 'g')) || []).length;
+  assert.equal(n, 1, `${k} 应只渲染一次（整合卡内）`);
+}
+console.log('params.html 保本位模式+近等双顶整合卡渲染冒烟 OK');

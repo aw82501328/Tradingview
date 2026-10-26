@@ -192,7 +192,7 @@ def provisional_sl(direction, bid, ask, near_sr, slip=DEFAULT_SLIP_STOP,
 # 成交的信号不消耗），用满即拒 point_attempt_max；sinkFallbackRearm 终局重置只清
 # 段去重不清尝试计数；0=不限（旧口径）；仅当下模式——回测基线不可比，持仓重启
 # 须 --accept-param-drift）。
-ENGINE_LOGIC_VERSION = "20261025-inner-extrem-guard"
+ENGINE_LOGIC_VERSION = "20261026-platshift-sr-openres"
 
 
 def ns_strategy(cfg):

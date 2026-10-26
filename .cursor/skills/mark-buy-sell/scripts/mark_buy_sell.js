@@ -506,7 +506,7 @@ function onlyThisInterval(res) {
 
     // 大级别笔变化时，从该周期起按区间套重算更小周期（2026-10-14 规则v2 起为笔区间粒度：
     // 脏区间 t0 之前沿用上次标记、之后取新算，见下方 marks 合并）；未变的大级别整体沿用
-    const LOGIC_V = "20261025-inner-extrem-guard"; // 笔内极值守卫（innerExtremeGuardOn：同型替换/push起点/顶替族新配对笔内藏超近等容差更极值时落地为端点，如15m 9-4下跌笔终点12:00内藏14:45@4460.15→延伸到14:45）+absorbMarkFast沿袭（逻辑变更必须升版使状态作废全量重算）
+    const LOGIC_V = "20261026-platshift-restore"; // 平台回退起点重估（platShiftRestore：回退接入的终点被更极端同型分型替换=回退理由消失，笔起点复位到取后端点，如15m 9-1 22:15顶取后00:00被00:30回退、更深底替换后起点=00:00）（逻辑变更必须升版使状态作废全量重算）
     const statePath = path.join(CACHE_DIR, `buysell_${String(SYMBOL).replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
     const fpOf = (bis) => (bis || []).map(b => [b.type, b.startTime, b.endTime, b.startPrice, b.endPrice]);
     let prevState = null;

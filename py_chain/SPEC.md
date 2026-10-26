@@ -75,12 +75,17 @@
   - **终点侧反向贯穿改实体口径**：`fractalRangeClear` 终点侧三根的证据从影线极值改为
     bodyTop/bodyBottom（影线刺穿不算——10-1 09:00 长阳高 4161.385 刺穿 04:30 顶 4160.41
     但实体顶 4159.67 未越过）；单根长K豁免（振幅口径）不变。
-  - **平台取后可证伪回退（新规则）**：`tryNearEqualSameType` 后移时记 `_platAnchor`；间隔不足
-    分支入口处若原端点能与 k 完整成笔（含起点侧极值守卫：区间内无比起点更极值的同向极值）
-    则回退原端点并接入 k——「两底近等取哪个无所谓」的断言被可证结构否定时让位（与
-    `_shiftBreakRestore` 同哲学）。例：15m 10-1 02:00 底被近等后移到 03:0、04:30 顶只剩 4 根
-    合并K（04:00 长下影压平使包含链多并一块）→ 回退后 02:00→04:30 成笔；60m 9-18 04:00 底
-    上方藏 07:00 更低点 → 守卫拦下不回退。
+  - **平台取后可证伪回退**：`tryNearEqualSameType` 后移时记 `_platAnchor`；间隔不足分支若
+    原端点能与 k 完整成笔（含起点侧极值守卫：区间内无比起点更极值的同向极值）则回退原端点
+    并接入 k——「取哪个无所谓」的断言被可证结构否定时让位。例：15m 10-1 02:00 底近等后移后、
+    04:30 顶只剩 4 根合并K → 回退成笔；60m 9-18 04:00 底上方藏 07:00 更低点 → 守卫拦下不回退。
+  - **平台回退起点重估（2026-10-26）**：回退接入的终点随后被更极端同型分型直接替换 =
+    回退理由（只有原锚能接上）消失，取后端点与新终点能成笔且起点侧干净时，笔起点复位到
+    取后端点（`_plat_shift_restore`；未触发则 `_platShiftLost` 线索随新终点保持窗口开放）。
+    锚或取后端点锁定/跳空锁定排除。例：15m 9-1 22:15 顶 4375.695 取后 9-2 00:00 顶 4374.79
+    → 00:30 底回退锚 22:15 → 更深底替换后下跌笔起点重估 00:00（→ 9-2 11:30 4282.625）。
+    A/B（XAUUSD 全量）：D 不变、240=19、60=145、15=632、3=1474 处替换、重估触发 322 次，
+    交替/衔接健全性全过；py/JS 五窗口逐位一致。
   - **回归**：15m 全历史 294→342 笔、60m 74→82、240 22→24、D 不变（bars.db XAUUSD 生产口径
     markWickBars→…→extendLastBi 对拍，`_cmp_merge*.json`）；test_chan_core_rules/test_near_double
     断言按新口径更新（反向吞没=实体、冻结目标改链式基线+目标存在性、固定容差边界改合成K线）；
@@ -233,6 +238,8 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 
 > 2026-10-25 **同一点最大尝试次数（用户规则）**：`CHAN_CFG.pointMaxAttempts` 默认 2（参数中心 entry 桶「同一点最大尝试次数」，int 0~20，0=不限=旧口径关闭开关）——同一买卖点（点身份=检测周期+策略键+锚点时间；锚点被新点替换/笔延伸出新锚点时间=新点新预算）**终生最多实际开仓 N 次**：成交建仓才计数（backtest `_fill_pending` 建仓处按 (periodX, strategyKey, anchorTime) 递增；被同向互斥压掉未成交的信号不消耗；信号/交易新带 `anchorTime` 字段），计数达上限的锚点当下制不再布防触发（`evaluateRealtimeEntries` 锚点窗口闸之后检查——窗外锚仍报 anchor_bar_window，窗内且次数用满才报 `point_attempt_max`，ctx 含 pointType/anchorTime/attempts/max）。**计数终生保留**：`sinkFallbackRearm` 终局重置只清段去重、不清尝试计数（此前同一点经 入场→终局→rearm→再进 可无限循环，仅受锚点窗口/同向互斥实际约束——本参数即在此加终生上限，重置若回血则形同虚设）。仅当下模式（回测默认+实盘唯一路径）；确认制与 JS 标记层不适用（mark_entry.js 为单次快照评估、无 fired/rearm 状态机，新键经 --chan-cfg 传入闲置无害）。bt journal header 记 pointMaxAttempts 口径；已知边界：信号 N 拍发出 N+1 拍成交、评估先于成交一拍——同点两段在一拍内先后合格且首单一拍内终局的极端序列可能超限 1 次成交（同向互斥兜底大多数情形）。`live_trader.ENGINE_LOGIC_VERSION` → `20261025-point-max-attempts`（决策级；持仓重启须 --accept-param-drift）。**全部缠论回测基线不可比**（同一点第 3+ 次成交被拦——历史存在该情形即变；设 0 可逐位复现旧口径，兼作 A/B 关闭开关）。测试 `py_chain.test_point_attempts`（12 例：闸门拒绝与放行/0=不限/None 不启用/窗外优先窗口闸/成交计数/互斥不消耗/不同锚点独立预算/rearm 不清计数/接线）/`test_param_center.TestPointMaxAttemptsParams`（3 例）。
 
+> 2026-10-26 **支阻只算检测周期（用户规则）**：`BacktestEngine._rebuild_chain` 调 `compute_srflip` 的周期集由 core 全键改为 `detectPeriodsOf(periods, open_res, res_chain)`（=开单周期勾选∩有已加载下级，保持 core 顺序）——背驰下沉级别（链A 的 3m 未勾 30S 时非检测周期）与结构参考级别（未勾的 240 等、D 恒不参与）不再计算支阻，近支阻闸门与止损重选（backtest `sr_pick`）的 `srflip.merged` 池随之收窄；`open_res=None`（历史方案显式 periods 重放）仍走 core 全键、行为逐位不变。链A 当前配置即 60/15 两级、链B 为 30/5。动因：性能画像支阻链占引擎 ~55%（srTypes 置空对照同窗 352→157.5s），用户口径「支阻判断只发生在检测周期、3 分钟是背驰周期」。**全部链式回测基线不可比**；`live_trader.ENGINE_LOGIC_VERSION` → `20261026-platshift-sr-openres`（持仓重启须 --accept-param-drift）。JS 工作台/分析页支阻显示仍按全周期桶参数，与回测引擎池存在已知差异（仅显示层，后续按需同步）。
+
 > 2026-10-25 **近支阻按方向取侧（用户规则）**：`CHAN_CFG.srSideGateOn` 默认开（参数中心 entry 桶「fib/BOLL按方向取侧」，JS `chan_core.js` 同键）——「支阻位附近」闸门与止损重选（backtest `sr_pick`）的支阻池中，fib/BOLL 候选按 `type` 只认信号同侧：做多 `SUP`（最近上涨笔回撤支撑/布林下轨与下侧中轨）、做空 `RES`（最近下跌笔反弹阻力/布林上轨与上侧中轨）；密集区与人工位不按侧过滤。实现=`mark_entry.sr_side_levels`（JS `mark_entry.js srSideLevels` 镜像）三挂点：`evaluateEntry` 确认制、`evaluateRealtimeEntries` 当下制（拒绝 ctx 的 nearest_sr 随过滤后池走）、backtest `_fill_pending` 止损池——与 1类豁免 `sr_drop_fib_for_class1` 同挂点组合（1类键先剔全部 fib，侧过滤再剔反向 boll）。动机：9-4 04:15 60m 2Buy@4470.55 命中下跌笔 0.382 反弹位 4485.98（距 15.4 ≤ near 30）开单亏损 −15.16——买侧参照应为前上涨笔 4282.625→4510.93 的回撤位（最近 4423.72 距 46.8 > near 30，该信号新口径被拒）。`live_trader.ENGINE_LOGIC_VERSION` → `20261025-sr-side-gate`（决策级；持仓重启须 --accept-param-drift）。**全部缠论回测基线不可比**（两侧 fib 命中的信号重排）。测试 `py_chain.test_sr_zone.TestSrSideGate`（8 例，含 9-4 案例复刻）/`test_param_center.TestSrSideGateParam`/`mark_entry.test.js` 取侧 describe（9 例）。
 
 > 2026-10-24 **三类/四类族拆强弱 + 全部策略键去 wait 前缀（用户规则）**：①3/4 类点（3买/类3买/4买/类4买 及卖侧镜像）新增 `strong` 字段——`chan_core._mark_third_fourth_strong`（JS `markThirdFourthStrong` 镜像，find*Points 收笔前调用）：**弱=点后同向腿背驰**（弱3=2类点后首根上推腿对1类点后首根反弹腿顶背驰、弱4=3类点后首根上推腿对2类点后首根上推腿顶背驰，卖侧镜像=点后首根下推腿底背驰；`isBiDiverge` 本周期 macd 三判据+时长闸；前点=同侧更早最近点，3族取(1类,2族含类2)、4族取(2族,3族)；判不出即强——语义=推动腿动能逐段衰竭，踩在衰竭趋势上的 3/4 类点为弱）。②策略键全量去 wait 前缀（wait1Buy→1Buy 等 12 键）+弱 3/4 锚点分流 Bear 键：`3BuyBear/3SellBear/BuyBear/SellBear`（同构二类族 2Buy/2BuyBear；新键不进 TREND_STRATEGY_KEYS/EXIT_TRAIL_REF_KEYS——照抄 2BuyBear 先例）。③白名单 pointClasses 9→13 项（3s/3w/3xs/3xw/4s/4w/4xs/4xw），旧值 3/3x/4/4x 运行期别名展开+保存迁移；默认全选。④图表标签 3/4 族加强/弱前缀（mark_buy_sell `_family_label`/`familyLabel`），LOGIC_V → `20261024-third-fourth-strongweak`；`live_trader.ENGINE_LOGIC_VERSION` 同步（持仓重启须 --accept-param-drift）。回测信号 pointStrong 3/4 锚点 None→布尔、journal 锚点标签（强三买…）；fxma pointClasses 只认 type 不受影响。**全部回测基线不可比**（strategyKey 换名+弱 3/4 分流）。
@@ -267,7 +274,7 @@ CDP 取数(data_loader) → chan_core(mergeBars/buildBi/buildZS/MACD/背驰)
 
 1. **够笔** `lastBiOk`——检测周期最后一笔方向要「对着来」：做空要等一段反弹（up 笔），做多要等一段回调（down 笔）。
 2. **以下级别出现背驰** `lowerDiverge` / `realtimeLowerDiverge`——在更低周期里找同向背驰点（做空找顶背驰、做多找底背驰），且该点必须通过**下沉链**校验（见 §2.1.2.3）。
-3. **在支阻位附近** `nearSr`——背驰点价格与任一支阻位（`srflip.merged` 全量候选池，含密集区 / 黄金分割 / BOLL / 人工位）的价差 ≤ `near`（**绝对价差**，默认 10.0，CLI `--near`；2026-09-13 起 ×检测周期ATR 语义改为直接输入，与滑点同单位——`compute_entries(near=)`/`evaluateRealtimeEntries(near=)`/`BacktestEngine(near=)` 形参同名，Web 工作台与回测界面同参）。**1类豁免（2026-10-10）**：1Buy/1Sell（等一买/等一卖）的支阻池剔除黄金分割候选（`sr_drop_fib_for_class1`，`evaluateEntry` 与当下制同口径）——fib 位由非一类买卖点锚定派生，1类点创新低/高时旧摆动段回撤档不再有支撑/压力语义；止损重选（backtest `sr_pick`）同口径剔除。**按方向取侧（2026-10-25，`srSideGateOn` 默认开，参数中心 entry 桶）**：fib/BOLL 位只认信号同侧——做多取 `SUP`（最近上涨笔回撤支撑/布林下轨与下侧中轨）、做空取 `RES`（最近下跌笔反弹阻力/布林上轨与上侧中轨），另一侧 fib/BOLL 不参与闸门与止损重选（`sr_side_levels`，闸门两路径与 backtest `sr_pick` 三挂点同池；密集区/人工位不按侧过滤；zones 模式池无 fib/boll 天然 no-op）。动因：9-4 04:15 60m 2Buy@4470.55 命中下跌笔 0.382 反弹位 4485.98（距 15.4）——买侧参照应为前上涨笔 4282.625→4510.93 的回撤位（最近 4423.72 距 46.8 > near 30，该信号按新口径被拒）。
+3. **在支阻位附近** `nearSr`——背驰点价格与任一支阻位（`srflip.merged` 全量候选池，含密集区 / 黄金分割 / BOLL / 人工位；2026-10-26 起池只算检测周期级别，见上方注记）的价差 ≤ `near`（**绝对价差**，默认 10.0，CLI `--near`；2026-09-13 起 ×检测周期ATR 语义改为直接输入，与滑点同单位——`compute_entries(near=)`/`evaluateRealtimeEntries(near=)`/`BacktestEngine(near=)` 形参同名，Web 工作台与回测界面同参）。**1类豁免（2026-10-10）**：1Buy/1Sell（等一买/等一卖）的支阻池剔除黄金分割候选（`sr_drop_fib_for_class1`，`evaluateEntry` 与当下制同口径）——fib 位由非一类买卖点锚定派生，1类点创新低/高时旧摆动段回撤档不再有支撑/压力语义；止损重选（backtest `sr_pick`）同口径剔除。**按方向取侧（2026-10-25，`srSideGateOn` 默认开，参数中心 entry 桶）**：fib/BOLL 位只认信号同侧——做多取 `SUP`（最近上涨笔回撤支撑/布林下轨与下侧中轨）、做空取 `RES`（最近下跌笔反弹阻力/布林上轨与上侧中轨），另一侧 fib/BOLL 不参与闸门与止损重选（`sr_side_levels`，闸门两路径与 backtest `sr_pick` 三挂点同池；密集区/人工位不按侧过滤；zones 模式池无 fib/boll 天然 no-op）。动因：9-4 04:15 60m 2Buy@4470.55 命中下跌笔 0.382 反弹位 4485.98（距 15.4）——买侧参照应为前上涨笔 4282.625→4510.93 的回撤位（最近 4423.72 距 46.8 > near 30，该信号按新口径被拒）。
 4. **锚点窗口（2026-10-18 用户规则，2026-10-21 重定义参数化；2026-10-22 trailing 重开）**——大周期某根K线满足买卖点条件（锚点所在K线）→ 去小周期找背驰限**锚K起 `anchorWinBars` 根检测周期K内**（默认 2、旧口径=1）：背驰点所在K须落窗（当下制另要求触发拍在窗内，拒绝闸 `anchor_bar_window`；确认制 `evaluateEntry` 只查背驰点落窗，JS 侧 `coverBarIndex`+`ctx.anchorPoint`+`barTimesAll` 镜像），且触发价距窗口极值 ≤ `anchorWinPts` 点（0=不限；极值=锚点价与窗口内实际极值取小/大，买侧最低/卖侧最高）。无永久闩锁——锚漂移/换新点即重开窗（旧锚窗口失败后价格涨过/跌破、重新满足条件仍会再触发）。**trailing 重开（2026-10-22 `anchorWinTrailOn` 默认开）**：窗口内创新高/新低时时间窗锚K=窗口极值所在K（False=固定锚K 2026-10-21 口径）——连续新高不可能产生新压低2卖锚，固定锚K会把极值处的触发卡死（2026-09-08 12:00 案例，详见 §2.1.3 进场链一节）。
 
 #### 2.1.2.3 背驰属于哪个级别（下沉链 / 区间套，2026-09-08 实现）

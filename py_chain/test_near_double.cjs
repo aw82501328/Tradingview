@@ -94,14 +94,17 @@ function rbuild(locked=null,nearDouble=true,cfg=null){
   return c.fixBiExtremes(c.buildBi(c.findFractals(m),m,c.calcATR(bars,14),c.calcMACD(bars),locked,nearDouble),m);
  }finally{if(cfg)Object.assign(c.CHAN_CFG,saved);}}
 test('near-equal rebound (gap<4) shifts endpoint to later top: 9-18 11:00 → 9-19 01:00',()=>{
- let up=rbuild().find(x=>x.startTime===rStart);
+ // 隔离守卫（与镜像用例同款）：关端点内部极值恢复，否则端点被上移到 9-18 17:00
+ // 被包含合并吞掉的上影真高 4398.2——本用例只验近等后顶取后本身。
+ const iso={endInnerRecoverOn:false};
+ let up=rbuild(null,true,iso).find(x=>x.startTime===rStart);
  assert.equal(up.endTime,rNew);assert.equal(up.endPrice,4397.045);
- assert.equal(rbuild().find(x=>x.startTime===rNew).endPrice,4322.81);
+ assert.equal(rbuild(null,true,iso).find(x=>x.startTime===rNew).endPrice,4322.81);
  // 关 nearDoubleRebound 且无锁定 → 旧行为：端点停在前顶 4399.67
- up=rbuild(null,true,{nearDoubleRebound:false}).find(x=>x.startTime===rStart);
+ up=rbuild(null,true,{nearDoubleRebound:false,...iso}).find(x=>x.startTime===rStart);
  assert.equal(up.endTime,rOld);assert.equal(up.endPrice,4399.67);
  // 关 nearDoubleRebound 但 k 为上级锁定端点（如 240 层已后移的 4397.05）→ 区间套落地不受开关限制
- up=rbuild([{dir:'top',price:4397.045}],true,{nearDoubleRebound:false}).find(x=>x.startTime===rStart);
+ up=rbuild([{dir:'top',price:4397.045}],true,{nearDoubleRebound:false,...iso}).find(x=>x.startTime===rStart);
  assert.equal(up.endTime,rNew);assert.equal(up.endPrice,4397.045);
  // 无锁定且非 nearDouble 周期（模拟 15m 口径）→ 不后移
  up=rbuild(null,false).find(x=>x.startTime===rStart);
@@ -115,14 +118,17 @@ test('near-equal rebound mirrors for double bottom',()=>{
  const bars=rdata['60'].map(b=>({time:b.time,open:10000-b.open,high:10000-b.low,low:10000-b.high,close:10000-b.close}));
  const mirror=()=>{const m=c.mergeBars(c.markWickBars(bars));
   return c.fixBiExtremes(c.buildBi(c.findFractals(m),m,c.calcATR(bars,14),c.calcMACD(bars),null,true),m);};
- const on=mirror();
- const down=on.find(x=>x.endTime===rNew);
- assert.equal(down.type,'down');
- assert.equal(down.endPrice,10000-4397.045);   // 后底 5602.955 > 前底 5600.330：非 <= 替换可达
- const saved=c.CHAN_CFG.nearDoubleRebound;
- try{c.CHAN_CFG.nearDoubleRebound=false;
+ // 隔离守卫（与 py 镜像用例同款）：关端点内部极值恢复，本用例只验近等后底取后本身。
+ const saved=c.CHAN_CFG.nearDoubleRebound,savedRec=c.CHAN_CFG.endInnerRecoverOn;
+ c.CHAN_CFG.endInnerRecoverOn=false;
+ try{
+  const on=mirror();
+  const down=on.find(x=>x.endTime===rNew);
+  assert.equal(down.type,'down');
+  assert.equal(down.endPrice,10000-4397.045);   // 后底 5602.955 > 前底 5600.330：非 <= 替换可达
+  c.CHAN_CFG.nearDoubleRebound=false;
   assert.ok(!mirror().some(x=>x.endTime===rNew)); // 关开关（无锁定）→ 端点停在前底 09-18 15:00
- }finally{c.CHAN_CFG.nearDoubleRebound=saved;}
+ }finally{c.CHAN_CFG.nearDoubleRebound=saved;c.CHAN_CFG.endInnerRecoverOn=savedRec;}
 });
 // ---- 死顶/死底近等吸收（2026-10-22）----
 // 双顶/双底的前一个顶/底自身与笔起点不成笔（间隔不足）时，与其近等的后顶/后底
@@ -169,4 +175,28 @@ test('synthetic dead-top absorb, tolerance boundary, unattributable blocker',()=
  // bar9 高点抬到 110：超越点无同类分型归属 → 不吸收
  const ohlc=dOHLC.slice();ohlc[9]=[108,110,104.5,109];
  assert.deepEqual(shape(dsyn(ohlc)),[['down',125,97]]);
+});
+
+// ---- 平台回退起点重估（2026-10-26，与 py PlatShiftRestoreTests 同步）----
+// 9-1 22:15 顶取后 00:00 → 00:30 回退锚 22:15 → 更深底替换后起点复位 00:00。
+const prData=JSON.parse(zlib.gunzipSync(fs.readFileSync('py_chain/fixtures/plat_restore_xauusd_20260901.json.gz')));
+const prTs=s=>Date.parse(`2026-${s}+08:00`)/1000;
+function prBuild(bars,locked=null){const t=c.markWickBars(bars),m=c.mergeBars(t);
+ return c.extendLastBi(c.fixBiExtremes(c.buildBi(c.findFractals(m),m,c.calcATR(bars,14),c.calcMACD(bars),locked,true,'15'),m)||[],t);}
+test('plat shift restore: start moves to taken-later top 00:00 after replace',()=>{
+ const t0=prTs('09-02T00:00:00'),out=prBuild(prData['15']);
+ const up=out.find(x=>x.endTime===t0);
+ assert.equal(up&&up.type,'up');assert.equal(up.endPrice,4374.79);
+ const down=out.find(x=>x.startTime===t0);
+ assert.equal(down.type,'down');assert.equal(down.endTime,prTs('09-02T11:30:00'));
+ assert.equal(down.endPrice,4282.625);
+ // 锚（22:15）被上级锁定 → 重估排除，起点保持回退锚
+ const lk=prBuild(prData['15'],[{dir:'top',price:4375.695}]);
+ assert.equal(lk.find(x=>x.endPrice===4282.625).startTime,prTs('09-01T22:15:00'));
+});
+test('plat shift restore: no replace keeps rollback anchor (truncated to 00:45)',()=>{
+ const bars=prData['15'].filter(x=>x.time<=prTs('09-02T00:45:00')),out=prBuild(bars);
+ const down=out.find(x=>x.endPrice===4347.09);
+ assert.equal(down.startTime,prTs('09-01T22:15:00'));
+ assert.ok(!out.some(x=>x.startTime===prTs('09-02T00:00:00')));
 });

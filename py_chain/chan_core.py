@@ -1326,6 +1326,32 @@ def tryNearEqualSameType(ctx, last, head, k):
     return _stkCons(k, head[1])
 
 
+def _plat_shift_restore(ctx, head, k):
+    """平台回退起点重估（2026-10-26）：回退接入的终点被更极端同型分型替换 =
+    回退理由（只有原锚能接上）消失，两起点等价时按近等取后原则把笔起点复位到
+    取后端点。条件：锚带 _platRestored 且未锁、被丢弃端点未锁/未跳空锁、
+    lost→k 能成笔、lost→k 区间无更极端同向极值（与回退起点守卫同口径）。"""
+    lost = head[0].get("_platShiftLost")
+    if lost is None or _stkLen(head) < 2:
+        return None
+    anchor = head[1][0]
+    if not anchor.get("_platRestored") or anchor.get("locked", False):
+        return None
+    if lost.get("locked", False) or lost.get("gapLocked", False):
+        return None
+    if not _pair_forms_bi(ctx, lost, k):
+        return None
+    is_top = lost["type"] == "top"
+    for i in range(lost["mergedIdx"] + 1, k["mergedIdx"]):
+        m = ctx.merged[i]
+        if (is_top and m["high"] > lost["high"]) or (not is_top and m["low"] < lost["low"]):
+            return None
+    if CHAN_CFG["debug"]:
+        print(f"[阶段二] 平台回退起点重估: {'顶' if is_top else '底'}@{anchor['mergedIdx']} -> "
+              f"取后{'顶' if is_top else '底'}@{lost['mergedIdx']}，接入 {'底' if is_top else '顶'}@{k['mergedIdx']}")
+    return _stkCons(k, _stkCons(lost, head[1][1]))
+
+
 def _deadNearAbsorb(ctx, last, head, k):
     """死顶/死底近等吸收（2026-10-22）。命中返回追加 k 的新 head，否则 None。
 
@@ -1803,6 +1829,13 @@ def biStep(ctx, head, k):
                 if last.get("_shiftMid") is not None:
                     k["_shiftAnchor"] = last.get("_shiftAnchor")
                     k["_shiftMid"] = last["_shiftMid"]
+                # 平台回退起点重估（2026-10-26）：last 是回退接入的终点且被 k 直接
+                # 替换 → 回退理由消失，尝试把起点复位到被丢弃的取后端点。
+                restored = _plat_shift_restore(ctx, head, k)
+                if restored is not None:
+                    return restored
+                if last.get("_platShiftLost") is not None:
+                    k["_platShiftLost"] = last["_platShiftLost"]  # 窗口保持开放
                 head = _stkCons(k, head[1])           # result[-1] = k
         else:
             # 跳空锁定的端点：仅当后续同类型分型「突破」锁定价格时才解锁替换
@@ -1981,6 +2014,8 @@ def biStep(ctx, head, k):
                         print(f"[阶段二] 平台取后回退: {'底' if last['type']=='bottom' else '顶'}@{last['mergedIdx']}"
                               f" -> 原{'底' if _plat_anchor['type']=='bottom' else '顶'}@{_plat_anchor['mergedIdx']}，接入 "
                               f"{'顶' if k['type']=='top' else '底'}@{k['mergedIdx']}")
+                    _plat_anchor["_platRestored"] = True
+                    k["_platShiftLost"] = last
                     return _stkCons(k, _stkCons(_plat_anchor, head[1]))
             if _stkLen(head) >= 2 and head[1][0]["type"] == k["type"]:
                 prev = head[1][0]
@@ -2236,7 +2271,8 @@ def alignBiToUpper(lowerBis, upperBis, upperIntervalSec, lowerBars=None):
 
 # 阶段二重放在分型 dict 上派生的一次性旗标（重放前须重置，见 resetBiFlags）
 _REPLAY_FLAGS = ("locked", "gapLocked", "nearDouble", "macdCross", "macdRaw",
-                 "_platAnchor", "_shiftAnchor", "_shiftMid", "_openEndpoint")
+                 "_platAnchor", "_shiftAnchor", "_shiftMid", "_openEndpoint",
+                 "_platRestored", "_platShiftLost")
 
 
 def resetBiFlags(seq, start=0):

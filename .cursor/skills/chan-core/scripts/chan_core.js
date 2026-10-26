@@ -874,6 +874,27 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, res =
     return true;
   };
 
+  // 平台回退起点重估（2026-10-26，与 py_chain/chan_core.py _plat_shift_restore 同步）：
+  // 回退接入的终点被更极端同型分型替换 = 回退理由（只有原锚能接上）消失，
+  // 两起点等价时按近等取后原则把笔起点复位到被丢弃的取后端点。
+  const platShiftRestore = (last, k) => {
+    const lost = last._platShiftLost;
+    if (!lost || result.length < 2) return false;
+    const anchor = result[result.length - 2];
+    if (!anchor._platRestored || anchor.locked) return false;
+    if (lost.locked || lost.gapLocked) return false;
+    if (!pairFormsBi(lost, k)) return false;
+    const isTop = lost.type === "top";
+    for (let i = lost.mergedIdx + 1; i < k.mergedIdx; i++) {
+      const m = merged[i];
+      if ((isTop && m.high > lost.high) || (!isTop && m.low < lost.low)) return false;
+    }
+    if (CHAN_CFG.debug) console.log(`[阶段二] 平台回退起点重估: ${isTop ? "顶" : "底"}@${anchor.mergedIdx} → 取后${isTop ? "顶" : "底"}@${lost.mergedIdx}，接入 ${isTop ? "底" : "顶"}@${k.mergedIdx}`);
+    result[result.length - 2] = lost;
+    result[result.length - 1] = k;
+    return true;
+  };
+
   // 死顶/死底近等吸收（2026-10-22，与 py_chain/chan_core.py _deadNearAbsorb 同步）：
   // 异类型 isValid 通过、仅因笔内极值守卫面临忽略时，k 侧每个内部超越点都归属于
   // 一个同类「死分型」f（f 与笔起点无法成笔——not pairFormsBi(last, f)，典型如
@@ -1032,6 +1053,10 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, res =
             k._shiftAnchor = last._shiftAnchor;
             k._shiftMid = last._shiftMid;
           }
+          // 平台回退起点重估（2026-10-26，与 py 同步）：last 被直接替换 → 回退理由
+          // 消失，尝试把起点复位到被丢弃的取后端点；未触发则 k 继承线索保持窗口开放。
+          if (platShiftRestore(last, k)) continue;
+          if (last._platShiftLost) k._platShiftLost = last._platShiftLost;
           result[result.length - 1] = k;
         }
       } else {
@@ -1196,6 +1221,8 @@ function buildBi(fractals, merged, atr, macdArr, lockedPivots, nearDouble, res =
           }
           if (startClear) {
             if (CHAN_CFG.debug) console.log(`[阶段二] 平台取后回退: ${last.type === "top" ? "顶" : "底"}@${last.mergedIdx} → 原${last._platAnchor.type === "top" ? "顶" : "底"}@${last._platAnchor.mergedIdx}，接入 ${k.type === "top" ? "顶" : "底"}@${k.mergedIdx}`);
+            last._platAnchor._platRestored = true;
+            k._platShiftLost = last;
             result[result.length - 1] = last._platAnchor;
             result.push(k);
             continue;
