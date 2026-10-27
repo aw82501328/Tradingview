@@ -225,6 +225,9 @@ def build_cfg_summary(cfg):
         "periods": periods_txt,
         "from": cfg.get("from"),
         "to": cfg.get("to") or "",
+        # 长窗自动分段（2026-10-27）：摘要带段数（列表/对比表可显示；无=空串）
+        "segments": (f"自动{len(cfg['seg_bounds'])}段"
+                     if isinstance(cfg.get("seg_bounds"), list) and cfg["seg_bounds"] else ""),
     }
 
 

@@ -132,6 +132,14 @@ const CHAN_CFG = {
   // 做空只认 RES（最近下跌笔反弹阻力/布林上轨与上侧中轨）；密集区/人工位不过滤。
   // mark_entry.js 进场闸门消费。
   srSideGateOn: true,
+  // 进场背驰判据 v2（2026-10-27，与 py_chain/chan_core.py CHAN_CFG.diverge* 同步）：
+  // divergeSlopeOn=先比两笔斜率（|端点价差|÷时长）变小即背驰；divergeAreaShrinkOn=
+  // 斜率没变小时再比柱状体面积须明显变小（当前段<参照段×divergeAreaShrinkPct%，
+  // 受 areaDurComparable 时长门）；两开关全关=旧三项OR口径（面积/DIF/柱高任一）。
+  // mark_entry.js 进场背驰消费（收笔/买卖点识别走 isBiDiverge 旧口径不变）。
+  divergeSlopeOn: true,
+  divergeAreaShrinkOn: true,
+  divergeAreaShrinkPct: 50.0,
   // ---- 小周期绘制/加载窗口（2026-10-02 参数化；与 py_chain/chan_core.py CHAN_CFG 同步）----
   // 由 chan-bi/mark-buy-sell/mark-entry 三脚本消费：DRAW_WINDOW_DAYS 改由此构造。
   // 3分钟/15分钟/30秒 只画（并只加载）最近 N 天；60m/240m/D 不限、从 --from 全量。
@@ -2358,10 +2366,12 @@ function pointAllowedByDirection(windows, tailStart, t, side) {
  * 回踩可以略低于前低。跌破锚价的只更新参照不标；不在同中枢的不标（交给三类；主点不在
  * 任何中枢内则无类点）。
  * 扫描窗=(锚_i, 锚_{i+1})，方向开窗在 find*Points 统一过滤。
- * 强弱（用户口径 2026-10-14 定稿）：反弹 = 锚之后到该候选为止的反向极值（买=锚后最高点、
- * 卖=锚后最低点，滚动累计）；前高/前低 = 锚之前最近的反向端点（即结束于锚的笔的起点）——
- * 过=强、未过=弱、锚前无参照=null（弱先行）。只用锚到候选之间已成结构，候选出现当下
- * 即可判强弱，无需等候选后的反弹完成（10-9 案例口径：反弹4143.425 vs 前高4184.385 → 弱二买）。
+ * 强弱（2026-10-27 锁弱口径，用户拍板；2026-10-14 滚动累计版作废）：反弹 = 锚之后到
+ * 主点为止的反向极值（买=锚后最高点、卖=锚后最低点）；前高/前低 = 锚之前最近的反向
+ * 端点（即结束于锚的笔的起点）——过=强、未过=弱、锚前无参照=null（弱先行）。
+ * 只在主点判一次，同锚序列后续类点沿用主点档位：主点未过前高整条序列锁死弱，
+ * 主点之后才出现的新高不改档（9-22 09:45 案例：1买锚4322.81 前高4374.94，01:30/04:30
+ * 反弹只到4357.10=弱，其后 08:00 新高4376.01 过前高，旧滚动口径把 09:45 类2买判强）。
  * class2ZsTol 参数为兼容保留，规则v2 同中枢按时间归属、不再使用价格容差。
  */
 function secondFamilyV2(bis, firstPts, zss, c2tol, isSell) {
@@ -2426,12 +2436,13 @@ function secondFamilyV2(bis, firstPts, zss, c2tol, isSell) {
         }
       }
     }
-    // 反弹极值：锚之后的反向端点滚动极值（买=最高、卖=最低）
+    // 反弹极值：锚之后的反向端点极值（买=最高、卖=最低）；主点后不再累计（锁弱口径）
     let reboundExtreme = isSell ? Infinity : -Infinity;
+    let mainStrong = null; // 主点档位（锁弱：类点沿用，主点后新高不改档）
     for (let i = 0; i < seg.length; i++) {
       const b = seg[i];
       const t = b.endTime || 0;
-      if (b.type === rev && t > anchorT) {
+      if (!marked && b.type === rev && t > anchorT) {
         reboundExtreme = isSell ? Math.min(reboundExtreme, b.endPrice)
                                 : Math.max(reboundExtreme, b.endPrice);
       }
@@ -2439,12 +2450,12 @@ function secondFamilyV2(bis, firstPts, zss, c2tol, isSell) {
       if (t <= anchorT || t >= nextT) continue;
       const p = b.endPrice;
       const raised = isSell ? p < refP : p > refP;
-      const strong = (prevExtreme == null || !Number.isFinite(reboundExtreme)) ? null
-        : (isSell ? reboundExtreme < prevExtreme : reboundExtreme > prevExtreme);
       if (!marked) {
         // 主点仍要求相对参照抬高/压低；没抬高只下移参照
         if (!raised) { refP = p; continue; }
-        out.push({ type: isSell ? "2卖" : "2买", time: t, price: p, strong });
+        mainStrong = (prevExtreme == null || !Number.isFinite(reboundExtreme)) ? null
+          : (isSell ? reboundExtreme < prevExtreme : reboundExtreme > prevExtreme);
+        out.push({ type: isSell ? "2卖" : "2买", time: t, price: p, strong: mainStrong });
         zs2 = zsCoveringTime(zss, t);
         marked = true;
         refP = p;
@@ -2457,8 +2468,9 @@ function secondFamilyV2(bis, firstPts, zss, c2tol, isSell) {
       const holdsAnchor = isSell ? p < anchorP : p > anchorP;
       // 同中枢：抬高的后续点是类2；没抬高但未破锚的回踩也是类2（上级已收同向笔内的
       // 第二次回踩可以略破前低/前高）。破锚或不在同中枢：只更新参照，不标。
+      // 强弱沿用主点档位（2026-10-27 锁弱）。
       if (inSame && (raised || holdsAnchor)) {
-        out.push({ type: isSell ? "类2卖" : "类2买", time: t, price: p, strong });
+        out.push({ type: isSell ? "类2卖" : "类2买", time: t, price: p, strong: mainStrong });
       }
       refP = p;
     }
@@ -3030,6 +3042,7 @@ module.exports = {
   // MACD 背驰
   fmtT,
   biMacdMetrics,
+  areaDurComparable,
   isBiDiverge,
   // 买卖点
   findBuyPoints,

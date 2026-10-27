@@ -886,6 +886,74 @@ class BacktestWorker(ModeWorker):
                 for t in tasks if t["id"] is not None]
         return snap or None
 
+    @staticmethod
+    def _split_segments(cfg, symbol, from_ts, to_ts, lead_days, log=None,
+                        periods_needed=None):
+        """长窗自动分段（2026-10-27，chan 链式路径专用；引擎耗时随窗口超线性上涨，
+        实测半年窗单步耗时约 1 个月窗的 3~4 倍——分段把每段拉回高吞吐区）。
+
+        窗口 > split_min_days（默认 90 天）→ 均分 ceil(天数/split_seg_days)（默认
+        60）段、就近对齐 UTC+8 日界；每段 {data_from_ts=段起点−lead, to_ts,
+        start_ts=段起点}，bt_batch 链内逐段顺序跑、段间 carry 交接完整持仓
+        （tradeNo/互斥槽/点尝试与段级计数连续，段边界不强平），只有末段末尾结算。
+        返回 None=不分段：开关未显式开启（cfg.auto_split 缺省/False——旧方案重放忠实，
+        新回测卡默认传 true）/ lead_days<=0 旧口径（warmup_bars 预热）/ 窗口不超
+        阈值 / to_ts=None 时查不到品种数据终点。
+        cfg.seg_bounds（bt_runs 方案快照）存在时按快照逐位重放不再重算（保忠实）。"""
+        if cfg.get("auto_split") is not True:
+            return None
+        if cfg.get("seg_bounds"):
+            lead = int(lead_days or 0)
+            out = []
+            for pair in cfg["seg_bounds"]:
+                f, t = int(pair[0]), int(pair[1])
+                out.append({"data_from_ts": max(0, f - lead * 86400),
+                            "to_ts": t, "start_ts": f})
+            return out
+        from_ts = int(from_ts or 0)
+        lead = int(lead_days or 0)
+        if not from_ts or lead <= 0:
+            return None
+        end_ts = int(to_ts) if to_ts else None
+        if end_ts is None:
+            # 到最新：按 symbol 本地存储「需装载周期」的最晚时间交集定窗口终点
+            try:
+                st = next((s for s in data_store.list_stores()
+                           if s.get("symbol") == symbol), None)
+            except Exception:
+                st = None
+            pdict = (st or {}).get("periods") or {}
+            res_list = (list(periods_needed) if periods_needed else list(pdict))
+            lasts = [pdict[r].get("last") for r in res_list
+                     if isinstance(pdict.get(r), dict) and pdict[r].get("last")]
+            if not lasts:
+                return None
+            end_ts = int(min(lasts))
+        days = (end_ts - from_ts) / 86400.0
+        min_days = float(cfg.get("split_min_days") or 90)
+        seg_days = float(cfg.get("split_seg_days") or 60)
+        if days <= min_days:
+            return None
+        n = max(2, int(math.ceil(days / seg_days)))
+        span = end_ts - from_ts
+        cuts = [from_ts]
+        for i in range(1, n):
+            c = from_ts + int(round(i * span / n))
+            c = ((c + 8 * 3600 + 43200) // 86400) * 86400 - 8 * 3600  # 就近对齐 UTC+8 日界
+            if c <= cuts[-1] or c >= end_ts:
+                continue
+            cuts.append(c)
+        cuts.append(end_ts)
+        if len(cuts) < 3:
+            return None
+        cfg["seg_bounds"] = [[f, t] for f, t in zip(cuts, cuts[1:])]
+        if log:
+            log(f"长窗 {days:.0f} 天 > {min_days:g} 天：自动分段 {len(cuts) - 1} 段"
+                f"（约 {days / (len(cuts) - 1):.0f} 天/段，段间持仓连续不断档；"
+                f"要单次整窗跑请在回测卡关闭「长窗自动分段」）")
+        return [{"data_from_ts": max(0, f - lead * 86400),
+                 "to_ts": t, "start_ts": f} for f, t in zip(cuts, cuts[1:])]
+
     def _run(self):
         cfg = self.cfg
         # 多品种批量并行（>1 个品种）：转 _run_batch（每品种一个子进程）；
@@ -923,57 +991,84 @@ class BacktestWorker(ModeWorker):
         merged = None
         open_trades = []
         journals = []
+        # 长窗自动分段（2026-10-27）：与子进程路径同口径（bt_batch 链内逐段+carry 交接）
+        segments = self._split_segments(
+            cfg, cfg.get("symbol"), from_ts, to_ts, lead_days, log=self.log,
+            periods_needed=sorted({p for t in tasks for p in t["periods"]})) or [None]
+        n_seg = len(segments)
         for task in tasks:
             cid = task["id"]
             tag = f"[链{cid}] " if cid else ""
             periods = task["periods"]
-            self.log(f"{tag}取数：数据源=本地存储 symbol={cfg.get('symbol')} "
-                     f"periods={periods} from_ts={data_from_ts}"
-                     f"{' to_ts=' + str(to_ts) if to_ts else ''}")
-            bars = data_store.load_store(cfg.get("symbol"), periods=periods,
-                                         from_ts=data_from_ts, to_ts=to_ts)
-            for res in periods:
-                n = len(bars.get(res, []) or [])
-                if n:
-                    self.log(f"  {res:>4}: {n} 根（{fmtT(bars[res][-1]['time'])} 止）")
-            # 参数中心（参数配置页统一管理）：API 显式值优先（历史方案复现/后端覆盖能力），
-            # 缺省用参数中心当前值；回写 cfg 保证 bt_runs 历史方案快照/对比表显示实际生效参数。
-            # 构造参数抽取为 _engine_kwargs_of（与多品种批量共用，逐参等价）
-            engine = BacktestEngine(bars, **task["engine_kwargs"])
-            self.log(f"{tag}回测开始（最小周期 {engine.fine_res}，成交口径 {engine.fill_mode}，"
-                     f"信号模式 {'当下背驰' if engine.signal_mode == 'realtime' else '确认制'}，"
-                     f"背驰进场 {'分型确认后下一根开盘' if engine.diverge_confirm else '当下'}，"
-                     f"柱缩闸 {'开' if engine.entry_macd_shrink else '关'}，"
-                     f"止损下限 {'开' if engine.stop_entry_bar_floor else '关'}，"
-                     f"检测周期够笔 {'预期' if engine.expect_bi else '分型确认'}）...")
-            # 链事件包装：信号/成交/出场/过滤 dict 打链标签（SignalLog 行键含 chain，
-            # 两链共用开单周期时同行不串写）；旧口径任务（cid=None）回调零改动
-            if cid:
-                on_sig = lambda s: self._on_signal(dict(s, chain=cid), symbol=cfg.get("symbol"))
-                on_trd = lambda tr: self._on_trade(dict(tr, chain=cid), symbol=cfg.get("symbol"))
-                on_ext = lambda tr: self._on_exit(dict(tr, chain=cid), symbol=cfg.get("symbol"))
-                on_sup = lambda s: self._on_suppressed(dict(s, chain=cid), symbol=cfg.get("symbol"))
-            else:
-                on_sig, on_trd, on_ext, on_sup = (self._on_signal, self._on_trade,
-                                                  self._on_exit, self._on_suppressed)
-            result = engine.run(
-                start_ts=start_ts,
-                log=self.log,
-                on_progress=self._on_progress,
-                on_signal=on_sig,
-                on_trade=on_trd,
-                on_exit=on_ext,
-                on_suppressed=on_sup,
-                paused=self._pause_evt,
-                stopped=self._stop_evt,
-                journal_symbol=cfg.get("symbol"),
-                journal_strategy=(f"chan{cid}" if cid else "chan"),
-            )
-            if result.get("journal"):
-                journals.append(result["journal"])
-                self.log(f"{tag}交易日志：{result['journal']}（bt_query 零重算查询单笔原因）")
-            open_trades.extend(tr for tr in result["trades"] if tr.get("state") != "closed")
-            merged = merge_run_stats(merged, result["stats"])
+            carry = None
+            for si, seg in enumerate(segments):
+                seg = seg or {}
+                seg_from = seg.get("data_from_ts", data_from_ts)
+                seg_to = seg.get("to_ts", to_ts)
+                seg_start = seg.get("start_ts", start_ts)
+                stag = tag if n_seg == 1 else f"{tag}段{si + 1}/{n_seg} "
+                self.log(f"{stag}取数：数据源=本地存储 symbol={cfg.get('symbol')} "
+                         f"periods={periods} from_ts={seg_from}"
+                         f"{' to_ts=' + str(seg_to) if seg_to else ''}")
+                bars = data_store.load_store(cfg.get("symbol"), periods=periods,
+                                             from_ts=seg_from, to_ts=seg_to)
+                for res in periods:
+                    n = len(bars.get(res, []) or [])
+                    if n:
+                        self.log(f"  {res:>4}: {n} 根（{fmtT(bars[res][-1]['time'])} 止）")
+                # 参数中心（参数配置页统一管理）：API 显式值优先（历史方案复现/后端覆盖能力），
+                # 缺省用参数中心当前值；回写 cfg 保证 bt_runs 历史方案快照/对比表显示实际生效参数。
+                # 构造参数抽取为 _engine_kwargs_of（与多品种批量共用，逐参等价）
+                engine = BacktestEngine(bars, **task["engine_kwargs"])
+                if si == 0:
+                    self.log(f"{tag}回测开始（最小周期 {engine.fine_res}，成交口径 {engine.fill_mode}，"
+                             f"信号模式 {'当下背驰' if engine.signal_mode == 'realtime' else '确认制'}，"
+                             f"背驰进场 {'分型确认后下一根开盘' if engine.diverge_confirm else '当下'}，"
+                             f"柱缩闸 {'开' if engine.entry_macd_shrink else '关'}，"
+                             f"止损下限 {'开' if engine.stop_entry_bar_floor else '关'}，"
+                             f"检测周期够笔 {'预期' if engine.expect_bi else '分型确认'}）...")
+                # 链事件包装：信号/成交/出场/过滤 dict 打链标签（SignalLog 行键含 chain，
+                # 两链共用开单周期时同行不串写）；旧口径任务（cid=None）回调零改动
+                if cid:
+                    on_sig = lambda s: self._on_signal(dict(s, chain=cid), symbol=cfg.get("symbol"))
+                    on_trd = lambda tr: self._on_trade(dict(tr, chain=cid), symbol=cfg.get("symbol"))
+                    on_ext = lambda tr: self._on_exit(dict(tr, chain=cid), symbol=cfg.get("symbol"))
+                    on_sup = lambda s: self._on_suppressed(dict(s, chain=cid), symbol=cfg.get("symbol"))
+                else:
+                    on_sig, on_trd, on_ext, on_sup = (self._on_signal, self._on_trade,
+                                                      self._on_exit, self._on_suppressed)
+                jstr = ((f"chan{cid}" if cid else "chan") if n_seg == 1 else
+                        (f"chan{cid}_s{si + 1}of{n_seg}" if cid
+                         else f"chan_s{si + 1}of{n_seg}"))
+                result = engine.run(
+                    start_ts=seg_start,
+                    log=self.log,
+                    on_progress=self._on_progress,
+                    on_signal=on_sig,
+                    on_trade=on_trd,
+                    on_exit=on_ext,
+                    on_suppressed=on_sup,
+                    paused=self._pause_evt,
+                    stopped=self._stop_evt,
+                    journal_symbol=cfg.get("symbol"),
+                    journal_strategy=jstr,
+                    carry=carry,
+                )
+                carry = result.get("carryState")
+                if result.get("journal"):
+                    journals.append(result["journal"])
+                    self.log(f"{stag}交易日志：{result['journal']}（bt_query 零重算查询单笔原因）")
+                merged = merge_run_stats(merged, result["stats"])
+                st = result["stats"] or {}
+                n_open = sum(1 for tr in result["trades"] if tr.get("state") != "closed")
+                self.log(f"{stag}段完成：{st.get('steps', 0)} 步，信号 {st.get('signals', 0)}，"
+                         f"成交 {st.get('executed', 0)}，已平仓 {st.get('closed', 0)}，"
+                         f"未平仓 {n_open} 笔"
+                         f"（{'交接下段继续管' if si + 1 < n_seg else '按末段口径结算'}）")
+                if si + 1 == n_seg:
+                    open_trades.extend(tr for tr in result["trades"] if tr.get("state") != "closed")
+                if self._stop_evt.is_set():
+                    break
             if self._stop_evt.is_set():
                 break
         if journals:
@@ -1112,11 +1207,17 @@ class BacktestWorker(ModeWorker):
             # 子进程 bt_batch 逐链跑并合并 done；cfg.chain_snapshot 供 bt_runs 快照
             tasks = self._chain_tasks(cfg, sym, log=self.log)
             cfg["chain_snapshot"] = self._chain_snapshot_of(tasks)
+            # 长窗自动分段（2026-10-27）：seg_bounds 落 cfg 供 bt_runs 快照忠实重放
+            segs = self._split_segments(
+                cfg, sym, from_ts, to_ts, lead_days, log=self.log,
+                periods_needed=sorted({p for t in tasks for p in t["periods"]}))
             child_cfg = {"strategy": strategy,
                          "chan_cfg": param_center.chan_cfg_effective(sym),
                          "chains": [{"id": t["id"], "periods": t["periods"],
                                      "engine_kwargs": t["engine_kwargs"]} for t in tasks],
                          "data_from_ts": data_from_ts, "to_ts": to_ts, "start_ts": start_ts}
+            if segs:
+                child_cfg["segments"] = segs
         ctx = mp.get_context("spawn")
         msg_q = ctx.Queue()
         pause_e = ctx.Event()
@@ -1294,6 +1395,16 @@ class BacktestWorker(ModeWorker):
                                  "chains": [{"id": t["id"], "periods": t["periods"],
                                              "engine_kwargs": t["engine_kwargs"]} for t in tasks],
                                  "data_from_ts": data_from_ts, "to_ts": to_ts, "start_ts": start_ts}
+                    # 长窗自动分段（2026-10-27）：批量仅显式结束日才分段（各品种数据
+                    # 终点不同时 to_ts=None 不拆，避免逐品种不同段界把对比口径拆散）
+                    if to_ts:
+                        segs = self._split_segments(
+                            scfg, sym, from_ts, to_ts, lead_days,
+                            log=(self.log if sym == todo[0] else None),
+                            periods_needed=sorted({p for t in tasks
+                                                   for p in t["periods"]}))
+                        if segs:
+                            child_cfg["segments"] = segs
                 p = ctx.Process(target=bt_batch.run_symbol,
                                 args=(child_cfg, sym, msg_q, pause_e, stop_e),
                                 name=f"bt-batch-{sym}", daemon=True)
@@ -1872,6 +1983,18 @@ class ControlApp:
         if "use_cache" in out:
             v = out["use_cache"]
             out["use_cache"] = v in (True, "true", "True", "1", 1)
+        # 长窗自动分段（2026-10-27，仅缠论V1）：开关缺省=不拆（旧方案/旧客户端重放
+        # 忠实）；新回测卡显式传 true。阈值/段长可覆盖（天数），缺省 90/60 走
+        # _split_segments 代码默认
+        if "auto_split" in out:
+            v = out["auto_split"]
+            out["auto_split"] = v in (True, "true", "True", "1", 1)
+        for k in ("split_min_days", "split_seg_days"):
+            if k in out and out[k] not in (None, ""):
+                try:
+                    out[k] = int(out[k])
+                except (TypeError, ValueError):
+                    pass
         # 数据源固定本地存储（2026-10-07）：回测只读 SQLite（TV 关闭可跑），
         # 旧方案/旧客户端传来的 live/cache 一律归一为 store（缺数据须先在基础数据页拉取）
         out["data_source"] = "store"

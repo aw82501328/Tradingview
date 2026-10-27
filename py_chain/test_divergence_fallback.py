@@ -64,7 +64,8 @@ class TestSinkFallback(unittest.TestCase):
     def setUp(self):
         self.saved = {k: CHAN_CFG.get(k) for k in
                       ("sinkFallback", "sinkFallbackRearm", "macdDivergeBodyOn", "macdDivergeTol",
-                       "expectBiEnough", "divergeConfirm", "entryMacdShrink", "divergeReferByZs")}
+                       "expectBiEnough", "divergeConfirm", "entryMacdShrink", "divergeReferByZs",
+                       "divergeSlopeOn", "divergeAreaShrinkOn")}
         CHAN_CFG["sinkFallback"] = False
         CHAN_CFG["sinkFallbackRearm"] = False
         CHAN_CFG["macdDivergeBodyOn"] = True
@@ -74,6 +75,11 @@ class TestSinkFallback(unittest.TestCase):
         CHAN_CFG["entryMacdShrink"] = False
         # 合成笔会走出中枢，入中枢参照会改到更早的下跌笔
         CHAN_CFG["divergeReferByZs"] = False
+        # 本套件测下沉链/近等护栏的机械行为：背驰判据钉旧三项 OR 口径
+        # （fixtures 按旧判据构造；2026-10-27 判据 v2=先斜率后面积有独立套件
+        #   test_entry_diverge.py，勿在此重复覆盖）
+        CHAN_CFG["divergeSlopeOn"] = False
+        CHAN_CFG["divergeAreaShrinkOn"] = False
 
     def tearDown(self):
         CHAN_CFG.update(self.saved)
@@ -129,13 +135,17 @@ class TestExpectBi(unittest.TestCase):
     def setUp(self):
         self.saved = {k: CHAN_CFG.get(k) for k in
                       ("sinkFallback", "expectBiEnough", "expectBiMinBars", "divergeConfirm",
-                       "entryMacdShrink", "divergeReferByZs")}
+                       "entryMacdShrink", "divergeReferByZs",
+                       "divergeSlopeOn", "divergeAreaShrinkOn")}
         CHAN_CFG["sinkFallback"] = True   # 预期模式下停止级 3m 失败需回退到 15
         CHAN_CFG["expectBiEnough"] = True
         CHAN_CFG["expectBiMinBars"] = 5
         CHAN_CFG["divergeConfirm"] = False
         CHAN_CFG["entryMacdShrink"] = False
         CHAN_CFG["divergeReferByZs"] = False
+        # 同 TestSinkFallback：判据钉旧三项 OR（判据 v2 见 test_entry_diverge.py）
+        CHAN_CFG["divergeSlopeOn"] = False
+        CHAN_CFG["divergeAreaShrinkOn"] = False
 
     def tearDown(self):
         CHAN_CFG.update(self.saved)

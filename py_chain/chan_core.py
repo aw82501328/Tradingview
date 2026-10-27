@@ -139,6 +139,12 @@ CHAN_CFG = {
                                   # 锚点时间)，成交建仓才计数（互斥压掉不消耗），用满即拒
                                   # （mark_entry point_attempt_max）；rearm 终局重置只清段去重、
                                   # 不清此计数（终生上限）；0=不限（旧口径）；默认 2=初始+重试一次
+    "pointMaxAttemptsSeg": 2,    # 同一段内最大开仓次数（2026-10-27）：段=上级周期当前笔
+                                  # （bis[-1] 含形成中）的 startTime，键=(periodX,strategyKey,
+                                  # 上级段起点)——锚点漂移不重置预算（9-11 15m 2买 17:00→20:00
+                                  # 四锚连开4笔案例），段终结反向新笔起点才重置；不同点类别
+                                  # （2Buy/3Buy/强弱）各自独立预算；计数与 pointMaxAttempts 同
+                                  # 口径（成交建仓才计、rearm 不清、0=不限）；上级未加载不启用
     "macdDivergeBodyOn": True,   # MACD背驰容差开关（2026-10-12）：开=影线未过再比笔端点K实体（默认）；
                                   # 关=只比影线。容差见 macdDivergeTol
     "macdDivergeTol": 0.0,       # MACD背驰固定容差（绝对价差，点）。未严格更极端时价差 ∈ [0, 该值]
@@ -153,6 +159,16 @@ CHAN_CFG = {
     "entryMacdShrink": True,     # 进场MACD柱缩闸（2026-09-23）：背驰级别最近两根已收K线的
                                   # 柱状体（|macd|）变小才出信号——动能仍在放大时不进场；
                                   # 闸未过不消耗段去重键，下一拍自动重评（等柱缩才进）
+    "divergeSlopeOn": True,      # 进场背驰斜率判据（2026-10-27）：开=先比两笔斜率
+                                  # （|端点价差|/时长，现算+除零保护），当前笔<参照笔即判背驰；
+                                  # 与面积判据全关=旧三项OR口径（A/B 基准）。作用于当下制/
+                                  # 确认制/fxma divLower 三条进场链（isBiDiverge 本体不动，
+                                  # 收笔/买卖点/强弱判定仍走旧三项OR）
+    "divergeAreaShrinkOn": True, # 进场背驰面积判据（2026-10-27）：开=斜率没变小再比柱状体
+                                  # 面积，需明显变小（当前段<参照段×divergeAreaShrinkPct%，
+                                  # down 笔比绿柱/up 笔比红柱），受 _areaDurComparable 时长门
+    "divergeAreaShrinkPct": 50.0, # 面积明显变小阈值（%）：当前段柱面积须 < 参照段×该值
+                                  # 才判背驰；50=缩到一半以下；100=任意变小即可；0=恒不过
     "stopEntryBarFloor": True,   # 进场K线止损下限（2026-09-23）：止损至少在进场时所在背驰
                                   # 周期K线极值外侧加滑点处——该K线运行中每创新低/高止损
                                   # 同步外推（只放松），收盘后冻结；与支阻位止损取更宽者
@@ -2647,12 +2663,14 @@ def buildZS(bis, barSec=0):
     return [dict(z) for z in zss]
 
 
-def buildZSByUpper(lowerBis, upperBis, tolSec=0, open_last=True):
+def buildZSByUpper(lowerBis, upperBis, tolSec=0, open_last=True, _pre_elig=False):
     """按上级笔分解构建中枢（分解原则，不跨周期）：
     本级别中枢只能构建在「同一个上级笔」内部。用上级笔时间区间把本级别笔切段，
     每段内独立运行 buildZS，保证中枢不跨上级笔端点。
     @param lowerBis 本级别笔（已校准/对齐的最终绘制笔）
     @param upperBis 上一级别笔（用于分解约束，可为空数组）
+    @param _pre_elig 调用方保证 lowerBis 已是 pointEligibleBis 结果（pointContext
+    直传合格笔视图，2026-10-26 等价优化：过滤幂等，跳过重复 O(n) 重滤逐位一致）。
     @param tolSec 时间容差（秒）：本级别端点经低一级校准后可能与上级端点有最多一个
                   本级别bar的偏移；同时作为 buildZS 的 barSec——中枢水平边缘左右各外扩 5×tolSec
     @param open_last 最后一段开放段（默认 True）：最后一个上级笔的 endTime 视为 +∞（当下）——
@@ -2662,7 +2680,8 @@ def buildZSByUpper(lowerBis, upperBis, tolSec=0, open_last=True):
                   只能等上级 bar 收盘（曾致 8-21 15:48 信号延后 15 分钟才触发）。
     @returns 中枢列表，每项额外含 upperStart/upperEnd（所属上级笔时间范围）
     """
-    lowerBis = pointEligibleBis(lowerBis)
+    if not _pre_elig:
+        lowerBis = pointEligibleBis(lowerBis)
     if not lowerBis or len(lowerBis) < 3:
         return []
     tol = tolSec or 0
@@ -2699,7 +2718,9 @@ def buildZSByUpper(lowerBis, upperBis, tolSec=0, open_last=True):
                 break
         if ub is None:
             continue  # 不完整归属任何上级笔的零散笔不参与中枢
-        if cur is None or cur["upper"] != ub:
+        # 2026-10-26 等价优化：cur["upper"]/ub 均为 upperBis 元素（不同笔 dict 不同一），
+        # 身份比较与内容比较逐位一致。
+        if cur is None or cur["upper"] is not ub:
             if cur is not None and len(cur["bis"]) > 0:
                 segments.append(cur)
             cur = {"upper": ub, "bis": []}
@@ -3411,11 +3432,35 @@ def _direction_windows(upper_bis):
     return windows, tail_start
 
 
+_WIN_IX = {}   # id(windows) -> (windows 强引用, (t0s, t1s, sides, 单调不交叠))
+
+
 def _point_allowed_by_direction(windows, tail_start, t, side):
-    """方向闸：已收笔窗 (t0,t1] 内只放行本侧；尾段与最早确认笔之前的历史双向放行。"""
-    if t is None:
+    """方向闸：已收笔窗 (t0,t1] 内只放行本侧；尾段与最早确认笔之前的历史双向放行。
+    2026-10-26 等价优化：窗按构建序时间非降且半开不交叠（相邻已收笔共享端点）——
+    bisect_left 取最后一个 t0 < t 的窗即唯一可能包含者（t==t0[k+1] 时原判定归
+    前窗：后窗须严格 t>t0 不含、前窗 t<=t1 含），与原最新优先线性扫逐位一致；
+    乱序/交叠退化回退原路径。数组按 windows 身份缓存（买卖两侧同 ctx 复用）。"""
+    if t is None or t > tail_start:
         return True
-    if t > tail_start:
+    ent = _WIN_IX.get(id(windows))
+    if ent is None or ent[0] is not windows:
+        t0s = [w["t0"] for w in windows]
+        t1s = [w["t1"] for w in windows]
+        sds = [w["side"] for w in windows]
+        mono = (all(t0s[i] <= t0s[i + 1] for i in range(len(t0s) - 1))
+                and all(t1s[i] <= t0s[i + 1] for i in range(len(t0s) - 1)))
+        ent = (windows, (t0s, t1s, sds, mono))
+        if len(_WIN_IX) >= 16:
+            _WIN_IX.clear()
+        _WIN_IX[id(windows)] = ent
+    t0s, t1s, sds, mono = ent[1]
+    if mono:
+        i = bisect.bisect_left(t0s, t) - 1
+        if i < 0:
+            return True
+        if t0s[i] < t and t <= t1s[i]:
+            return sds[i] == side
         return True
     for i in range(len(windows) - 1, -1, -1):
         w = windows[i]
@@ -3432,11 +3477,14 @@ def _second_family_v2(bis, firstPts, zss, c2tol, is_sell):
     上涨笔里的第二次回踩可以略低于前低。跌破锚价的只更新参照不标；不在同中枢的不标
     （交给三类规则；主点不在任何中枢内则无类点）。
     扫描窗=(锚_i, 锚_{i+1})，方向开窗在 findBuy/findSellPoints 统一过滤。
-    强弱（用户口径 2026-10-14 定稿）：反弹 = 锚之后到该候选为止的反向极值（买=锚后
-    最高点、卖=锚后最低点，滚动累计）；前高/前低 = 锚之前最近的反向端点（即结束于锚
-    的笔的起点）——过=强、未过=弱、锚前无参照=None（弱先行）。只用锚到候选之间已成
-    结构，候选出现当下即可判强弱，无需等候选后的反弹完成（10-9 案例口径：反弹
-    4143.425 vs 前高 4184.385 → 弱二买）。c2tol 为兼容保留，不再使用价格容差。
+    强弱（2026-10-27 锁弱口径，用户拍板；2026-10-14 滚动累计版作废）：反弹 = 锚之后到
+    主点为止的反向极值（买=锚后最高点、卖=锚后最低点）；前高/前低 = 锚之前最近的反向
+    端点（即结束于锚的笔的起点）——过=强、未过=弱、锚前无参照=None（弱先行）。
+    **只在主点（首个抬低/压低=2买/2卖）判一次，同锚序列后续类点沿用主点档位**：
+    主点时未过前高整条序列锁死弱，主点之后才出现的新高不改档（9-22 09:45 案例：
+    1买锚 4322.81 前高 4374.94，01:30/04:30 时锚后反弹只到 4357.10=弱，其后 08:00
+    新高 4376.01 过前高，旧滚动口径把 09:45 类2买判强）。只用锚到主点之间已成结构，
+    主点当下即可判。c2tol 为兼容保留，不再使用价格容差。
     @returns 点列表（{type, time, price, strong}）。"""
     out = []
     if not firstPts:
@@ -3506,11 +3554,13 @@ def _second_family_v2(bis, firstPts, zss, c2tol, is_sell):
                     if t <= anchor_t and t > prev_t:
                         prev_t = t
                         prev_extreme = p
-        # 反弹极值：锚之后的反向端点滚动极值（买=最高、卖=最低）
+        # 反弹极值：锚之后的反向端点极值（买=最高、卖=最低）；主点后不再累计
+        # （2026-10-27 锁弱口径——主点后新高不改档）
         rebound_extreme = float("inf") if is_sell else -float("inf")
+        main_strong = None  # 主点档位（锁弱：类点沿用）
         for b in seg:
             t = b["endTime"] or 0
-            if b["type"] == rev and t > anchor_t:
+            if not marked and b["type"] == rev and t > anchor_t:
                 rebound_extreme = (min(rebound_extreme, b["endPrice"]) if is_sell
                                    else max(rebound_extreme, b["endPrice"]))
             if b["type"] != want:
@@ -3519,18 +3569,18 @@ def _second_family_v2(bis, firstPts, zss, c2tol, is_sell):
                 continue
             p = b["endPrice"]
             raised = p < ref_p if is_sell else p > ref_p
-            if prev_extreme is None or not math.isfinite(rebound_extreme):
-                strong = None
-            else:
-                strong = (rebound_extreme < prev_extreme if is_sell
-                          else rebound_extreme > prev_extreme)
             if not marked:
                 # 主点仍要求相对参照抬高/压低；没抬高只下移参照
                 if not raised:
                     ref_p = p
                     continue
+                if prev_extreme is None or not math.isfinite(rebound_extreme):
+                    main_strong = None
+                else:
+                    main_strong = (rebound_extreme < prev_extreme if is_sell
+                                   else rebound_extreme > prev_extreme)
                 out.append({"type": "2卖" if is_sell else "2买",
-                            "time": t, "price": p, "strong": strong})
+                            "time": t, "price": p, "strong": main_strong})
                 zs2 = _zs_covering_time(zss, t)
                 marked = True
                 ref_p = p
@@ -3542,9 +3592,10 @@ def _second_family_v2(bis, firstPts, zss, c2tol, is_sell):
             holds_anchor = p < anchor_p if is_sell else p > anchor_p
             # 同中枢：抬高的后续点是类2；没抬高但未破锚的回踩也是类2（上级已收同向笔内的
             # 第二次回踩可以略破前低/前高）。破锚或不在同中枢：只更新参照，不标。
+            # 强弱沿用主点档位（锁弱）。
             if in_same and (raised or holds_anchor):
                 out.append({"type": "类2卖" if is_sell else "类2买",
-                            "time": t, "price": p, "strong": strong})
+                            "time": t, "price": p, "strong": main_strong})
             ref_p = p
     out.sort(key=lambda q: q["time"])
     return out
@@ -3570,6 +3621,11 @@ def _third_family_v2(bis, upper_bis, zss, t3tol, is_sell):
     win_dir = "down" if is_sell else "up"    # 序号窗口的同向上级笔
     eps = 1e-9
     j = 0
+    # 2026-10-26 等价优化：笔结束时刻预构（合格笔按笔序时间非降）——process_zs 的
+    # t < raw_end 纯跳过前缀改 bisect 起点无副作用；乱序退化回退全程线性（原口径）。
+    _end_times = [b["endTime"] or 0 for b in bis]
+    _bis_mono = all(_end_times[i] <= _end_times[i + 1]
+                    for i in range(len(_end_times) - 1))
 
     def process_zs(zs, bound_t, strict):
         nonlocal j
@@ -3578,7 +3634,9 @@ def _third_family_v2(bis, upper_bis, zss, t3tol, is_sell):
         collect = False
         n = 0
         left = False
-        for b in bis:
+        start = (bisect.bisect_left(_end_times, raw_end)
+                 if _bis_mono else 0)
+        for b in (bis if start == 0 else bis[start:]):
             t = b["endTime"] or 0
             if t < raw_end:
                 # 结束于 raw_end 的笔参与离开判定（上破笔常被 buildZS 吸收为末段延伸笔）
@@ -3644,14 +3702,41 @@ def _third_family_v2(bis, upper_bis, zss, t3tol, is_sell):
     return dedup
 
 
+_MARK_LEGS_IX = {}   # id(bis) -> (bis 强引用, {dir: (子表, startTimes, 单调)})；容量溢出清空
+                     # （2026-10-26 等价优化：买卖两侧同 bis 对象，方向子表建一次两侧复用）
+
+
+def _mark_legs_of(bis):
+    ent = _MARK_LEGS_IX.get(id(bis))
+    if ent is not None and ent[0] is bis:
+        return ent[1]
+    legs = {}
+    for d in ("up", "down"):
+        lb = [b for b in bis if b["type"] == d]
+        st = [b["startTime"] or 0 for b in lb]
+        mono = all(st[i] <= st[i + 1] for i in range(len(st) - 1))
+        legs[d] = (lb, st, mono)
+    if len(_MARK_LEGS_IX) >= 8:
+        _MARK_LEGS_IX.clear()
+    _MARK_LEGS_IX[id(bis)] = (bis, legs)
+    return legs
+
+
 def _leg_after_point(bis, t, direction, tol_sec):
     """点后首根同向笔（2026-10-24 3/4 族强弱口径）：startTime >= t - tol_sec 的
     最早 direction 笔。1类点是上级笔端点在小级别的投影，其时间与小级别笔起点可差
     一根K（_lower_vertex_of 校准常态为对齐），容差 tol_sec=一根 barSec 兜住；
-    找不到返回 None（调用方按「判不出=强」处理）。"""
+    找不到返回 None（调用方按「判不出=强」处理）。
+    2026-10-26 等价优化：方向子表（按 bis 身份缓存）+ startTimes 二分——子表按笔序
+    构建时间非降，bisect_left 首命中=最小 startTime、同刻取列表靠前者，与原全量
+    线性扫（严格 < 保首）逐位一致；乱序退化回退原线性路径。"""
+    lb, st, mono = _mark_legs_of(bis)[direction]
+    if mono:
+        i = bisect.bisect_left(st, t - tol_sec)
+        return lb[i] if i < len(lb) else None
     best = None
-    for b in bis:
-        if b["type"] != direction or (b["startTime"] or 0) < t - tol_sec:
+    for b in lb:
+        if (b["startTime"] or 0) < t - tol_sec:
             continue
         if best is None or b["startTime"] < best["startTime"]:
             best = b
@@ -3678,13 +3763,21 @@ def _mark_third_fourth_strong(points, bis, macd_arr, bar_sec, is_sell):
     third_ts = ("3卖", "类3卖") if is_sell else ("3买", "类3买")
     subject_ts = third_ts + (("4卖", "类4卖") if is_sell else ("4买", "类4买"))
 
+    # 2026-10-26 等价优化：_latest_before 改类型子表稳定排序+bisect——时间并列按列表序
+    # （稳定排序保并列原序），前缀末位=时间最大且列表最靠后，与原全量扫描（同刻 >=
+    # 取列表靠后者）逐位一致；子表按类型集惰性构建，本侧最多两套。
+    _sorted_pts = {}
+
     def _latest_before(types, t):
-        best = None
-        for q in points:
-            if q["type"] in types and q["time"] < t:
-                if best is None or q["time"] >= best["time"]:
-                    best = q
-        return best
+        ent = _sorted_pts.get(types)
+        if ent is None:
+            sub = [(q["time"], i, q) for i, q in enumerate(points) if q["type"] in types]
+            sub.sort(key=lambda e: (e[0], e[1]))
+            ent = ([e[0] for e in sub], [e[2] for e in sub])
+            _sorted_pts[types] = ent
+        times_, refs = ent
+        i = bisect.bisect_left(times_, t)
+        return refs[i - 1] if i > 0 else None
 
     for p in points:
         if p["type"] not in subject_ts:
@@ -3963,7 +4056,7 @@ def pointContext(bis, upperBis, barSec):
         return (elig, None, None, None, None)
     projected = project_first_points(elig, upperBis, barSec)
     windows, tail_start = _direction_windows(upperBis)
-    zss = buildZSByUpper(elig, upperBis, barSec)
+    zss = buildZSByUpper(elig, upperBis, barSec, _pre_elig=True)
     return (elig, projected, windows, tail_start, zss)
 
 

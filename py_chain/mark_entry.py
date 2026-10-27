@@ -244,13 +244,58 @@ def pickDivergeRefer(bis, cur, barSec, parentBi=None):
     return fallback
 
 
-def findDivergePoints(bis, macdArr, barSec=None):
+def _slopeOf(bi):
+    """笔斜率 = |端点价差| / 时长（秒）。时长 ≤0（退化笔/相邻K）→ None（斜率判据不可用）。"""
+    dur = (bi.get("endTime") or 0) - (bi.get("startTime") or 0)
+    if dur <= 0:
+        return None
+    return abs((bi.get("endPrice") or 0) - (bi.get("startPrice") or 0)) / dur
+
+
+def entryDivergeOk(bi, refer, macdArr, v2=None):
+    """进场背驰判据 v2（2026-10-27 用户口径；当下制/确认制/fxma divLower 三链共用）：
+      ① 斜率判据（divergeSlopeOn）：两笔斜率（|端点价差|/时长，现算+除零保护），
+         当前笔 < 参照笔 = 背驰；
+      ② 面积判据（divergeAreaShrinkOn；斜率没变小才比）：柱状体面积明显变小——
+         当前段 < 参照段 × divergeAreaShrinkPct%（down 笔比绿柱面积/up 笔比红柱
+         面积），受 _areaDurComparable 时长门（时长比 > divergeDurRatio 面积不可用）。
+    两开关全关 = 旧三项 OR 口径（isBiDiverge，A/B 基准）；任一开 = 新逻辑，未开启
+    的判据跳过；①② 都不过 → False（DIF/单根柱高判据在新逻辑下不再参与）。
+    动因：9-25 21:30 15m 2Buy 案例——急跌段 DIF 更深/单根柱更高但 69min 慢跌参照段
+    面积更大，旧 OR 口径凭面积一条放行（实际是动能加速）；新口径斜率 0.572>0.264
+    未变小、面积 71%>50% 未明显变小 → 不开单。
+    @param v2   None=读 CHAN_CFG 开关（引擎默认）；False=强制旧口径（测试/A-B 用）。
+    """
+    if v2 is False:
+        return isBiDiverge(bi, refer, macdArr)
+    slope_on = bool(CHAN_CFG.get("divergeSlopeOn"))
+    area_on = bool(CHAN_CFG.get("divergeAreaShrinkOn"))
+    if not slope_on and not area_on:
+        return isBiDiverge(bi, refer, macdArr)
+    if slope_on:
+        s_cur, s_ref = _slopeOf(bi), _slopeOf(refer)
+        if s_cur is not None and s_ref is not None and s_cur < s_ref:
+            return True
+    if area_on and _areaDurComparable(bi, refer):
+        cur = biMacdMetrics(bi, macdArr)
+        ref = biMacdMetrics(refer, macdArr)
+        if cur and ref:
+            key = "greenArea" if bi.get("type") == "down" else "redArea"
+            pct = float(CHAN_CFG.get("divergeAreaShrinkPct", 50.0) or 0.0)
+            if cur[key] * 100.0 < ref[key] * pct:
+                return True
+    return False
+
+
+def findDivergePoints(bis, macdArr, barSec=None, v2=None):
     """识别某周期的背驰点（做多=底背驰，做空=顶背驰）。
     参考 chan_core.findBuyPoints/findSellPoints 的候选逻辑，但不做区间套/锚定：
-      - 底背驰：下跌笔创新低 + MACD 背驰（绿柱面积变小 或 DIF低点抬高）
-      - 顶背驰：上涨笔创新高 + MACD 背驰（红柱面积变小 或 DIF高点变低）
+      - 底背驰：下跌笔创新低 + 背驰（entryDivergeOk v2：先斜率、后面积明显变小；
+        两开关全关=旧口径 绿柱面积变小 或 DIF低点抬高 或 单根柱变矮）
+      - 顶背驰：上涨笔创新高 + 背驰（同上，镜像）
     参照笔 = 向前最近同向笔（跳过幅度 < 当前 50% 的次级别回调；B 开关下按
     中枢回退到入中枢段，见 pickDivergeRefer——barSec 为 None 时 B 规则不可用）。
+    @param v2   透传 entryDivergeOk（None=读 CHAN_CFG；False=旧口径）
     @returns [{ time, price, direction }] direction='long'（做多）|'short'（做空）
     """
     bis = pointEligibleBis(bis)
@@ -263,7 +308,7 @@ def findDivergePoints(bis, macdArr, barSec=None):
     for k in range(1, len(downIdx)):
         cur = bis[downIdx[k]]
         refer = pickDivergeRefer(bis, cur, barSec)
-        if refer is not None and cur["endPrice"] < refer["endPrice"] and isBiDiverge(cur, refer, macdArr):
+        if refer is not None and cur["endPrice"] < refer["endPrice"] and entryDivergeOk(cur, refer, macdArr, v2):
             points.append({"time": cur["endTime"], "price": cur["endPrice"],
                            "direction": "long", "referStart": refer["startTime"]})
 
@@ -272,7 +317,7 @@ def findDivergePoints(bis, macdArr, barSec=None):
     for k in range(1, len(upIdx)):
         cur = bis[upIdx[k]]
         refer = pickDivergeRefer(bis, cur, barSec)
-        if refer is not None and cur["endPrice"] > refer["endPrice"] and isBiDiverge(cur, refer, macdArr):
+        if refer is not None and cur["endPrice"] > refer["endPrice"] and entryDivergeOk(cur, refer, macdArr, v2):
             points.append({"time": cur["endTime"], "price": cur["endPrice"],
                            "direction": "short", "referStart": refer["startTime"]})
 
@@ -1036,13 +1081,15 @@ def _zs_by_upper_cached(bis, upperBis, barSec):
     return zss
 
 
-def lowerDiverge(periodData, X, wantDir, chain=None):
+def lowerDiverge(periodData, X, wantDir, chain=None, v2=None):
     """以下级别出现背驰（区间套下沉版，SPEC_divergence_chanset 规则 1/2/3）：
     收集所有更低周期中方向匹配的背驰点后逐个做下沉链校验，仅保留
     「候选级别 == 该点下沉停止级」且「参照笔与候选段同处其所属上级笔内部」的候选；
     按时间**降序**返回（最新的在前）。
     调用方（evaluateEntry）依次尝试候选并做支阻位校验，失败回退次新——过滤后所见
     候选已全部下沉合法，天然不会把高级别候选替换成跨级 3m/30S 微点。
+    背驰判据 = entryDivergeOk v2（先斜率、后面积明显变小；两开关全关=旧三项 OR）。
+    @param v2   透传 findDivergePoints（None=读 CHAN_CFG；False=旧口径，测试/A-B 用）
     @returns [ { res, point:{time,price,direction,referStart} }, ... ] 按 point.time 降序
     """
     xSec = intervalSecOf(X) or float("inf")
@@ -1054,7 +1101,7 @@ def lowerDiverge(periodData, X, wantDir, chain=None):
         if not pd or not pd.get("bis") or len(pd["bis"]) < 3:
             continue
         try:
-            pts = findDivergePoints(pd["bis"], pd.get("macdArr"), barSec=sec or None)
+            pts = findDivergePoints(pd["bis"], pd.get("macdArr"), barSec=sec or None, v2=v2)
         except Exception:
             continue
         for p in pts:
@@ -1471,7 +1518,7 @@ def _evalRealtimeNode(periodData, node, wantDir, tCut, periodTimes, minBars):
         return None, "macd_no_diverge", {"res": res, "segStart": F.get("startTime")}
     lo = bisect.bisect_left(macdT, refer["startTime"])
     hi = bisect.bisect_right(macdT, F["endTime"])
-    if not isBiDiverge(F, refer, macdArr[lo:hi]):
+    if not entryDivergeOk(F, refer, macdArr[lo:hi]):
         return None, "macd_no_diverge", {"res": res, "segStart": F.get("startTime")}
     if not strictNew and not _biDivergeStrictAll(F, refer, macdArr[lo:hi]):
         return None, "near_equal_strict_fail", {"res": res, "segStart": F.get("startTime")}
@@ -1511,8 +1558,10 @@ def realtimeLowerDiverge(periodData, X, wantDir, tCut,
         影线不过且 macdDivergeBodyOn（默认开）时再比该 K 实体
         （底 min(open,close) / 顶 max(open,close)）。仅落在容差内（未严格突破）
         要求三判据 AND（_biDivergeStrictAll），候选带 nearEqual=True；
-      - isBiDiverge（当下对比，2026-10-01 起双判据 AND）：DIF低点抬高（多）/DIF高点变低（空）
-        且（时长可比时）绿柱/红柱面积变小；时长比>3 时面积不计入，DIF 单判据兜底。
+      - 背驰判据 = entryDivergeOk v2（2026-10-27）：先比两笔斜率（|端点价差|/时长），
+        变小即背驰；斜率没变小再比柱状体面积，需明显变小（cur < ref ×
+        divergeAreaShrinkPct%，默认 50，受时长门）；两开关全关=旧三项 OR 口径
+        （面积变小 或 DIF 抬高/压低 或 单根柱变矮，A/B 基准）。
     参照笔 = 向前最近同向**已完成**笔（跳过幅度 < 当前段 50% 的次级别回调），
     且必须与候选段同处其所属上级笔内部（规则 2）——参照跨上级笔边界则候选无效。
 
@@ -1574,8 +1623,30 @@ def realtimeLowerDiverge(periodData, X, wantDir, tCut,
     return []
 
 
+def _upper_seg_start(periodData, X):
+    """上级周期当前段起点（pointMaxAttemptsSeg 段级预算键第三元，2026-10-27）。
+
+    段=上级周期 bis[-1]（最后一笔，含形成中）的 startTime：段延伸（端点外推
+    创新高/新低）startTime 不变 → 预算不重置；该笔终结、反向新笔开始 → 新起点
+    → 预算重置。上级选取与 evaluateRealtimeEntries/compute_entries 内局部
+    upperResOf 同口径（已加载周期中比 X 大的最小周期）；上级未加载（或无 bis）
+    返回 None → 段级闸不启用。
+    """
+    sec = intervalSecOf(X) or 0
+    best = None
+    for r in periodData:
+        s = intervalSecOf(r) or 0
+        if s > sec and (best is None or s < intervalSecOf(best)):
+            best = r
+    if best is None:
+        return None
+    ub = periodData[best]["bis"]
+    return ub[-1]["startTime"] if ub else None
+
+
 def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLevels,
                             detectPeriods, near=NEAR, tCut=None, fired=None, attempts=None,
+                            attempts_seg=None,
                             periodTimes=None, periodMacdTimes=None, divergeConfirm=None,
                             expectBiEnabled=None, realtimeMinBars=None,
                             zsExitWeakRatio=None, trend_res=None, trend_state=None,
@@ -1607,6 +1678,10 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
                              计数 ≥ 上限的锚点本拍拒绝 point_attempt_max，不再布防触发）。
                              计数在成交建仓处递增（backtest._fill_pending，被同向互斥压掉的
                              信号不消耗），本函数只读不写；None=不启用（旧口径）。
+    @param attempts_seg      可选：同一段内开仓计数 {(periodX, strategyKey, 上级段起点): 成交次数}
+                             （2026-10-27 pointMaxAttemptsSeg；段=上级周期 bis[-1] 的 startTime，
+                             锚点漂移不换键，段终结反向新笔才重置；计数 ≥ 上限拒绝
+                             point_attempt_seg；上级未加载本闸不启用；其余口径同 attempts）。
     @param firedIndex        可选：{(periodX, strategyKey, segStart)} 索引（fired 的 O(1)
                              预检视图，由调用方与 fired 同步维护；None 时回退 any() 线性扫描）
     @param periodTimes       各周期K线时间数组 { res: [times] }（二分用，可选）
@@ -1637,14 +1712,17 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
                              None=旧固定映射（历史子集回放零变化）。
     @returns 新信号列表（flat），每项含 { periodX, markRes, time, price, direction,
              strategyKey, strategyLabel, signalNote, nearSr, pointType, pointStrong,
-             anchorTime, realtime:True, segStart, fallback?, nearEqual?, expectBi,
-             trendDirection?, trendReason? }
+             anchorTime, realtime:True, segStart, segUpperStart, fallback?, nearEqual?,
+             expectBi, trendDirection?, trendReason? }
     """
     fired = fired if fired is not None else set()
     # 同一点最大尝试次数（2026-10-25）：0=不限（旧口径）。注意不能写 `or 2` 兜底——
     # 0 是合法值（不限），or 会把 0 吞成默认 2
     _pma = CHAN_CFG.get("pointMaxAttempts", 2)
     attempt_cap = 2 if _pma is None else int(_pma)
+    # 同一段内最大开仓次数（2026-10-27）：0=不限（同上不能 or 兜底）
+    _pms = CHAN_CFG.get("pointMaxAttemptsSeg", 2)
+    seg_attempt_cap = 2 if _pms is None else int(_pms)
     # 出场参数（参数中心可调；None → 模块常量默认）
     min_bars = realtimeMinBars if realtimeMinBars is not None else REALTIME_MIN_BARS
     zs_ratio = zsExitWeakRatio if zsExitWeakRatio is not None else ZS_EXIT_WEAK_RATIO
@@ -1692,6 +1770,8 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
         pd = periodData.get(X)
         if pd is None:
             continue
+        # 上级段起点（pointMaxAttemptsSeg 段级预算键第三元；本拍 bis 快照内恒定）
+        segU = _upper_seg_start(periodData, X)
         if trend_sec and (intervalSecOf(X) or 0) >= trend_sec:
             _rej("res_ge_trend", ctx={"res": X, "trendRes": trend_res})
             continue  # 顺势参考周期及以上不作检测周期（只作方向锚，结构性剔除）
@@ -1801,6 +1881,22 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
                               "anchorTime": point.get("time"),
                               "attempts": attempts.get(_akey, 0),
                               "max": attempt_cap})
+                    continue
+            # ⓪¾ 同一段内开仓次数上限（pointMaxAttemptsSeg，2026-10-27）：段=上级周期
+            # 当前笔（bis[-1] 含形成中）的 startTime。⓪½ 锚点级预算在锚点漂移时换键
+            # 重置——单边行情连续创新低/新高时同一 2买/2卖 反复换锚连开（9-11 15m
+            # 17:00→20:00 四锚四笔案例），本闸以段为身份兜住；段延伸端点外推不换键，
+            # 段终结反向新笔起点才重置；不同点类别（2Buy/3Buy/强弱）各自独立预算，
+            # 2买开满不挤占同段 3买；上级未加载（segU=None）不启用
+            if attempts_seg is not None and seg_attempt_cap > 0 and segU is not None:
+                _skey = (X, key, segU)
+                if attempts_seg.get(_skey, 0) >= seg_attempt_cap:
+                    _rej("point_attempt_seg", skey=key,
+                         ctx={"pointType": point.get("type"),
+                              "anchorTime": point.get("time"),
+                              "segUpperStart": segU,
+                              "attempts": attempts_seg.get(_skey, 0),
+                              "max": seg_attempt_cap})
                     continue
             # ① 够笔（当下制）：最后一笔=形成中段，方向匹配 + 段长门槛；
             #    预期够笔（expectBiEnabled，页面可选默认开）：末笔方向不符（回调/反弹的反向段
@@ -1932,6 +2028,7 @@ def evaluateRealtimeEntries(periodBis, periodMacd, periodAtr, periodPoints, srLe
                     "anchorTime": point.get("time"),  # 锚点时间（尝试计数键第三元+诊断）
                     "realtime": True,
                     "segStart": c["segStart"],
+                    "segUpperStart": segU,  # 上级段起点（段级计数键第三元+诊断；上级未加载=None）
                     "fallback": bool(c.get("fallback", False)),   # M1 回退候选（非停止级命中）
                     "nearEqual": bool(c.get("nearEqual", False)), # M2 近等候选（未严格创新极值）
                     "expectBi": expectBi,                         # M4 检测周期走了预期够笔口径

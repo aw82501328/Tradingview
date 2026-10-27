@@ -32,7 +32,8 @@
 
 from bisect import bisect_right
 
-from .chan_core import calcATR, calcMACD, intervalSecOf, findBuyPoints, findSellPoints
+from .chan_core import (calcATR, calcMACD, intervalSecOf, findBuyPoints, findSellPoints,
+                        pointContext)
 
 # numpy 可选加速（countBarsPassing 向量化；不可用时回退纯循环，结果一致）
 try:
@@ -1034,10 +1035,13 @@ def compute_srflip(periodBis, barsByPeriod, periods,
         if "fib" in srTypes and bis and len(bis) >= 3:
             macd = periodMacdIn.get(res) or calcMACD(bars)
             upperMacd = periodMacdIn.get(upperRes) if upperRes else None
+            # 2026-10-26 等价优化：买卖两侧共享一次 pointContext（find* 在 _ctx=None 时
+            # 各自内建一份，入参完全相同——此处一次构建、两侧 _ctx 复用，逐位一致）。
+            fib_ctx = pointContext(bis, upperBis, intervalSecOf(res))
             buyPts = findBuyPoints(bis, upperBis, macd, intervalSecOf(res), cache=work_cache,
-                                   upperMacd=upperMacd)
+                                   upperMacd=upperMacd, _ctx=fib_ctx)
             sellPts = findSellPoints(bis, upperBis, macd, intervalSecOf(res), cache=work_cache,
-                                     upperMacd=upperMacd)
+                                     upperMacd=upperMacd, _ctx=fib_ctx)
             fN = int(fibLookbackBars or 0)
             minPt = bars[-fN:][0]["time"] if fN > 0 and len(bars) > fN else None
             fibs = buildFibCandidates(bis, buyPts, sellPts, fibLevels, bars, clusterAtr * atr,

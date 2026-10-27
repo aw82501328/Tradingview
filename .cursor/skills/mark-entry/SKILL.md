@@ -18,7 +18,7 @@ disable-model-invocation: true
 
 > **模块分类**：交易策略 · **缠论V1**（进出场直接消费买卖点；分层与新增策略接入见 `.cursor/skills/README.md`）。
 >
-> **算法来源**：买卖点识别复用 `chan-core` 的 `findBuyPoints`/`findSellPoints`（唯一算法源，与 mark-buy-sell 同源），背驰判定复用 `isBiDiverge`，中枢复用 `buildZSByUpper`；**交易计划文案中转已取消**（2026-10-16）——买卖点 → 进场键在本脚本 `pointStrategyOf` 直映射；震荡 regime（`computeRegime`）与顺势方向（`trendStateOf`）复用 `trading-plan` 模块导出（默认均关闭）。
+> **算法来源**：买卖点识别复用 `chan-core` 的 `findBuyPoints`/`findSellPoints`（唯一算法源，与 mark-buy-sell 同源），背驰判定 2026-10-27 起用本脚本 `entryDivergeOk`（判据 v2：先比两笔斜率变小、没变小再比柱状体面积须明显变小（<参照×divergeAreaShrinkPct% 默认 50）；两开关全关回落 `isBiDiverge` 旧三项OR），中枢复用 `buildZSByUpper`；**交易计划文案中转已取消**（2026-10-16）——买卖点 → 进场键在本脚本 `pointStrategyOf` 直映射；震荡 regime（`computeRegime`）与顺势方向（`trendStateOf`）复用 `trading-plan` 模块导出（默认均关闭）。
 >
 > **强制依赖两个前置数据**：
 > 1. **画笔**（chan-bi）落盘的笔数据 `.cursor/cache/bis_<品种>.json`；
@@ -68,7 +68,7 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 | `--slip-be-atr-k=K` | 保本滑点ATR系数（同上口径） | `0` |
 | `--exit-min-merged=N` | 出场成笔预期门槛（形成段合并后 ≥N 根K；WEB 参数中心「进出场」模块同名透传） | `5` |
 | `--zs-weak-ratio=K` | 出中枢力度衰减比例（离开笔幅度 < 进入笔×K 视为变弱；WEB 参数中心同名透传） | `1.0` |
-| `--chan-cfg=<json>` | 缠论核心 CHAN_CFG 整体覆盖（WEB 参数中心透传，未知键闲置无害）。含 `pointClasses` 买卖点类别白名单（2026-10-24：最新锚点类别未勾→跳过不开单、不回溯；2026-10-25 起默认五项 1/2s/2xs/3s/4s、此前默认全选；13 项全族拆强弱，旧值 2/2x/3/3x/4/4x 别名展开）。`pointMaxAttempts` 同一点最大尝试次数（2026-10-25，默认 2、0=不限）**仅回测/实盘引擎生效**（成交建仓才计数，用满即拒；终局重置不清计数）——标记层单次快照评估无 fired/rearm 状态机，该键传入闲置无害、图上标记不受影响 | 不覆盖 |
+| `--chan-cfg=<json>` | 缠论核心 CHAN_CFG 整体覆盖（WEB 参数中心透传，未知键闲置无害）。含 `pointClasses` 买卖点类别白名单（2026-10-24：最新锚点类别未勾→跳过不开单、不回溯；2026-10-25 起默认五项 1/2s/2xs/3s/4s、此前默认全选；13 项全族拆强弱（二类族强弱 2026-10-27 起锁弱：只在主点判一次、同锚序列类2沿用主点档位），旧值 2/2x/3/3x/4/4x 别名展开）。`pointMaxAttempts` 同一点最大尝试次数（2026-10-25，默认 2、0=不限）与 `pointMaxAttemptsSeg` 同一段内最大开仓次数（2026-10-27，默认 2、0=不限；段=上级周期当前笔起点，锚点漂移不重置、不同类别独立预算）均**仅回测/实盘引擎生效**（成交建仓才计数，用满即拒；终局重置不清计数）——标记层单次快照评估无 fired/rearm 状态机，两键传入闲置无害、图上标记不受影响 | 不覆盖 |
 | `--dry` | 只计算不绘图 | 关闭 |
 | `--trend-res=R` | 顺势参考周期：`240`=4小时 / `D`=日线 / `off`=关闭（默认）。参考周期及以上不作检测周期；其方向与信号方向相反时跳过（规则见 trading-plan SPEC §5 与 WEB 参数页「交易计划」页签） | `off` |
 | `--range-res=R` | 震荡判定参考周期：`240`/`D`/`off`（默认）。参考周期及以上不作检测周期（只作锚）；参考周期 regime 震荡/笔不足 → 更低周期观望（trading-plan `computeRegime`，与引擎震荡闸同口径） | `off` |

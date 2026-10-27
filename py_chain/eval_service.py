@@ -742,12 +742,24 @@ class EvalManager:
                     periods = list(tasks[0]["periods"])
                     kw = dict(tasks[0]["engine_kwargs"])
                 chan_cfg = param_center.chan_cfg_effective(symbol)
+            # 长窗自动分段（2026-10-27）：分段方案的冻结重放必须同段界逐段跑（段间
+            # carry 交接持仓），否则整窗单引擎重放与原跑结果失真；_split_segments
+            # 对带 seg_bounds 的 cfg 逐位重放，冻结/重放两侧同源
+            segments = []
+            if engine_id != "fx_ma":
+                try:
+                    segments = BacktestWorker._split_segments(
+                        cfg, symbol, from_ts, to_ts, lead_days,
+                        periods_needed=sorted(set(periods))) or []
+                except Exception:
+                    segments = []
             replay = {
                 "strategy": strategy, "symbol": symbol,
                 "chan_cfg": chan_cfg, "engine_kwargs": kw,
                 "periods": periods, "data_from_ts": data_from_ts,
                 "to_ts": to_ts, "start_ts": start_ts,
                 "from": cfg.get("from") or "",
+                "segments": segments,
             }
             return _json_roundtrip(replay)
         finally:
@@ -761,12 +773,12 @@ class EvalManager:
         try:
             chan_core.apply_cfg(replay.get("chan_cfg") or {})
             self._note_progress(job, 0, 0, "正在读取K线")
-            bars = data_store.load_store(
-                replay["symbol"], periods=replay["periods"],
-                from_ts=replay["data_from_ts"], to_ts=replay.get("to_ts"))
-            kw = dict(replay["engine_kwargs"])
-            engine_cls = engine_dispatch.engine_class_of(replay.get("strategy"))
-            engine = engine_cls(bars, **kw)
+            # 长窗自动分段（2026-10-27）：分段冻结重放逐段跑（与 bt_batch 同口径），
+            # 段间 carry 交接持仓；SignalLog/过滤行跨段累计（循环外只建一次）；
+            # 单段（segments 空）= 原整窗路径不变
+            segments = replay.get("segments") or [None]
+            carry = None
+            trades_all = []
             log = SignalLog()
             mode, strategy, symbol = "eval", replay.get("strategy"), replay["symbol"]
             suppressed = []
@@ -778,17 +790,29 @@ class EvalManager:
             def _on_progress(i, n):
                 self._note_progress(job, i, n, "回测进度")
 
-            result = engine.run(
-                start_ts=replay.get("start_ts"),
-                log=lambda *a, **k: None,
-                on_signal=lambda s: log.append_signal(mode, s, symbol=symbol, strategy=strategy),
-                on_trade=lambda tr: log.fill_trade(mode, tr, symbol=symbol, strategy=strategy),
-                on_exit=lambda tr: log.fill_exit(mode, tr, symbol=symbol, strategy=strategy),
-                on_suppressed=_on_suppressed,
-                on_progress=_on_progress,
-                journal=False,
-            )
-            for tr in result.get("trades") or []:
+            for seg in segments:
+                seg = seg or {}
+                bars = data_store.load_store(
+                    replay["symbol"], periods=replay["periods"],
+                    from_ts=seg.get("data_from_ts", replay["data_from_ts"]),
+                    to_ts=seg.get("to_ts", replay.get("to_ts")))
+                kw = dict(replay["engine_kwargs"])
+                engine_cls = engine_dispatch.engine_class_of(replay.get("strategy"))
+                engine = engine_cls(bars, **kw)
+                result = engine.run(
+                    start_ts=seg.get("start_ts", replay.get("start_ts")),
+                    log=lambda *a, **k: None,
+                    on_signal=lambda s: log.append_signal(mode, s, symbol=symbol, strategy=strategy),
+                    on_trade=lambda tr: log.fill_trade(mode, tr, symbol=symbol, strategy=strategy),
+                    on_exit=lambda tr: log.fill_exit(mode, tr, symbol=symbol, strategy=strategy),
+                    on_suppressed=_on_suppressed,
+                    on_progress=_on_progress,
+                    journal=False,
+                    carry=carry,
+                )
+                carry = result.get("carryState")
+                trades_all = result.get("trades") or []
+            for tr in trades_all:
                 if tr.get("state") == "closed":
                     continue
                 log.fill_trade(mode, tr, symbol=symbol, strategy=strategy)

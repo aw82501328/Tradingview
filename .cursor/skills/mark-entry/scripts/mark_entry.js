@@ -56,7 +56,8 @@ const path = require("path");
 const CDP = require("../../../../server-cdp/node_modules/chrome-remote-interface");
 // 缠论算法核心（复用背驰判定、中枢、ATR、MACD 等工具函数）
 const core = require("../../chan-core/scripts/chan_core.js");
-const { calcATR, calcMACD, isBiDiverge, fmtT, lowerResOf, buildZSByUpper, intervalSecOf } = core;
+const { calcATR, calcMACD, isBiDiverge, fmtT, lowerResOf, buildZSByUpper, intervalSecOf,
+        biMacdMetrics, areaDurComparable } = core;
 // 交易计划模块（顺势参考周期方向判定 trendStateOf；规则见 trading-plan SPEC 与 WEB 参数页）
 const planCore = require("../../trading-plan/scripts/trading_plan.js");
 
@@ -209,7 +210,8 @@ function onlyThisInterval(res) {
 }
 
 // ============================================================
-// 背驰识别算法（纯函数，复用 chan-core.isBiDiverge）
+// 背驰识别算法（纯函数；2026-10-27 起判据 v2=先斜率后面积明显变小，见 entryDivergeOk；
+// 两开关全关时复用 chan-core.isBiDiverge 旧三项 OR 口径）
 // ============================================================
 
 /**
@@ -258,29 +260,62 @@ function pickDivergeRefer(bis, cur, barSec, parentBi) {
   return fallback;
 }
 
+// 进场背驰判据 v2（2026-10-27，与 py_chain/mark_entry.py entryDivergeOk 对齐）：
+// ① 斜率判据（divergeSlopeOn）：两笔斜率（|端点价差|÷时长，除零保护）当前笔<参照笔=背驰；
+// ② 面积判据（divergeAreaShrinkOn；斜率没变小才比）：柱状体面积明显变小——当前段
+//   <参照段×divergeAreaShrinkPct%（down 笔比绿柱/up 笔比红柱），受 areaDurComparable
+//   时长门。两开关全关=旧三项 OR 口径（isBiDiverge，A/B 基准）；确认制进场背驰消费
+//   （收笔/买卖点识别仍走 isBiDiverge 旧口径）。
+function slopeOf(bi) {
+  const dur = (bi.endTime || 0) - (bi.startTime || 0);
+  if (dur <= 0) return null;
+  return Math.abs((bi.endPrice || 0) - (bi.startPrice || 0)) / dur;
+}
+
+function entryDivergeOk(bi, refer, macdArr) {
+  const slopeOn = core.CHAN_CFG.divergeSlopeOn !== false;
+  const areaOn = core.CHAN_CFG.divergeAreaShrinkOn !== false;
+  if (!slopeOn && !areaOn) return isBiDiverge(bi, refer, macdArr);
+  if (slopeOn) {
+    const sCur = slopeOf(bi), sRef = slopeOf(refer);
+    if (sCur != null && sRef != null && sCur < sRef) return true;
+  }
+  if (areaOn && areaDurComparable(bi, refer)) {
+    const cur = biMacdMetrics(bi, macdArr), ref = biMacdMetrics(refer, macdArr);
+    if (cur && ref) {
+      const key = bi.type === "down" ? "greenArea" : "redArea";
+      const rawPct = Number(core.CHAN_CFG.divergeAreaShrinkPct);
+      const pct = Number.isFinite(rawPct) ? rawPct : 50.0;
+      if (cur[key] * 100.0 < ref[key] * pct) return true;
+    }
+  }
+  return false;
+}
+
 function findDivergePoints(bis, macdArr) {
   bis = core.pointEligibleBis(bis);
   if (!bis || bis.length < 3) return [];
   const points = [];
 
-  // 做多（底背驰）：下跌笔创新低 + 背驰
+  // 做多（底背驰）：下跌笔创新低 + 背驰（entryDivergeOk v2：先斜率后面积明显变小；
+  // 两开关全关=旧三项 OR）
   const downIdx = [];
   bis.forEach((b, i) => { if (b.type === "down") downIdx.push(i); });
   for (let k = 1; k < downIdx.length; k++) {
     const cur = bis[downIdx[k]];
     const refer = pickDivergeRefer(bis, cur, null);
-    if (refer && cur.endPrice < refer.endPrice && isBiDiverge(cur, refer, macdArr)) {
+    if (refer && cur.endPrice < refer.endPrice && entryDivergeOk(cur, refer, macdArr)) {
       points.push({ time: cur.endTime, price: cur.endPrice, direction: "long", referStart: refer.startTime });
     }
   }
 
-  // 做空（顶背驰）：上涨笔创新高 + 背驰
+  // 做空（顶背驰）：上涨笔创新高 + 背驰（同上，镜像）
   const upIdx = [];
   bis.forEach((b, i) => { if (b.type === "up") upIdx.push(i); });
   for (let k = 1; k < upIdx.length; k++) {
     const cur = bis[upIdx[k]];
     const refer = pickDivergeRefer(bis, cur, null);
-    if (refer && cur.endPrice > refer.endPrice && isBiDiverge(cur, refer, macdArr)) {
+    if (refer && cur.endPrice > refer.endPrice && entryDivergeOk(cur, refer, macdArr)) {
       points.push({ time: cur.endTime, price: cur.endPrice, direction: "short", referStart: refer.startTime });
     }
   }
@@ -2209,8 +2244,10 @@ async function main() {
 // ============================================================
 
 module.exports = {
-  // 背驰识别（含区间套下沉判定）
+  // 背驰识别（含区间套下沉判定；entryDivergeOk=进场判据 v2，2026-10-27）
   findDivergePoints,
+  entryDivergeOk,
+  slopeOf,
   levelsBelow,
   hasLowerResLoaded,
   biEndingAt,

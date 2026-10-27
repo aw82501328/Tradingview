@@ -79,6 +79,8 @@
 
 > **同一点最大尝试次数（`pointMaxAttempts`，2026-10-25，仅 py 引擎）**：同一买卖点（检测周期+类别+锚点时间）终生最多实际开仓 N 次（默认 2、0=不限=旧口径）——成交建仓才计数（被同向互斥压掉未成交的信号不消耗），用满即拒 `point_attempt_max`，终局重置（`sinkFallbackRearm`）只清段去重不清此计数。**JS 标记层不实现**：单次快照评估无 fired/rearm 状态机，键经 `--chan-cfg` 传入闲置无害——图上进场标记不受影响，仅回测/实盘开单受约束（锚点被新点替换/笔延伸出新锚点时间=新点新预算）。
 
+> **同一段内最大开仓次数（`pointMaxAttemptsSeg`，2026-10-27，仅 py 引擎）**：同一上级段内同类买卖点（键=检测周期+类别+上级段起点；段=上级周期 bis[-1] 含形成中的 startTime）最多实际开仓 N 次（默认 2、0=不限）——锚点随新极值漂移不重置本预算（9-11 15m 2买四锚四笔案例）、段终结反向新笔起点才重置；不同类别（2买/3买/强弱）独立预算；计数口径同 pointMaxAttempts（成交才计、终局不回血），用满即拒 `point_attempt_seg`。**JS 标记层同样不实现**（单次快照无成交概念，键传入闲置无害）。
+
 各策略专属条件：
 
 | key | 专属条件 |
@@ -96,7 +98,7 @@
 - **破前底/过前高**：最近完成的下/上涨笔终点跌破/突破更早同向笔终点（参照 `findDivergePoints` 的「创新低/创新高」，跳过幅度 < 当前笔 50% 的次级别笔）。
 - **出中枢力度变弱**（`zsExitWeak`，`buildZSByUpper` 取最后一个中枢）：离开笔相对进入笔 `isBiDiverge` 为 true **或** 离开笔 `span < 进入笔 span`；无离开笔（中枢未离开）→ false。
 - **MACD 0轴**：`calcMACD` 返回的 `dif`，当前值 <0（下0轴）/ >0（上0轴）。
-- **以下级别背驰**：`findDivergePoints(bis, macdArr)`（复用，不做区间套/锚定）识别各更低周期背驰点，候选点含 `referStart`（参照笔起点，供下沉判定的规则 2 参照 containment）。
+- **以下级别背驰**：`findDivergePoints(bis, macdArr)`（复用，不做区间套/锚定）识别各更低周期背驰点，候选点含 `referStart`（参照笔起点，供下沉判定的规则 2 参照 containment）。背驰判据 2026-10-27 起 v2（`entryDivergeOk`）：先比两笔斜率（|端点价差|÷时长）变小=背驰；没变小再比柱状体面积须明显变小（当前段<参照段×`divergeAreaShrinkPct`%，默认 50，受时长门）；`divergeSlopeOn`/`divergeAreaShrinkOn` 两开关全关=旧三项 OR（`isBiDiverge` 面积/DIF/单根柱高任一）。
 
 ### 2.4 出场条件（simulatePosition，纯函数）
 

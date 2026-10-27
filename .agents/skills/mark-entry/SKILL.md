@@ -10,7 +10,7 @@ description: Mark entry signals (进出场) on the TradingView Desktop chart via
 - **买点（多头）** → 向上**红色**箭头（`arrow_up`）
 - **卖点（空头）** → 向下**绿色**箭头（`arrow_down`）
 
-> **算法来源**：买卖点识别复用 `chan-core` 的 `findBuyPoints`/`findSellPoints`（唯一算法源），背驰判定复用 `isBiDiverge`，中枢复用 `buildZSByUpper`；**交易计划文案中转已取消**（2026-10-16）——买卖点 → 进场键在本脚本 `pointStrategyOf` 直映射；震荡 regime（`computeRegime`）与顺势方向（`trendStateOf`）复用 `trading-plan` 模块导出（默认均关闭）。
+> **算法来源**：买卖点识别复用 `chan-core` 的 `findBuyPoints`/`findSellPoints`（唯一算法源），背驰判定 2026-10-27 起用本脚本 `entryDivergeOk`（判据 v2：先比两笔斜率变小、没变小再比柱状体面积须明显变小（<参照×divergeAreaShrinkPct% 默认 50）；两开关全关回落 `isBiDiverge` 旧三项OR），中枢复用 `buildZSByUpper`；**交易计划文案中转已取消**（2026-10-16）——买卖点 → 进场键在本脚本 `pointStrategyOf` 直映射；震荡 regime（`computeRegime`）与顺势方向（`trendStateOf`）复用 `trading-plan` 模块导出（默认均关闭）。
 >
 > **强制依赖两个前置数据**：
 > 1. **画笔**（chan-bi）落盘的笔数据 `.cursor/cache/bis_<品种>.json`；
@@ -53,12 +53,16 @@ node .cursor/skills/mark-entry/scripts/mark_entry.js --from=2026-06-30 --near=10
 > `pointClasses` 买卖点类别白名单（2026-10-24 参数中心「进出场」页）同经 `--chan-cfg` 透传：
 > 最新锚点类别未勾选 → 跳过不开单、不回溯更早的点；2026-10-25 起默认五项
 > 1/2s/2xs/3s/4s（一类/强二类/强类二/强三类/强四类；此前默认全选）。13 项=1/2s/2w/2xs/2xw/
-> 3s/3w/3xs/3xw/4s/4w/4xs/4xw（全族拆强弱：二类族=1买后反弹过/未过前高；3/4族=点后
+> 3s/3w/3xs/3xw/4s/4w/4xs/4xw（全族拆强弱：二类族=1买后反弹过/未过前高——2026-10-27 起锁弱，只在主点判一次、同锚序列类2沿用主点档位；3/4族=点后
 > 同向腿背驰=弱、判不出即强）；旧值 2/2x/3/3x/4/4x 运行期别名展开。
 > `pointMaxAttempts` 同一点最大尝试次数（2026-10-25 参数中心「进出场」页，默认 2、0=不限）
 > **仅回测/实盘引擎生效**（成交建仓才计数，用满即拒 point_attempt_max；终局重置不清计数）——
 > 标记层为单次快照评估、无 fired/rearm 状态机，该键经 `--chan-cfg` 传入闲置无害，
 > 图上进场标记不受影响。
+> `pointMaxAttemptsSeg` 同一段内最大开仓次数（2026-10-27 参数中心「进出场」页，默认 2、
+> 0=不限）**同样仅回测/实盘引擎生效**（用满即拒 point_attempt_seg）——段级键=检测周期+
+> 类别+上级段起点（段=上级周期 bis[-1] 含形成中的 startTime），锚点随新极值漂移不重置
+> 预算、段终结反向新笔起点才重置；不同类别（2买/3买/强弱）独立预算；标记层不实现。
 
 ### 参数说明
 

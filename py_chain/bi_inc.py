@@ -74,6 +74,9 @@ def _fold_seq(seq, seq_midx, seq_start, fractals, fold_from):
             seq_midx[-1] = f["mergedIdx"]
 
 
+REBUILD_STAT = {"full": 0, "lock_only": 0}   # 诊断计数：全量重建 vs lock_only 快路径命中
+
+
 class BiIncBuilder:
     """单周期增量笔构建器。用法：每次分型尾部变化时 update(...)，返回当前笔列表
     （同一列表对象原地更新尾部；消费方跨调用持有的旧 dict 不被改动——尾部重建
@@ -106,7 +109,7 @@ class BiIncBuilder:
         self._stale = True
 
     def update(self, fractals, merged, macd, atr, nearDouble=False,
-               lockedPivots=None, changed_from=None):
+               lockedPivots=None, changed_from=None, unchanged=False):
         """分型尾部变化后重建笔列表；返回笔列表（self._bis，同一对象）。
 
         nearDouble/lockedPivots 与 buildBi 同口径（按 nearDoubleOn(res)
@@ -116,6 +119,10 @@ class BiIncBuilder:
         changed_from=本拍分型列表的首个变更索引（批处理修复 2026-10-10：一拍并入
         多根K时 updateFractalsTail(since=…) 在窗口 [since-2, n-2) 内找回的分型
         位于 n-2 之下，热区须从这里起折叠，否则又被冻结前缀吞掉）；None=旧推导。
+        unchanged=调用方声明本拍分型/合并K内容未变（backtest bis_changed=False），
+        且对象身份未换——重建走 lock_only 快路径（2026-10-26 等价提速：折叠序列/
+        跳空差值/计数表纯函数于分型与 merged，内容不变则现值即重建值，跳过重建直接
+        复用；重去污染+重标锁+全量 biStep 重放照旧，重放仍用当前 atr/ctx，逐位一致）。
 
         锁变化全量重建的必要性（2026-10-07 实证，勿再尝试局部化）：增量栈相对
         batch 存在中段漂移（近等后移的腿终局守卫读后继分型、无有界回看窗，
@@ -131,7 +138,8 @@ class BiIncBuilder:
                 or nearDouble != self._near_double or lock_key != self._lock_key):
             return self._full_rebuild(fractals, merged, macd, atr,
                                       nearDouble=nearDouble,
-                                      lockedPivots=lockedPivots)
+                                      lockedPivots=lockedPivots,
+                                      lock_only=unchanged)
         self._sync_gap_cum(len(merged))
         if len(fractals) < 2:
             self._bis = []
@@ -254,26 +262,37 @@ class BiIncBuilder:
         return countRaw(self._merged, a, b)
 
     def _full_rebuild(self, fractals, merged, macd, atr,
-                      nearDouble=False, lockedPivots=None):
+                      nearDouble=False, lockedPivots=None, lock_only=False):
+        # lock_only（2026-10-26 等价提速）：调用方已声明分型/merged 内容与身份均未变、
+        # 构建器非失效态且开关未变——折叠序列(_seq/_seq_start/_seq_midx)与跳空/计数表
+        # (_gap_diffs/_gap_final/_cum/_cum_final/_gap_levels)纯函数于二者且当前值即
+        # 重建值，跳过重建直接复用；重去污染+重标锁+全量 biStep 重放与 biList/fix 全
+        # 照旧（重放用当前 atr/ctx），输出与原全量路径逐位一致。任一前提不满足即整体
+        # 回退原路径。
+        lock_only = (lock_only and not self._stale and self._seq is not None
+                     and fractals is self._fracs and merged is self._merged
+                     and nearDouble == self._near_double)
+        REBUILD_STAT["lock_only" if lock_only else "full"] += 1
         self._fracs = fractals
         self._merged = merged
         self._near_double = bool(nearDouble)
         self._lock_key = tuple((lp["dir"], lp["price"]) for lp in (lockedPivots or ()))
-        self._gap_diffs = []
-        self._gap_final = 0
-        self._cum = [0]
-        self._cum_final = 1
-        self._sync_gap_cum(len(merged))
+        if not lock_only:
+            self._gap_diffs = []
+            self._gap_final = 0
+            self._cum = [0]
+            self._cum_final = 1
+            self._gap_levels = []   # 与差值表同步清空：由 _sync_gap_cum 的 insort 一次建序
+                                    # （2026-10-26 等价提速：删除原 sorted() 二次重建——
+                                    # 同一集合按 (差值,序号) 全序 insort 与 sorted 同值）
+            self._sync_gap_cum(len(merged))
+            self._seq = []
+            self._seq_start = []
+            self._seq_midx = []
+            _fold_seq(self._seq, self._seq_midx, self._seq_start, fractals, 0)
         self._gap_threshold = atr * CHAN_CFG["gapFilter"] if atr else 0
-        self._seq = []
-        self._seq_start = []
-        self._seq_midx = []
         self._heads = []
         self._lens = []
-        _fold_seq(self._seq, self._seq_midx, self._seq_start, fractals, 0)
-        self._gap_levels = sorted(
-            ((max(up, dn), i) for i, (up, dn) in
-             enumerate(self._gap_diffs[:self._gap_final])))
         # 全量重建同样先去污染（分型 dict 持久、可能带着增量期的残留旗标），再重标
         # 锁定——否则重建结果依赖历史路径，破坏「重同步点输出严格等于 batch(前缀)」。
         resetBiFlags(self._seq)

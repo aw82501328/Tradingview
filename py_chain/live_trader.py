@@ -191,8 +191,22 @@ def provisional_sl(direction, bid, ask, near_sr, slip=DEFAULT_SLIP_STOP,
 # 周期+类别+锚点时间）终生最多实际开仓 2 次，成交建仓才计数（被同向互斥压掉未
 # 成交的信号不消耗），用满即拒 point_attempt_max；sinkFallbackRearm 终局重置只清
 # 段去重不清尝试计数；0=不限（旧口径）；仅当下模式——回测基线不可比，持仓重启
-# 须 --accept-param-drift）。
-ENGINE_LOGIC_VERSION = "20261026-platshift-sr-openres"
+# 须 --accept-param-drift）、
+# 同一段内最大开仓次数（2026-10-27：pointMaxAttemptsSeg 默认 2——同一上级段内
+# 同类买卖点（键=检测周期+类别+上级段起点）最多实际开仓 2 次；段=上级周期当前笔
+# （bis[-1] 含形成中）的 startTime，段延伸端点外推不换键，段终结反向新笔起点才
+# 重置预算——锚点随新极值漂移不再重置（9-11 15m 2买 17:00→20:00 四锚连开 4 笔
+# 案例）；不同类别（2买/3买/强弱）独立预算互不挤占；计数口径同 pointMaxAttempts
+# （成交才计、rearm 不清、0=不限、仅当下模式、上级未加载不启用）——回测基线
+# 不可比，持仓重启须 --accept-param-drift）、
+# 进场背驰判据 v2（2026-10-27：divergeSlopeOn/divergeAreaShrinkOn 默认开、
+# divergeAreaShrinkPct 默认 50——先比两笔斜率（|端点价差|÷时长）变小=背驰，
+# 没变小再比柱状体面积须明显变小（当前段<参照段×50%，受时长门）；两开关全关
+# =旧三项OR口径。作用于当下制/确认制/fxma divLower 三条进场链（isBiDiverge
+# 本体不动，收笔/买卖点/强弱判定仍旧口径）。动因 9-25 21:30 15m 2Buy：急跌段
+# DIF 更深/柱更高仅凭面积一条放行——回测基线（chan+fxma）不可比，持仓重启须
+# --accept-param-drift）。
+ENGINE_LOGIC_VERSION = "20261027-slope-area-div"  # 进场背驰判据v2（先斜率后面积明显变小50%阈值·当下制+确认制+fxma divLower三链；两开关全关=旧三项OR；回测基线不可比，持仓重启须 --accept-param-drift）
 
 
 def ns_strategy(cfg):

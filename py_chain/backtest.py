@@ -1129,6 +1129,10 @@ class BacktestEngine:
         # ——成交建仓才计数（_fill_pending 递增，被同向互斥压掉的信号不消耗）；与 _rt_fired
         # 不同，终局重置(_rearm_fired)不清此计数（同一点终生上限）；0=不限（检查闸关闭）
         self._rt_attempts = {}
+        # 同一段内开仓计数（pointMaxAttemptsSeg，2026-10-27）：{(periodX, strategyKey,
+        # 上级段起点): 成交次数}——锚点漂移不换键（9-11 15m 2买四锚四笔案例），段终结
+        # 反向新笔起点才重置；计数/清理口径与 _rt_attempts 完全一致（成交才计、rearm 不清）
+        self._rt_attempts_seg = {}
         # C-1 盘中合成K状态挂点（_rebuild_chain 每拍刷新，_collect_realtime 消费）
         self._synth_state = None
         # 批量重同步水位（fine 周期 cut 达到 last+RESYNC_EVERY 时全周期重同步）
@@ -1365,6 +1369,8 @@ class BacktestEngine:
             self._bis[res] = inc.update(
                 new_f, merged, macd.to_list(), atr.value,
                 nearDouble=near_double, lockedPivots=locks,
+                # unchanged=本拍分型/合并K未变（仅锁端点集变化时的全量重建走快路径）
+                unchanged=not bis_changed,
                 changed_from=changed_from)
         elif near_double and inc.refresh_open(
                 new_f, merged, macd.to_list(), atr.value,
@@ -1689,7 +1695,7 @@ class BacktestEngine:
     def run(self, to_ts=None, start_ts=None, log=None, log_every=2000,
             on_progress=None, on_signal=None, on_trade=None, on_exit=None, on_suppressed=None,
             paused=None, stopped=None, journal=None, journal_symbol=None,
-            journal_strategy="chan", fast_warmup=True):
+            journal_strategy="chan", fast_warmup=True, carry=None):
         """逐根K线重放。
 
         @param to_ts      结束时间戳（None 表示回测到最后一根）
@@ -1715,6 +1721,12 @@ class BacktestEngine:
                           batch(前缀)，与逐步路径的重同步点同口径，节拍也对齐），
                           其后 <RESYNC_EVERY 根照旧逐步推进——行为等价由
                           test_warmup_faststart 对拍锁定；False=旧逐根预热（对拍基准）。
+        @param carry       长窗自动分段交接（2026-10-27，bt_batch 逐段调用）：携带前段
+                          完整 trades（含已平仓——tradeNo=len(trades)+1 依列表长度续号）、
+                          同向互斥槽回填、当下背驰去重 _rt_fired 与点尝试/段级计数
+                          _rt_attempts(_seg)。段边界持仓连续：未终局单在新段继续按
+                          其 dict 自带状态机管理（pendingExit 等挂起平仓随字段带走）；
+                          只有末段末尾才 mark-to-market。None=独立回测（行为不变）。
         @returns dict：{ signals, trades, stats, journal, ... }，见 _finish
         """
         log = log or (lambda *a, **k: None)
@@ -1738,6 +1750,16 @@ class BacktestEngine:
         open_pos = {"long": None, "short": None}
         stats = {"steps": 0, "signals": 0, "executed": 0, "suppressed": 0, "closed": 0,
                  "long": 0, "short": 0, "markRes": {}, "strategyKeys": {}}
+        # 分段交接播种（carry 见 run 文档）：trades 全量进场保证单号续接与
+        # result["trades"] 跨段完整；互斥槽按方向回填未终局单（后写覆盖=最新）
+        if carry:
+            trades.extend(dict(t) for t in carry.get("trades") or [])
+            for t in trades:
+                if t.get("state") != "closed" and t.get("direction") in open_pos:
+                    open_pos[t["direction"]] = t
+            self._rt_attempts = dict(carry.get("rtAttempts") or {})
+            self._rt_attempts_seg = dict(carry.get("rtAttemptsSeg") or {})
+            self._rt_fired = set(carry.get("rtFired") or ())
 
         # 交易日志（零开销口径：事件+状态变化+拒绝去重；journal=False 关闭）。
         # self._journal 供 _fill_pending/_collect_realtime/_rebuild_chain 等方法内部
@@ -1774,6 +1796,9 @@ class BacktestEngine:
                 # 同一点最大尝试次数（2026-10-25：成交建仓才计数，用满即拒 point_attempt_max；
                 # 闸门直读 CHAN_CFG，header 只记口径；0=不限——不能写 or 2 兜底，0 是合法值）
                 "pointMaxAttempts": int(CHAN_CFG.get("pointMaxAttempts", 2)),
+                # 同一段内最大开仓次数（2026-10-27：段=上级周期当前笔起点，用满即拒
+                # point_attempt_seg；口径同上，0=不限——不能 or 兜底）
+                "pointMaxAttemptsSeg": int(CHAN_CFG.get("pointMaxAttemptsSeg", 2)),
                 "exitMinMerged": self.exit_min_merged,
                 "exitCfg": dict(self.exit_cfg),
                 # 实际加载数据范围（诊断数据源截断：cards 说"跑到最新"但加载层少给数据时
@@ -2347,7 +2372,8 @@ class BacktestEngine:
         上一单终局后再发一次信号（近等双底二底再进场场景：首单止损/保本离场后，
         回退候选不至于被首单的 fired 键永久吞掉）。同向互斥持仓期间不重置。
         注意：只清段去重，不清同一点尝试计数 _rt_attempts（pointMaxAttempts
-        是成交次数的终生上限，终局重置不回血——否则与无限重进的旧口径等价）。"""
+        是成交次数的终生上限，终局重置不回血——否则与无限重进的旧口径等价）；
+        也不清段级计数 _rt_attempts_seg（pointMaxAttemptsSeg 同口径）。"""
         if not CHAN_CFG.get("sinkFallbackRearm"):
             return
         x, k, m = tr.get("periodX"), tr.get("strategyKey"), tr.get("markRes")
@@ -2406,6 +2432,7 @@ class BacktestEngine:
                 self._points, srLevels, detectPeriods,
                 near=self.near, tCut=t, fired=self._rt_fired, firedIndex=self._rt_fired_idx,
                 attempts=self._rt_attempts,
+                attempts_seg=self._rt_attempts_seg,
                 periodTimes=self._times, periodMacdTimes=macdTViews,
                 periodMerged=mergedViews, periodBars=barViews,
                 divergeConfirm=self.diverge_confirm,
@@ -2607,6 +2634,8 @@ class BacktestEngine:
                 "pointType": s.get("pointType"),        # 进场锚买卖点类型（2026-10-16 直连）
                 "pointStrong": s.get("pointStrong"),    # 2族强弱（None=未定型/非2族）
                 "anchorTime": s.get("anchorTime"),      # 锚点时间（尝试计数键第三元；确认制信号无此字段=None）
+                "segStart": s.get("segStart"),          # 背驰级别形成段起点（透传自信号）
+                "segUpperStart": s.get("segUpperStart"),  # 上级段起点（段级计数键第三元；上级未加载=None）
                 "trendDirection": s.get("trendDirection"),  # 顺势参考周期方向（2026-09-15）
                 "trendReason": s.get("trendReason"),        # 成因注记，如「4小时2买」
                 "fallback": s.get("fallback", False),   # M1 回退候选标记（透传自信号）
@@ -2652,6 +2681,11 @@ class BacktestEngine:
             # 仅作记录不参与当下制检查（确认制不查尝试上限）
             _akey = (s.get("periodX"), s.get("strategyKey"), s.get("anchorTime"))
             self._rt_attempts[_akey] = self._rt_attempts.get(_akey, 0) + 1
+            # 同一段内开仓计数（pointMaxAttemptsSeg，2026-10-27）：口径同上（成交才计、
+            # 互斥不消耗）；键第三元=信号时刻上级段起点（mark_entry segUpperStart）——
+            # 段延伸不换键、段终结反向新笔起点才重置；上级未加载 None 键仅记录
+            _skey = (s.get("periodX"), s.get("strategyKey"), s.get("segUpperStart"))
+            self._rt_attempts_seg[_skey] = self._rt_attempts_seg.get(_skey, 0) + 1
             if open_pos is not None:
                 open_pos[d] = trades[-1]
             if jr is not None and jr.enabled:
@@ -2708,6 +2742,11 @@ class BacktestEngine:
             "lastTime": lastTime,
             "periods": self.periods,
             "fine_res": self.fine_res,
+            # 分段交接快照（2026-10-27）：bt_batch 段间持仓连续用；独立回测无害
+            "carryState": {"trades": trades,
+                           "rtAttempts": self._rt_attempts,
+                           "rtAttemptsSeg": self._rt_attempts_seg,
+                           "rtFired": self._rt_fired},
         }
 
 

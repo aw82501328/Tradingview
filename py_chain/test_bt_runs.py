@@ -110,9 +110,12 @@ class TestComputeSummary(unittest.TestCase):
         self.assertEqual(cs, {"strategy": "chan_v1",      # cfg 缺省 → 默认策略（旧档等价）
                               "symbol": "OANDA:XAUUSD",
                               "periods": "D+240+60+15+3", "from": "2026-07-02",
-                              "to": ""})
+                              "to": "", "segments": ""})   # segments=分段摘要（无=空）
         self.assertEqual(build_cfg_summary({**CFG, "to": "2026-09-01"})["to"], "2026-09-01")
         self.assertEqual(build_cfg_summary({**CFG, "strategy": "fxma_v1"})["strategy"], "fxma_v1")
+        # 长窗自动分段（2026-10-27）：seg_bounds 快照 → 摘要带段数
+        self.assertEqual(build_cfg_summary(
+            {**CFG, "seg_bounds": [[1, 2], [2, 3]]})["segments"], "自动2段")
         self.assertTrue(default_name(CFG).startswith("OANDA:XAUUSD 2026-07-02·"))
 
 

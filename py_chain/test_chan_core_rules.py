@@ -681,6 +681,40 @@ class TestPointRulesV2(unittest.TestCase):
         two = next(p for p in pts if p["type"] == "2买")
         self.assertFalse(two.get("strong"))
 
+    def test_lockweak_main_strength_inherited(self):
+        # 2026-10-27 锁弱口径：主点（2买@200）时锚后反弹只到 455 < 前高 460 → 弱；
+        # 其后 500 时刻新高 465 过前高，但主点已判弱 → 类2买@600 沿用弱档，
+        # 主点后新高不改档（旧滚动口径此处=强；9-22 15m trade#19 案例同构）。
+        bis = [
+            self.b(-50, 0, "down", 460.0, 440.0),
+            self.b(0, 100, "up", 440.0, 455.0),
+            self.b(100, 200, "down", 455.0, 441.0),   # 2买@200（弱：反弹455<460）
+            self.b(200, 300, "up", 441.0, 450.0),
+            self.b(300, 400, "down", 450.0, 444.0),   # 类2买@400（弱）
+            self.b(400, 500, "up", 444.0, 465.0),     # 主点后新高 465>460 —— 不改档
+            self.b(500, 600, "down", 465.0, 446.0),   # 类2买@600 → 仍弱
+        ]
+        upper = [self.b(0, 600, "up", 440.0, 465.0)]
+        pts = cc.findBuyPoints(bis, upper, self.MACD_LOW, 900, 0.0, 0.0)
+        got = [(p["type"], p["time"], p["price"], p.get("strong")) for p in pts
+               if p["type"] in ("2买", "类2买")]
+        self.assertEqual(got, [
+            ("2买", 200, 441.0, False),
+            ("类2买", 400, 444.0, False),
+            ("类2买", 600, 446.0, False),
+        ])
+        # 主点强的序列类2沿用强（反弹在主点前已过前高）
+        bis2 = list(bis)
+        bis2[1] = self.b(0, 100, "up", 440.0, 470.0)   # 主点前反弹 470>460 → 主点强
+        pts2 = cc.findBuyPoints(bis2, upper, self.MACD_LOW, 900, 0.0, 0.0)
+        got2 = [(p["type"], p["time"], p.get("strong")) for p in pts2
+                if p["type"] in ("2买", "类2买")]
+        self.assertEqual(got2, [
+            ("2买", 200, True),
+            ("类2买", 400, True),
+            ("类2买", 600, True),
+        ])
+
     def test_no_upper_returns_empty(self):
         # 无上级（日线）不标（2026-10-14 规则v2）
         bis = [self.b(-50, 0, "down", 460.0, 440.0), self.b(0, 100, "up", 440.0, 455.0)]

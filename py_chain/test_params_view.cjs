@@ -153,3 +153,45 @@ for (const k of ['nearDoubleFixed', 'nearDouble3', 'nearDoubleShiftLocked', 'abs
   assert.equal(n, 1, `${k} 应只渲染一次（整合卡内）`);
 }
 console.log('params.html 保本位模式+近等双顶整合卡渲染冒烟 OK');
+
+// ⑥ 进场背驰判据 v2 整合卡（2026-10-27）：斜率/面积两开关 + 面积阈值一张卡；
+//    面积关时阈值置灰（disabled），三键不独立成行（只渲染一次）
+const divSchema = {
+  ...schema,
+  divergeSlopeOn: { label: '进场背驰·斜率判据', desc: '斜率变小=背驰', default: true },
+  divergeAreaShrinkOn: { label: '进场背驰·面积判据', desc: '面积明显变小', default: true },
+  divergeAreaShrinkPct: { label: '进场背驰·面积明显变小阈值(%)', desc: 'cur<ref×pct%', min: 0, max: 100, default: 50 },
+};
+const mkDiv = (eff, ovr = {}) => ({ schema: divSchema, effective: eff, overrides: ovr });
+const divEffOn = {
+  ...Object.fromEntries(Object.entries(divSchema).map(([k, s]) => [k, s.default])),
+  divergeSlopeOn: true, divergeAreaShrinkOn: true, divergeAreaShrinkPct: 50,
+};
+let dv = vm.runInContext('divergeV2CardHtml', ctx)(mkDiv(divEffOn));
+assert.ok(dv.includes('背驰判据（先斜率后面积）'), 'v2 卡标题缺失');
+assert.ok(dv.includes('data-k="divergeSlopeOn"') && dv.includes('checked'), '斜率开关缺失/未勾');
+assert.ok(dv.includes('data-k="divergeAreaShrinkOn"'), '面积开关缺失');
+const pctIn = dv.match(/<input type="number"[^>]*data-k="divergeAreaShrinkPct"[^>]*>/)[0];
+assert.ok(pctIn.includes('min="0"') && pctIn.includes('max="100"') && pctIn.includes('value="50"'),
+  '阈值输入缺 min/max/value');
+assert.ok(!pctIn.includes('disabled'), '面积开时阈值不应置灰');
+assert.ok(!dv.includes(' mod'), '默认无 override 不应亮已修改徽章');
+// 面积关：阈值置灰 disabled、卡片仍在（斜率开关独立可用）
+dv = vm.runInContext('divergeV2CardHtml', ctx)(mkDiv({ ...divEffOn, divergeAreaShrinkOn: false }));
+const pctIn2 = dv.match(/<input type="number"[^>]*data-k="divergeAreaShrinkPct"[^>]*>/)[0];
+assert.ok(pctIn2.includes('disabled'), '面积关时阈值应置灰');
+assert.ok(dv.includes('dim'), '面积关时阈值组应加 dim 类');
+// 覆盖点亮徽章；entryRowsHtml 内三键只渲染一次（无独立行）
+dv = vm.runInContext('divergeV2CardHtml', ctx)(mkDiv(divEffOn, { divergeAreaShrinkPct: 30 }));
+assert.ok(dv.includes('prow mod'), 'override 应点亮已修改徽章');
+const divRows = vm.runInContext('entryRowsHtml', ctx)(mkDiv({
+  ...divEffOn, near: 5, lots: 4, slip_stop: 3, slip_stop_atr_k: 0, slip_fallback: 10,
+  slip_fallback_atr_k: 0, slip_be: 3, slip_be_atr_k: 0, exitTrailSlip: 1,
+  exit_min_merged: 5, realtime_min_bars: 5, zs_exit_weak_ratio: 1,
+}));
+for (const k of ['divergeSlopeOn', 'divergeAreaShrinkOn', 'divergeAreaShrinkPct']) {
+  const n = (divRows.match(new RegExp(`data-k="${k}"`, 'g')) || []).length;
+  assert.equal(n, 1, `${k} 应只渲染一次（v2 整合卡内）`);
+}
+assert.ok(divRows.includes('背驰判据（先斜率后面积）'), 'entryRowsHtml 缺 v2 卡');
+console.log('params.html 进场背驰判据 v2 卡渲染冒烟 OK');

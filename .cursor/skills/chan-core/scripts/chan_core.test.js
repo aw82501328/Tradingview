@@ -772,6 +772,38 @@ describe("findBuyPoints 买点识别（2026-10-14 规则v2）", () => {
     assert.ok(pts.every(p => !(p.time > 100 && p.time <= 200 && p.type !== "1买")));
   });
 
+  test("锁弱口径（2026-10-27）：主点弱→同锚序列类2沿用弱，主点后新高不改档（与 py test_lockweak_main_strength_inherited 成对镜像）", () => {
+    // 前高=460（bis[0] 起点），锚=1买@0(440)。主点 2买@200 时锚后反弹只到 455<460 → 弱；
+    // 其后 500 时刻新高 465>460 过前高——旧滚动口径会把类2买@600 判强，锁弱=仍弱。
+    const bb = (t0, t1, typ, p0, p1) => ({ type: typ, startTime: t0, endTime: t1, startPrice: p0, endPrice: p1, span: Math.abs(p1 - p0) });
+    const mk = [
+      bb(-50, 0, "down", 460.0, 440.0),
+      bb(0, 100, "up", 440.0, 455.0),
+      bb(100, 200, "down", 455.0, 441.0),   // 2买@200（弱）
+      bb(200, 300, "up", 441.0, 450.0),
+      bb(300, 400, "down", 450.0, 444.0),   // 类2买@400（弱）
+      bb(400, 500, "up", 444.0, 465.0),     // 主点后新高 465>460 —— 不改档
+      bb(500, 600, "down", 465.0, 446.0),   // 类2买@600 → 仍弱
+    ];
+    const up = [bb(0, 600, "up", 440.0, 465.0)];
+    const pts = core.findBuyPoints(mk, up, [], 900, 0, 0);
+    assert.deepEqual(pts.filter(p => p.type === "2买" || p.type === "类2买")
+      .map(p => [p.type, p.time, p.price, p.strong ?? null]), [
+      ["2买", 200, 441.0, false],
+      ["类2买", 400, 444.0, false],
+      ["类2买", 600, 446.0, false],
+    ]);
+    // 主点强（主点前反弹已过前高）→ 序列类2沿用强
+    const mk2 = mk.map((x, i) => (i === 1 ? bb(0, 100, "up", 440.0, 470.0) : x));
+    const pts2 = core.findBuyPoints(mk2, up, [], 900, 0, 0);
+    assert.deepEqual(pts2.filter(p => p.type === "2买" || p.type === "类2买")
+      .map(p => [p.type, p.time, p.strong ?? null]), [
+      ["2买", 200, true],
+      ["类2买", 400, true],
+      ["类2买", 600, true],
+    ]);
+  });
+
   test("无上级（日线）返回空（2026-10-14 规则v2：日线不再标买卖点）", () => {
     assert.deepEqual(core.findBuyPoints(bis(), [], [], 3600, 0, 0), []);
     assert.deepEqual(core.findBuyPoints(bis().slice(0, 2), null, [], 900), []);

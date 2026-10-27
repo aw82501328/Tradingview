@@ -606,8 +606,10 @@ class FxMaEngine(BacktestEngine):
         return ubis[-1]["type"] if ubis else None
 
     def _fx_lower_diverge_cands(self, P, direction, cache):
-        """P 的以下级别背驰候选（缠论V1 lowerDiverge 同源：findDivergePoints 双判据
-        背驰 + sinkChainConfirm 区间套下沉链校验，次级别/次次级别由结构自动归属；
+        """P 的以下级别背驰候选（缠论V1 lowerDiverge 同源：findDivergePoints 背驰判据
+        v2（2026-10-27 起先斜率、后面积明显变小，随 CHAN_CFG divergeSlopeOn/
+        divergeAreaShrinkOn，两开关全关=旧三项 OR）+ sinkChainConfirm 区间套下沉链
+        校验，次级别/次次级别由结构自动归属；
         笔取 _structure_bis 结构过滤视图，与买卖点识别同口径）。
 
         periodData 全周期构建一次、候选按 (P, 方向) 各算一次，经 cache 在同一评估拍

@@ -32,7 +32,12 @@ def run_symbol(child_cfg, symbol, msg_q, pause_evt, stop_evt):
     双周期链（2026-10-23）：chan 传 child_cfg["chains"]=[{id,periods,engine_kwargs}]
     ——逐链独立引擎实例顺序跑（持仓/信号/交易日志按链隔离：journal_strategy=chanA/
     chanB、事件带 chain 字段），stats/open/journal 合并为单条 done；无 chains 键的
-    旧 child_cfg（engine_kwargs+periods）走原单引擎路径，行为逐位不变。"""
+    旧 child_cfg（engine_kwargs+periods）走原单引擎路径，行为逐位不变。
+
+    长窗自动分段（2026-10-27）：child_cfg["segments"]=[{data_from_ts,to_ts,start_ts}]
+    时链内逐段顺序跑（每段独立装载数据+预热，段间 carry 交接完整 trades/互斥槽/
+    点尝试与段级计数/当下背驰去重——持仓不断，只有末段末尾结算；journal 文件名带
+    _sNofM 段后缀）。缺省 [整窗] 单段=旧口径逐位不变。"""
 
     def _send(**msg):
         msg["symbol"] = symbol
@@ -46,7 +51,14 @@ def run_symbol(child_cfg, symbol, msg_q, pause_evt, stop_evt):
         chan_core.apply_cfg(child_cfg["chan_cfg"])
         chains = child_cfg.get("chains")
         if chains:
-            # 逐链顺序跑：链间完全独立（各自引擎实例/持仓/journal），互不影响
+            # 长窗自动分段（2026-10-27）：child_cfg["segments"] 由父进程按窗口预算
+            # （>split_min_days 均分为 ≤split_seg_days 段，日界对齐；缺省 [None]=整窗
+            # 单段，旧 child_cfg 行为逐位不变）。段间持仓连续：carry 携带前段完整
+            # trades/互斥槽/点尝试与段级计数/当下背驰去重（见 BacktestEngine.run
+            # carry 文档），只有末段末尾 mark-to-market——中间段 open 不进 done.open。
+            segments = child_cfg.get("segments") or [None]
+            n_seg = len(segments)
+            from .backtest import exit_cfg_desc
             merged = None
             open_trades = []
             journals = []
@@ -56,57 +68,84 @@ def run_symbol(child_cfg, symbol, msg_q, pause_evt, stop_evt):
                 cid = task.get("id")
                 tag = f"[链{cid}] " if cid else ""
                 periods = task["periods"]
-                _log(f"{tag}取数：数据源=本地存储 symbol={symbol} periods={periods} "
-                     f"from_ts={child_cfg['data_from_ts']}"
-                     f"{' to_ts=' + str(child_cfg['to_ts']) if child_cfg.get('to_ts') else ''}")
-                bars = data_store.load_store(symbol, periods=periods,
-                                             from_ts=child_cfg["data_from_ts"],
-                                             to_ts=child_cfg.get("to_ts"))
-                for res in periods:
-                    n = len(bars.get(res, []) or [])
-                    if n:
-                        _log(f"  {res:>4}: {n} 根（{fmtT(bars[res][-1]['time'])} 止）")
-                kw = dict(task["engine_kwargs"])
-                kw["contract_mult"] = mark_entry.contract_mult_of(symbol)
-                engine = BacktestEngine(bars, **kw)
-                from .backtest import exit_cfg_desc
-                _log(f"{tag}回测开始（最小周期 {engine.fine_res}，成交口径 {engine.fill_mode}，"
-                     f"信号模式 {'当下背驰' if engine.signal_mode == 'realtime' else '确认制'}，"
-                     f"背驰进场 {'分型确认后下一根开盘' if engine.diverge_confirm else '当下'}，"
-                     f"柱缩闸 {'开' if engine.entry_macd_shrink else '关'}，"
-                     f"止损下限 {'开' if engine.stop_entry_bar_floor else '关'}，"
-                     f"检测周期够笔 {'预期' if engine.expect_bi else '分型确认'}，"
-                     f"出场 {exit_cfg_desc(engine.exit_cfg)}）...")
-                chain_kw = {"chain": cid} if cid else {}
+                carry = None
+                for si, seg in enumerate(segments):
+                    if stop_evt.is_set():
+                        break
+                    seg = seg or {}
+                    data_from_ts = seg.get("data_from_ts", child_cfg["data_from_ts"])
+                    seg_to = seg.get("to_ts", child_cfg.get("to_ts"))
+                    seg_start = seg.get("start_ts", child_cfg.get("start_ts"))
+                    stag = tag if n_seg == 1 else f"{tag}段{si + 1}/{n_seg} "
+                    _log(f"{stag}取数：数据源=本地存储 symbol={symbol} periods={periods} "
+                         f"from_ts={data_from_ts}"
+                         f"{' to_ts=' + str(seg_to) if seg_to else ''}")
+                    bars = data_store.load_store(symbol, periods=periods,
+                                                 from_ts=data_from_ts, to_ts=seg_to)
+                    for res in periods:
+                        n = len(bars.get(res, []) or [])
+                        if n:
+                            _log(f"  {res:>4}: {n} 根（{fmtT(bars[res][-1]['time'])} 止）")
+                    kw = dict(task["engine_kwargs"])
+                    kw["contract_mult"] = mark_entry.contract_mult_of(symbol)
+                    engine = BacktestEngine(bars, **kw)
+                    if si == 0:
+                        _log(f"{tag}回测开始（最小周期 {engine.fine_res}，成交口径 {engine.fill_mode}，"
+                             f"信号模式 {'当下背驰' if engine.signal_mode == 'realtime' else '确认制'}，"
+                             f"背驰进场 {'分型确认后下一根开盘' if engine.diverge_confirm else '当下'}，"
+                             f"柱缩闸 {'开' if engine.entry_macd_shrink else '关'}，"
+                             f"止损下限 {'开' if engine.stop_entry_bar_floor else '关'}，"
+                             f"检测周期够笔 {'预期' if engine.expect_bi else '分型确认'}，"
+                             f"出场 {exit_cfg_desc(engine.exit_cfg)}）...")
+                    chain_kw = {"chain": cid} if cid else {}
+                    # 段>1 时 journal 文件名带段后缀（同一 wall-clock 启动会撞名）；
+                    # 单段保持旧命名（chanA/chan），旧口径零变化
+                    jstr = ((f"chan{cid}" if cid else "chan") if n_seg == 1 else
+                            (f"chan{cid}_s{si + 1}of{n_seg}" if cid
+                             else f"chan_s{si + 1}of{n_seg}"))
 
-                def _on_progress(i, total, _cid=cid):
-                    if i % max(1, total // 100) == 0 or i == total:
-                        m = {"kind": "progress", "current": i, "total": total,
-                             "pct": round(100.0 * i / total, 1) if total else 0}
-                        if _cid:
-                            m["chain"] = _cid
-                        _send(**m)
+                    def _on_progress(i, total, _cid=cid, _si=si):
+                        if i % max(1, total // 100) == 0 or i == total:
+                            if n_seg > 1:
+                                pct = round(100.0 * (_si + i / total) / n_seg, 1)
+                            else:
+                                pct = round(100.0 * i / total, 1) if total else 0
+                            m = {"kind": "progress", "current": i, "total": total,
+                                 "pct": pct}
+                            if _cid:
+                                m["chain"] = _cid
+                            _send(**m)
 
-                result = engine.run(
-                    start_ts=child_cfg.get("start_ts"),
-                    log=_log,
-                    on_progress=_on_progress,
-                    on_signal=lambda s: _send(kind="signal", signal=dict(s, **chain_kw)),
-                    on_trade=lambda tr: _send(kind="trade", trade=dict(tr, **chain_kw)),
-                    on_exit=lambda tr: _send(kind="exit", trade=dict(tr, **chain_kw)),
-                    on_suppressed=lambda s: _send(kind="suppressed", signal=dict(s, **chain_kw)),
-                    paused=pause_evt,
-                    stopped=stop_evt,
-                    journal_symbol=symbol,
-                    journal_strategy=(f"chan{cid}" if cid else "chan"))
-                jp = result.get("journal")
-                if jp:
-                    journals.append(jp)
-                    _log(f"{tag}交易日志：{jp}")
-                open_trades.extend(dict(tr, **chain_kw)
-                                   for tr in result.get("trades") or []
-                                   if tr.get("state") != "closed")
-                merged = merge_run_stats(merged, result.get("stats") or {})
+                    result = engine.run(
+                        start_ts=seg_start,
+                        log=_log,
+                        on_progress=_on_progress,
+                        on_signal=lambda s: _send(kind="signal", signal=dict(s, **chain_kw)),
+                        on_trade=lambda tr: _send(kind="trade", trade=dict(tr, **chain_kw)),
+                        on_exit=lambda tr: _send(kind="exit", trade=dict(tr, **chain_kw)),
+                        on_suppressed=lambda s: _send(kind="suppressed", signal=dict(s, **chain_kw)),
+                        paused=pause_evt,
+                        stopped=stop_evt,
+                        journal_symbol=symbol,
+                        journal_strategy=jstr,
+                        carry=carry)
+                    carry = result.get("carryState")
+                    jp = result.get("journal")
+                    if jp:
+                        journals.append(jp)
+                        _log(f"{stag}交易日志：{jp}")
+                    st = result.get("stats") or {}
+                    merged = merge_run_stats(merged, st)
+                    n_open = sum(1 for tr in result.get("trades") or []
+                                 if tr.get("state") != "closed")
+                    _log(f"{stag}段完成：{st.get('steps', 0)} 步，信号 {st.get('signals', 0)}，"
+                         f"成交 {st.get('executed', 0)}，已平仓 {st.get('closed', 0)}，"
+                         f"未平仓 {n_open} 笔"
+                         f"（{'交接下段继续管' if si + 1 < n_seg else '按末段口径结算'}）")
+                    if si + 1 == n_seg:
+                        open_trades.extend(dict(tr, **chain_kw)
+                                           for tr in result.get("trades") or []
+                                           if tr.get("state") != "closed")
             _send(kind="done",
                   stats=merged or {},
                   open=open_trades,

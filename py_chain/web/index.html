@@ -599,6 +599,11 @@ function buildCard(m) {
     backtest: [
       { k: 'lead_days', label: '预热提前（天）·0=从起始日交易', type: 'text', def: '60' },
       { k: 'warmup', label: '预热根数（提前=0 时生效）', type: 'text', def: '60' },
+      // 长窗自动分段（2026-10-27，仅缠论V1）：>90天自动拆≤60天段顺序跑，段间持仓/
+      // 单号/计数连续不断档；后端缺省=不拆（旧方案重放忠实），新卡默认开
+      { k: 'auto_split', label: '长窗自动分段', type: 'select', def: 'true',
+        options: [['true', '开启（>90天拆≤60天段·持仓不断）'], ['false', '关闭（单次整窗跑）']],
+        title: '窗口超过90天时自动均分为不超过60天的段顺序跑：每段独立预热重建结构（长窗引擎单步耗时超线性上涨，分段拉回高吞吐区）；段间持仓、单号、同向互斥与尝试计数全部连续，段边界不强平，只有最后一段末尾结算。与单次整窗跑结果非逐位一致（每段结构从各自预热重建）。' },
       locateField,
       // 支阻预设下拉已移除（2026-09-29）：支阻参数统一=参数配置该品种当前生效方案/品种桶
     ],
@@ -1243,7 +1248,7 @@ function collectCfg(cid, mode) {
 // fxma_v1：周期（取数周期由参数中心 entryRes 推导）、30秒级别开关、预热根数（用默认）
 // 回放/实时卡仍用卡内策略下拉驱动；回测卡=策略TAB，按各卡策略直接应用
 const STRATEGY_FIELD_HIDE = {
-  fxma_v1: ['periods', 'with_30s', 'warmup'],
+  fxma_v1: ['periods', 'with_30s', 'warmup', 'auto_split'],
 };
 function applyStrategyHide(card, strategyId) {
   const hide = STRATEGY_FIELD_HIDE[strategyId] || [];
@@ -1251,8 +1256,9 @@ function applyStrategyHide(card, strategyId) {
     card.querySelector('.f-periods'),
     card.querySelector('[data-cfg="with_30s"]')?.closest('.field'),
     card.querySelector('[data-cfg="warmup"]')?.closest('.field'),
+    card.querySelector('[data-cfg="auto_split"]')?.closest('.field'),
   ];
-  ['periods', 'with_30s', 'warmup'].forEach((key, i) => {
+  ['periods', 'with_30s', 'warmup', 'auto_split'].forEach((key, i) => {
     if (fields[i]) fields[i].style.display = hide.includes(key) ? 'none' : '';
   });
 }

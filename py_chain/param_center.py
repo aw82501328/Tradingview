@@ -77,13 +77,14 @@ CHAN_BI_KEYS = (
 # class2ZsTol 已停用（类2买/类2卖「同一个中枢」改按时间归属，find* 签名保留兼容）
 POINTS_CHAN_KEYS = ("divergeDurRatio",)
 ENTRY_CHAN_KEYS = (
-    "sinkFallback", "sinkFallbackRearm", "pointMaxAttempts",
+    "sinkFallback", "sinkFallbackRearm", "pointMaxAttempts", "pointMaxAttemptsSeg",
     "macdDivergeBodyOn", "macdDivergeTol",
     "expectBiEnough", "expectBiMinBars", "divergeConfirm", "macdZeroTol",
     "strong2BuyMacdOn", "pointClasses",
     "entryMacdShrink", "stopEntryBarFloor",
     "anchorWinBars", "anchorWinPts", "anchorWinTrailOn",
     "divergeReferByZs", "sinkSkipLevel", "srSideGateOn",
+    "divergeSlopeOn", "divergeAreaShrinkOn", "divergeAreaShrinkPct",
 )
 # pointClasses 旧值别名（2026-10-24 同日三次口径：三类/四类族也拆强弱 3s/3w/…/4xw；
 # 二次口径曾拆二类/类二 2s/2w/2xs/2xw）。normalize 保存时迁移；mark_entry 运行期
@@ -285,6 +286,13 @@ PARAM_MODULES = {
                                  "终局重置只清段去重、不清此计数；0=不限（旧口径）；"
                                  "默认2=初始一次+重试一次",
                                  0, 20),
+            "pointMaxAttemptsSeg": ("同一段内最大开仓次数",
+                                    "同一上级段内同类买卖点（键=检测周期+类别+上级段起点）最多实际"
+                                    "开仓次数：锚点随新极值漂移不重置预算（段延伸不换键），上级段终结"
+                                    "反向新笔起点才重置；不同类别（2买/3买/强弱）各自独立预算互不"
+                                    "挤占；计数口径同「同一点最大尝试次数」（成交才计、终局不回血），"
+                                    "用满拒绝码 point_attempt_seg；0=不限；默认2",
+                                    0, 20),
             "macdDivergeBodyOn": ("MACD背驰容差", "与容差同一张卡，在进场闸门。开=影线未过时再比笔端点K实体（默认开）；关=只比影线", None, None),
             "macdDivergeTol": ("背驰容差", "MACD背驰固定容差（绝对价差，点）。影线或实体未严格更极端时，价差落在 0 到该值内算近等。0=不放宽。开关关着仍用于影线", 0.0, 100.0),
             "expectBiEnough": ("M4预期够笔", "允许预期段在合并K线够笔后进场；结构预期本身在普通分型确认后立即参与", None, None),
@@ -321,6 +329,22 @@ PARAM_MODULES = {
             "sinkSkipLevel": ("跨级下沉",
                               "下沉链次级展开<3笔时跳过该级继续向下找有展开的级别判背驰"
                               "（如60→3直沉，markRes=3）；关=在本级判定", None, None),
+            "divergeSlopeOn": ("进场背驰·斜率判据",
+                               "开=背驰先比两笔斜率（|端点价差|÷时长），当前笔<参照笔即判背驰；"
+                               "斜率没变小再看面积判据。与面积判据全关=旧三项OR口径"
+                               "（面积变小 或 黄白线抬高/压低 或 单根柱变矮，A/B 基准）。"
+                               "作用于当下制/确认制/强分型均线V1背驰触发三链"
+                               "（收笔/买卖点识别不受影响）",
+                               None, None),
+            "divergeAreaShrinkOn": ("进场背驰·面积判据",
+                                    "开=斜率没变小时再比柱状体面积，需明显变小（当前段<参照段×"
+                                    "「面积明显变小阈值」%）；两段时长比过大时面积项自动不可用"
+                                    "（只剩斜率判据）",
+                                    None, None),
+            "divergeAreaShrinkPct": ("进场背驰·面积明显变小阈值(%)",
+                                     "当前段柱状体面积须小于参照段×该百分比才判背驰："
+                                     "50=缩到一半以下；100=任意变小即可；0=面积判据恒不过",
+                                     0.0, 100.0),
         },
     },
     "chain": {

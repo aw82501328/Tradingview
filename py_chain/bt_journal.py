@@ -63,6 +63,8 @@ GATE_LABELS = {
     "cand_fired": "该形成段已发过（候选级去重）",
     "anchor_bar_window": "锚点窗口外（触发/背驰点须在锚K起N根检测周期K内且距窗口极值≤点数；2026-10-21 重定义；2026-10-22 起锚K随窗口内新极值重开=anchorWinTrailOn）",
     "near_sr_fail": "不在支阻位附近",
+    "point_attempt_max": "同一点尝试次数用满（锚点级 pointMaxAttempts，成交建仓才计数）",
+    "point_attempt_seg": "同一段内开仓次数用满（段级 pointMaxAttemptsSeg，段=上级周期当前笔起点，锚点漂移不重置）",
     "eval_reason": "确认制条件未过",
     # realtimeLowerDiverge / _evalRealtimeNode 内部原因（gate=no_diverge 的细分）
     "sink_chain_short": "下沉链不通（停止级=检测周期自身，无严格更低级别背驰）",
@@ -325,6 +327,7 @@ class BtJournal:
                      "strategyLabel": sig.get("strategyLabel"),
                      "price": sig.get("price"), "nearSr": sig.get("nearSr"),
                      "segStart": sig.get("segStart"),
+                     "segUpperStart": sig.get("segUpperStart"),
                      "pointType": sig.get("pointType"),
                      "pointStrong": sig.get("pointStrong"),
                      "trendDirection": sig.get("trendDirection"),

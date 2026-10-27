@@ -537,6 +537,7 @@ const BREAK_BEFORE_KEYS = new Set();
 // __EXIT_MODES__ = 出场方式组标记（exitModeRowsHtml 专用：每方式一张 开关+比例 卡）
 // __STRONG2_MACD__ = 强2类买卖点黄白线（开关 strong2BuyMacdOn + 容差 macdZeroTol 同一张卡）
 // __MACD_DIVERGE__ = MACD背驰容差（开关 macdDivergeBodyOn + 容差 macdDivergeTol 同一张卡）
+// __DIVERGE_V2__ = 进场背驰判据 v2（斜率/面积两开关 + 面积阈值同一张卡，2026-10-27）
 const ENTRY_GROUPS = [
   ['买卖点类别（勾选=该类可开单，买卖两侧对称；全族按强弱拆分——二类族=1买后反弹过/未过前高，3/4族=点后同向腿背驰（弱3=2类后上推腿对1类后反弹腿、弱4=3类后上推腿对2类后上推腿，判不出即强）；最新锚点为未勾类别时跳过·不回溯更早的点；2026-10-25 起默认五项 1/强二/强类二/强三/强四类，此前默认全选）', ['pointClasses']],
   ['支阻', ['near']],
@@ -546,8 +547,9 @@ const ENTRY_GROUPS = [
   ['__EXIT_MODES__', []],
   ['进场扩展（M1/M4）', ['sinkFallback', 'sinkFallbackRearm',
                        'expectBiEnough', 'expectBiMinBars', 'divergeConfirm']],
-  ['进场闸门', ['__STRONG2_MACD__', '__MACD_DIVERGE__', 'entryMacdShrink', 'stopEntryBarFloor',
-              'anchorWinBars', 'anchorWinPts', 'anchorWinTrailOn', 'srSideGateOn', 'pointMaxAttempts']],
+  ['进场闸门', ['__DIVERGE_V2__', '__STRONG2_MACD__', '__MACD_DIVERGE__', 'entryMacdShrink', 'stopEntryBarFloor',
+              'anchorWinBars', 'anchorWinPts', 'anchorWinTrailOn', 'srSideGateOn', 'pointMaxAttempts',
+              'pointMaxAttemptsSeg']],
   ['规则修复（07-07 06:30 案例锚点）', ['divergeReferByZs', 'sinkSkipLevel']],
 ];
 
@@ -668,6 +670,38 @@ function macdDivergeCardHtml(m) {
       data-k="macdDivergeTol" value="${tol}" aria-label="背驰容差">点</span></div>`;
 }
 
+// 进场背驰判据 v2（2026-10-27）：斜率/面积两开关 + 面积阈值同一张卡（进场闸门首位）。
+// ① 先比两笔斜率（|端点价差|÷时长）变小=背驰；② 没变小再比柱状体面积须明显变小
+// （当前段<参照段×阈值%，时长比过大面积不可用）。两判据全关=旧三项OR口径（A/B 基准）。
+// 面积开关关闭时阈值输入置灰（值仍随表单保存，collect 按 data-k 收集）。
+function divergeV2CardHtml(m) {
+  const sSpec = m.schema.divergeSlopeOn, aSpec = m.schema.divergeAreaShrinkOn,
+        pSpec = m.schema.divergeAreaShrinkPct;
+  if (!sSpec || !aSpec || !pSpec) return '';
+  const sOn = !!m.effective.divergeSlopeOn, aOn = !!m.effective.divergeAreaShrinkOn;
+  const pct = m.effective.divergeAreaShrinkPct;
+  const isMod = m.overrides.divergeSlopeOn !== undefined
+    || m.overrides.divergeAreaShrinkOn !== undefined
+    || m.overrides.divergeAreaShrinkPct !== undefined;
+  return `<div class="prow ${isMod ? 'mod' : ''}" title="${sSpec.desc}">
+    <span class="pname"><span class="plabel">背驰判据（先斜率后面积）<span class="badge">已修改</span></span>
+    <span class="pdef">斜率${sSpec.default ? '默认开' : '默认关'} · 面积${aSpec.default ? '默认开' : '默认关'} · 阈值默认 ${pSpec.default}% · ①两笔斜率（|端点价差|÷时长）变小=背驰 ②没变小再比柱面积须 &lt;参照×阈值%（时长比过大面积不可用）；全关=旧三项OR（面积/DIF/柱高任一）</span></span>
+    <span class="zs-keep">斜率<input type="checkbox" data-k="divergeSlopeOn" ${sOn ? 'checked' : ''} aria-label="背驰斜率判据"></span>
+    <span class="zs-keep">面积<input type="checkbox" data-k="divergeAreaShrinkOn" ${aOn ? 'checked' : ''} aria-label="背驰面积判据"></span>
+    <span class="zs-keep${aOn ? '' : ' dim'}" data-keep-for="divergeAreaShrinkOn">阈值<input type="number" step="any" min="${pSpec.min}" max="${pSpec.max}"
+      data-k="divergeAreaShrinkPct" value="${pct}"${aOn ? '' : ' disabled'} aria-label="面积明显变小阈值">%</span></div>`;
+}
+
+// 面积判据开关关闭时：阈值输入置灰（同 applyExitModeDim 的 data-keep-for 模式）
+function applyDivergeDim() {
+  const on = document.querySelector('#pgrid [data-k="divergeAreaShrinkOn"]');
+  const wrap = document.querySelector('#pgrid .zs-keep[data-keep-for="divergeAreaShrinkOn"]');
+  if (!on || !wrap) return;
+  const enabled = !!on.checked;
+  wrap.classList.toggle('dim', !enabled);
+  wrap.querySelectorAll('input').forEach(inp => { inp.disabled = !enabled; });
+}
+
 // 出场方式开关关闭时：同卡比例输入置灰；跟踪止盈关闭时滑点组的「跟踪止盈滑点」置灰
 function applyExitModeDim() {
   for (const [onKey, pctKey] of EXIT_MODE_PAIRS) {
@@ -741,6 +775,9 @@ function entryRowsHtml(m) {
   grouped.add('macdZeroTol');
   grouped.add('macdDivergeBodyOn');              // 并入「MACD背驰容差」卡
   grouped.add('macdDivergeTol');
+  grouped.add('divergeSlopeOn');                 // 并入「背驰判据（先斜率后面积）」卡
+  grouped.add('divergeAreaShrinkOn');
+  grouped.add('divergeAreaShrinkPct');
   return ENTRY_GROUPS.map(([title, keys]) => {
     if (title === '__EXIT_MODES__') {
       return `<div class="pgroup">出场方式（至少启用一种；锁定盈利优先级最高。其余比例 = 平总仓位[初始手数]%，整数手）</div>`
@@ -749,6 +786,7 @@ function entryRowsHtml(m) {
     return `<div class="pgroup">${title}</div>`
       + keys.map(k => k === '__STRONG2_MACD__' ? strong2MacdCardHtml(m)
         : k === '__MACD_DIVERGE__' ? macdDivergeCardHtml(m)
+        : k === '__DIVERGE_V2__' ? divergeV2CardHtml(m)
         : (m.schema[k] ? paramRow(m, k) : '')).join('');
   }).join('') + Object.keys(m.schema)
     .filter(k => !grouped.has(k) && !Object.values(SLIP_ATR_K).includes(k))
@@ -1178,7 +1216,7 @@ function renderModule(name) {
   if (name === 'chain') applyChainDim();
   if (name === 'points') applyAnchorDim();
   if (name === 'fxmaBase' || name === 'fxmaEntry') applyFxmaDim();
-  if (name === 'entry') applyExitModeDim();
+  if (name === 'entry') { applyExitModeDim(); applyDivergeDim(); }
   if (name === 'plan') {
     applyPlanRangeDim();
     if ($('logicDetails').open) {
@@ -1416,6 +1454,9 @@ document.addEventListener('change', e => {
   if (e.target && e.target.dataset
       && (EXIT_MODE_KEYS.includes(e.target.dataset.k)
           || e.target.dataset.k === 'exitTrailSlip')) applyExitModeDim();
+  // 背驰面积判据开关变化：阈值输入即时置灰或恢复
+  if (e.target && e.target.dataset
+      && e.target.dataset.k === 'divergeAreaShrinkOn') applyDivergeDim();
 });
 $('saveBtn').onclick = () => save(active).catch(err => toast(err.message, true));
 $('resetBtn').onclick = () => reset(active).catch(err => toast(err.message, true));

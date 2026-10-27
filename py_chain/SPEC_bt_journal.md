@@ -47,6 +47,12 @@ ctx 含 pointType/anchorTime/nowBarTime（时间窗）或 markRes/divergeTime（
 （检测周期+类别+锚点时间）实际开仓次数达上限后该锚点不再布防触发（成交建仓才计数，
 被同向互斥压掉未成交的信号不消耗；终局重置 sinkFallbackRearm 只清段去重不清此计数），
 ctx 含 pointType/anchorTime/attempts/max，header 记 pointMaxAttempts 口径；
+`point_attempt_seg`=同一段内开仓次数已满（`pointMaxAttemptsSeg`，2026-10-27）——同一
+上级段内同类买卖点（键=检测周期+类别+上级段起点；段=上级周期 bis[-1] 含形成中的
+startTime，段延伸不换键、段终结反向新笔起点才重置）实际开仓次数达上限后不再布防
+触发——锚点随新极值漂移不重置本预算（9-11 15m 2买四锚四笔案例）；不同类别独立
+预算；其余口径同 point_attempt_max；ctx 含 pointType/anchorTime/segUpperStart/
+attempts/max，header 记 pointMaxAttemptsSeg 口径，signal 行带 segUpperStart 字段；
 `fx_prov_invalidated`=pred2 预判点消失——收复前低/前高、结构重算或真点
 接管，ctx 含 provTime/provPrice/dSegStart，2026-10-09）。**拒绝行存结构化数字，中文渲染
 统一在 bt_query**（写侧零格式化开销）。fxma state 行的买卖点类型带「预判」前缀
@@ -111,6 +117,20 @@ python -m py_chain.bt_query --json ...                   # 机器可读
 `chanA|<symbol>`、cleanup_old 分组与保留策略自动按链隔离（_parse_name 无需改动）。
 header.periods/fineRes 即该链加载集与最细周期（链B fine=1m）。信号/成交行无独立
 链字段（整份文件即一条链）；Web 信号表行带 chain 字段（A/B）与「链A/链B」角标。
+
+## 长窗自动分段命名与跨段语义（2026-10-27）
+
+长窗自动分段（窗口>90 天自动均分 ≤60 天段，仅缠论V1）的每段独立 journal：
+journal_strategy 追加段后缀——`bt_chanA_s1of4_<symbol>_<stamp>.ndjson`（同一
+wall-clock 启动的多段必须错名；单段=旧命名 `chanA`/`chan` 逐位不变）。latest.json
+按段后缀各成键，`bt_query --symbol` 的回退口径（品种后缀最新）默认命中**末段**
+文件；查跨段单笔（fill 在前段、exit 在后段）须显式指定段文件。跨段连续性由引擎
+carry 承载：段末未平仓单整笔交接下段（tradeNo 续号/止损跟踪线随 trade dict/同向
+互斥槽/点尝试与段级计数/当下背驰去重集），段边界不强平、只有末段末尾 mark-to-market；
+交接单的 fill 行在前段文件、exit 行在后段文件，tradeNo 跨段连续无重复。
+方案 cfg 落 `seg_bounds` 段界快照，eval 冻结重放按快照逐段跑（eval_service
+replay.segments）保证与原跑同口径。分段结果与单次整窗跑**非逐位一致**（每段结构
+从各自预热重建；段界布防等待不跨段）——对比口径须同 segmented 与否。
 
 ## 笔结构与基线（2026-10-25 笔内极值守卫）
 

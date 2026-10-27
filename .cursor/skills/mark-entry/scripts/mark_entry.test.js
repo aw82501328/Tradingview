@@ -134,6 +134,114 @@ describe("findDivergePoints / lowerDiverge 过滤", () => {
 });
 
 // ============================================================
+// 进场背驰判据 v2（2026-10-27，与 py_chain/test_entry_diverge.py 成对同构）：
+// ① 斜率变小=背驰（divergeSlopeOn）；② 斜率没变小再比柱状体面积须明显变小
+// （cur < ref×divergeAreaShrinkPct%，受 areaDurComparable 时长门）。
+// 两开关全关=旧三项 OR。9-25 21:30 动因案例数值复刻（真实重放实测）：
+// 参照 down 69min@幅度18.195（绿柱Σ35.87），形成段 down 63min@幅度36.06（Σ25.41=71%）
+// → 斜率没变小、面积 71%>50% 没明显变小 → 新口径不开、旧 OR 放行。
+// ============================================================
+const { entryDivergeOk, slopeOf } = require("./mark_entry.js");
+const divCore = require("../../chan-core/scripts/chan_core.js");
+const D_REF = bi("down", 0, 4140, 4315.795, 4297.6);
+const D_F = bi("down", 4320, 8100, 4309.49, 4273.43);
+const D_MACD = [
+  ...Array.from({ length: 10 }, (_, i) => ({ time: 180 * (i + 1), macd: i === 5 ? -3.06 : -3.5, dif: -1.0 - 0.03 * i, dea: 0 })),
+  ...Array.from({ length: 10 }, (_, i) => ({ time: 4320 + 180 * (i + 1), macd: i === 4 ? -3.71 : -2.541, dif: i === 9 ? -5.4867 : -2.0 - 0.3 * i, dea: 0 })),
+];
+
+describe("entryDivergeOk 进场背驰判据 v2（先斜率后面积）", () => {
+  const saved = {};
+  // 只在首次改键时存原值（同键二次 setCfg 不覆盖 saved——恢复才回得到最初值）
+  const setCfg = (kv) => Object.entries(kv).forEach(([k, v]) => { if (!(k in saved)) saved[k] = divCore.CHAN_CFG[k]; divCore.CHAN_CFG[k] = v; });
+  const restoreCfg = () => { Object.entries(saved).forEach(([k, v]) => { divCore.CHAN_CFG[k] = v; }); Object.keys(saved).forEach(k => delete saved[k]); };
+
+  test("9-25 案例：斜率更大+面积 71% → 新口径 False", () => {
+    assert.ok(slopeOf(D_F) > slopeOf(D_REF));   // 0.00954 > 0.00440
+    assert.equal(entryDivergeOk(D_F, D_REF, D_MACD), false);
+  });
+
+  test("同案例：两开关全关=旧三项 OR（面积变小一条放行）", () => {
+    try {
+      setCfg({ divergeSlopeOn: false, divergeAreaShrinkOn: false });
+      assert.equal(entryDivergeOk(D_F, D_REF, D_MACD), true);
+    } finally { restoreCfg(); }
+  });
+
+  test("斜率变小即背驰（面积再大也不拦）", () => {
+    const slow = bi("down", 0, 4000, 100.0, 50.0);   // 斜率 0.0125
+    const fast = bi("down", 5000, 6000, 49.0, 42.0); // 斜率 0.007 更缓，创新低
+    const arr = [{ time: 100, macd: -1.0, dif: -5, dea: 0 }, { time: 200, macd: -1.0, dif: -6, dea: 0 },
+                 { time: 5100, macd: -5.0, dif: -7, dea: 0 }, { time: 5500, macd: -5.0, dif: -7, dea: 0 }];
+    assert.equal(entryDivergeOk(fast, slow, arr), true);
+  });
+
+  test("面积阈值严格 <：恰 50% 不过、49.9% 过；pct=100 任意变小、pct=0 恒不过", () => {
+    const slow = bi("down", 0, 1000, 100.0, 90.0);    // 斜率 0.01
+    const fast = bi("down", 2000, 3200, 89.0, 70.0);  // 斜率 ≈0.0158 更陡 → 斜率不过
+    const arrEq = [{ time: 100, macd: -10.0, dif: -1, dea: 0 },
+                   { time: 2100, macd: -2.5, dif: -2, dea: 0 }, { time: 3100, macd: -2.5, dif: -2, dea: 0 }];
+    const arrLt = [{ time: 100, macd: -10.0, dif: -1, dea: 0 },
+                   { time: 2100, macd: -2.5, dif: -2, dea: 0 }, { time: 3100, macd: -2.49, dif: -2, dea: 0 }];
+    assert.equal(entryDivergeOk(fast, slow, arrEq), false);
+    assert.equal(entryDivergeOk(fast, slow, arrLt), true);
+    try {
+      setCfg({ divergeAreaShrinkPct: 100.0 });
+      assert.equal(entryDivergeOk(fast, slow, arrEq), true);
+      setCfg({ divergeAreaShrinkPct: 0.0 });
+      assert.equal(entryDivergeOk(fast, slow, arrLt), false);
+    } finally { restoreCfg(); }
+  });
+
+  test("时长比过大 → 面积项不可用（只剩斜率）", () => {
+    const longRef = bi("down", 0, 6000, 100.0, 90.0);  // 6000s vs 1200s 比 5>3
+    const fast = bi("down", 2000, 3200, 89.0, 70.0);
+    const arr = [{ time: 100, macd: -10.0, dif: -1, dea: 0 },
+                 { time: 2100, macd: -1.0, dif: -2, dea: 0 }, { time: 3100, macd: -1.0, dif: -2, dea: 0 }];
+    assert.equal(entryDivergeOk(fast, longRef, arr), false);
+  });
+
+  test("顶背驰镜像：up 笔比红柱面积（绿柱不参与）", () => {
+    const slow = bi("up", 0, 1000, 90.0, 100.0);
+    const fast = bi("up", 2000, 3200, 101.0, 120.0);
+    const redSmall = [{ time: 100, macd: 10.0, dif: 1, dea: 0 },
+                      { time: 2100, macd: 1.0, dif: 2, dea: 0 }, { time: 3100, macd: 1.0, dif: 2, dea: 0 }];
+    const redBig = [{ time: 100, macd: 10.0, dif: 1, dea: 0 },
+                    { time: 2100, macd: 6.0, dif: 2, dea: 0 }, { time: 3100, macd: 6.0, dif: 2, dea: 0 }];
+    assert.equal(entryDivergeOk(fast, slow, redSmall), true);
+    assert.equal(entryDivergeOk(fast, slow, redBig), false);
+  });
+
+  test("findDivergePoints：新口径拦「仅面积变小」点、斜率变小点照常出", () => {
+    const bis = [bi("up", -1000, 0, 4290.0, 4315.795), D_REF,
+                 bi("up", 4140, 4320, 4297.6, 4309.49), D_F];
+    const savedZs = divCore.CHAN_CFG.divergeReferByZs;
+    divCore.CHAN_CFG.divergeReferByZs = false;
+    try {
+      assert.deepEqual(findDivergePoints(bis, D_MACD), []);   // 9-25 案例：新口径无点
+      setCfg({ divergeSlopeOn: false, divergeAreaShrinkOn: false });
+      const pts = findDivergePoints(bis, D_MACD);             // 全关=旧口径出一个做多点
+      assert.equal(pts.length, 1);
+      assert.equal(pts[0].direction, "long");
+      assert.equal(pts[0].time, D_F.endTime);
+    } finally {
+      divCore.CHAN_CFG.divergeReferByZs = savedZs;
+      restoreCfg();
+    }
+    const slow = bi("down", 0, 4000, 100.0, 50.0);
+    const fast = bi("down", 5000, 6000, 49.0, 42.0);
+    const bis2 = [bi("up", -500, 0, 40.0, 100.0), slow, bi("up", 4000, 5000, 50.0, 49.0), fast];
+    const arr = [{ time: 100, macd: -1.0, dif: -5, dea: 0 }, { time: 200, macd: -1.0, dif: -6, dea: 0 },
+                 { time: 5100, macd: -5.0, dif: -7, dea: 0 }];
+    try {
+      const pts2 = findDivergePoints(bis2, arr);
+      assert.equal(pts2.length, 1);
+      assert.equal(pts2[0].price, 42.0);
+    } finally { divCore.CHAN_CFG.divergeReferByZs = savedZs; }
+  });
+});
+
+// ============================================================
 // 锚点窗口闸（2026-10-18 用户规则、2026-10-21 重定义、2026-10-22 trailing 重开，
 // 与 py_chain/test_anchor_bar_window.py 成对同构）：时间窗=锚K起 anchorWinBars 根
 // 检测周期K（默认 2，旧口径=1）；价距窗=背驰点价距窗口极值（买侧最低/卖侧最高

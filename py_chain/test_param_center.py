@@ -744,5 +744,109 @@ class TestPointMaxAttemptsParams(unittest.TestCase):
                 param_center.normalize("entry", {"pointMaxAttempts": bad})
 
 
+class TestPointMaxAttemptsSegParams(unittest.TestCase):
+    """同一段内最大开仓次数（2026-10-27 pointMaxAttemptsSeg，entry 桶 int 0~20 默认 2）：
+    键=检测周期+类别+上级段起点（锚点漂移不重置、段终结反向新笔起点才重置）；
+    注册/生效/边界与 pointMaxAttempts 同款。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._orig_file = param_center.PARAMS_FILE
+        param_center.PARAMS_FILE = str(Path(self.tmp.name) / "module_params.json")
+        chan_core.reset_cfg()
+
+    def tearDown(self):
+        chan_core.reset_cfg()
+        param_center.PARAMS_FILE = self._orig_file
+        self.tmp.cleanup()
+
+    def test_default_single_source(self):
+        self.assertEqual(param_center.defaults_of("entry")["pointMaxAttemptsSeg"], 2)
+        schema = param_center.schema_of("entry")["pointMaxAttemptsSeg"]
+        self.assertEqual(schema["type"], "int")
+        self.assertEqual(schema["default"], 2)
+        self.assertEqual(schema["min"], 0)
+        self.assertEqual(schema["max"], 20)
+        self.assertIn("pointMaxAttemptsSeg", param_center.ENTRY_CHAN_KEYS)
+        self.assertEqual(chan_core.CHAN_CFG_DEFAULTS["pointMaxAttemptsSeg"], 2)
+
+    def test_update_applies_to_chan_cfg(self):
+        param_center.update("entry", {"pointMaxAttemptsSeg": 3})
+        self.assertEqual(chan_core.CHAN_CFG["pointMaxAttemptsSeg"], 3)
+        self.assertEqual(param_center.chan_cfg_effective("XAUUSD")["pointMaxAttemptsSeg"], 3)
+        param_center.update("entry", {"pointMaxAttemptsSeg": 2})   # 改回默认=剔除覆盖
+        self.assertEqual(chan_core.CHAN_CFG["pointMaxAttemptsSeg"], 2)
+
+    def test_zero_valid_and_range_checks(self):
+        # 0=不限合法值（同 pointMaxAttempts——引擎侧不能 or 兜底）
+        param_center.update("entry", {"pointMaxAttemptsSeg": 0})
+        self.assertEqual(chan_core.CHAN_CFG["pointMaxAttemptsSeg"], 0)
+        for bad in (2.5, 21, -1, True):
+            with self.assertRaises(ValueError):
+                param_center.normalize("entry", {"pointMaxAttemptsSeg": bad})
+
+
+class TestDivergeV2Params(unittest.TestCase):
+    """进场背驰判据 v2（2026-10-27 divergeSlopeOn/divergeAreaShrinkOn 布尔默认开 +
+    divergeAreaShrinkPct float 0~100 默认 50，entry 桶三键）：默认单源/CHAN_CFG 往返/
+    范围校验。两开关全关=旧三项OR（A/B 基准）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._orig_file = param_center.PARAMS_FILE
+        param_center.PARAMS_FILE = str(Path(self.tmp.name) / "module_params.json")
+        chan_core.reset_cfg()
+
+    def tearDown(self):
+        chan_core.reset_cfg()
+        param_center.PARAMS_FILE = self._orig_file
+        self.tmp.cleanup()
+
+    def test_defaults_single_source(self):
+        defaults = param_center.defaults_of("entry")
+        self.assertIs(defaults["divergeSlopeOn"], True)
+        self.assertIs(defaults["divergeAreaShrinkOn"], True)
+        self.assertEqual(defaults["divergeAreaShrinkPct"], 50.0)
+        schema = param_center.schema_of("entry")
+        self.assertEqual(schema["divergeSlopeOn"]["type"], "bool")
+        self.assertTrue(schema["divergeSlopeOn"]["default"])
+        self.assertEqual(schema["divergeAreaShrinkOn"]["type"], "bool")
+        self.assertTrue(schema["divergeAreaShrinkOn"]["default"])
+        self.assertEqual(schema["divergeAreaShrinkPct"]["type"], "float")
+        self.assertEqual(schema["divergeAreaShrinkPct"]["default"], 50.0)
+        self.assertEqual(schema["divergeAreaShrinkPct"]["min"], 0.0)
+        self.assertEqual(schema["divergeAreaShrinkPct"]["max"], 100.0)
+        for k in ("divergeSlopeOn", "divergeAreaShrinkOn", "divergeAreaShrinkPct"):
+            self.assertIn(k, param_center.ENTRY_CHAN_KEYS)
+        self.assertIs(chan_core.CHAN_CFG_DEFAULTS["divergeSlopeOn"], True)
+        self.assertIs(chan_core.CHAN_CFG_DEFAULTS["divergeAreaShrinkOn"], True)
+        self.assertEqual(chan_core.CHAN_CFG_DEFAULTS["divergeAreaShrinkPct"], 50.0)
+
+    def test_update_applies_to_chan_cfg(self):
+        param_center.update("entry", {"divergeSlopeOn": False, "divergeAreaShrinkPct": 30.0})
+        self.assertIs(chan_core.CHAN_CFG["divergeSlopeOn"], False)
+        self.assertEqual(chan_core.CHAN_CFG["divergeAreaShrinkPct"], 30.0)
+        eff = param_center.chan_cfg_effective("XAUUSD")
+        self.assertIs(eff["divergeSlopeOn"], False)
+        self.assertEqual(eff["divergeAreaShrinkPct"], 30.0)
+        # 改回默认=剔除覆盖
+        param_center.update("entry", {"divergeSlopeOn": True, "divergeAreaShrinkPct": 50.0})
+        self.assertIs(chan_core.CHAN_CFG["divergeSlopeOn"], True)
+        self.assertEqual(chan_core.CHAN_CFG["divergeAreaShrinkPct"], 50.0)
+
+    def test_pct_zero_valid_and_range_checks(self):
+        # 0=面积判据恒不过（合法值，引擎侧 or 兜底会把 0 吞成 50——不允许）
+        param_center.update("entry", {"divergeAreaShrinkPct": 0.0})
+        self.assertEqual(chan_core.CHAN_CFG["divergeAreaShrinkPct"], 0.0)
+        for bad in (-0.1, 100.1, "x", True):
+            with self.assertRaises(ValueError):
+                param_center.normalize("entry", {"divergeAreaShrinkPct": bad})
+        for bad in ("yes", 1, 0.5):
+            with self.assertRaises(ValueError):
+                param_center.normalize("entry", {"divergeSlopeOn": bad})
+            with self.assertRaises(ValueError):
+                param_center.normalize("entry", {"divergeAreaShrinkOn": bad})
+
+
 if __name__ == "__main__":
     unittest.main()

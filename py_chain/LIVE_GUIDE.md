@@ -170,8 +170,23 @@ Windows Server VPS（2C/4G/60G，伦敦机房低延迟）：装 Python 3.12 + MT
   （或任意配置里 `"chain": "B"`；`--chain B` 可临时覆盖）。
 - **指纹与漂移**：chain 模块属 chan_v1 param_modules → 两链进程的语义指纹都含整份
   链配置——改链B 勾选会同时变更链A 进程指纹（保守口径：有持仓拒启，需各自
-  --accept-param-drift 放行）。ENGINE_LOGIC_VERSION=20261025-point-max-attempts
-  （2026-10-25：同一点最大尝试次数 pointMaxAttempts 默认 2——同一买卖点（同检测
+  --accept-param-drift 放行）。ENGINE_LOGIC_VERSION=20261027-slope-area-div
+  （2026-10-27：进场背驰判据 v2——先比两笔斜率（|端点价差|÷时长）变小=背驰
+  （divergeSlopeOn 默认开），没变小再比柱状体面积须明显变小（cur<ref×50%，
+  divergeAreaShrinkOn 默认开、divergeAreaShrinkPct 默认 50，参数中心 entry 桶
+  进场闸门三键同卡）；两开关全关=旧三项OR（A/B 基准）。当下制/确认制/fxma
+  divLower 三链同判据，收笔/买卖点识别不动。动因 9-25 21:30 15m 2Buy 急跌
+  加速被旧 OR 面积一条放行。回测基线（chan+fxma）全部不可比，持仓重启须
+  --accept-param-drift）。
+  前版 20261027-seg-attempt-cap（2026-10-27：同一段内最大开仓次数 pointMaxAttemptsSeg 默认 2——同一上级段内
+  同类买卖点（键=检测周期+类别+上级段起点；段=上级周期 bis[-1] 含形成中的
+  startTime，段延伸不换键、段终结反向新笔起点才重置）最多实际开仓 2 次，锚点
+  随新极值漂移不重置本预算（9-11 15m 2买 17:00→20:00 四锚四笔案例）；不同类别
+  （2买/3买/强弱）独立预算互不挤占；计数口径同 pointMaxAttempts（成交才计、
+  终局不回血、0=不限、仅当下模式、上级未加载不启用），用满即拒 point_attempt_seg。
+  前版 20261026-platshift-sr-openres：平台回退起点重估 platShiftRestore + 支阻只算
+  检测周期；更前版 20261025-point-max-attempts（2026-10-25：同一点最大尝试次数
+  pointMaxAttempts 默认 2——同一买卖点（同检测
   周期+类别+锚点时间）终生最多实际开仓 2 次，成交建仓才计数（被同向互斥压掉
   未成交的信号不消耗），用满即拒 point_attempt_max；终局重置只清段去重不清
   尝试计数；0=不限（旧口径）。同日稍早：吸收成笔即标 absorbMarkFast + 合成K
