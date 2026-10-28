@@ -962,6 +962,29 @@ class BacktestEngine:
             raise ValueError(f"fine_res {self.fine_res!r} 不在 periods {self.periods} 中")
         if not self.bars[self.fine_res]["_list"]:
             raise ValueError(f"最小周期 {self.fine_res} 无K线数据")
+        # 链式回测时间轴守卫（2026-10-28）：res_chain 传参=链语义（双周期链回测/快照
+        # 重放），时间轴须=链最细非 30S 周期；长窗下细周期（链B 的 1/5/30）数据深度
+        # 不足时，上方覆盖感知会静默换粗周期照跑（实测链B 退到 240 全程无报错——
+        # 信号评估粒度/anchor 成交粒度/结构起点全变），显式报错优于静默照跑（同支阻
+        # 预设口径，webapp._sr_preset_kwargs）。fine_override 非空=实盘 live_trader
+        # 显式指定链最细（缺深度由 feed 预热补齐）不拦；res_chain=None=旧口径
+        # （cfg.periods 显式历史重放）保持覆盖感知原行为，逐位不变。
+        if res_chain is not None and fine_override is None:
+            intended = next((r for r in sorted(self.periods,
+                                               key=lambda r: intervalSecOf(r) or 0)
+                             if str(r).upper() != "30S"), None)
+            if intended is not None and str(fine_res) != str(intended):
+                ib = self.bars[intended]["_list"]
+                cover = (f"{fmtT(ib[0]['time'])} → {fmtT(ib[-1]['time'])}"
+                         if ib else "窗口内无K线")
+                ref_res = max(spans, key=spans.get) if spans else "?"
+                raise ValueError(
+                    f"链时间轴 {intended} 数据深度不足：窗口内仅覆盖 {cover}"
+                    f"（{spans.get(intended, 0) / 86400:.1f} 天，须 ≥ 全周期最大跨度"
+                    f"（{ref_res}）的 90% 即 {max_span * 0.9 / 86400:.1f} 天），"
+                    f"已拒绝静默把时间轴换成 {fine_res} 照跑（信号评估/成交粒度会全变）。"
+                    f"请：①基础数据页把链周期数据补拉到窗口起点（含预热段）"
+                    f"②缩短回测窗口至 {intended} 覆盖范围 ③参数中心·周期链 关闭该链")
         self.warmup_bars = warmup_bars
         self.with_marks = with_marks
         # 支阻位类型开关（None → compute_srflip 默认 cluster+boll）；

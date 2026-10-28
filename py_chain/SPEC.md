@@ -151,6 +151,20 @@
   的回测信号归零）；修复后时间轴仍为 3 分钟，30S 只在自身覆盖内作低级别背驰候选
   （评估/成交粒度 = 3 分钟收盘；实测仅增不减：24 → 26 信号，新增 2 个 30S 级别）。
   若回测区间就在 30S 覆盖内（如只测最近几小时），30S 仍会成为时间轴保持细粒度。
+- **链式回测时间轴守卫（2026-10-28）**：覆盖感知在**链语义**（`res_chain` 传参=双周期链
+  回测/链快照重放）下有一个静默退化路径——长窗里细周期（链B 的 1/5/30）数据深度不足
+  0.9 跨度阈值时，自动探测会换成粗周期照跑（实测链B 退到 `fine=240` 全程无报错：当下
+  背驰评估从每根 1m 变每 4h 一次、anchor 成交粒度变 240m、1/5/30 结构只在其数据起点后
+  才形成；auto_split 长窗更隐蔽——前段退化后段正常，段间 carry 混接两种口径）。修复：
+  `BacktestEngine.__init__` 构造守卫——`res_chain` 非空且未显式传 `fine_res` 时，若自动
+  探测结果 ≠ 链最细非 30S 周期（即 intended 时间轴没过阈值被换粗）→ 抛 `ValueError`
+  （信息含 intended/实际覆盖/阈值/补救三选：补拉数据/缩窗/关链），与支阻预设同一口径
+  「显式选择被静默替换比失败更危险」。**不拦的路径**：`fine_res` 显式传参（实盘
+  live_trader 恒链最细，缺深度由 feed 预热补齐）；`res_chain=None` 旧口径（cfg.periods
+  显式历史重放，覆盖感知原行为逐位不变）。链A 同款受保护（3m 深度不足退 15m 也会拦，
+  如 BITSTAMP:BTCUSD 3m 比 15m 浅的库）。bt_runs 无任何链快照方案存量，重放零影响；
+  回测结果无任何变化（守卫只在原先静默退化的场景把「照跑」变「报错」），
+  ENGINE_LOGIC_VERSION 不变。测试 `py_chain.test_dual_chain.FineResGuardTests`（5 例）。
 - **30S 取数滚动扩充（2026-09-05，用户确定的简单策略）**：15m 及以上全量、3m 保持全量
   （~2 万根 ≈15s 非瓶颈，且为回测时间轴）、**30S 滚动加载近一周**——秒级分支原有界滚动
   （最多 3 轮 scrollToFirstBar × scroll_wait，覆盖 7 天或首根不再推进即停）。实测 TV 30S
@@ -503,7 +517,7 @@ run() 批量路径成交 bar 当拍未收盘，存在 ≤1 根 fine bar 的微�
 - **同向持仓互斥**（引擎侧实现细节）：同方向持仓未终局时新信号不成交（`stats["suppressed"]` + `on_suppressed` 回调，Web 信号行被剔除、不留在列表；2026-10-01 前旧行为=行状态标「同向过滤」保留）；**多空互不影响**（各方向独立状态机）；同时刻同向共振按检测周期从大到小取一条。
 - **回测新增回调**：`on_exit(tr)`（持仓终局）、`on_suppressed(s)`（互斥过滤）。
 - **与 JS 的口径差**：见 §2.1.5.2（逐项差异表），此处不再重复。
-- **Web 控制台**：信号行状态流转 `信号→持仓中→已平仓`；被同向互斥过滤的信号不进列表（行剔除，历史保存方案里的旧「同向过滤」行仍照常展示），含出场时间/出场价/出场类型/盈亏/手数列；「标记进出场」按钮画箭头 + 黄色出场标记（`marks.py`：终局 `xcross` / 平一半 `circle`，默认色 `DEFAULT_EXIT_COLOR = #FFEB3B`）。
+- **Web 控制台**：信号行状态流转 `信号→持仓中→已平仓`；被同向互斥过滤的信号不进列表（行剔除，历史保存方案里的旧「同向过滤」行仍照常展示），含出场时间/出场价/出场类型/盈亏/手数列；「标记进出场」按钮画箭头 + 黄色出场标记（`marks.py`：终局 `xcross` / 平一半 `circle`，默认色 `DEFAULT_EXIT_COLOR = #FFEB3B`）。成交/出场回填按 **tradeNo 锚定**（2026-10-28，`webapp.SignalLog._tradeNo_to_idx`，键=mode/策略/品种/链/tradeNo/signalTime，行键降级为回退）：同锚点第二次尝试信号与第一笔行键全同，append 新行会顶走键映射、随后被同向互斥 suppressed 又把键 pop 掉，出场按键找不到行 → 行永远停在「持仓中」（run 20261028-114131-fce5 #44 实例：引擎 04-24 01:03 stopBe 已平而显示层无出场）；tradeNo 引擎侧每笔唯一且 fill/trade_end 都带，signalTime 入键防分段并行（独立引擎 tradeNo 从 1 编号）跨段撞号。配套守卫：行键命中的行已属另一笔 tradeNo 时不覆盖不串写；已成交的行不被同键 suppressed 隐藏。
   - 注：`marks.py` 的模块 docstring（L11、L57）仍写着「统一灰 `#787B86`」，与常量和实际行为不符，属陈旧注释（本次未改代码）。
 
 ### 2.1.7 交易起始时刻 start_ts 与预热提前量 lead（2026-09-15）
@@ -1024,6 +1038,47 @@ nearSr/止损推导消费）；锁变化局部化/漂移检测/resync 语义放�
 **既有失败（非本批引入，HEAD 6f53f08 同样失败，git worktree 验证）**：test_mark_entry_sink
 3（no_expansion_stops_at_x/only_stop_level_candidate/3m_candidate_filtered…）+
 test_divergence_fallback 6（10-02 近等简化既有，见 wickminrange 记忆）。
+
+## 分段并行·独立段口径快跑（2026-10-28，用户拍板）
+
+动机：全量回测（单品种全历史）慢——多线程受 GIL 限制对纯 CPU 引擎零收益（P1 注记
+同因），品种间/策略间已并行，剩下的串行轴=链内段间（auto_split carry 链式依赖：
+持仓/单号/互斥/尝试计数跨段连续）。**并行与 carry 链互斥**（并行=每段不能等前段
+结果）→ 拍板取舍：新增可选「独立段口径」快跑模式，**与链式顺序结果非逐位一致**，
+只影响交易层——①段边界持仓按段末收盘价 mark-to-market 终值（不强平不交接）；
+②同向互斥/点尝试（锚点级+段级）/当下背驰去重每段重置；③单号每段从 1 重编。
+结构/信号口径与链式完全一致（每段独立预热重建）。定位=参数摸索快跑，定稿用
+链式口径复跑。
+
+实现（引擎零改动）：`bt_batch.run_chain`（run_symbol 链内段循环抽出，`chained`
+开关键控 carry；run_symbol 顺序调用=行为逐位不变）＋`run_seg_subproc`（单 (链,段)
+孙进程，chained=False，progress 带 seg 归因）＋`run_symbol_parallel`（webapp 直接
+spawn 的聚合入口，与 run_symbol 同签名同 done 协议——单品种/批量中继零改动）：
+(链,段) fan-out 槽位调度（并行度=min(任务数,CPU核数)，`BT_SEG_PARALLEL` 覆盖）、
+done 按固定任务序（链主序×段序）合并（merge_run_stats 纯累加=合并序无关可复现）、
+任一任务 error/崩溃(2s flush 宽限)→stop 其余→error、stop 5s 终杀。**聚合进程须
+非 daemon**（multiprocessing 禁 daemon 派生子进程）：webapp spawn `daemon=not
+parallel`，退出兜底=worker finally stop→terminate + `main()` finally 补
+`app.service.shutdown()`（Ctrl+C 路径原本不走 shutdown_service，非 daemon 子进程
+会被 atexit join 到回测自然结束）。
+
+journal 竞态收敛：孙进程 `BtJournal(register=False)` 只建文件（latest.json 读改写
+与 cleanup_old 删文件多进程并发会竞态），聚合进程收齐后 `bt_journal.register()`
+串行补注册。开关：cfg `seg_parallel`（默认关；normalize 缺省不注入=旧客户端忠实；
+仅 chan 且分段 ≥2 生效否则静默链式）；`split_seg_days` 段长回测卡可设（默认 60 天
+≈2 个月，改段长=段界变化结果不可比；旧方案快照带自己的 seg_bounds 不受影响）。
+回放/方案库照常（seg_bounds 落 cfg，独立段结果与完成顺序无关=重放可复现）。
+测试：`test_seg_parallel.py` 8 例（normalize/段长覆盖/补注册/并行==顺序独立段
+stats+open 全等/单段回落/webapp 端到端 on+off）；链式回归=既有套件（105 例仅
+1 个 HEAD 同在的模块顺序环境变量干扰失败）。ENGINE_LOGIC_VERSION 不动（引擎逻辑
+零改动；两口径都是 run() 调用方式变化）。**性能实测（2026-10-28，XAUUSD 全窗
+291 天=D 线覆盖限制，链A D/240/60/15/3，journal 开，独占 16 逻辑核）**：链式顺序
+9049s（≈2小时31分，逐段 812/2215/1973/1868/2180s，段内累计深度 118 天时步均
+9~10 步/s）vs **分段并行 60 天段×5=2278s（≈38 分钟）≈3.97×；30 天段×10=1146s
+（≈19 分钟）≈7.9×——并行模式推荐段长 30（段更浅步更快且 16 线程内一波装下）**；
+两口径同窗 steps ≈95.1k 一致；孙进程峰值内存 ~230-314MB/个，聚合进程 44MB。
+基准工具 `_tmp_fullrun_bench.py`（chained/independent/parallel 三模式，--seg-skip
+支持中断后续跑）。
 
 ## 双周期链（2026-10-23）
 

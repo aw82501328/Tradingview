@@ -84,6 +84,8 @@ py_chain/web/module_params.json
 py_chain/bars.db
 py_chain/bars.db-wal
 py_chain/bars.db-shm
+# py_chain 目录下误生成的回测方案库残留（真正库在 data/bars.db；0字节无引用）
+py_chain/runs.db
 
 # 实盘运行时：真实账号配置（敏感，只提交 live_config.json 模板）、开闸/急停标记、probe/对拍产物（不入库）
 py_chain/web/live_config.local.json

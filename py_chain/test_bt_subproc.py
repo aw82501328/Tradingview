@@ -144,5 +144,22 @@ class BtSubprocEndToEndTests(unittest.TestCase):
         self.assertGreaterEqual(w.progress.get("total", 0), 0)
 
 
+class ParamSnapshotFreezeTests(unittest.TestCase):
+    """参数中心有效值快照冻结（2026-10-28 参数对比）：chan 构造参数出口
+    _engine_kwargs_of 赋值刷新（非 setdefault——载参数/重放带进来的旧快照一律
+    换成本次起跑实际生效值）。fxma/批量分发路径同式挂钩（一行赋值）。"""
+
+    def test_engine_kwargs_freezes_snapshot(self):
+        from . import param_center
+        cfg = {"symbol": "OANDA:XAUUSD", "param_snapshot": {"stale": True}}
+        webapp.BacktestWorker._engine_kwargs_of(cfg, ["D", "60", "15", "3"])
+        snap = cfg["param_snapshot"]
+        self.assertNotIn("stale", snap)                    # 旧快照被刷新
+        for name, vals in param_center.effective_all("OANDA:XAUUSD").items():
+            self.assertEqual(snap[name], vals)             # 与有效值逐桶一致
+            self.assertEqual(snap["_titles"][name],
+                             param_center.PARAM_MODULES[name]["title"])
+
+
 if __name__ == "__main__":
     unittest.main()

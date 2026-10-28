@@ -848,5 +848,39 @@ class TestDivergeV2Params(unittest.TestCase):
                 param_center.normalize("entry", {"divergeAreaShrinkOn": bad})
 
 
+class TestSnapshotOf(unittest.TestCase):
+    """参数对比快照（2026-10-28）：snapshot_of 附 _titles 且不动入参；
+    effective_snapshot 与 effective_all 同桶同值（按品种取桶）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._orig_file = param_center.PARAMS_FILE
+        param_center.PARAMS_FILE = str(Path(self.tmp.name) / "module_params.json")
+
+    def tearDown(self):
+        param_center.PARAMS_FILE = self._orig_file
+        self.tmp.cleanup()
+
+    def test_snapshot_of_titles_and_isolation(self):
+        pm = {"entry": {"lots": 4}, "chain": {"chainA": "60,15,3"}}
+        snap = param_center.snapshot_of(pm)
+        self.assertEqual(snap["_titles"], {
+            "entry": param_center.PARAM_MODULES["entry"]["title"],
+            "chain": param_center.PARAM_MODULES["chain"]["title"]})
+        self.assertEqual(snap["entry"], {"lots": 4})
+        snap["entry"]["lots"] = 99
+        self.assertEqual(pm["entry"]["lots"], 4)          # 不动入参
+
+    def test_effective_snapshot_matches_effective_all(self):
+        for sym in (None, "OANDA:XAUUSD"):
+            snap = param_center.effective_snapshot(sym)
+            ea = param_center.effective_all(sym)
+            self.assertEqual(set(snap), set(ea) | {"_titles"})
+            for name, vals in ea.items():
+                self.assertEqual(snap[name], vals)
+                self.assertEqual(snap["_titles"][name],
+                                 param_center.PARAM_MODULES[name]["title"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -294,6 +294,15 @@ class SignalLog:
         # strategy 入键（2026-10-02 多策略并行回测）：同品种同时刻的信号在
         # 缠论V1/强分型均线V1 两个策略 TAB 下各自成行互不串写
         self._key_to_idx = {}
+        # 成交/出场回填的 tradeNo 锚定索引（2026-10-28）：键=(mode, strategy, symbol,
+        # chain, tradeNo, signalTime)。动因：同锚点第二次尝试信号与第一笔行键全同
+        # （signalTime/periodX/direction/strategyKey/chain），append 新行会顶走
+        # _key_to_idx 的键映射，随后该信号被同向互斥 suppressed 又把键 pop 掉 →
+        # 第一笔的出场回填按键找不到行，行永远停在「持仓中」（run fce5 #44 实例：
+        # 引擎 04-24 01:03 stopBe 已平，行无出场）。tradeNo 引擎侧每笔唯一且
+        # fill/trade_end 事件都带，作回填主锚；signalTime 入键防分段并行（独立
+        # 引擎 tradeNo 各自从 1 编号）跨段撞号串写。行键降级为回退路径。
+        self._tradeNo_to_idx = {}
         # 已判定同向互斥过滤的信号键：这些信号不进列表。缠论V1 顺序是先 append 行
         # 下一根才判过滤（行已存在→隐藏）；fxma/live/replay 顺序是过滤回调先于
         # on_signal（行还没建→append 时按此集合拒收）
@@ -304,6 +313,17 @@ class SignalLog:
         # 时，同时刻同方向同策略的信号在链A/链B 各自成行互不串写；单链/旧行无 chain=None
         return (mode, s.get("strategy"), s.get("symbol"), s.get("time") or s.get("signalTime"),
                 s.get("periodX"), s.get("direction"), s.get("strategyKey"), s.get("chain"))
+
+    def _trade_key(self, mode, s):
+        """成交/出场回填的 tradeNo 锚定键（s 须已归一 symbol/strategy，与 _row_key 同源）。"""
+        return (mode, s.get("strategy"), s.get("symbol"), s.get("chain"),
+                s.get("tradeNo"), s.get("time") or s.get("signalTime"))
+
+    def _trade_idx_of(self, mode, s):
+        """tr 带 tradeNo+signalTime 时给出行下标，否则 None（无 tradeNo 的旧事件走行键）。"""
+        if s.get("tradeNo") is None or (s.get("time") or s.get("signalTime")) is None:
+            return None
+        return self._tradeNo_to_idx.get(self._trade_key(mode, s))
 
     def append_signal(self, mode, s, symbol=None, strategy=None):
         """记录一条新进场信号，返回该行；同向互斥过滤的信号返回 None（不进列表）。"""
@@ -363,77 +383,107 @@ class SignalLog:
             return row
 
     def fill_trade(self, mode, tr, symbol=None, strategy=None):
-        """回测成交时回填对应信号行的成交状态（持仓中）；找不到则追加一行记录。"""
+        """回测成交时回填对应信号行的成交状态（持仓中）；找不到则追加一行记录。
+
+        匹配顺序（2026-10-28）：tradeNo 锚定索引优先（期末持仓回推/重复 fill 原位
+        更新），行键回退；行键命中的行若已归属另一笔 tradeNo（同锚点第二次尝试与
+        第一笔同键），不覆盖、另起新行。"""
         if strategy and not tr.get("strategy"):
             tr = dict(tr, strategy=strategy)
-        key = self._row_key_fill(mode, tr, symbol)
+        s = dict(tr)
+        if symbol:
+            s["symbol"] = symbol
+        key = self._row_key(mode, s)
         with self.lock:
-            idx = self._key_to_idx.get(key)
+            idx = self._trade_idx_of(mode, s)
+            if idx is None:
+                kidx = self._key_to_idx.get(key)
+                if kidx is not None:
+                    row0 = self.rows[kidx]
+                    if (s.get("tradeNo") is not None
+                            and row0.get("tradeNo") not in (None, s.get("tradeNo"))):
+                        kidx = None   # 键命中的行是另一笔交易：另起新行，不覆盖其成交数据
+                    idx = kidx
             if idx is None:
                 self._id += 1
                 row = {
                     "id": self._id,
                     "mode": mode,
-                    "strategy": strategy or tr.get("strategy"),
-                    "symbol": symbol or tr.get("symbol"),
-                    "chain": tr.get("chain"),
-                    "time": tr.get("signalTime"),
-                    "direction": tr.get("direction"),
-                    "periodX": tr.get("periodX"),
-                    "strategyKey": tr.get("strategyKey"),
-                    "markRes": tr.get("markRes"),
-                    "price": tr.get("signalPrice"),
-                    "nearSr": tr.get("nearSr"),
-                    "trendDirection": tr.get("trendDirection"),
-                    "trendReason": tr.get("trendReason"),
-                    "pointType": tr.get("pointType"),
-                    "pointStrong": tr.get("pointStrong"),
-                    "fallback": bool(tr.get("fallback", False)),
-                    "nearEqual": bool(tr.get("nearEqual", False)),
-                    "expectBi": bool(tr.get("expectBi", False)),
+                    "strategy": strategy or s.get("strategy"),
+                    "symbol": symbol or s.get("symbol"),
+                    "chain": s.get("chain"),
+                    "tradeNo": s.get("tradeNo"),
+                    "time": s.get("signalTime"),
+                    "direction": s.get("direction"),
+                    "periodX": s.get("periodX"),
+                    "strategyKey": s.get("strategyKey"),
+                    "markRes": s.get("markRes"),
+                    "price": s.get("signalPrice"),
+                    "nearSr": s.get("nearSr"),
+                    "trendDirection": s.get("trendDirection"),
+                    "trendReason": s.get("trendReason"),
+                    "pointType": s.get("pointType"),
+                    "pointStrong": s.get("pointStrong"),
+                    "fallback": bool(s.get("fallback", False)),
+                    "nearEqual": bool(s.get("nearEqual", False)),
+                    "expectBi": bool(s.get("expectBi", False)),
                     "status": "持仓中",
-                    "entryTime": tr.get("entryTime"),
-                    "entryPrice": tr.get("entryPrice"),
-                    "fillMode": tr.get("fillMode"),
-                    "lots": tr.get("lots"),
-                    "mult": tr.get("mult"),
-                    "stopRef": tr.get("stopRef"),
-                    "state": tr.get("state", "open"),
+                    "entryTime": s.get("entryTime"),
+                    "entryPrice": s.get("entryPrice"),
+                    "fillMode": s.get("fillMode"),
+                    "lots": s.get("lots"),
+                    "mult": s.get("mult"),
+                    "stopRef": s.get("stopRef"),
+                    "state": s.get("state", "open"),
                     "exitTime": None,
                     "exitPrice": None,
                     "exitType": None,
-                    "exits": list(tr.get("exits") or []),
-                    "pnl": tr.get("pnl"),
+                    "exits": list(s.get("exits") or []),
+                    "pnl": s.get("pnl"),
                 }
                 self.rows.append(row)
+                self._key_to_idx[self._row_key(mode, s)] = len(self.rows) - 1
+                if s.get("tradeNo") is not None and s.get("signalTime") is not None:
+                    self._tradeNo_to_idx[self._trade_key(mode, s)] = len(self.rows) - 1
                 return row
             row = self.rows[idx]
             row["status"] = "持仓中"
-            row["entryTime"] = tr.get("entryTime")
-            row["entryPrice"] = tr.get("entryPrice")
-            row["fillMode"] = tr.get("fillMode")
-            row["lots"] = tr.get("lots")
-            row["mult"] = tr.get("mult")
-            row["stopRef"] = tr.get("stopRef")
-            row["state"] = tr.get("state", "open")
-            row["exits"] = list(tr.get("exits") or [])
-            row["pnl"] = tr.get("pnl")
+            row["entryTime"] = s.get("entryTime")
+            row["entryPrice"] = s.get("entryPrice")
+            row["fillMode"] = s.get("fillMode")
+            row["lots"] = s.get("lots")
+            row["mult"] = s.get("mult")
+            row["stopRef"] = s.get("stopRef")
+            row["state"] = s.get("state", "open")
+            row["exits"] = list(s.get("exits") or [])
+            row["pnl"] = s.get("pnl")
+            if s.get("tradeNo") is not None:
+                row["tradeNo"] = s.get("tradeNo")
+                if s.get("signalTime") is not None:
+                    self._tradeNo_to_idx[self._trade_key(mode, s)] = idx
             return row
 
-    def _row_key_fill(self, mode, tr, symbol):
-        """成交/出场回填的匹配键（tr 缺 strategy 时用调用方显式值补齐）。"""
+    def fill_exit(self, mode, tr, symbol=None, strategy=None):
+        """持仓终局（止损/保本止损/全平）时回填出场信息（状态→已平仓）。
+
+        匹配顺序（2026-10-28）：tradeNo 锚定索引优先，行键回退；行键命中的行若
+        已归属另一笔 tradeNo 则放弃（防同键第二次尝试把出场串写到第一笔的行）。
+        无 tradeNo 的旧事件走行键，行为不变。"""
+        if strategy and not tr.get("strategy"):
+            tr = dict(tr, strategy=strategy)
         s = dict(tr)
         if symbol:
             s["symbol"] = symbol
-        return self._row_key(mode, s)
-
-    def fill_exit(self, mode, tr, symbol=None, strategy=None):
-        """持仓终局（止损/保本止损/全平）时回填出场信息（状态→已平仓）。"""
-        if strategy and not tr.get("strategy"):
-            tr = dict(tr, strategy=strategy)
-        key = self._row_key_fill(mode, tr, symbol)
         with self.lock:
-            idx = self._key_to_idx.get(key)
+            idx = self._trade_idx_of(mode, s)
+            if idx is None:
+                kidx = self._key_to_idx.get(self._row_key(mode, s))
+                if kidx is not None:
+                    row0 = self.rows[kidx]
+                    if (s.get("tradeNo") is not None
+                            and row0.get("tradeNo") not in (None, s.get("tradeNo"))):
+                        return None
+                    idx = kidx
             if idx is None:
                 return None
             row = self.rows[idx]
@@ -468,6 +518,10 @@ class SignalLog:
             if idx is None:
                 return None
             row = self.rows[idx]
+            # 已成交的行属于一笔真实持仓（2026-10-28）：同键重复尝试信号被过滤时
+            # 只作废键映射，不隐藏不removes——否则成交行从表格消失、出场无处回填
+            if row.get("entryTime") is not None:
+                return None
             row["status"] = "同向过滤"
             row["hidden"] = True
             return row
@@ -515,6 +569,10 @@ class SignalLog:
                              if r.get("mode") != mode or r.get("strategy") != strategy]
             self._key_to_idx = {self._row_key(r["mode"], r): i for i, r in enumerate(self.rows)
                                 if not r.get("hidden")}
+            self._tradeNo_to_idx = {self._trade_key(r["mode"], r): i
+                                    for i, r in enumerate(self.rows)
+                                    if not r.get("hidden")
+                                    and r.get("tradeNo") is not None and r.get("time") is not None}
             # 过滤键随清空一并作废：新一轮同键信号是否被互斥过滤要重新判定，
             # 上一轮的键残留会错误拦截本轮 append
             if mode is None:
@@ -827,6 +885,9 @@ class BacktestWorker(ModeWorker):
         if cfg.get("lots") is None:
             cfg["lots"] = param_center.lots_of(ep, cfg.get("symbol"))
         cfg["contract_mult"] = mark_entry.contract_mult_of(cfg.get("symbol"))
+        # 参数中心有效值快照冻结（2026-10-28，赋值非 setdefault：载参数/重放带进来的
+        # 旧快照一律刷新成本次起跑实际生效值）；bt_runs 参数对比用
+        cfg["param_snapshot"] = param_center.snapshot_of(pm)
         return dict(
             periods=periods,
             warmup_bars=cfg.get("warmup", 60),
@@ -869,7 +930,8 @@ class BacktestWorker(ModeWorker):
         if not specs:
             raise ValueError("两条周期链均未启用（参数中心·周期链 至少开一条，或回测卡显式传 periods）")
         if log and any(sp.get("id") == "B" for sp in specs):
-            log("链B 已启用：1 分钟数据深度最浅，回测起始受其限制；缺 1/5/30 周期数据时先在基础数据页拉取")
+            log("链B 已启用：链周期（1/5/30）数据须覆盖整个回测窗口（含预热段），"
+                "缺数据或深度不足会直接报错——先在基础数据页拉取到窗口起点")
         tasks = []
         for i, sp in enumerate(specs):
             kw = self._engine_kwargs_of(cfg, sp["periods"], log=log if i == 0 else None)
@@ -1097,6 +1159,8 @@ class BacktestWorker(ModeWorker):
         """
         cfg = self.cfg
         pm = param_center.effective_all(cfg.get("symbol"))
+        # 参数中心有效值快照冻结（2026-10-28）：与缠论V1 _engine_kwargs_of 同口径
+        cfg["param_snapshot"] = param_center.snapshot_of(pm)
         chan_core.apply_cfg(param_center.chan_cfg_effective(cfg.get("symbol")))
         periods = engine_dispatch.fxma_load_periods(pm["fxma"]["entryRes"])
         lead_days = int(cfg.get("lead_days") or 0)
@@ -1190,7 +1254,9 @@ class BacktestWorker(ModeWorker):
         if lead_days > 0:
             self.log(f"预热提前 {lead_days} 天：数据起点 {fmtT(data_from_ts)}，交易起点 {fmtT(from_ts)}")
         if engine_id == "fx_ma":
+            parallel = False
             pm_sym = param_center.effective_all(sym)
+            cfg["param_snapshot"] = param_center.snapshot_of(pm_sym)
             chan_core.apply_cfg(param_center.chan_cfg_effective(sym))
             periods = engine_dispatch.fxma_load_periods(pm_sym["fxma"]["entryRes"])
             if cfg.get("lots") is None:
@@ -1218,15 +1284,27 @@ class BacktestWorker(ModeWorker):
                          "data_from_ts": data_from_ts, "to_ts": to_ts, "start_ts": start_ts}
             if segs:
                 child_cfg["segments"] = segs
+            # 分段并行（2026-10-28·独立段口径快跑）：seg_parallel 且分段 ≥2 → 改 spawn
+            # bt_batch.run_symbol_parallel（(链,段) fan-out 孙进程，聚合出同构单条 done，
+            # 本中继/事件协议零改动）；口径与链式有边界差异（快跑用，定稿请关闭复跑）
+            parallel = (cfg.get("seg_parallel") is True and len(segs or []) >= 2)
         ctx = mp.get_context("spawn")
         msg_q = ctx.Queue()
         pause_e = ctx.Event()
         stop_e = ctx.Event()
-        p = ctx.Process(target=bt_batch.run_symbol,
+        target = (bt_batch.run_symbol_parallel if parallel else bt_batch.run_symbol)
+        # daemon 语义：run_symbol 子进程维持 daemon=True 不变；分段并行聚合入口须
+        # 非 daemon——multiprocessing 禁止 daemon 进程再派生子进程（聚合进程要
+        # fan-out (链,段) 孙进程）。退出安全由两条路径兜底：worker finally 的
+        # stop 镜像→join(5)→terminate，与 main() finally 的 app.service.shutdown()。
+        p = ctx.Process(target=target,
                         args=(child_cfg, sym, msg_q, pause_e, stop_e),
-                        name=f"bt-{strategy}-{sym}", daemon=True)
+                        name=f"bt-{strategy}-{sym}{'-segpar' if parallel else ''}",
+                        daemon=not parallel)
         p.start()
-        self.log(f"子进程已启动（PID {p.pid}）——多策略 TAB 真并行（GIL 免锁）")
+        self.log(f"子进程已启动（PID {p.pid}"
+                 f"{'，分段并行（独立段口径）' if parallel else ''}）"
+                 f"——多策略 TAB 真并行（GIL 免锁）")
         terminal = False
         dying_at = None
         stop_at = None
@@ -1370,6 +1448,10 @@ class BacktestWorker(ModeWorker):
                 # 进出场按品种取桶：清掉共享 cfg 可能带来的统一 near/滑点/手数
                 for k in ENTRY_FILL_KEYS:
                     scfg.pop(k, None)
+                # 参数中心有效值按品种冻结（2026-10-28）：分发时记录，保存时与
+                # lots/合约乘数同口径注入该品种 cfg（共享 worker.cfg 不带快照）
+                self.batch[sym]["param_snapshot"] = param_center.effective_snapshot(sym)
+                parallel = False
                 if engine_id == "fx_ma":
                     pm_sym = param_center.effective_all(sym)
                     sym_periods = engine_dispatch.fxma_load_periods(pm_sym["fxma"]["entryRes"])
@@ -1405,12 +1487,18 @@ class BacktestWorker(ModeWorker):
                                                    for p in t["periods"]}))
                         if segs:
                             child_cfg["segments"] = segs
-                p = ctx.Process(target=bt_batch.run_symbol,
+                    # 分段并行（2026-10-28·独立段口径快跑，同单品种路径）
+                    parallel = (cfg.get("seg_parallel") is True
+                                and len(child_cfg.get("segments") or []) >= 2)
+                p = ctx.Process(target=(bt_batch.run_symbol_parallel if parallel
+                                        else bt_batch.run_symbol),
                                 args=(child_cfg, sym, msg_q, pause_e, stop_e),
-                                name=f"bt-batch-{sym}", daemon=True)
+                                name=f"bt-batch-{sym}{'-segpar' if parallel else ''}",
+                                daemon=not parallel)   # 分段并行聚合进程须非 daemon（要派生孙进程）
                 p.start()
                 procs[sym] = p
-                self.log(f"[{sym}] 子进程已启动（PID {p.pid}）")
+                self.log(f"[{sym}] 子进程已启动（PID {p.pid}"
+                         f"{'，分段并行（独立段口径）' if parallel else ''}）")
             self._relay_batch(msg_q, procs, pause_e, stop_e)
         finally:
             stop_e.set()
@@ -1989,6 +2077,11 @@ class ControlApp:
         if "auto_split" in out:
             v = out["auto_split"]
             out["auto_split"] = v in (True, "true", "True", "1", 1)
+        # 分段并行（2026-10-28·独立段口径快跑）：缺省关；仅 chan 且长窗分段 ≥2 段
+        # 生效（否则 silently 走链式顺序，旧方案重放忠实）
+        if "seg_parallel" in out:
+            v = out["seg_parallel"]
+            out["seg_parallel"] = v in (True, "true", "True", "1", 1)
         for k in ("split_min_days", "split_seg_days"):
             if k in out and out[k] not in (None, ""):
                 try:
@@ -3089,6 +3182,13 @@ def main(argv=None):
         print("\n已退出 Web 控制台。")
     finally:
         app.analysis.close()
+        # 兜底停全部 Worker（Ctrl+C 路径不走 RestartManager 的 shutdown_service）：
+        # 分段并行聚合子进程非 daemon（须派生孙进程），不显式终止会在解释器退出时
+        # 被 atexit join 到回测自然结束——Ctrl+C 退服可能挂住到回测跑完
+        try:
+            app.service.shutdown()
+        except Exception:
+            pass
         server.server_close()
 
 

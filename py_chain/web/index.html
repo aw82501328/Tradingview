@@ -604,6 +604,13 @@ function buildCard(m) {
       { k: 'auto_split', label: '长窗自动分段', type: 'select', def: 'true',
         options: [['true', '开启（>90天拆≤60天段·持仓不断）'], ['false', '关闭（单次整窗跑）']],
         title: '窗口超过90天时自动均分为不超过60天的段顺序跑：每段独立预热重建结构（长窗引擎单步耗时超线性上涨，分段拉回高吞吐区）；段间持仓、单号、同向互斥与尝试计数全部连续，段边界不强平，只有最后一段末尾结算。与单次整窗跑结果非逐位一致（每段结构从各自预热重建）。' },
+      // 段长可设（2026-10-28）：60天≈2个月；拆得越细单步越快、配合分段并行并行度越高
+      { k: 'split_seg_days', label: '单段长度(天)·60≈2个月', type: 'text', def: '60',
+        title: '长窗自动分段的目标单段长度（天）：60≈2个月、90≈3个月、30≈1个月。拆得越细引擎单步越快、配合「分段并行」并行度越高；改段长=段界变化，新跑与旧跑结果不可比。' },
+      // 分段并行（2026-10-28·独立段口径快跑，用户拍板）：每 (链,段) 一个进程并行
+      { k: 'seg_parallel', label: '分段并行(独立段口径)', type: 'select', def: 'false',
+        options: [['false', '关闭（链式顺序·持仓跨段连续）'], ['true', '开启（每段独立并行·快跑）']],
+        title: '开启后每个 (链,段) 一个进程并行回测（需「长窗自动分段」实际拆出 ≥2 段才生效）：每段独立空仓——段边界持仓按段末收盘价结算、同向互斥/点尝试/背驰去重不跨段，与链式顺序结果非逐位一致，适合参数摸索快跑；定稿请关闭后用链式口径复跑。' },
       locateField,
       // 支阻预设下拉已移除（2026-09-29）：支阻参数统一=参数配置该品种当前生效方案/品种桶
     ],
@@ -1248,7 +1255,7 @@ function collectCfg(cid, mode) {
 // fxma_v1：周期（取数周期由参数中心 entryRes 推导）、30秒级别开关、预热根数（用默认）
 // 回放/实时卡仍用卡内策略下拉驱动；回测卡=策略TAB，按各卡策略直接应用
 const STRATEGY_FIELD_HIDE = {
-  fxma_v1: ['periods', 'with_30s', 'warmup', 'auto_split'],
+  fxma_v1: ['periods', 'with_30s', 'warmup', 'auto_split', 'split_seg_days', 'seg_parallel'],
 };
 function applyStrategyHide(card, strategyId) {
   const hide = STRATEGY_FIELD_HIDE[strategyId] || [];
@@ -1257,8 +1264,10 @@ function applyStrategyHide(card, strategyId) {
     card.querySelector('[data-cfg="with_30s"]')?.closest('.field'),
     card.querySelector('[data-cfg="warmup"]')?.closest('.field'),
     card.querySelector('[data-cfg="auto_split"]')?.closest('.field'),
+    card.querySelector('[data-cfg="split_seg_days"]')?.closest('.field'),
+    card.querySelector('[data-cfg="seg_parallel"]')?.closest('.field'),
   ];
-  ['periods', 'with_30s', 'warmup', 'auto_split'].forEach((key, i) => {
+  ['periods', 'with_30s', 'warmup', 'auto_split', 'split_seg_days', 'seg_parallel'].forEach((key, i) => {
     if (fields[i]) fields[i].style.display = hide.includes(key) ? 'none' : '';
   });
 }
@@ -1772,7 +1781,7 @@ function updateBtCompareButton() {
   if (n < 2) el('bt-compare-view').hidden = true;
 }
 
-// ---------- 对比矩阵（数据全部来自列表缓存里的固化 summary，无额外请求） ----------
+// ---------- 对比矩阵（汇总/参数来自列表缓存固化数据；参数中心有效参数另拉 param-src，见 fillCompareParams） ----------
 const BT_METRICS = [
   ['已平仓数', s => s.closed ?? '-'],
   ['盈 / 亏', s => `${s.win ?? '-'} / ${s.lose ?? '-'}`],
@@ -1800,21 +1809,61 @@ function renderBtCompare() {
   const head = runs.map(r => `<th title="保存于 ${fmtTime(r.saved_at)}">${esc(r.name)}</th>`).join('');
   const metricsHtml = BT_METRICS.map(([label, get]) =>
     `<tr><th>${label}</th>${runs.map(r => `<td>${get(r.summary || {})}</td>`).join('')}</tr>`).join('');
-  const keys = BT_CFG_KEYS.filter(k => runs.some(r => r.cfg && k in r.cfg));
-  const cfgHtml = keys.map(k => {
-    const base = runs.map(r => btCfgVal(k, (r.cfg || {})[k]));
-    return `<tr><th>${BT_CFG_LABELS[k] || k}</th>${base.map(v =>
-      `<td${String(v) !== String(base[0]) ? ' class="bt-diff"' : ''}>${esc(v)}</td>`).join('')}</tr>`;
-  }).join('');
   view.hidden = false;
   view.innerHTML = `
     <div class="equity-chart" id="bt-compare-equity"></div>
     <div style="padding:6px 0 6px;"><strong>汇总对比</strong><span style="color:var(--muted);font-size:12px;">（数值为保存时固化的统计）</span></div>
     <table><thead><tr><th>指标</th>${head}</tr></thead><tbody>${metricsHtml}</tbody></table>
-    <div style="padding:8px 0 6px;"><strong>参数对比</strong><span style="color:var(--muted);font-size:12px;">（与第一个选中方案不同的高亮）</span></div>
-    <table><thead><tr><th>参数</th>${head}</tr></thead><tbody>${cfgHtml}</tbody></table>`;
+    <div style="padding:8px 0 6px;"><strong>参数对比</strong><span style="color:var(--muted);font-size:12px;">（只列有差异的参数；与第一个选中方案不同的值高亮）</span><span id="bt-compare-param-status" style="color:var(--muted);font-size:12px;"></span></div>
+    <div id="bt-compare-params"></div>`;
   // 对比小图：优先用 summary.equity；旧方案缺字段时拉明细现场算并缓存
   fillCompareEquity(runs, el('bt-compare-equity'));
+  // 参数对比：cfg 全键即时渲染；参数中心有效参数另拉 param-src（每方案一次，缓存在列表行）
+  fillCompareParams(runs, head);
+}
+
+// 参数对比表体：全参数（cfg 全键 + 参数中心有效参数分组）只列有差异的行；
+// 与第一个选中方案不同的值高亮；无差异行时给提示（相同的项未列出）
+function btCompareParamsHtml(runs, head) {
+  const rows = btCompareParamRows(runs);
+  if (!rows.length)
+    return `<div style="color:var(--muted);padding:2px 0 6px;">所选方案参数完全一致（相同的项未列出）</div>`;
+  return `<table><thead><tr><th>参数</th>${head}</tr></thead><tbody>${rows.map(row =>
+    `<tr><th>${esc(row.label)}</th>${row.vals.map(v =>
+      `<td${String(v) !== String(row.vals[0]) ? ' class="bt-diff"' : ''}>${esc(v)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+}
+
+// 参数源（/api/bt/runs/param-src）逐方案拉取，缓存 run._param_src → run.params
+// （新方案=起跑冻结的参数中心快照分组、老方案=决策日志 header 兜底、均无=空）。
+// 两阶段渲染：先用缓存/空参数源出表（勾选即见 cfg 差异行），就绪后补渲染参数组行；
+// 等待期间勾选变化则本次渲染作废（renderBtCompare 会带新选择重跑）
+async function fillCompareParams(runs, head) {
+  const box = el('bt-compare-params');
+  if (!box) return;
+  const status = el('bt-compare-param-status');
+  const paint = () => { box.innerHTML = btCompareParamsHtml(runs, head); };
+  const applySrc = () => runs.forEach(r => { r.params = (r._param_src || {}).groups || {}; });
+  applySrc(); paint();
+  const selKey = [...btCompareSel].join('|');
+  const pend = runs.filter(r => r._param_src === undefined);
+  if (pend.length) {
+    if (status) status.textContent = '（参数中心有效参数加载中…）';
+    await Promise.all(pend.map(async r => {
+      try {
+        const d = await (await fetch(`/api/bt/runs/param-src?id=${encodeURIComponent(r.id)}`)).json();
+        r._param_src = d.ok ? { source: d.source || null, groups: d.groups || {} }
+                            : { source: null, groups: {} };
+      } catch { r._param_src = { source: null, groups: {} }; }
+    }));
+    if ([...btCompareSel].join('|') !== selKey) return;
+    applySrc(); paint();
+  }
+  if (status) {
+    const src = runs.map(r => (r._param_src || {}).source);
+    const cnt = t => src.filter(s => s === t).length;
+    status.textContent = src.some(Boolean)
+      ? `（参数源：快照×${cnt('snapshot')} · 决策日志×${cnt('journal')} · 无×${src.filter(s => !s).length}）` : '';
+  }
 }
 
 // 旧方案无 summary.equity 时拉 /detail 计算，结果写回列表缓存避免重复请求

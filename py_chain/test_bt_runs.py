@@ -4,6 +4,7 @@
 覆盖：pnl=None/0（信号/保本单）不进盈亏与胜负、half 出场计数、四状态行数、
 UNIQUE 重名拦截（转 409 的来源）、save/list/get 往返保序、rename/delete。
 """
+import json
 import os
 import sqlite3
 import tempfile
@@ -11,7 +12,8 @@ import time
 import unittest
 
 from py_chain.bt_runs import (
-    BtRunStore, build_cfg_summary, compute_equity, compute_summary, default_name,
+    BtRunStore, _param_groups_of, build_cfg_summary, compute_equity,
+    compute_summary, default_name,
 )
 
 
@@ -242,6 +244,73 @@ class TestBtRunStore(unittest.TestCase):
                                          "price": 4218.0}])])
         self.assertEqual(s["exits"]["trailStop"], 1)   # trailRaise 迁移不计入终局分布
         self.assertEqual(s["exits"]["stopBe"], 1)
+
+
+class TestParamSnapshotAndSrc(unittest.TestCase):
+    """参数对比数据面（2026-10-28 全参数对比）：列表剥离快照/明细保留 +
+    param-src 参数源三档（快照优先 → 决策日志 header 兜底 → 无）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = BtRunStore(os.path.join(self.tmp.name, "bars.db"))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_list_strips_snapshot_detail_keeps(self):
+        snap = {"entry": {"lots": 4}, "_titles": {"entry": "进出场"}}
+        meta = self.store.save("带快照", {**CFG, "param_snapshot": snap}, [])
+        self.assertEqual(meta["cfg"]["param_snapshot"], snap)   # save 返回全量
+        listed = self.store.list()
+        self.assertNotIn("param_snapshot", listed[0]["cfg"])   # 列表剥离（payload/载参数）
+        self.assertEqual(listed[0]["cfg"]["symbol"], CFG["symbol"])   # 其余键不受影响
+        detail = self.store.get(meta["id"])
+        self.assertEqual(detail["cfg"]["param_snapshot"], snap)  # 明细保留
+
+    def test_param_groups_snapshot_branch(self):
+        snap = {"entry": {"lots": 4, "near": 5.0}, "chan": {"gapFilter": 0.0},
+                "_titles": {"entry": "进出场", "chan": "画笔"}}
+        src, groups = _param_groups_of({"cfg": {"param_snapshot": snap}})
+        self.assertEqual(src, "snapshot")
+        self.assertEqual(groups, {"进出场": {"lots": 4, "near": 5.0},
+                                  "画笔": {"gapFilter": 0.0}})   # _titles 不出组
+
+    def test_param_groups_journal_fallback(self):
+        # 双链两份 ndjson：header 首行 + 后续事件行；exitCfg 子 dict 展平一级；
+        # 运行诊断（startTs/toTs/nBars/lastBarTime）与 cfg 重复键（lots/signalMode）
+        # 不进对比（2026-10-28 修正：只列差异行的表不被诊断值刷屏）
+        p1 = os.path.join(self.tmp.name, "bt_chanA.ndjson")
+        p2 = os.path.join(self.tmp.name, "bt_chanB.ndjson")
+        with open(p1, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"ev": "header", "cfg": {
+                "pointClasses": "1,2s", "exitCfg": {"exitLockOn": True},
+                "startTs": 1755302400, "toTs": 1757894400, "lastBarTime": 999,
+                "nBars": {"3": 5000}, "lots": 4, "signalMode": "realtime"}}) + "\n")
+            f.write(json.dumps({"ev": "state", "t": 1}) + "\n")
+        with open(p2, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"ev": "header", "cfg": {"pointMaxAttempts": 2,
+                                                        "startTs": 1755302400}}) + "\n")
+        src, groups = _param_groups_of({"cfg": {"journal": f"{p1};{p2}"}})
+        self.assertEqual(src, "journal")
+        self.assertEqual(groups, {"决策日志": {
+            "pointClasses": "1,2s", "exitCfg.exitLockOn": True,
+            "pointMaxAttempts": 2}})
+
+    def test_param_groups_journal_missing_corrupt_and_precedence(self):
+        # 日志已清理（30 天保留）与损坏文件：跳过；有快照时不读日志（优先级）
+        gone = os.path.join(self.tmp.name, "gone.ndjson")
+        bad = os.path.join(self.tmp.name, "bad.ndjson")
+        with open(bad, "w", encoding="utf-8") as f:
+            f.write("not-json\n")
+        self.assertEqual(_param_groups_of({"cfg": {"journal": f"{gone};{bad}"}}),
+                         (None, {}))
+        snap = {"entry": {"lots": 1}, "_titles": {"entry": "进出场"}}
+        src, _ = _param_groups_of({"cfg": {"param_snapshot": snap, "journal": gone}})
+        self.assertEqual(src, "snapshot")
+
+    def test_param_groups_none(self):
+        self.assertEqual(_param_groups_of({"cfg": {}}), (None, {}))
+        self.assertEqual(_param_groups_of({}), (None, {}))
 
 
 if __name__ == "__main__":

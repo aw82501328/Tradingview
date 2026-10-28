@@ -446,10 +446,18 @@ class BtRunStore:
                 out = []
                 for row in cur:
                     try:
-                        out.append(self._meta_from_row(row))
+                        meta = self._meta_from_row(row)
                     except (ValueError, TypeError):
                         print(f"[bt_runs] 方案 {row[0]} 数据损坏，已跳过",
                               file=sys.stderr)
+                        continue
+                    # param_snapshot 只随 detail/param-src 出（列表 payload 不回归，
+                    # 载参数也不会把过期快照串进新 run；2026-10-28）
+                    if isinstance(meta.get("cfg"), dict) \
+                            and "param_snapshot" in meta["cfg"]:
+                        meta["cfg"] = {k: v for k, v in meta["cfg"].items()
+                                       if k != "param_snapshot"}
+                    out.append(meta)
                 return out
             finally:
                 conn.close()
@@ -575,6 +583,9 @@ def _save_one(app, worker, sym, name=None):
             cfg["lots"] = per["lots"]
         if per.get("contract_mult") is not None:
             cfg["contract_mult"] = per["contract_mult"]
+        # 参数中心有效值快照（2026-10-28）：批量分发时按品种冻结的运行期值
+        if per.get("param_snapshot"):
+            cfg["param_snapshot"] = per["param_snapshot"]
     duration = worker.duration_sec
     if sym and isinstance(worker.batch, dict):
         per = (worker.batch.get(sym) or {}).get("duration")
@@ -686,6 +697,64 @@ def _analyze(app, body):
     return {"run": meta}
 
 
+def _param_groups_of(run):
+    """方案「参数中心有效参数」源（2026-10-28 参数对比）。
+
+    优先 cfg["param_snapshot"]（起跑时冻结的全桶有效值，_titles 桶名→中文标题分组）；
+    老方案回落决策日志 header（cfg["journal"] 为 ';' 分隔的双链路径，只读文件头部
+    首条 ev=header 行的 cfg）。日志只保留 30 天，缺失/损坏即视为无。
+    返回 (source, groups)：source ∈ "snapshot" | "journal" | None，groups={组名: {键: 值}}。"""
+    cfg = run.get("cfg") or {}
+    snap = cfg.get("param_snapshot")
+    if isinstance(snap, dict) and snap:
+        titles = snap.get("_titles") or {}
+        groups = {str(titles.get(name, name)): dict(vals)
+                  for name, vals in snap.items()
+                  if name != "_titles" and isinstance(vals, dict)}
+        if groups:
+            return "snapshot", groups
+    # journal header 里的非参数键不进对比（2026-10-28 修正）：
+    # - 运行期诊断（窗口不同必不同，只列差异行的表会被它们刷屏）：startTs/toTs/
+    #   nBars（各周期K线数）/lastBarTime；
+    # - 与 cfg 顶层键重复（对比表已按 手数/滑点/信号模式 等行显示）：lots/near/
+    #   slip*/contractMult/signalMode/fillMode/warmupBars/expectBi/divergeConfirm/
+    #   entryMacdShrink/stopEntryBarFloor/periods/fineRes（链配置见 chain_snapshot）。
+    # 保留的是参数中心口径值：pointClasses/pointMaxAttempts(Seg)/anchorWin*/
+    #   exitMinMerged/exitCfg.*（子 dict 展平一级）。
+    drop = {"periods", "fineRes", "warmupBars", "startTs", "toTs", "fillMode",
+            "signalMode", "lots", "near", "slipStop", "slipFallback", "slipBe",
+            "contractMult", "expectBi", "divergeConfirm", "entryMacdShrink",
+            "stopEntryBarFloor", "nBars", "lastBarTime"}
+    merged = {}
+    for p in str(cfg.get("journal") or "").split(";"):
+        p = p.strip()
+        if not p:
+            continue
+        try:
+            with open(p, "r", encoding="utf-8") as fh:
+                for _ in range(5):    # header 总在文件头部，容错扫前几行
+                    line = fh.readline()
+                    if not line:
+                        break
+                    rec = json.loads(line)
+                    if rec.get("ev") != "header":
+                        continue
+                    for k, v in (rec.get("cfg") or {}).items():
+                        if k in drop:
+                            continue
+                        if isinstance(v, dict):
+                            for sk, sv in v.items():
+                                merged[f"{k}.{sk}"] = sv
+                        else:
+                            merged[k] = v
+                    break
+        except (OSError, ValueError):
+            continue
+    if merged:
+        return "journal", {"决策日志": merged}
+    return None, {}
+
+
 def handle(handler, app, method):
     """处理 /api/bt/runs 前缀的请求；命中返回 True（webapp 三个 do_* 顶部挂载）。"""
     parsed = urlparse(handler.path)
@@ -706,6 +775,13 @@ def handle(handler, app, method):
                 if run is None:
                     raise _HttpError("方案不存在", 404)
                 result = {"run": run}
+            elif action == "param-src":
+                run_id = parse_qs(parsed.query).get("id", [""])[0]
+                run = app.bt_runs.get(run_id)
+                if run is None:
+                    raise _HttpError("方案不存在", 404)
+                source, groups = _param_groups_of(run)
+                result = {"id": run_id, "source": source, "groups": groups}
             else:
                 raise _HttpError("未知回测方案接口", 404)
         elif method == "POST":

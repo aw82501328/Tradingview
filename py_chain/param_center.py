@@ -1020,6 +1020,20 @@ def effective_all(symbol=None):
     return {name: effective(name, symbol) for name in PARAM_MODULES}
 
 
+def snapshot_of(pm):
+    """effective_all 结果 → 对比快照（回测起跑时冻结进 cfg["param_snapshot"]，供
+    bt_runs 参数对比，2026-10-28）。各桶键序稳定=桶 schema 序；另带 "_titles" 内嵌
+    各桶中文标题——前端自描述分组展示，无需再拉 schema。不动入参。"""
+    out = {name: dict(vals) for name, vals in pm.items()}
+    out["_titles"] = {name: PARAM_MODULES[name]["title"] for name in pm}
+    return out
+
+
+def effective_snapshot(symbol=None):
+    """全模块有效值快照（按品种取桶）。"""
+    return snapshot_of(effective_all(symbol))
+
+
 def chan_cfg_effective(symbol=None):
     """从画笔 / 标记买卖点 / 标记进出场拼出完整 CHAN_CFG（供 apply_cfg / --chan-cfg）。
     chan/points/entry 均取该品种桶（空=黄金页）。"""

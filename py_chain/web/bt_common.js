@@ -658,12 +658,74 @@ const BT_CFG_LABELS = { strategy: '策略', symbol: '品种', from: '起始日�
                         slip_fallback: '最大止损', slip_fallback_atr_k: '最大止损ATR系数',
                         slip_be: '保本滑点', slip_be_atr_k: '保本滑点ATR系数',
                         near: '近支阻阈值', sr_preset: '支阻预设', diverge_confirm: '背驰进场', expect_bi: '检测周期够笔',
-                        entry_macd_shrink: '柱缩闸', stop_entry_bar_floor: '止损下限', with_30s: '30秒级别' };
+                        entry_macd_shrink: '柱缩闸', stop_entry_bar_floor: '止损下限', with_30s: '30秒级别',
+                        signal_mode: '信号模式', use_cache: '使用缓存', auto_split: '长窗自动分段',
+                        split_min_days: '分段阈值(天)', split_seg_days: '单段上限(天)', seg_parallel: '分段并行',
+                        chain_snapshot: '周期链', seg_bounds: '分段边界' };
+// 参数对比不显示的 cfg 键（非用户参数，2026-10-28 全参数对比）：journal=决策日志
+// 路径（每方案必不同）、from_ts/to_ts=from/to 的派生时间戳、param_snapshot=参数
+// 中心快照（由 param-src 端点取回后按组展开，不作为整块值显示）
+const BT_CFG_SKIP = new Set(['journal', 'from_ts', 'to_ts', 'param_snapshot']);
 function btCfgVal(k, v) {
   if (k === 'strategy') return btStrategyName(v);
   if (k === 'periods') return Array.isArray(v) ? v.join('+') : (v ?? '—');
   if (k === 'data_source') return { store: '本地数据存储', live: '实时拉取', cache: '本地缓存' }[v] || v || '—';
+  if (k === 'signal_mode') return { realtime: '当下背驰', confirm: '确认制' }[v] || v || '—';
+  if (k === 'chain_snapshot') return Array.isArray(v)
+    ? v.map(c => `链${c.id} 结构${(c.periods || []).join('+')} 开单${(c.open_res || []).join('+')}`).join('；') : (v ?? '—');
+  if (k === 'seg_bounds') return Array.isArray(v)
+    ? v.map(b => `${(b && b[0]) || '?'}→${(b && b[1]) || '最新'}`).join('；') : (v ?? '—');
   if (k === 'to') return v || '到最新';
   if (typeof v === 'boolean') return v ? '开' : '关';
+  if (Array.isArray(v)) return v.join('+');
+  if (v && typeof v === 'object') { try { return JSON.stringify(v); } catch { return '—'; } }
   return v ?? '—';
+}
+
+// 值规范化串（差异比较用）：null/缺失/'' 视为同值；数组/对象按 JSON 序列化比
+function btParamCanonical(v) {
+  if (v == null || v === '') return '';
+  if (typeof v === 'object') { try { return JSON.stringify(v); } catch { return String(v); } }
+  return String(v);
+}
+
+// 参数对比行（2026-10-28 全参数对比·只显示有差异）：
+// ① cfg 键并集（BT_CFG_KEYS 已知序在前、其余键字母序；BT_CFG_SKIP 排除）
+// ② 参数组并集（run.params={组名:{键:值}}，来自 /api/bt/runs/param-src：新方案=
+//    起跑冻结的参数中心快照分组、老方案=决策日志 header 兜底；组序/组内键序=
+//    首个出现该组/键的 run 的序，渲染稳定）
+// 全部一致的比较项不生成行；返回 [{id, label, vals:[显示串]}]。
+function btCompareParamRows(runs) {
+  const cfgs = runs.map(r => r.cfg || {});
+  const known = BT_CFG_KEYS.filter(k => cfgs.some(c => Object.prototype.hasOwnProperty.call(c, k)));
+  const extras = [...new Set(cfgs.flatMap(c => Object.keys(c)))]
+    .filter(k => !BT_CFG_KEYS.includes(k) && !BT_CFG_SKIP.has(k)).sort();
+  const rows = [];
+  for (const k of [...known, ...extras]) {
+    const raw = cfgs.map(c => c[k]);
+    const canon = raw.map(btParamCanonical);
+    if (canon.every(s => s === canon[0])) continue;
+    rows.push({ id: k, label: BT_CFG_LABELS[k] || k, vals: raw.map(v => btCfgVal(k, v)) });
+  }
+  const groupOrder = [];
+  const groupKeys = new Map();
+  runs.forEach(r => {
+    Object.keys((r && r.params) || {}).forEach(g => {
+      if (!groupKeys.has(g)) { groupKeys.set(g, new Set()); groupOrder.push(g); }
+      Object.keys((r.params || {})[g] || {}).forEach(kk => groupKeys.get(g).add(kk));
+    });
+  });
+  // 无任何参数源（老方案且决策日志已清理）的 run：缺值显示「—（无快照）」；
+  // 有参数源但缺该组/该键：显示「—」
+  const hasSrc = runs.map(r => r.params && Object.keys(r.params).length > 0);
+  for (const g of groupOrder) {
+    for (const kk of groupKeys.get(g)) {
+      const raw = runs.map(r => (((r || {}).params || {})[g] || {})[kk]);
+      const canon = raw.map(btParamCanonical);
+      if (canon.every(s => s === canon[0])) continue;
+      rows.push({ id: `param:${g}/${kk}`, label: `${g}·${kk}`,
+                  vals: raw.map((v, i) => v === undefined ? (hasSrc[i] ? '—' : '—（无快照）') : btCfgVal(kk, v)) });
+    }
+  }
+  return rows;
 }

@@ -167,5 +167,89 @@ class SignalLogChainTests(unittest.TestCase):
         self.assertNotEqual(row3["id"], r2["id"])
 
 
+def _walk_bars(t0, sec, n, start_off_sec=0):
+    """合成随机游走K线：n 根 sec 周期，窗口偏移 start_off_sec 起（守卫测试用）。"""
+    import random
+    rnd = random.Random(11)
+    out, p = [], 4000.0
+    st = t0 + start_off_sec
+    for i in range(n):
+        o = p
+        c = o + rnd.uniform(-1, 1) * (sec / 60.0) ** 0.5
+        out.append({"time": st + i * sec, "open": o, "high": max(o, c) + 0.3,
+                    "low": min(o, c) - 0.3, "close": c})
+        p = c
+    return out
+
+
+class FineResGuardTests(unittest.TestCase):
+    """链式回测时间轴守卫（2026-10-28）：细周期深度不足时覆盖感知会静默换粗
+    周期照跑（复现：链B 长窗 1/5/30 浅 → fine=240 无报错）。守卫=链语义
+    （res_chain 传参）下 intended 时间轴未通过 0.9 跨度测试即抛 ValueError；
+    fine_override（实盘显式指定）与 res_chain=None（旧口径重放）不拦。"""
+
+    T0 = 1760000000
+    DAY = 86400
+    WIN = 180  # 半年窗
+
+    def _bars(self, d30=60, d5=40, d1=20):
+        """链B 周期集：D/240 全窗；30/5/1 只剩尾部 dN 天。"""
+        return {
+            "D": _walk_bars(self.T0, self.DAY, self.WIN),
+            "240": _walk_bars(self.T0, 240 * 60, self.WIN * 6),
+            "30": _walk_bars(self.T0, 1800, d30 * 24 * 2, (self.WIN - d30) * self.DAY),
+            "5": _walk_bars(self.T0, 300, d5 * 24 * 12, (self.WIN - d5) * self.DAY),
+            "1": _walk_bars(self.T0, 60, d1 * 24 * 60, (self.WIN - d1) * self.DAY),
+        }
+
+    def test_shallow_chain_b_raises(self):
+        from .backtest import BacktestEngine
+        with self.assertRaises(ValueError) as ctx:
+            BacktestEngine(self._bars(), periods=CHAIN_B, res_chain=CHAIN_B,
+                           open_res={"30", "5"})
+        msg = str(ctx.exception)
+        # 信息含 intended 时间轴、退化目标与补救提示（可直接给用户看）
+        self.assertIn("链时间轴 1 数据深度不足", msg)
+        self.assertIn("换成 240", msg)
+        self.assertIn("基础数据页", msg)
+        self.assertIn("关闭该链", msg)
+
+    def test_full_depth_chain_b_fine_is_1(self):
+        from .backtest import BacktestEngine
+        eng = BacktestEngine(self._bars(d30=self.WIN, d5=self.WIN, d1=self.WIN),
+                             periods=CHAIN_B, res_chain=CHAIN_B,
+                             open_res={"30", "5"})
+        self.assertEqual(str(eng.fine_res), "1")
+
+    def test_fine_override_not_guarded(self):
+        # 实盘口径：live_trader 显式传 fine_res=链最细（缺深度由 feed 预热补齐）
+        from .backtest import BacktestEngine
+        eng = BacktestEngine(self._bars(), periods=CHAIN_B, res_chain=CHAIN_B,
+                             open_res={"30", "5"}, fine_res="1")
+        self.assertEqual(str(eng.fine_res), "1")
+
+    def test_legacy_no_res_chain_unchanged(self):
+        # 旧口径（cfg.periods 显式历史重放，res_chain=None）：覆盖感知原行为，
+        # 深度不足照旧退化不报错——重放逐位不变
+        from .backtest import BacktestEngine
+        eng = BacktestEngine(self._bars(), periods=CHAIN_B)
+        self.assertEqual(str(eng.fine_res), "240")
+
+    def test_chain_a_partial_30s_guarded_on_3m(self):
+        # 链A 同款：3m 深度不足（30S 深度足也不顶替时间轴）→ 守卫按 3m 报错
+        from .backtest import BacktestEngine
+        bars = {
+            "D": _walk_bars(self.T0, self.DAY, self.WIN),
+            "240": _walk_bars(self.T0, 240 * 60, self.WIN * 6),
+            "60": _walk_bars(self.T0, 3600, self.WIN * 24),
+            "15": _walk_bars(self.T0, 900, self.WIN * 96),
+            "3": _walk_bars(self.T0, 180, 30 * 24 * 20, (self.WIN - 30) * self.DAY),
+            "30S": _walk_bars(self.T0, 30, self.WIN * 24 * 120),
+        }
+        with self.assertRaises(ValueError) as ctx:
+            BacktestEngine(bars, periods=CHAIN_A_30S, res_chain=CHAIN_A_30S)
+        self.assertIn("链时间轴 3 数据深度不足", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -170,6 +170,14 @@ def _update_latest(strategy, symbol, path):
         pass  # 指针文件失败不影响回测
 
 
+def register(path, strategy, symbol):
+    """补注册（2026-10-28 分段并行）：孙进程 BtJournal(register=False) 只建文件不注册
+    （latest.json 读改写与 cleanup_old 删文件在多进程并发下会竞态），聚合进程收齐后
+    串行调用本函数统一注册。幂等；失败静默（与 _update_latest 同口径）。"""
+    _update_latest(strategy, symbol, path)
+    cleanup_old(keep_for=(strategy, sanitize_symbol(symbol)))
+
+
 def latest_path(symbol=None, strategy=None):
     """latest.json → 最新日志路径。优先 (strategy, symbol) 精确匹配；只给 symbol 时
     在该品种各组（chan/fxma/…）中取最新；都不命中再回退全局最新（无则 None）。"""
